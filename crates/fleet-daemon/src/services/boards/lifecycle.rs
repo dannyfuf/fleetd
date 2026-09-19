@@ -100,8 +100,17 @@ impl Boards {
     /// Gets or creates the board scoped to one published worktree.
     pub async fn ensure_for_worktree(&self, worktree: &WorktreeId) -> DaemonResult<BoardView> {
         let state = self.state_store.load().await?;
-        let (worktree_record, context) = worktree_context(&state, worktree)?;
+        worktree_context(&state, worktree)?;
         // Existing-board refreshes stay lock-free, as context-board refreshes do.
+        if let Some(id) = self.worktree_board(worktree)? {
+            return self.get(&id).await;
+        }
+        // Materialization shares the lifecycle claim used by delete and restore. Otherwise a
+        // missing-board read can race past a completed cascade and save an orphan, or create an
+        // empty document before restore has returned the archived board and its cards.
+        let _lifecycle = self.worktrees.claim_lifecycle(worktree.clone()).await;
+        let state = self.state_store.load().await?;
+        let (worktree_record, context) = worktree_context(&state, worktree)?;
         if let Some(id) = self.worktree_board(worktree)? {
             return self.get(&id).await;
         }
@@ -255,6 +264,7 @@ impl Boards {
         prefix: Option<String>,
         backend: Option<BackendRef>,
     ) -> DaemonResult<BoardView> {
+        let _lifecycle = self.worktrees.claim_lifecycle(worktree.clone()).await;
         let state = self.state_store.load().await?;
         let (worktree_record, context) = worktree_context(&state, worktree)?;
         let now = self.now();

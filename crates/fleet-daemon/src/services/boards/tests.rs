@@ -69,6 +69,52 @@ async fn ensure_is_idempotent_persists_and_emits_once() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn worktree_board_materialization_waits_for_the_worktree_lifecycle_claim() {
+    let (_temp, services, _receiver) = fixture().await;
+    let worktree: WorktreeId = "acme/api#feature".parse().unwrap();
+    services
+        .state
+        .transaction({
+            let worktree = worktree.clone();
+            move |state| {
+                state.repos.push(
+                    serde_json::from_value(serde_json::json!({
+                        "id": "acme/api", "owner": "acme", "name": "api",
+                        "url": "https://example.invalid/acme/api.git", "contextId": "work",
+                        "defaultBranch": "main", "path": "/tmp/acme-api", "clonedAt": "now"
+                    }))
+                    .unwrap(),
+                );
+                state.worktrees.push(
+                    serde_json::from_value(serde_json::json!({
+                        "id": worktree, "repoId": "acme/api", "slug": "feature",
+                        "branch": "feature", "baseRef": "main", "path": "/tmp/acme-api-feature",
+                        "session": "api/feature", "createdAt": "now"
+                    }))
+                    .unwrap(),
+                );
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+
+    let lifecycle = services.worktrees.claim_lifecycle(worktree.clone()).await;
+    let boards = Arc::clone(&services.boards);
+    let request_worktree = worktree.clone();
+    let request = tokio::spawn(async move { boards.ensure_for_worktree(&request_worktree).await });
+    tokio::task::yield_now().await;
+    assert!(
+        !request.is_finished(),
+        "board creation cannot pass an in-flight delete or restore"
+    );
+
+    drop(lifecycle);
+    let view = request.await.unwrap().unwrap();
+    assert_eq!(view.board.worktree_id.as_ref(), Some(&worktree));
+}
 #[tokio::test]
 async fn stale_worktree_links_are_only_cleared_in_views_and_orphans_are_hidden() {
     let (_temp, services, _receiver) = fixture().await;

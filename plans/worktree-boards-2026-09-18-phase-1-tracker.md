@@ -70,6 +70,10 @@
     passed (1 selected) and `cargo test -p fleet-daemon --test boards_service
     deleting_a_worktree_sweeps_its_quarantined_suffixed_board_id` passed (1 selected);
     `make lint` passed.
+- [x] P1-T21 — Serialize worktree-board materialization with worktree lifecycle
+  - verified: `cargo test -p fleet-daemon
+    worktree_board_materialization_waits_for_the_worktree_lifecycle_claim` passed (1 selected);
+    `make lint` passed.
 
 ## Notes / decisions log
 (Append-only. Date-stamp entries. Capture anything that surprised you or that future-you will want.)

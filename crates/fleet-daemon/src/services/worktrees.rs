@@ -101,6 +101,11 @@ pub struct Worktrees {
 }
 
 impl Worktrees {
+    /// Claims exclusive ownership of one worktree's create/delete/restore boundary.
+    pub(super) async fn claim_lifecycle(&self, id: WorktreeId) -> TransitionLockClaim {
+        self.sessions.claim_worktree_lifecycle(id).await
+    }
+
     /// Creates the worktree service and schedules startup intent recovery. Creation drives
     /// files, Git, the shell, and GitHub, so it takes the shared adapter bundle.
     #[must_use]

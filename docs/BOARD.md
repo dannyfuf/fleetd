@@ -595,8 +595,9 @@ cannot adopt one. After any worktree deletion moves the worktree to trash, the l
 restores its board and cards; expiry removes both together. A cascade failure is warned and
 swallowed because the lifecycle move has already committed. An unreadable restored board stays in
 place without being quarantined again, so a newer build or manual repair can recover it. Board
-locks are per board: no board's clone, sync or hook run blocks another board's requests, and
-`ensure` reads an existing board without taking one.
+locks are per board: no board's clone, sync or hook run blocks another board's requests. Creating a
+missing worktree board also takes that worktree's lifecycle claim through its save, so deletion and
+restore cannot pass its missing-board read; reads of existing boards remain lock-free.
 
 ## 5. Protocol (`fleet-proto`, version 8)
 
