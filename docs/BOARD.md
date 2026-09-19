@@ -749,7 +749,8 @@ Property rows in the card detail reuse `KeyValueList`/`FactRow`; pickers reuse
   error: Option<String>, focus: BoardFocus { column: usize, row: usize }, filter: String,
   filter_editing: bool, group_secondary: Option<GroupBy> }`. Loaded on tab open / context switch
   (`EnsureBoard`), refreshed on `Event::BoardChanged` for the shown board id.
-  `AppState.snapshot.boards` summaries drive the tab badge (open count, conflict dot).
+  The active context's unscoped `AppState.snapshot.boards` summary drives the tab badge (open
+  count, conflict dot); worktree-scoped summaries never contribute to the Hub tab.
 - **Bridge**: board requests use `Bridge::request` reply receivers, with no new `BridgeEvent`
   variants. Responses land in `AppState` reducers (`apply_board_view`, `apply_card`); board loads
   use context/generation guards.

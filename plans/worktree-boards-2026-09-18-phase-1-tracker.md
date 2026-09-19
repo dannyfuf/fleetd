@@ -40,6 +40,8 @@
     the final phase-gate `make test` passed the complete workspace and all doctests.
 - [x] P1-T09 — Sweep quarantined worktree-board ids during deletion
   - verified: `cargo test -p fleet-daemon --test boards_service deleting_a_worktree_sweeps_its_quarantined_suffixed_board_id` passed; `make lint` passed.
+- [x] P1-T10 — Keep the Hub board badge scoped to the context board
+  - verified: `cargo test -p fleet-app board_tab_summary_ignores_worktree_boards_in_the_active_context` passed (1 selected, 861 filtered); `make lint` passed.
 
 ## Notes / decisions log
 (Append-only. Date-stamp entries. Capture anything that surprised you or that future-you will want.)

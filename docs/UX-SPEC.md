@@ -1909,7 +1909,7 @@ limits when an already-completed watch is first discovered.
 
 ## Board
 
-*One board per context, one column per status, one key per edit* (BOARD §8).
+*One unscoped board per context, one column per status, one key per edit* (BOARD §8).
 
 ### Placement
 
@@ -1918,9 +1918,9 @@ The board is the Hub's third screen tab (`g b`, tab label `Board`), rendered by
 rail in place; the context bar above it is what scopes it, because the board shown is always
 `EnsureBoard(active_context)`. Switching context clears the board and re-ensures the new one.
 
-The `Board` tab carries the active context's `Snapshot.boards` summary: `open_count` as the tab
-count, and a `•` appended to the label when `conflict_count > 0`. The tab spins while a load is
-in flight.
+The `Board` tab carries the active context's **unscoped** `Snapshot.boards` summary: `open_count`
+as the tab count, and a `•` appended to the label when `conflict_count > 0`. Worktree-scoped
+summaries from that context are ignored. The tab spins while a load is in flight.
 
 ### The pane
 

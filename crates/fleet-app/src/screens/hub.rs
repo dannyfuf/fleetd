@@ -8,6 +8,7 @@ use std::{
 };
 
 use fleet_core::{
+    board::BoardSummary,
     github::{PrTab, PullRequest, worktree_matches_pr},
     ids::{ContextId, RepoId, WorktreeId},
     model::{CloneJob, Context, Repo, Worktree},
@@ -416,12 +417,10 @@ fn row_capacity(window_height: f32, metrics: fleet_ui_kit::theme::Metrics) -> us
 /// The Hub's screen tabs; summary counts are context scoped, independent of repo scope.
 fn hub_tabs(state: &AppState) -> fleet_ui_kit::SegmentedTabs {
     use fleet_ui_kit::{SegmentedTab, SegmentedTabs};
-    let summary = state.snapshot.as_ref().and_then(|snapshot| {
-        snapshot
-            .boards
-            .iter()
-            .find(|board| Some(&board.context_id) == state.active_context())
-    });
+    let summary = state
+        .snapshot
+        .as_ref()
+        .and_then(|snapshot| context_board_summary(&snapshot.boards, state.active_context()));
     let label = if summary.is_some_and(|board| board.conflict_count > 0) {
         "Board •"
     } else {
@@ -454,4 +453,13 @@ fn hub_tabs(state: &AppState) -> fleet_ui_kit::SegmentedTabs {
         };
         window.dispatch_action(action, cx);
     })
+}
+
+fn context_board_summary<'a>(
+    boards: &'a [BoardSummary],
+    context: Option<&ContextId>,
+) -> Option<&'a BoardSummary> {
+    boards
+        .iter()
+        .find(|board| board.worktree_id.is_none() && Some(&board.context_id) == context)
 }
