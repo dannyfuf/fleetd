@@ -597,7 +597,10 @@ swallowed because the lifecycle move has already committed. An unreadable restor
 place without being quarantined again, so a newer build or manual repair can recover it. Board
 locks are per board: no board's clone, sync or hook run blocks another board's requests. Creating a
 missing worktree board also takes that worktree's lifecycle claim through its save, so deletion and
-restore cannot pass its missing-board read; reads of existing boards remain lock-free.
+restore cannot pass its missing-board read. Board creation additionally holds one short allocator
+claim from suffix selection through the document save, preventing distinct base ids from reserving
+the same suffix; backend validation stays outside that claim. Reads of existing boards remain
+lock-free.
 
 ## 5. Protocol (`fleet-proto`, version 8)
 

@@ -74,6 +74,10 @@
   - verified: `cargo test -p fleet-daemon
     worktree_board_materialization_waits_for_the_worktree_lifecycle_claim` passed (1 selected);
     `make lint` passed.
+- [x] P1-T22 — Reserve board ids across differently based concurrent creations
+  - verified: `cargo test -p fleet-daemon
+    differently_based_boards_reserve_colliding_suffixes_through_save` passed (1 selected);
+    `make lint` passed.
 
 ## Notes / decisions log
 (Append-only. Date-stamp entries. Capture anything that surprised you or that future-you will want.)

@@ -35,6 +35,9 @@ pub struct Boards {
     /// One lock per board. A single process-wide lock would let a clone or a backend sync on
     /// one board block every request for every other one until the client's timeout.
     gates: Arc<Mutex<HashMap<BoardId, Arc<Mutex<()>>>>>,
+    /// Serializes the short choose-id-and-save section across differently based boards.
+    /// Per-board gates cannot protect suffixes shared by distinct base ids.
+    allocation: Arc<Mutex<()>>,
     /// The last reported load failure per board. The snapshot refresh rescans every document
     /// roughly every two seconds, and one unreadable file must not fill the log with it.
     unreadable: Arc<std::sync::Mutex<HashMap<BoardId, String>>>,
@@ -83,6 +86,7 @@ impl Boards {
             events,
             index: Arc::new(RwLock::new(HashMap::new())),
             gates: Arc::new(Mutex::new(HashMap::new())),
+            allocation: Arc::new(Mutex::new(())),
             unreadable: Arc::new(std::sync::Mutex::new(HashMap::new())),
             summaries: Arc::new(RwLock::new(HashMap::new())),
         }

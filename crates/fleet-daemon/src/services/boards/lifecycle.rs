@@ -81,10 +81,11 @@ impl Boards {
         if let Some(id) = self.context_board(context)? {
             return self.get(&id).await;
         }
-        board.id = self.available_board_id(&board.id)?;
         let backend = self.backends.get(&board.backend.kind)?;
         backend.validate(&board.backend.settings).await?;
         board.backend.settings = backend.normalize(&board.backend.settings).await?;
+        let _allocation = self.allocation.lock().await;
+        board.id = self.available_board_id(&board.id)?;
         let doc = BoardDocument {
             version: BOARD_DOCUMENT_VERSION,
             board,
@@ -120,10 +121,11 @@ impl Boards {
             return self.get(&id).await;
         }
         let mut board = new_worktree_board(&context, &worktree_record, &self.now());
-        board.id = self.available_board_id(&base)?;
         let backend = self.backends.get(&board.backend.kind)?;
         backend.validate(&board.backend.settings).await?;
         board.backend.settings = backend.normalize(&board.backend.settings).await?;
+        let _allocation = self.allocation.lock().await;
+        board.id = self.available_board_id(&base)?;
         let doc = BoardDocument {
             version: BOARD_DOCUMENT_VERSION,
             board,
@@ -233,7 +235,6 @@ impl Boards {
         if self.context_board(context)?.is_some() {
             return Err(BoardError::Duplicate(context.to_string()).into());
         }
-        board.id = self.available_board_id(&board.id)?;
         apply_board_patch(
             &mut board,
             BoardPatch {
@@ -247,6 +248,8 @@ impl Boards {
         let backend = self.backends.get(&board.backend.kind)?;
         backend.validate(&board.backend.settings).await?;
         board.backend.settings = backend.normalize(&board.backend.settings).await?;
+        let _allocation = self.allocation.lock().await;
+        board.id = self.available_board_id(&board.id)?;
         let doc = BoardDocument {
             version: BOARD_DOCUMENT_VERSION,
             board,
@@ -274,7 +277,6 @@ impl Boards {
         if self.worktree_board(worktree)?.is_some() {
             return Err(BoardError::Duplicate(worktree.to_string()).into());
         }
-        board.id = self.available_board_id(&base)?;
         apply_board_patch(
             &mut board,
             BoardPatch {
@@ -288,6 +290,8 @@ impl Boards {
         let backend = self.backends.get(&board.backend.kind)?;
         backend.validate(&board.backend.settings).await?;
         board.backend.settings = backend.normalize(&board.backend.settings).await?;
+        let _allocation = self.allocation.lock().await;
+        board.id = self.available_board_id(&base)?;
         let doc = BoardDocument {
             version: BOARD_DOCUMENT_VERSION,
             board,
