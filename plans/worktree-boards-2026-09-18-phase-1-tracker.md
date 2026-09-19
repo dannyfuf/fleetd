@@ -65,6 +65,11 @@
 - [x] P1-T19 — Disambiguate optional worktree selectors from board subcommands
   - verified: `cargo test -p fleet-cli` passed (120 library and 9 integration tests), including
     selector values `list`, `sync`, and `card`; `make lint` passed.
+- [x] P1-T20 — Scan quarantined board documents once per worktree cascade
+  - verified: `cargo test -p fleet-daemon quarantined_documents_are_grouped_with_one_directory_listing`
+    passed (1 selected) and `cargo test -p fleet-daemon --test boards_service
+    deleting_a_worktree_sweeps_its_quarantined_suffixed_board_id` passed (1 selected);
+    `make lint` passed.
 
 ## Notes / decisions log
 (Append-only. Date-stamp entries. Capture anything that surprised you or that future-you will want.)

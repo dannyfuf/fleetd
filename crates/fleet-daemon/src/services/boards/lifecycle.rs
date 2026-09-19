@@ -518,12 +518,14 @@ impl Boards {
             }
         }
         // Quarantined documents are absent from `list`, but still reserve every derived id.
-        // Worktree ids can recur, so their remains must leave with the deleted worktree.
-        for id in worktree_board_id_candidates(&base) {
-            if !self.store.quarantined(&id)?.is_empty() {
-                let _guard = self.gate(&id).await;
-                self.store.delete_with_worktree(&id, trash)?;
+        // List once: repository deletion can run this cascade for many worktrees in sequence.
+        for (id, paths) in self.store.quarantined_documents()? {
+            if id != base && !is_suffixed_worktree_board_id(&id, &base) {
+                continue;
             }
+            let _guard = self.gate(&id).await;
+            self.store
+                .delete_quarantined_with_worktree(&id, paths, trash)?;
         }
         Ok(())
     }
@@ -611,7 +613,11 @@ fn suffixed_board_id(base: &BoardId, suffix: u32) -> BoardId {
     BoardId::try_from(stem).expect("a suffixed worktree board id is always a valid board slug")
 }
 
-fn worktree_board_id_candidates(base: &BoardId) -> impl Iterator<Item = BoardId> + '_ {
-    std::iter::once(base.clone())
-        .chain((2..=MAX_BOARD_ID_SUFFIX).map(|suffix| suffixed_board_id(base, suffix)))
+fn is_suffixed_worktree_board_id(id: &BoardId, base: &BoardId) -> bool {
+    id.as_str()
+        .rsplit_once('-')
+        .and_then(|(_, suffix)| suffix.parse::<u32>().ok())
+        .is_some_and(|suffix| {
+            (2..=MAX_BOARD_ID_SUFFIX).contains(&suffix) && suffixed_board_id(base, suffix) == *id
+        })
 }

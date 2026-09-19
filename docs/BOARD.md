@@ -495,6 +495,7 @@ impl BoardStore {
     /// would let the `ensure` that scanned for a board create an empty one in its place.
     pub fn peek(&self, id: &BoardId) -> DaemonResult<Option<BoardDocument>>;
     pub fn quarantined(&self, id: &BoardId) -> DaemonResult<Vec<PathBuf>>;   // `<id>.json.broken-*`
+    pub(crate) fn quarantined_documents(&self) -> DaemonResult<BTreeMap<BoardId, Vec<PathBuf>>>; // one directory scan for cascade filtering
     pub fn stamp(&self, id: &BoardId) -> Option<(u64, SystemTime)>;          // size+mtime; memoizes summaries
     pub fn save(&self, doc: &BoardDocument) -> DaemonResult<()>;
     pub fn delete(&self, id: &BoardId) -> DaemonResult<()>;   // board and its quarantined remains to trash_dir

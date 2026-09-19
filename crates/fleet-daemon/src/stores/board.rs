@@ -6,7 +6,11 @@ use fleet_core::{
     ids::BoardId,
     paths::FleetHome,
 };
-use std::{collections::BTreeSet, path::Path, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 const WORKTREE_BOARD_TRASH_DIR: &str = ".fleet-boards";
 
@@ -57,20 +61,20 @@ impl BoardStore {
     }
     /// The quarantined documents this board left behind, in stable path order.
     pub fn quarantined(&self, id: &BoardId) -> DaemonResult<Vec<std::path::PathBuf>> {
+        Ok(self.quarantined_documents()?.remove(id).unwrap_or_default())
+    }
+    /// Lists every quarantined document in one directory scan, grouped by board id.
+    pub(crate) fn quarantined_documents(&self) -> DaemonResult<BTreeMap<BoardId, Vec<PathBuf>>> {
         if !self.files.exists(&self.home.boards_dir()) {
-            return Ok(Vec::new());
+            return Ok(BTreeMap::new());
         }
-        let prefix = format!("{id}.json.broken-");
-        Ok(self
-            .files
-            .list(&self.home.boards_dir())?
-            .into_iter()
-            .filter(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.starts_with(&prefix))
-            })
-            .collect())
+        let mut documents = BTreeMap::<BoardId, Vec<PathBuf>>::new();
+        for path in self.files.list(&self.home.boards_dir())? {
+            if let Some(id) = quarantined_board_id(&path) {
+                documents.entry(id).or_default().push(path);
+            }
+        }
+        Ok(documents)
     }
     /// A cheap change stamp for a document, used to skip re-reading an unchanged board.
     ///
@@ -152,6 +156,26 @@ impl BoardStore {
         if self.files.exists(&live) {
             paths.push(live);
         }
+        self.bundle_with_worktree(paths, worktree_trash)
+    }
+    /// Moves already-enumerated quarantined documents into a worktree's trash entry.
+    pub(crate) fn delete_quarantined_with_worktree(
+        &self,
+        id: &BoardId,
+        paths: Vec<PathBuf>,
+        worktree_trash: &Path,
+    ) -> DaemonResult<()> {
+        if paths
+            .iter()
+            .any(|path| quarantined_board_id(path).as_ref() != Some(id))
+        {
+            return Err(DaemonError::Validation(format!(
+                "quarantined board paths do not all belong to {id}"
+            )));
+        }
+        self.bundle_with_worktree(paths, worktree_trash)
+    }
+    fn bundle_with_worktree(&self, paths: Vec<PathBuf>, worktree_trash: &Path) -> DaemonResult<()> {
         if paths.is_empty() {
             return Ok(());
         }
@@ -206,6 +230,12 @@ impl BoardStore {
     }
 }
 
+fn quarantined_board_id(path: &Path) -> Option<BoardId> {
+    let name = path.file_name()?.to_str()?;
+    let (id, _) = name.split_once(".json.broken-")?;
+    BoardId::try_from(id).ok()
+}
+
 fn archived_board_id(path: &Path) -> DaemonResult<BoardId> {
     let name = path
         .file_name()
@@ -252,7 +282,10 @@ fn validate_document(doc: &BoardDocument) -> DaemonResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::files::RealFiles;
+    use crate::{
+        adapters::files::RealFiles,
+        testing::fakes::{FakeFiles, FakeFilesCall},
+    };
     use fleet_core::{board::new_board, model::Context};
 
     fn fixture() -> (tempfile::TempDir, FleetHome, BoardStore, BoardDocument) {
@@ -336,6 +369,31 @@ mod tests {
         store.delete(&doc.board.id).unwrap();
         assert!(store.quarantined(&doc.board.id).unwrap().is_empty());
         assert_eq!(std::fs::read_dir(home.trash_dir()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn quarantined_documents_are_grouped_with_one_directory_listing() {
+        let home = FleetHome::new("/fleet-board-store-test");
+        let files = Arc::new(FakeFiles::new(home.trash_dir(), vec![home.boards_dir()]));
+        files.insert_text(home.boards_dir().join("alpha.json.broken-one"), "broken");
+        files.insert_text(home.boards_dir().join("alpha.json.broken-two"), "broken");
+        files.insert_text(home.boards_dir().join("beta.json.broken-one"), "broken");
+        files.insert_text(home.boards_dir().join("unrelated.txt"), "other");
+        let store = BoardStore::new(home.clone(), files.clone());
+
+        let documents = store.quarantined_documents().unwrap();
+
+        assert_eq!(documents.len(), 2);
+        assert_eq!(documents[&"alpha".parse().unwrap()].len(), 2);
+        assert_eq!(documents[&"beta".parse().unwrap()].len(), 1);
+        assert_eq!(
+            files
+                .calls()
+                .iter()
+                .filter(|call| **call == FakeFilesCall::List(home.boards_dir()))
+                .count(),
+            1
+        );
     }
 
     #[test]
