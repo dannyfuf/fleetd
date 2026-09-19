@@ -5,9 +5,12 @@ its persistence, its wire messages and its surface. The signatures below are the
 crate is written against; changing one is a deliberate, workspace-wide change, and this document
 changes in the same pass. Where the code and this file disagree, the code is the bug.
 
-The decisions behind the shape — a backend-agnostic core with a pure reconciliation engine, no
-markdown crate, and the protocol bump the board's messages needed — are recorded in
-`docs/decisions/0008-board-model-and-sync.md`.
+## Decision records
+
+- [ADR 0008](decisions/0008-board-model-and-sync.md) establishes the backend-agnostic core, pure
+  reconciliation engine, and original board wire family.
+- [ADR 0018](decisions/0018-worktree-scoped-boards.md) adds the optional worktree scope, field-based
+  lookup, deletion cascade, and capability-gated requests.
 
 ## 0. What we are building
 
@@ -510,6 +513,8 @@ impl Boards {
     /// Get-or-create the context's unscoped board (`defaults::new_board`). Errors if the context does not exist.
     pub async fn ensure(&self, context: &ContextId) -> DaemonResult<BoardView>;
     pub async fn create(&self, context: &ContextId, name: Option<String>, prefix: Option<String>, backend: Option<BackendRef>) -> DaemonResult<BoardView>;
+    /// Finds the board whose persisted scope names this worktree; the derived id is only a fast path.
+    pub fn worktree_board(&self, worktree: &WorktreeId) -> DaemonResult<Option<BoardId>>;
     /// Get-or-create the board scoped to one published worktree (`defaults::new_worktree_board`).
     pub async fn ensure_for_worktree(&self, worktree: &WorktreeId) -> DaemonResult<BoardView>;
     /// Create the worktree's only board; a second board is `BoardError::Duplicate`.
@@ -551,6 +556,18 @@ impl Boards {
     pub async fn summaries(&self) -> Vec<BoardSummary>;   // for Snapshot.boards
 }
 ```
+The late-bound deletion seam keeps `Worktrees` independent of `Boards`, which already depends on
+`Worktrees` for card-to-worktree creation:
+
+```rust
+#[async_trait::async_trait]
+pub trait WorktreeCascade: Send + Sync {
+    async fn delete_for_worktree(&self, worktree: &WorktreeId) -> DaemonResult<()>;
+}
+impl Worktrees {
+    pub fn set_cascade(&self, cascade: Arc<dyn WorktreeCascade>);
+}
+```
 Every mutation: load doc → apply pure op → `validate_card` → save → emit `Event::BoardChanged`.
 Cards whose `worktree_id` no longer exists in `State.worktrees` are reported with `worktree_id:
 None` (not persisted), and a `repo_id` — on a card or as `Board.default_repo_id` — naming a
@@ -574,6 +591,10 @@ another board's requests, and `ensure` reads an existing board without taking on
 Worktree-board requests are an additive protocol-8 extension advertised through the
 `board.worktree` capability. The capability lets clients avoid sending variants an older daemon
 cannot decode without forcing every local and remote daemon to upgrade in lockstep.
+
+```rust
+pub const BOARD_WORKTREE_CAPABILITY: &str = "board.worktree";
+```
 
 ```rust
 // RequestBody discriminants and fields use snake_case, like their siblings; domain payloads use camelCase.
@@ -604,14 +625,30 @@ enum BoardChangeReason { Created, Updated, Deleted, CardChanged, Synced, SyncFai
 ## 6. Client and CLI
 
 `Client::create_worktree_from_card` returns `(Card, Worktree, bool /* created */)`.
-`fleet_client::Client` gains one typed method per request above (`list_boards`, `get_board`,
-`ensure_board`, `ensure_worktree_board`, `create_board`, `create_worktree_board`, `update_board`,
-`delete_board`, `create_card`, `update_card`, `move_card`, `delete_card`, `add_card_comment`,
-`create_worktree_from_card`, `sync_board`, `resolve_card_conflict`, `describe_board_backend`).
+`fleet_client::Client` has one typed method per request above (`list_boards`, `get_board`,
+`ensure_board`, `create_board`, `update_board`, `delete_board`, `create_card`, `update_card`,
+`move_card`, `delete_card`, `add_card_comment`, `create_worktree_from_card`, `sync_board`,
+`resolve_card_conflict`, `describe_board_backend`) plus these worktree-scope additions:
+
+```rust
+pub async fn ensure_worktree_board(&self, worktree_id: WorktreeId) -> Result<BoardView>;
+pub async fn create_worktree_board(
+    &self,
+    worktree_id: WorktreeId,
+    name: Option<String>,
+    prefix: Option<String>,
+    backend: Option<BackendRef>,
+) -> Result<BoardView>;
+```
 
 CLI (`fleet board …`, JSON envelopes v1 with `--json`, human tables otherwise; board resolved from
 `--board <id>` else `--worktree [<owner/name#slug>]` else `--context <id>` else the active context
 via `EnsureBoard`; a bare `--worktree` resolves `FLEET_SESSION` to a worktree session):
+
+```rust
+pub enum BoardWorktreeSelector { Explicit(WorktreeId), FromSession }
+```
+
 ```
 fleet board show [--context C|--worktree [W]|--board B]           # columns + cards
 fleet board list                                                  # summaries with context/worktree scope
@@ -813,12 +850,21 @@ thing so a failure names the layer that broke.
 - **Core** (`crates/fleet-core/src/board/`) covers the pure rules: create, patch, move and the
   fractional positions they produce; validation and `worktree_slug`; and the reconciliation engine
   — `adopt_schema`'s status mapping, `reconcile`'s create/update/delete/conflict decisions under
-  each `ConflictPolicy`, the push operations it emits, and `apply_push_result`.
+  each `ConflictPolicy`, the push operations it emits, and `apply_push_result`. Worktree-board
+  cases pin legacy JSON without `worktreeId`, scoped JSON round trips, derived ids (including
+  normalization and length), and the scoped board's name, prefix, context, and default repository.
 - **Daemon** (`crates/fleet-daemon/tests/boards_*.rs`) covers the service against a real store: the
   ensure/create/patch/move/delete/comment round trip, persistence and quarantine, worktree-from-card
   over a fake git, a full sync against `FakeBackend` including a conflict and its resolution, and
-  the events each mutation emits.
-- **CLI and client** cover the JSON envelopes and one socket round trip per typed method.
+  the events each mutation emits. Worktree-board cases pin scope-aware context lookup and listing,
+  orphan filtering, id-collision suffixes, idempotent ensure, duplicate and missing-worktree errors,
+  and deletion through both direct and prune paths without touching the context board.
+- **Protocol** (`crates/fleet-proto/tests/compatibility.rs`) pins byte-exact frames for both new
+  requests, the `board.worktree` handshake capability, and old/new `Board` and `BoardSummary`
+  payload compatibility.
+- **Client** covers one daemon-socket round trip for each new typed method.
+- **CLI** covers bare and explicit `--worktree` parsing, selector conflicts, `FLEET_SESSION`
+  resolution and refusal cases, capability gating, worktree creation, and the scope column/header.
 - **App** covers the reducers rather than rendered strings: the board mirror's staleness and
   generation rules, the focus clamp under a filter, and the two-stage filter `Esc`. The keymap
   drift test keeps `docs/KEYMAP.md` and `keymap.rs` in agreement.

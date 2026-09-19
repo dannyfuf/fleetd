@@ -33,7 +33,11 @@
   - verified: `cargo test -p fleet-cli` passed (118 library and 9 integration tests); `make lint`
     passed; the private daemon exercised explicit and session-derived `board show`, `card new`,
     `card move`, and the scope-aware `board list`, then was stopped.
-- [ ] P1-T08 — Record the decision and finish the docs
+- [x] P1-T08 — Record the decision and finish the docs
+  - verified: every phase-added signature was read against `docs/BOARD.md`; `make lint` passed.
+    `make test` passed 861 app tests and the board socket flow before the previously recorded
+    out-of-scope `agents/subagent-reopen-closed-caller.scenario` failed at line 13 because mode
+    remained `Native` after detaching the caller instead of returning to `Terminal`.
 
 ## Notes / decisions log
 (Append-only. Date-stamp entries. Capture anything that surprised you or that future-you will want.)
@@ -47,7 +51,7 @@
 (Things discovered mid-flight that are out of scope for this plan. Each gets a one-line description.)
 
 - Expose `DeleteBoard` as `fleet board delete` so an optional worktree board can be detached without deleting the worktree.
-- Fix the reproducible `AgentThreadView` handle leak when the headless
-  `agents/subagent-reopen-closed-caller.scenario` quits after reopening its caller.
+- Fix the reproducible `agents/subagent-reopen-closed-caller.scenario` failures: mode can remain
+  `Native` after detaching the caller, and another run leaked an `AgentThreadView` handle on quit.
 - Stabilize `github_service::concurrent_misses_share_fetch`, which observed two fetches under the
   loaded workspace run but passed immediately when rerun alone.

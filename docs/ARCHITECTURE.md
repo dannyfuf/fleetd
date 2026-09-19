@@ -638,14 +638,19 @@ never obtains a process-control handle.
 
 ## Boards
 
-The daemon `Boards` service owns one versioned board document per context. It applies
+The daemon `Boards` service owns one versioned document per board: one unscoped board per context
+and, on demand, one additional board per published worktree. It applies
 `fleet-core::board` operations, validates the resulting cards, atomically saves the
 whole document, updates its card-to-board index, and publishes `BoardChanged` plus a
 snapshot refresh request. The index is rebuilt lazily from disk after restart. A
-shared mutation gate serializes edits, worktree linking, and sync jobs so remote I/O
-cannot overwrite an intervening local edit. Snapshot reads skip damaged documents
-and boards whose contexts have disappeared; full views clear missing worktree links
-in memory without changing their stored history.
+per-board mutation gate serializes edits, worktree linking, and sync jobs so remote I/O
+cannot overwrite an intervening local edit without blocking an unrelated board. Snapshot reads
+skip damaged documents, boards whose contexts have disappeared, and scoped boards whose worktrees
+have disappeared; full views clear missing card worktree links in memory without changing their
+stored history. Context lookup excludes scoped boards. Worktree lookup treats its derived board id
+as a fast path and falls back to the persisted `worktree_id`, so collisions and future derivation
+changes remain safe. After any worktree deletion moves it to trash, the late-bound
+`WorktreeCascade` removes its board; a failure is warned but cannot roll back the worktree move.
 
 `BoardBackends` resolves the `BoardBackend` adapter by `BackendRef.kind`. Each adapter
 validates its own settings, describes statuses and properties, and maps pull/push
