@@ -538,11 +538,13 @@ subscription are unchanged, and `Event` itself decodes an unknown family to `Eve
 instead of dropping the frame. A client must never send a window field to a daemon that did not
 advertise the capability, and capabilities reset on disconnect.
 
-The board and native-agent request names introduced by version 6 remain unchanged. `Snapshot`'s
-`agent_threads` and `boards` are both `#[serde(default)]`, so an older snapshot payload still
-deserializes; new request names are rejected rather than misread. `PruneWorktrees.ids` also remains
-defaulted and omitted when `None`; `Some(ids)` is the exact reviewed allowlist, which locked
-reinspection may shrink but never expand. Exact-set support is advertised as
+The original board request names introduced by version 6 remain unchanged. Worktree-scoped boards
+add `EnsureWorktreeBoard` and `CreateWorktreeBoard` under the `board.worktree` capability without
+bumping protocol version 8; consumers must not send those requests when the capability is absent.
+`Snapshot`'s `agent_threads` and `boards` are both `#[serde(default)]`, so an older snapshot payload
+still deserializes; new request names are rejected rather than misread. `PruneWorktrees.ids` also
+remains defaulted and omitted when `None`; `Some(ids)` is the exact reviewed allowlist, which
+locked reinspection may shrink but never expand. Exact-set support is advertised as
 `prune.reviewed_ids` in Hello capabilities.
 
 Delete, inspect, and prune responses preserve per-worktree results across host fanout:

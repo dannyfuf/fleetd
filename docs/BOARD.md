@@ -42,7 +42,7 @@ multi-line editor with a read-mode markdown renderer.
 | Backend trait + registry + local backend | `crates/fleet-daemon/src/adapters/board.rs` and `adapters/board/local.rs` |
 | Board store (per-board JSON document) | `crates/fleet-daemon/src/stores/board.rs` |
 | `Boards` service + sync job + worktree-from-card | `crates/fleet-daemon/src/services/boards.rs` and `services/boards/{cards,documents,lifecycle,sync,worktree}.rs` |
-| Dispatch arms | `crates/fleet-daemon/src/services/mod.rs` |
+| Dispatch arms | `crates/fleet-daemon/src/services/dispatch.rs` |
 | Client API | `crates/fleet-client/src/api/boards.rs` |
 | CLI `fleet board …` | `crates/fleet-cli/src/{args.rs,commands.rs,envelope.rs,human.rs,commands/board.rs}` |
 | UI-kit components | `crates/fleet-ui-kit/src/components/{card_tile,kanban_column,markdown_text,priority_glyph,text_area}.rs` |
