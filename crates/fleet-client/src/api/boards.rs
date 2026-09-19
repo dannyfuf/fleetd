@@ -5,7 +5,7 @@ use fleet_core::{
         BackendDescriptor, BackendRef, BackendSchema, BoardPatch, BoardSummary, BoardView, Card,
         CardDraft, CardPatch, ConflictResolution,
     },
-    ids::{BoardId, CardId, ContextId, HostId, JobId, RepoId, StatusId},
+    ids::{BoardId, CardId, ContextId, HostId, JobId, RepoId, StatusId, WorktreeId},
     model::Worktree,
 };
 use fleet_proto::{request::RequestBody, response::ResponseBody};
@@ -38,6 +38,17 @@ impl Client {
         }
     }
 
+    /// Returns a worktree's board, creating it when the worktree has none.
+    pub async fn ensure_worktree_board(&self, worktree_id: WorktreeId) -> Result<BoardView> {
+        match self
+            .request(RequestBody::EnsureWorktreeBoard { worktree_id })
+            .await?
+        {
+            ResponseBody::Board(value) => Ok(value),
+            response => Err(unexpected("ensure_worktree_board", response)),
+        }
+    }
+
     /// Creates a board in a context.
     pub async fn create_board(
         &self,
@@ -57,6 +68,28 @@ impl Client {
         {
             ResponseBody::Board(value) => Ok(value),
             response => Err(unexpected("create_board", response)),
+        }
+    }
+
+    /// Creates the only board scoped to a worktree.
+    pub async fn create_worktree_board(
+        &self,
+        worktree_id: WorktreeId,
+        name: Option<String>,
+        prefix: Option<String>,
+        backend: Option<BackendRef>,
+    ) -> Result<BoardView> {
+        match self
+            .request(RequestBody::CreateWorktreeBoard {
+                worktree_id,
+                name,
+                prefix,
+                backend,
+            })
+            .await?
+        {
+            ResponseBody::Board(value) => Ok(value),
+            response => Err(unexpected("create_worktree_board", response)),
         }
     }
 

@@ -27,7 +27,8 @@
   - verified: `FLEET_DAEMON="$PWD/target/debug/fleetd" cargo test -p fleet-daemon` (all suites passed, 768 library tests) and `make lint` passed.
 - [x] P1-T05 — Add the wire requests, the capability string and the dispatch arms
   - verified: `cargo test -p fleet-proto` passed; `FLEET_DAEMON="$PWD/target/debug/fleetd" cargo test -p fleet-daemon` passed (768 library tests); `make lint` passed; private `make restart FLEET_HOME=/tmp/wb-p1-home` succeeded.
-- [ ] P1-T06 — Add the typed client methods
+- [x] P1-T06 — Add the typed client methods
+  - verified: `cargo test -p fleet-client` passed (including both worktree-board socket round trips) and `make lint` passed.
 - [ ] P1-T07 — Add the `--worktree` selector to `fleet board`
 - [ ] P1-T08 — Record the decision and finish the docs
 

@@ -605,9 +605,9 @@ enum BoardChangeReason { Created, Updated, Deleted, CardChanged, Synced, SyncFai
 
 `Client::create_worktree_from_card` returns `(Card, Worktree, bool /* created */)`.
 `fleet_client::Client` gains one typed method per request above (`list_boards`, `get_board`,
-`ensure_board`, `create_board`, `update_board`, `delete_board`, `create_card`, `update_card`,
-`move_card`, `delete_card`, `add_card_comment`, `create_worktree_from_card`, `sync_board`,
-`resolve_card_conflict`, `describe_board_backend`).
+`ensure_board`, `ensure_worktree_board`, `create_board`, `create_worktree_board`, `update_board`,
+`delete_board`, `create_card`, `update_card`, `move_card`, `delete_card`, `add_card_comment`,
+`create_worktree_from_card`, `sync_board`, `resolve_card_conflict`, `describe_board_backend`).
 
 CLI (`fleet board …`, JSON envelopes v1 with `--json`, human tables otherwise; board resolved from
 `--board <id>` else `--context <id>` else the active context via `EnsureBoard`):

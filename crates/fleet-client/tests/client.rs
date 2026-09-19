@@ -6,7 +6,7 @@ use fleet_core::{
         BackendDescriptor, BackendRef, BackendSchema, BoardPatch, BoardView, Card, CardDraft,
         CardPatch, ConflictResolution, new_board, summarize,
     },
-    ids::TerminalId,
+    ids::{TerminalId, WorktreeId},
     model::{Context, Worktree},
 };
 use fleet_proto::{
@@ -380,6 +380,10 @@ async fn board_api_round_trips() {
         board: board.clone(),
         cards: vec![card.clone()],
     };
+    let worktree_id =
+        WorktreeId::try_from("acme/api#task").unwrap_or_else(|error| panic!("{error}"));
+    let mut worktree_view = view.clone();
+    worktree_view.board.worktree_id = Some(worktree_id.clone());
     let summary = summarize(&board, &view.cards);
     let worktree: Worktree = serde_json::from_value(serde_json::json!({
         "id":"acme/api#task", "repoId":"acme/api", "slug":"task", "branch":"task",
@@ -435,6 +439,14 @@ async fn board_api_round_trips() {
         view
     );
     check!(
+        RequestBody::EnsureWorktreeBoard {
+            worktree_id: worktree_id.clone()
+        },
+        ResponseBody::Board(worktree_view.clone()),
+        client.ensure_worktree_board(worktree_id.clone()),
+        worktree_view.clone()
+    );
+    check!(
         RequestBody::CreateBoard {
             context_id: context.id.clone(),
             name: Some("Team".into()),
@@ -449,6 +461,22 @@ async fn board_api_round_trips() {
             Some(BackendRef::default())
         ),
         view
+    );
+    check!(
+        RequestBody::CreateWorktreeBoard {
+            worktree_id: worktree_id.clone(),
+            name: Some("Task board".into()),
+            prefix: Some("TSK".into()),
+            backend: Some(BackendRef::default())
+        },
+        ResponseBody::Board(worktree_view.clone()),
+        client.create_worktree_board(
+            worktree_id,
+            Some("Task board".into()),
+            Some("TSK".into()),
+            Some(BackendRef::default())
+        ),
+        worktree_view
     );
     let board_patch = BoardPatch {
         default_repo_id: Some(None),
