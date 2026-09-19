@@ -184,7 +184,7 @@ pub enum BoardError {
         /// Explanation of the violated rule.
         reason: String,
     },
-    /// The context already owns a board.
+    /// The context or worktree scope already owns a board.
     #[error("board already exists for scope {0}")]
     Duplicate(String),
     /// Unknown backend.

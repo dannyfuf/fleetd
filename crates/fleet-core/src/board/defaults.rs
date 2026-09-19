@@ -1,4 +1,4 @@
-//! Defaults for a context's local board.
+//! Defaults for local boards scoped to a context or worktree.
 
 use super::model::{BackendRef, Board, BoardSettings, Status, StatusCategory, SyncState};
 use crate::{
