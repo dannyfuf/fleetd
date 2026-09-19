@@ -412,6 +412,21 @@ async fn deliver(
         return Err(error.into());
     }
 
+    // The caller already read this result through its own `wait`, so injecting it now is exactly
+    // the duplicate user message that state exists to stop. The item patch above still had to run
+    // — it is what stops the caller's transcript row saying "working" — but nothing is sent.
+    // `consume` closes this row in its own transaction, so seeing it open here means this pass
+    // read the outbox before that commit landed; close it and move on.
+    if matches!(delegation.delivery, DeliveryState::Consumed) {
+        tracing::info!(
+            target: "fleet::agents",
+            delegation = %delegation.id,
+            caller = %delegation.caller,
+            "skipped delivery injection for a result the caller already read",
+        );
+        return finish_row(service, row.id).await;
+    }
+
     let record = match service.inner.manager.record(delegation.caller).await {
         Ok(record) => record,
         Err(error) if error.kind == ErrorKind::NotFound => {

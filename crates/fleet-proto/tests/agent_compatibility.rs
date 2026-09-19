@@ -441,6 +441,22 @@ fn a_delegation_run_written_before_the_child_environment_still_decodes() {
     assert!(env.is_empty(), "{env:?}");
 }
 
+/// `caller` decides whether a terminal answer also consumes the delivery, so a daemon facing an
+/// un-upgraded `fleet` must read the field as absent rather than refuse the wait. Absent means
+/// "consume nothing", which is exactly what every peer did before the field existed.
+#[test]
+fn a_delegation_wait_written_before_the_caller_hint_still_decodes() {
+    let request: Request = serde_json::from_str(
+        r#"{"id":25,"body":{"type":"delegation_wait","delegation":"dddddddd-2222-4333-8444-555555555555","timeout_ms":30000}}"#,
+    )
+    .unwrap_or_else(|error| panic!("pre-caller delegation wait: {error}"));
+
+    assert!(matches!(
+        request.body,
+        RequestBody::DelegationWait { caller: None, .. }
+    ));
+}
+
 #[test]
 fn the_closed_threads_capability_string_is_pinned() {
     assert_eq!(fleet_proto::AGENT_CLOSED_CAPABILITY, "agent.closed");
@@ -952,11 +968,12 @@ fn request_goldens() -> Vec<(Request, &'static str)> {
                 body: RequestBody::DelegationWait {
                     delegation: delegation_id(),
                     timeout_ms: 30_000,
+                    caller: Some(thread),
                 },
             },
-            r#"{"id":25,"body":{"type":"delegation_wait","delegation":"dddddddd-2222-4333-8444-555555555555","timeout_ms":30000}}"#,
+            r#"{"id":25,"body":{"type":"delegation_wait","delegation":"dddddddd-2222-4333-8444-555555555555","timeout_ms":30000,"caller":"11111111-2222-4333-8444-555555555555"}}"#,
         ),
-        // The three delegation requests that carry optional fields, with every option absent: a
+        // The four delegation requests that carry optional fields, with every option absent: a
         // missing `skip_serializing_if` would show up here as a `null` or a `false` a version-7
         // peer never sent, and nowhere else.
         (
@@ -1000,6 +1017,19 @@ fn request_goldens() -> Vec<(Request, &'static str)> {
                 body: RequestBody::DelegationList { caller: None },
             },
             r#"{"id":28,"body":{"type":"delegation_list"}}"#,
+        ),
+        (
+            Request {
+                id: 31,
+                body: RequestBody::DelegationWait {
+                    delegation: delegation_id(),
+                    timeout_ms: 30_000,
+                    caller: None,
+                },
+            },
+            // Byte-identical to what a version-7 peer sent before `caller` existed, which is the
+            // whole proof that a waiter with no session of its own is still the old shape.
+            r#"{"id":31,"body":{"type":"delegation_wait","delegation":"dddddddd-2222-4333-8444-555555555555","timeout_ms":30000}}"#,
         ),
         // Delivery of a child's result to its caller is an ordinary `AgentSend` whose input is
         // marked; request 8 above pins the same shape with the mark absent.

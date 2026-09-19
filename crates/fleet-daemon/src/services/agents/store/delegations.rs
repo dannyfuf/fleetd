@@ -577,13 +577,6 @@ pub(crate) fn mark_done_for(
 ///
 /// Closing the `Deliver` outbox row in the same transaction is the half that stops the duplicate:
 /// a row left open would be drained by the worker after the transaction commits.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the `wait` path that calls this lands in the next commit of this batch"
-    )
-)]
 pub(crate) fn consume(
     tx: &Transaction<'_>,
     id: DelegationId,

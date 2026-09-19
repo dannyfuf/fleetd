@@ -196,15 +196,22 @@ impl Client {
     }
 
     /// Waits for one delegation to become terminal or the deadline to expire.
+    ///
+    /// `caller` names the thread this wait is issued for, when the waiter knows its own. It is
+    /// advisory identity, not authorisation: passing the delegation's own caller is what marks a
+    /// terminal result read, so the daemon never injects it into that thread a second time.
+    /// `None` — a shell with no session of its own — waits exactly as this call always has.
     pub async fn delegation_wait(
         &self,
         delegation: DelegationId,
         timeout_ms: u64,
+        caller: Option<ThreadId>,
     ) -> Result<Delegation> {
         match self
             .request(RequestBody::DelegationWait {
                 delegation,
                 timeout_ms,
+                caller,
             })
             .await?
         {

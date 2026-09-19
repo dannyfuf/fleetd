@@ -719,10 +719,11 @@ impl Services {
             RequestBody::DelegationWait {
                 delegation,
                 timeout_ms,
+                caller,
             } => {
                 let answer = self
                     .delegation_service()?
-                    .wait(delegation, timeout_ms)
+                    .wait(delegation, timeout_ms, caller)
                     .await;
                 self.agent_response(answer)
             }

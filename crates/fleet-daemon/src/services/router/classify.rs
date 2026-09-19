@@ -544,6 +544,7 @@ mod tests {
             RequestBody::DelegationWait {
                 delegation,
                 timeout_ms: 1,
+                caller: None,
             },
         ];
 

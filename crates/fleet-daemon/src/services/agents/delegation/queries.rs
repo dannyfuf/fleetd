@@ -4,6 +4,7 @@
 
 use std::time::Duration;
 
+use chrono::Utc;
 use fleet_core::agents::{Delegation, DelegationId, ThreadId};
 use fleet_proto::{
     error::{ErrorKind, ProtoError},
@@ -13,6 +14,7 @@ use fleet_proto::{
 use tokio::sync::broadcast;
 
 use super::DelegationService;
+use crate::services::agents::store::delegations;
 
 impl DelegationService {
     /// Every delegation, newest first, optionally narrowed to one caller.
@@ -34,17 +36,25 @@ impl DelegationService {
     }
 
     /// Blocks until one delegation is terminal, or until `timeout_ms` passes.
+    ///
+    /// `caller` is the thread the waiter is acting for, when it knows its own. Answering a
+    /// terminal record to that thread is the caller reading its own child's result, so the
+    /// delivery is consumed here and never injected again; see [`Self::consume_for`]. Every other
+    /// waiter — a third party, or one that named nobody — is answered exactly as before.
     pub(crate) async fn wait(
         &self,
         delegation: DelegationId,
         timeout_ms: u64,
+        caller: Option<ThreadId>,
     ) -> Result<ResponseBody, ProtoError> {
         // Subscribe before the first read. A transition committed between those two operations is
         // then either visible in the row or waiting in this receiver, so it cannot be missed.
         let mut events = self.inner.events.subscribe();
         let current = self.read_delegation(delegation).await?;
         if current.status.is_terminal() {
-            return Ok(ResponseBody::Delegation(current));
+            return Ok(ResponseBody::Delegation(
+                self.consume_for(current, caller).await?,
+            ));
         }
 
         let terminal = tokio::time::timeout(Duration::from_millis(timeout_ms), async {
@@ -78,7 +88,52 @@ impl DelegationService {
             Ok(result) => result?,
             Err(_) => self.read_delegation(delegation).await?,
         };
-        Ok(ResponseBody::Delegation(current))
+        Ok(ResponseBody::Delegation(
+            self.consume_for(current, caller).await?,
+        ))
+    }
+
+    /// Marks a terminal result read when the waiter is the delegation's own caller.
+    ///
+    /// Identity, not authorisation: a mismatch changes nothing and still answers the record. The
+    /// point is the duplicate — a caller handed its child's result here would otherwise be sent
+    /// the same text again as a user message once its turn settles, once per child.
+    ///
+    /// Best effort and idempotent, because the delivery worker is racing this. `consume` answers
+    /// `None` for anything but a terminal `Pending` delivery, so a `wait` that loses that race
+    /// simply reports `delivered`, which is the truth.
+    async fn consume_for(
+        &self,
+        current: Delegation,
+        caller: Option<ThreadId>,
+    ) -> Result<Delegation, ProtoError> {
+        if !current.status.is_terminal() || caller != Some(current.caller) {
+            return Ok(current);
+        }
+        let id = current.id;
+        let consumed = self
+            .inner
+            .store
+            .delegation_write(
+                "consume a delegation result read by its caller",
+                move |tx| {
+                    // No wake: this closes the delivery row rather than opening new work.
+                    Ok((delegations::consume(tx, id, Utc::now())?, false))
+                },
+            )
+            .await
+            .map_err(storage_error)?;
+        let Some(consumed) = consumed else {
+            return Ok(current);
+        };
+        tracing::info!(
+            target: "fleet::agents",
+            delegation = %consumed.id,
+            caller = %consumed.caller,
+            "consumed a delegation result its caller read through wait",
+        );
+        self.publish_changed(consumed.clone());
+        Ok(consumed)
     }
 
     pub(super) async fn read_delegation(

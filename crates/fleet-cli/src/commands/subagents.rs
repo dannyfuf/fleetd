@@ -215,7 +215,7 @@ async fn complete(
 
 async fn wait(client: &Client, arguments: SubagentWaitArgs) -> Result<CommandOutput, ProtoError> {
     let delegation = client
-        .delegation_wait(arguments.id, arguments.timeout.saturating_mul(1_000))
+        .delegation_wait(arguments.id, arguments.timeout.saturating_mul(1_000), None)
         .await?;
     let terminal = delegation.status.is_terminal();
     // `delivered_message` is the *terminal* template: it opens with "finished:" and prints a

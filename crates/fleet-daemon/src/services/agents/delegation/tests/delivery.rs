@@ -1,9 +1,20 @@
-use fleet_core::agents::{DeliveryState, MessageOrigin, SessionState, StopCause, TurnState};
-use fleet_proto::request::RequestBody;
+use fleet_core::agents::{
+    Delegation, DeliveryState, MessageOrigin, SessionState, StopCause, ThreadId, TurnState,
+};
+use fleet_proto::{request::RequestBody, response::ResponseBody};
+
+use crate::services::agents::store::OutboxAction;
 
 use super::{super::worker::drain, worker::Harness};
 
-fn open(thread: fleet_core::agents::ThreadId) -> RequestBody {
+fn one(response: ResponseBody) -> Delegation {
+    match response {
+        ResponseBody::Delegation(delegation) => delegation,
+        other => panic!("expected one delegation, got {other:?}"),
+    }
+}
+
+fn open(thread: ThreadId) -> RequestBody {
     RequestBody::AgentThreadOpen {
         thread,
         from_seq: None,
@@ -229,4 +240,109 @@ async fn two_children_finishing_together_deliver_as_two_turns() {
     for delegation in delegations {
         assert!(origins.contains(&MessageOrigin::Delegation { id: delegation.id }));
     }
+}
+
+/// The reported pain point: an orchestrator that waited on eight children was sent all eight
+/// results again as user messages once its turn settled. A caller's own `wait` hands the result
+/// over, so nothing is left to inject.
+#[tokio::test(start_paused = true)]
+async fn a_callers_own_wait_consumes_the_result_instead_of_delivering_it() {
+    let harness = Harness::start().await;
+    let (caller, delegations) = harness.caller_with_delegations(1, false, true).await;
+
+    let answered = one(harness
+        .service
+        .wait(delegations[0].id, 0, Some(caller))
+        .await
+        .expect("wait on a terminal child"));
+    assert_eq!(answered.delivery, DeliveryState::Consumed);
+
+    drain(&harness.service).await.expect("drain after consume");
+
+    assert!(
+        harness
+            .origins(caller)
+            .await
+            .iter()
+            .all(MessageOrigin::is_user),
+        "a consumed result is never injected as a delegation-origin message",
+    );
+    assert!(
+        harness
+            .store
+            .delegation_outbox()
+            .await
+            .expect("open rows")
+            .is_empty(),
+        "consuming the result closes its delivery row",
+    );
+}
+
+/// The other half of the rule: only the delegation's own caller consumes. Anyone else — including
+/// a `wait` from a shell that knows no session — leaves the delivery exactly as it was, so the
+/// caller still receives its child's result.
+#[tokio::test(start_paused = true)]
+async fn a_wait_from_anyone_but_the_caller_still_delivers_the_result() {
+    let harness = Harness::start().await;
+    let (caller, delegations) = harness.caller_with_delegations(1, false, true).await;
+
+    for waiter in [None, Some(ThreadId::new())] {
+        let answered = one(harness
+            .service
+            .wait(delegations[0].id, 0, waiter)
+            .await
+            .expect("wait on a terminal child"));
+        assert_eq!(answered.delivery, DeliveryState::Pending, "{waiter:?}");
+    }
+
+    drain(&harness.service).await.expect("drain delivery");
+    harness.wait_for_delegation_origins(caller, 1).await;
+
+    assert!(
+        harness
+            .origins(caller)
+            .await
+            .contains(&MessageOrigin::Delegation {
+                id: delegations[0].id
+            })
+    );
+}
+
+/// `consume` closes the delivery row in its own transaction, so the worker only meets a consumed
+/// delegation when a drain read the outbox before that commit landed. It must patch the caller's
+/// item, close the row, and send nothing.
+#[tokio::test(start_paused = true)]
+async fn the_worker_closes_a_consumed_delivery_without_injecting_it() {
+    let harness = Harness::start().await;
+    let (caller, delegations) = harness.caller_with_delegations(1, false, true).await;
+
+    one(harness
+        .service
+        .wait(delegations[0].id, 0, Some(caller))
+        .await
+        .expect("wait on a terminal child"));
+    // Re-open the delivery row the way a pass that raced the consume transaction would see it.
+    harness
+        .enqueue(delegations[0].id, OutboxAction::Deliver)
+        .await;
+
+    drain(&harness.service)
+        .await
+        .expect("drain a consumed delivery");
+
+    assert!(
+        harness
+            .origins(caller)
+            .await
+            .iter()
+            .all(MessageOrigin::is_user),
+    );
+    assert!(
+        harness
+            .store
+            .delegation_outbox()
+            .await
+            .expect("open rows")
+            .is_empty(),
+    );
 }

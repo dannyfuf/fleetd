@@ -409,6 +409,20 @@ pub enum RequestBody {
         delegation: DelegationId,
         /// Service-side wait deadline in milliseconds.
         timeout_ms: u64,
+        /// Thread on whose behalf this wait is issued, when the waiter knows its own.
+        ///
+        /// Advisory **identity**, never authorisation: it decides whether the delegation's result
+        /// is marked read, and nothing else. Any peer may wait on any delegation, and the answer
+        /// is byte-identical whatever this field says.
+        ///
+        /// When it names the delegation's own caller, a terminal answer also moves the delivery
+        /// from `pending` to `consumed`, because a caller that has just been handed the result
+        /// must not be sent it a second time as a user message when its turn settles. When it is
+        /// absent — an older `fleet`, or a `wait` from a shell with no session of its own — or
+        /// when it names a third party, nothing is consumed and delivery proceeds exactly as it
+        /// did before this field existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caller: Option<ThreadId>,
     },
     /// List boards.
     ListBoards {

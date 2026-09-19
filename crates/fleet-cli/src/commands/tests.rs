@@ -1373,6 +1373,7 @@ async fn subagent_verbs_use_typed_requests_and_render_human_and_json_output() {
                 RequestBody::DelegationWait {
                     delegation: expected.id,
                     timeout_ms,
+                    caller: None,
                 }
             );
             let mut answer = expected.clone();
@@ -1606,6 +1607,7 @@ async fn subagent_wait_json_bytes_are_unchanged_for_a_live_delegation() {
             RequestBody::DelegationWait {
                 delegation: expected.id,
                 timeout_ms: 1_000,
+                caller: None,
             }
         );
         let mut answer = expected;

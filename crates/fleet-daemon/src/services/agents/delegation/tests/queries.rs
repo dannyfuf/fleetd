@@ -137,7 +137,7 @@ async fn wait_returns_on_the_terminal_event() {
     let running = delegation(ThreadId::new(), 1);
     harness.insert(running.clone()).await;
 
-    let waiting = harness.service.wait(running.id, 10_000);
+    let waiting = harness.service.wait(running.id, 10_000, None);
     let finishing = async {
         // `join!` polls `waiting` first, so its subscribe-before-read invariant is active before
         // this update. Yielding lets that initial database read finish without sleeping.
@@ -160,7 +160,7 @@ async fn wait_times_out_with_the_current_record() {
 
     let current = one(harness
         .service
-        .wait(running.id, 0)
+        .wait(running.id, 0, None)
         .await
         .expect("wait succeeds"));
 
@@ -190,6 +190,106 @@ async fn cancel_refuses_a_terminal_delegation() {
             .expect("get succeeds")),
         terminal
     );
+}
+
+/// The duplicate this whole field exists to stop: an orchestrator that waited on eight children
+/// used to be sent all eight results again as user messages once its turn settled.
+#[tokio::test]
+async fn a_callers_own_wait_consumes_a_terminal_delivery() {
+    let harness = Harness::new();
+    let caller = ThreadId::new();
+    let finished = delegation(caller, 1);
+    harness.insert(finished.clone()).await;
+    harness
+        .finish(finished.clone(), DelegationStatus::Succeeded)
+        .await;
+
+    let answered = one(harness
+        .service
+        .wait(finished.id, 0, Some(caller))
+        .await
+        .expect("wait succeeds"));
+
+    assert_eq!(answered.delivery, DeliveryState::Consumed);
+    assert_eq!(
+        harness
+            .store
+            .delegation(finished.id)
+            .await
+            .expect("read delegation")
+            .expect("delegation exists")
+            .delivery,
+        DeliveryState::Consumed
+    );
+}
+
+/// Idempotent on purpose: a caller that waits twice, or that races the delivery worker and loses,
+/// gets an answer rather than an error.
+#[tokio::test]
+async fn consuming_a_delivery_twice_still_answers_the_record() {
+    let harness = Harness::new();
+    let caller = ThreadId::new();
+    let finished = delegation(caller, 1);
+    harness.insert(finished.clone()).await;
+    harness
+        .finish(finished.clone(), DelegationStatus::Succeeded)
+        .await;
+
+    for _ in 0..2 {
+        let answered = one(harness
+            .service
+            .wait(finished.id, 0, Some(caller))
+            .await
+            .expect("wait succeeds"));
+        assert_eq!(answered.delivery, DeliveryState::Consumed);
+    }
+}
+
+/// Identity, not authorisation: a stranger is answered the same record and changes nothing.
+#[tokio::test]
+async fn a_wait_from_anyone_but_the_caller_leaves_the_delivery_pending() {
+    let harness = Harness::new();
+    let finished = delegation(ThreadId::new(), 1);
+    harness.insert(finished.clone()).await;
+    harness
+        .finish(finished.clone(), DelegationStatus::Succeeded)
+        .await;
+
+    for waiter in [None, Some(ThreadId::new())] {
+        let answered = one(harness
+            .service
+            .wait(finished.id, 0, waiter)
+            .await
+            .expect("wait succeeds"));
+        assert_eq!(answered.delivery, DeliveryState::Pending);
+    }
+    assert_eq!(
+        harness
+            .store
+            .delegation(finished.id)
+            .await
+            .expect("read delegation")
+            .expect("delegation exists")
+            .delivery,
+        DeliveryState::Pending
+    );
+}
+
+/// A wait that times out answers a live record, and a live record has nothing to consume.
+#[tokio::test]
+async fn a_wait_that_times_out_consumes_nothing() {
+    let harness = Harness::new();
+    let caller = ThreadId::new();
+    let running = delegation(caller, 1);
+    harness.insert(running.clone()).await;
+
+    let current = one(harness
+        .service
+        .wait(running.id, 0, Some(caller))
+        .await
+        .expect("wait succeeds"));
+
+    assert_eq!(current, running);
 }
 
 #[tokio::test]
