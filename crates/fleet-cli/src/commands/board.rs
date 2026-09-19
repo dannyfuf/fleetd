@@ -52,7 +52,14 @@ pub(super) async fn board(
         ));
     }
     match command {
-        BoardCommand::List => list(client, board, context, json).await,
+        BoardCommand::List => {
+            if worktree.is_some() {
+                return Err(validation(
+                    "board list accepts --board to narrow the table, not --worktree",
+                ));
+            }
+            list(client, board, context, json).await
+        }
         BoardCommand::Backends => backends(client, json).await,
         BoardCommand::Create(arguments) => {
             create(client, board, worktree, context, arguments, json).await

@@ -667,6 +667,8 @@ fleet board card delete <key|id>
 fleet board card worktree <key|id> [--repo owner/name] [--base REF] [--host H]   # prints the created worktree like `fleet create`
 fleet board card resolve <key|id> keep-local|take-remote
 ```
+`board list` accepts `--board` to narrow the table and `--context` to restrict the daemon query;
+it rejects `--worktree` because listing does not ensure or resolve a board.
 `<key|id>` accepts a display key (`FLT-12`, `PROJ-123`) or a CardId, and the local key of a card
 with no remote link — a mirrored card's local key is not a selector, because a board mirroring the
 Jira project its own prefix names would have two namespaces of the same shape overlapping. `board

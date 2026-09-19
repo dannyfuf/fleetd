@@ -1204,6 +1204,10 @@ mod parsing {
             .to_string()
         };
         let text = help(&["--help"]);
+        assert!(
+            text.contains("Manage context and worktree boards and their cards"),
+            "{text}"
+        );
         for expected in ["backends", "describe", "sync"] {
             assert!(text.contains(expected), "missing {expected:?} in {text}");
         }
@@ -1716,6 +1720,18 @@ mod orchestration {
         .await
         .unwrap_err();
         assert_eq!(error.kind, ErrorKind::NotFound);
+    }
+
+    #[tokio::test]
+    async fn board_list_rejects_the_worktree_selector() {
+        let error = run(&["list", "--worktree", "acme/api#feature"], vec![])
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Validation);
+        assert_eq!(
+            error.message,
+            "board list accepts --board to narrow the table, not --worktree"
+        );
     }
 
     #[tokio::test]

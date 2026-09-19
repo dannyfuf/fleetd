@@ -35,7 +35,7 @@ pub struct Cli {
 pub enum Command {
     /// Manage configured remote machines.
     Host(HostArgs),
-    /// Manage context boards and their cards.
+    /// Manage context and worktree boards and their cards.
     Board(BoardArgs),
     /// Run a command, optionally teeing piped output to a read-only watch.
     Exec(ExecArgs),
