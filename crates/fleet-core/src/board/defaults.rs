@@ -7,7 +7,8 @@ use crate::{
     slug::slugify,
 };
 
-const BOARD_ID_MAX_LEN: usize = 64;
+/// Maximum byte length of a derived worktree board id.
+pub const BOARD_ID_MAX_LEN: usize = 64;
 
 /// Creates the five initial ordered status columns.
 #[must_use]

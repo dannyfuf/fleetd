@@ -11,7 +11,8 @@ use crate::{
 use fleet_core::{
     board::*,
     ids::{BoardId, CardId, ContextId, HostId, JobId, RepoId, StatusId, WorktreeId},
-    model::Worktree,
+    model::{Context, Worktree},
+    state::State,
 };
 use fleet_proto::{
     event::{BoardChangeReason, Event},

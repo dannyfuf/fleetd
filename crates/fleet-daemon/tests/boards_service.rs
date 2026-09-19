@@ -5,7 +5,7 @@ use std::{sync::Arc, time::Duration};
 use chrono::{TimeZone, Utc};
 use fleet_core::{
     board::*,
-    ids::BoardId,
+    ids::{BoardId, WorktreeId},
     model::{Context, Repo, RepoHooks, Worktree},
     paths::FleetHome,
     state::default_state,
@@ -176,6 +176,39 @@ impl Fixture {
 
     async fn local(&self) -> BoardView {
         self.boards.ensure(&"work".parse().unwrap()).await.unwrap()
+    }
+
+    async fn publish_worktree(&self, id: &str) -> Worktree {
+        let id: WorktreeId = id.parse().unwrap();
+        let worktree = Worktree {
+            repo_id: id.repo().parse().unwrap(),
+            slug: id.slug().into(),
+            id,
+            branch: "feature".into(),
+            base_ref: "origin/main".into(),
+            path: self
+                .home
+                .worktrees_dir()
+                .join("acme/api/feature")
+                .display()
+                .to_string(),
+            session: "api/feature".into(),
+            host: None,
+            created_at: "2026-09-06T12:00:00Z".into(),
+            last_opened_at: None,
+            degraded: None,
+        };
+        self.state
+            .transaction({
+                let worktree = worktree.clone();
+                move |state| {
+                    state.worktrees.push(worktree);
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+        worktree
     }
 
     async fn remote(&self) -> BoardView {
@@ -394,6 +427,76 @@ async fn context_lookup_and_listing_keep_worktree_boards_in_their_scope() {
         .unwrap();
     assert_eq!(f.boards.list(None).await.unwrap().len(), 1);
     assert_eq!(f.boards.summaries().await.len(), 1);
+}
+
+#[tokio::test]
+async fn worktree_board_ensure_is_idempotent_and_create_refuses_a_second_board() {
+    let mut f = Fixture::new(pull_caps()).await;
+    let worktree = f.publish_worktree("acme/api#feature").await;
+    let (first, second) = tokio::join!(
+        f.boards.ensure_for_worktree(&worktree.id),
+        f.boards.ensure_for_worktree(&worktree.id)
+    );
+    let first = first.unwrap();
+    assert_eq!(first, second.unwrap());
+    assert_eq!(f.store.list().unwrap().len(), 1);
+    assert_eq!(first.board.id, worktree_board_id(&worktree.id));
+    assert_eq!(first.board.worktree_id.as_ref(), Some(&worktree.id));
+    assert_eq!(first.board.context_id.as_str(), "work");
+    assert_eq!(
+        first.board.default_repo_id.as_ref(),
+        Some(&worktree.repo_id)
+    );
+    assert_eq!(first.board.prefix, "FEA");
+    assert_eq!(f.reasons(), vec![BoardChangeReason::Created]);
+
+    assert!(matches!(
+        f.boards
+            .create_for_worktree(&worktree.id, None, None, None)
+            .await,
+        Err(DaemonError::Conflict(_))
+    ));
+    assert!(matches!(
+        f.boards
+            .ensure_for_worktree(&"acme/api#missing".parse().unwrap())
+            .await,
+        Err(DaemonError::NotFound(_))
+    ));
+}
+
+#[tokio::test]
+async fn worktree_board_creation_suffixes_an_id_owned_by_another_board() {
+    let f = Fixture::new(pull_caps()).await;
+    let worktree = f.publish_worktree("acme/api#feature").await;
+    let context = f.state.load().await.unwrap().contexts[0].clone();
+    let mut blocker = new_board(&context, "2026-09-06T12:00:00Z");
+    blocker.id = worktree_board_id(&worktree.id);
+    f.store
+        .save(&BoardDocument {
+            version: BOARD_DOCUMENT_VERSION,
+            board: blocker,
+            cards: Vec::new(),
+        })
+        .unwrap();
+
+    let created = f
+        .boards
+        .create_for_worktree(
+            &worktree.id,
+            Some("Feature plan".into()),
+            Some("PLAN".into()),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.board.id.as_str(), "wt-acme-api-feature-2");
+    assert_eq!(created.board.name, "Feature plan");
+    assert_eq!(created.board.prefix, "PLAN");
+    assert_eq!(
+        f.boards.ensure_for_worktree(&worktree.id).await.unwrap(),
+        created
+    );
+    assert_eq!(f.store.list().unwrap().len(), 2);
 }
 
 #[tokio::test]

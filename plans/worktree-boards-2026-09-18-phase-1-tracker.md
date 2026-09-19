@@ -21,7 +21,8 @@
   - verified: `cargo test -p fleet-core board` (117 passed) and `make lint` passed.
 - [x] P1-T02 — Make board lookup and listing scope-aware in the daemon
   - verified: `cargo test -p fleet-daemon --test boards_service` (52 passed) and `make lint` passed.
-- [ ] P1-T03 — Add ensure/create for worktree boards to the `Boards` service
+- [x] P1-T03 — Add ensure/create for worktree boards to the `Boards` service
+  - verified: `cargo test -p fleet-daemon --test boards_service` (54 passed) and `make lint` passed.
 - [ ] P1-T04 — Cascade board deletion when a worktree is deleted or pruned
 - [ ] P1-T05 — Add the wire requests, the capability string and the dispatch arms
 - [ ] P1-T06 — Add the typed client methods

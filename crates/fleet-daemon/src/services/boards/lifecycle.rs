@@ -98,6 +98,36 @@ impl Boards {
         })
     }
 
+    /// Gets or creates the board scoped to one published worktree.
+    pub async fn ensure_for_worktree(&self, worktree: &WorktreeId) -> DaemonResult<BoardView> {
+        let state = self.state_store.load().await?;
+        let (worktree_record, context) = worktree_context(&state, worktree)?;
+        // Existing-board refreshes stay lock-free, as context-board refreshes do.
+        if let Some(id) = self.worktree_board(worktree)? {
+            return self.get(&id).await;
+        }
+        let base = worktree_board_id(worktree);
+        let _guard = self.gate(&base).await;
+        if let Some(id) = self.worktree_board(worktree)? {
+            return self.get(&id).await;
+        }
+        let mut board = new_worktree_board(&context, &worktree_record, &self.now());
+        board.id = self.available_worktree_board_id(&base)?;
+        let backend = self.backends.get(&board.backend.kind)?;
+        backend.validate(&board.backend.settings).await?;
+        board.backend.settings = backend.normalize(&board.backend.settings).await?;
+        let doc = BoardDocument {
+            version: BOARD_DOCUMENT_VERSION,
+            board,
+            cards: Vec::new(),
+        };
+        self.save(&doc, BoardChangeReason::Created).await?;
+        Ok(BoardView {
+            board: doc.board,
+            cards: doc.cards,
+        })
+    }
+
     /// Returns available summaries without making a broken board fail the whole snapshot.
     ///
     /// A board whose document has not changed since it was last parsed is served from the
@@ -219,6 +249,66 @@ impl Boards {
         };
         self.save(&doc, BoardChangeReason::Created).await?;
         self.get(&doc.board.id).await
+    }
+
+    /// Creates the worktree's only board after validating its backend configuration.
+    pub async fn create_for_worktree(
+        &self,
+        worktree: &WorktreeId,
+        name: Option<String>,
+        prefix: Option<String>,
+        backend: Option<BackendRef>,
+    ) -> DaemonResult<BoardView> {
+        let state = self.state_store.load().await?;
+        let (worktree_record, context) = worktree_context(&state, worktree)?;
+        let now = self.now();
+        let mut board = new_worktree_board(&context, &worktree_record, &now);
+        let base = board.id.clone();
+        let _guard = self.gate(&base).await;
+        if self.worktree_board(worktree)?.is_some() {
+            return Err(BoardError::Duplicate(worktree.to_string()).into());
+        }
+        board.id = self.available_worktree_board_id(&base)?;
+        apply_board_patch(
+            &mut board,
+            BoardPatch {
+                name,
+                prefix,
+                backend,
+                ..Default::default()
+            },
+            &now,
+        )?;
+        let backend = self.backends.get(&board.backend.kind)?;
+        backend.validate(&board.backend.settings).await?;
+        board.backend.settings = backend.normalize(&board.backend.settings).await?;
+        let doc = BoardDocument {
+            version: BOARD_DOCUMENT_VERSION,
+            board,
+            cards: Vec::new(),
+        };
+        self.save(&doc, BoardChangeReason::Created).await?;
+        self.get(&doc.board.id).await
+    }
+
+    fn available_worktree_board_id(&self, base: &BoardId) -> DaemonResult<BoardId> {
+        if self.board_id_is_available(base)? {
+            return Ok(base.clone());
+        }
+        for suffix in 2..=u32::MAX {
+            let candidate = suffixed_board_id(base, suffix);
+            if self.board_id_is_available(&candidate)? {
+                return Ok(candidate);
+            }
+        }
+        Err(DaemonError::Conflict(format!(
+            "no board id is available for {base}"
+        )))
+    }
+
+    fn board_id_is_available(&self, id: &BoardId) -> DaemonResult<bool> {
+        self.refuse_over_quarantine(id)?;
+        Ok(self.store.load(id)?.is_none())
     }
 
     /// Updates board configuration, rejecting removal of referenced statuses or labels.
@@ -401,4 +491,35 @@ impl Boards {
         }
         Ok(())
     }
+}
+
+fn worktree_context(state: &State, id: &WorktreeId) -> DaemonResult<(Worktree, Context)> {
+    let worktree = state
+        .worktrees
+        .iter()
+        .find(|worktree| worktree.id == *id)
+        .cloned()
+        .ok_or_else(|| DaemonError::NotFound(format!("worktree {id}")))?;
+    let repo = state
+        .repos
+        .iter()
+        .find(|repo| repo.id == worktree.repo_id)
+        .ok_or_else(|| DaemonError::NotFound(format!("repository {}", worktree.repo_id)))?;
+    let context = state
+        .contexts
+        .iter()
+        .find(|context| context.id == repo.context_id)
+        .cloned()
+        .ok_or_else(|| DaemonError::NotFound(format!("context {}", repo.context_id)))?;
+    Ok((worktree, context))
+}
+
+fn suffixed_board_id(base: &BoardId, suffix: u32) -> BoardId {
+    let suffix = format!("-{suffix}");
+    let keep = BOARD_ID_MAX_LEN
+        .saturating_sub(suffix.len())
+        .min(base.as_str().len());
+    let mut stem = base.as_str()[..keep].trim_end_matches('-').to_owned();
+    stem.push_str(&suffix);
+    BoardId::try_from(stem).expect("a suffixed worktree board id is always a valid board slug")
 }

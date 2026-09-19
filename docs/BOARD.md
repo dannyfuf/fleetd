@@ -249,6 +249,7 @@ impl PropertyValue { pub fn display(&self) -> String; pub fn matches_kind(&self,
 
 ```rust
 // crates/fleet-core/src/board/defaults.rs
+pub const BOARD_ID_MAX_LEN: usize = 64;
 pub fn default_statuses() -> Vec<Status>;   // backlog/Backlog, todo/Unstarted, in-progress/Started, done/Completed, canceled/Canceled
 pub fn default_prefix(context: &Context) -> String;   // first 3 alnum chars of context name uppercased, fallback "FLT"
 pub fn new_board(context: &Context, now: &str) -> Board; // id = context.id as BoardId, name = context.name, default statuses, next_number = 1
@@ -509,6 +510,10 @@ impl Boards {
     /// Get-or-create the context's unscoped board (`defaults::new_board`). Errors if the context does not exist.
     pub async fn ensure(&self, context: &ContextId) -> DaemonResult<BoardView>;
     pub async fn create(&self, context: &ContextId, name: Option<String>, prefix: Option<String>, backend: Option<BackendRef>) -> DaemonResult<BoardView>;
+    /// Get-or-create the board scoped to one published worktree (`defaults::new_worktree_board`).
+    pub async fn ensure_for_worktree(&self, worktree: &WorktreeId) -> DaemonResult<BoardView>;
+    /// Create the worktree's only board; a second board is `BoardError::Duplicate`.
+    pub async fn create_for_worktree(&self, worktree: &WorktreeId, name: Option<String>, prefix: Option<String>, backend: Option<BackendRef>) -> DaemonResult<BoardView>;
     /// A patch that changes nothing writes nothing and emits nothing, as an empty card patch does.
     pub async fn update(&self, id: &BoardId, patch: BoardPatch) -> DaemonResult<BoardView>;   // validates+normalizes backend settings via the registry, and only when the patch changed the BackendRef: a rename or a label must not wait on (or fail with) a backend it never mentioned
     pub async fn delete(&self, id: &BoardId) -> DaemonResult<()>;
