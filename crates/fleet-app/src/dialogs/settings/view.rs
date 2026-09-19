@@ -164,19 +164,24 @@ pub(super) fn row_element(
             if let Some(input) = editing {
                 return input.into_any_element();
             }
-            let mut field = TextField::new(value.clone())
-                .label(row.label.clone())
-                .focused(false)
-                .mono(true);
-            // The 18 px slot §3.8.1 reserves: the sub-label lives in the preview line, and an
-            // `invalid` message replaces it there, which is the zero-shift rule already.
-            if let Some(detail) = row.detail.clone() {
-                field = field.preview(detail);
-            }
+            // §6.4: a value nobody is editing is a read-only fact, not an empty box. `Enter`
+            // opens the row and the editor it opens carries the placeholder and the rule.
+            let mut column = div().flex().flex_col().child(
+                FactRow::new(
+                    row.label.clone(),
+                    FactValue::from_option((!value.is_empty()).then(|| value.clone())),
+                )
+                .label_width(px(LABEL_WIDTH))
+                .mono(true),
+            );
+            // The sub-label and the failing rule share one line, and the rule wins it, which
+            // is the zero-shift rule the field used to state in its 18 px slot.
             if let Some(invalid) = row.invalid.clone() {
-                field = field.invalid(invalid);
+                column = column.child(FactRow::warning(invalid));
+            } else if let Some(detail) = row.detail.clone() {
+                column = column.child(Text::ui(detail).faint().ellipsize());
             }
-            field.into_any_element()
+            column.into_any_element()
         }
         RowKind::Fact(value) => KeyValueList::new()
             .row(row.label.clone(), FactValue::known(value.clone()))

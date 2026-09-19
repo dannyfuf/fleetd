@@ -702,22 +702,16 @@ card show` prints `Local key:` for exactly the cards that answer to one.
 ## 7. UI-kit components (`fleet-ui-kit`, gpui only, tokens only)
 
 ```rust
-// text_area.rs — multi-line sibling of text_field.rs, same three layers
-pub struct TextAreaState { /* text: String, cursor: byte offset, preferred_col, scroll_row */ }
-impl TextAreaState {
-    pub fn new() -> Self; pub fn from_text(text: impl Into<String>) -> Self;
-    pub fn text(&self) -> &str; pub fn set_text(&mut self, text: impl Into<String>); pub fn cursor(&self) -> usize;
-    pub fn line_col(&self) -> (usize, usize);
-    /// Handles insert, backspace/delete, word ops, left/right/up/down, home/end, ctrl-a/e, enter (newline), tab (2 spaces). Returns true if consumed.
-    pub fn handle_keystroke(&mut self, keystroke: &Keystroke) -> bool;
-    pub fn insert(&mut self, s: &str);
-}
-pub struct TextArea { /* RenderOnce, presentational */ }
-impl TextArea {
-    pub fn new(value: impl Into<SharedString>) -> Self;
-    pub fn cursor(self, byte_offset: usize) -> Self; pub fn focused(self, bool) -> Self;
-    pub fn placeholder(self, impl Into<SharedString>) -> Self; pub fn label(self, impl Into<SharedString>) -> Self;
-    pub fn rows(self, u32) -> Self /* min visible rows, default 6 */; pub fn mono(self, bool) -> Self; pub fn invalid(self, bool) -> Self;
+// input.rs — the one text editor, single-line and multi-line modes of the same entity (ADR 0019).
+// A description or a comment is an `Entity<TextInput>` the dialog owns; DESIGN-SYSTEM §6.4 is its contract.
+pub struct TextInput { /* focus handle, InputBuffer, selection, undo, IME bridge, layout cache, scroll */ }
+impl TextInput {
+    pub fn new(mode: InputMode, cx: &mut Context<Self>) -> Self;   // InputMode::Multiline { min_rows, max_rows }
+    pub fn text(&self) -> &str; pub fn set_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>);
+    pub fn set_label(&mut self, label: Option<SharedString>, cx: &mut Context<Self>);
+    pub fn set_placeholder(&mut self, value: impl Into<SharedString>, cx: &mut Context<Self>);
+    pub fn set_mono(&mut self, mono: bool, cx: &mut Context<Self>); pub fn set_invalid(&mut self, message: Option<SharedString>, cx: &mut Context<Self>);
+    pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>);
 }
 
 // markdown_text.rs — read-mode renderer, no dependency; supports #/##/### headings, paragraphs, `-`/`*`/`1.` lists,
@@ -869,8 +863,8 @@ Parent is read-only in this milestone. Card detail is an 880 px two-pane dialog.
 CardCreate creates and opens detail; label pickers use Space for multi-select; BoardSettings
 reuses the settings row keys. Delete uses `ConfirmRequest::DeleteCard`. These supplemental dialog
 keys are listed in KEYMAP; context-only create-and-open has no palette command.
-Description/comment editors compose presentational TextArea with its state and key handling; a
-separate live input entity is not required. Card tiles suppress None priority, while standalone
+Description/comment editors are multi-line `TextInput` entities the dialog creates when an edit
+begins and drops when it ends; no surface decodes editing keys (ADR 0019). Card tiles suppress None priority, while standalone
 PriorityGlyph still renders it. Label colors remain token names.
 
 ## 9. What the tests hold

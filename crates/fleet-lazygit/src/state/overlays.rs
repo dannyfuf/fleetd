@@ -55,7 +55,9 @@ impl Buffer {
         &self.value
     }
 
-    /// The caret, as a character index for the text-field renderer.
+    /// The caret as a character index. Only the buffer's own tests read it; a renderer takes
+    /// the caret column from [`Buffer::lines_with_caret`] instead.
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn caret(&self) -> usize {
         self.value[..self.caret].chars().count()

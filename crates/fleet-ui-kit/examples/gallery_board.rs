@@ -1,11 +1,11 @@
 //! The visual and behavioural test bench for the **board** group of `fleet-ui-kit`.
 //!
 //! `KanbanBoard` · `KanbanColumn` · `CardTile` · `PriorityGlyph` · `MarkdownText` ·
-//! `TextArea` · `TextAreaState`.
+//! multi-line `TextInput`.
 //!
 //! Every component appears in every state it can be in, in both themes, and the interactive
 //! ones are *live*: the cursor really moves between columns, `[` / `]` really move the card,
-//! and the description editor really edits — multi-line, with `↑` / `↓` keeping their column.
+//! and the description editor really edits — multi-line, with `↑` / `↓` moving by visual row.
 //! If a state is not visible or not operable here, it is not implemented.
 //!
 //! ```sh
@@ -38,7 +38,7 @@ use std::rc::Rc;
 
 use fleet_ui_kit::prelude::*;
 use gpui::{
-    AnyElement, App, Context, FocusHandle, Focusable, Hsla, KeyBinding, KeyDownEvent, ListState,
+    AnyElement, App, Context, Entity, FocusHandle, Focusable, Hsla, KeyBinding, ListState,
     MouseDownEvent, Pixels, ScrollHandle, SharedString, Window, actions, div, px,
 };
 use support::layout::strip;
@@ -61,8 +61,8 @@ actions!(
     ]
 );
 
-/// How many rows the description editor shows.
-const EDITOR_ROWS: u32 = 8;
+/// How many visual rows the description editor shows.
+const EDITOR_ROWS: usize = 8;
 
 /// The height the live board is staged at, so a column really scrolls inside the gallery.
 const BOARD_H: f32 = 420.0;
@@ -261,8 +261,8 @@ fn fixtures() -> Vec<DemoColumn> {
             vec![
                 DemoCard::new(
                     "FLT-08",
-                    "TextArea: the multi-line sibling of TextField",
-                    "`↑` / `↓` keep the preferred column.\n\nTab inserts two spaces.",
+                    "Multi-line TextInput: soft wrap and visual rows",
+                    "`↑` / `↓` move by visual row.\n\n`tab` is the surface's, not the editor's.",
                 )
                 .priority(PriorityLevel::Low)
                 .label("ui-kit", Some("accent"))
@@ -317,8 +317,10 @@ struct BoardGallery {
     board_scroll: ScrollHandle,
     detail_scroll: ScrollHandle,
     page_scroll: ScrollHandle,
-    editor: TextAreaState,
-    editor_scroll: ScrollHandle,
+    /// The description editor: one live entity, reseeded when the selection moves.
+    editor: Entity<TextInput>,
+    /// The static specimens of the multi-line box, live so every state is operable.
+    specimens: Vec<(&'static str, Entity<TextInput>)>,
     editing: bool,
     read_mode: bool,
 }
@@ -326,6 +328,18 @@ struct BoardGallery {
 impl BoardGallery {
     fn new(cx: &mut Context<Self>) -> Self {
         let columns = fixtures();
+        let editor = cx.new(|cx| {
+            let mut input = TextInput::new(
+                InputMode::Multiline {
+                    min_rows: EDITOR_ROWS,
+                    max_rows: EDITOR_ROWS,
+                },
+                cx,
+            );
+            input.set_label(Some("description".into()), cx);
+            input.set_placeholder("Describe the card. Markdown is rendered in read mode.", cx);
+            input
+        });
         let mut gallery = Self {
             focus_handle: cx.focus_handle(),
             columns,
@@ -334,12 +348,12 @@ impl BoardGallery {
             board_scroll: ScrollHandle::new(),
             detail_scroll: ScrollHandle::new(),
             page_scroll: ScrollHandle::new(),
-            editor: TextAreaState::new(),
-            editor_scroll: ScrollHandle::new(),
+            editor,
+            specimens: specimens(cx),
             editing: false,
             read_mode: true,
         };
-        gallery.load_editor();
+        gallery.load_editor(cx);
         gallery
     }
 
@@ -350,12 +364,22 @@ impl BoardGallery {
 
     /// Refill the editor from the selected card, which is what selecting a card does in the
     /// real card detail too.
-    fn load_editor(&mut self) {
+    fn load_editor(&mut self, cx: &mut Context<Self>) {
         let description = self
             .selected()
             .map(|card| card.description.clone())
             .unwrap_or_default();
-        self.editor = TextAreaState::from_text(description);
+        self.editor
+            .update(cx, |input, cx| input.set_text(description, cx));
+    }
+
+    /// Whether any live editor on the page owns the keyboard.
+    fn typing(&self, window: &Window, cx: &App) -> bool {
+        self.editor.read(cx).focus_handle().is_focused(window)
+            || self
+                .specimens
+                .iter()
+                .any(|(_, input)| input.read(cx).focus_handle().is_focused(window))
     }
 
     /// Keep the cursor inside the column it just landed in.
@@ -369,7 +393,7 @@ impl BoardGallery {
         self.column = self.column.saturating_add_signed(delta).min(last);
         self.clamp_row();
         self.editing = false;
-        self.load_editor();
+        self.load_editor(cx);
         cx.notify();
     }
 
@@ -377,7 +401,7 @@ impl BoardGallery {
         let last = self.columns[self.column].cards.len().saturating_sub(1);
         self.row = self.row.saturating_add_signed(delta).min(last);
         self.editing = false;
-        self.load_editor();
+        self.load_editor(cx);
         cx.notify();
     }
 
@@ -451,12 +475,13 @@ impl BoardGallery {
     fn edit_description(
         &mut self,
         _: &EditDescription,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.selected().is_some() {
             self.read_mode = false;
             self.editing = true;
+            self.editor.update(cx, |input, cx| input.focus(window, cx));
             cx.notify();
         }
     }
@@ -464,29 +489,23 @@ impl BoardGallery {
     fn toggle_read_mode(
         &mut self,
         _: &ToggleReadMode,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.read_mode = !self.read_mode;
-        self.editing = false;
-        cx.notify();
+        self.stop_editing(window, cx);
     }
 
-    fn escape(&mut self, _: &Escape, _window: &mut Window, cx: &mut Context<Self>) {
-        self.editing = false;
-        cx.notify();
+    fn escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        self.stop_editing(window, cx);
     }
 
-    /// Every key the editor owns while it is capturing, and nothing else.
-    fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        if !self.editing {
-            return;
-        }
-        if self.editor.handle_keystroke(&event.keystroke) {
-            self.editor.reveal_cursor(EDITOR_ROWS as usize);
-            cx.stop_propagation();
-            cx.notify();
-        }
+    /// Leave the editor and hand the keyboard back, so a surface that stops drawing the editor
+    /// never leaves focus on an element nobody paints.
+    fn stop_editing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.editing = false;
+        window.focus(&self.focus_handle, cx);
+        cx.notify();
     }
 }
 
@@ -544,13 +563,12 @@ fn live_board(gallery: &BoardGallery, t: &Theme, cx: &mut Context<BoardGallery>)
                     .conflict(card.conflict)
                     .selected(selected)
                     .focused(selected)
-                    .on_click(move |_event: &MouseDownEvent, _window, cx| {
+                    .on_click(move |_event: &MouseDownEvent, window, cx| {
                         weak.update(cx, |this, cx| {
                             this.column = index;
                             this.row = row;
-                            this.editing = false;
-                            this.load_editor();
-                            cx.notify();
+                            this.stop_editing(window, cx);
+                            this.load_editor(cx);
                         })
                         .ok();
                     })
@@ -589,16 +607,7 @@ fn live_detail(gallery: &BoardGallery, t: &Theme) -> AnyElement {
             .child(MarkdownText::new(card.description.clone()))
             .into_any_element()
     } else {
-        TextArea::new(gallery.editor.shared_text())
-            .label("description")
-            .placeholder("Describe the card. Markdown is rendered in read mode.")
-            .cursor(gallery.editor.cursor())
-            .focused(gallery.editing)
-            .rows(EDITOR_ROWS)
-            .max_rows(EDITOR_ROWS)
-            .scroll_row(gallery.editor.scroll_row())
-            .scroll("gallery-board-editor-scroll", gallery.editor_scroll.clone())
-            .into_any_element()
+        gallery.editor.clone().into_any_element()
     };
 
     div()
@@ -809,77 +818,127 @@ fn markdown_section(cx: &mut App) -> AnyElement {
     LAYOUT.section("markdown", &t, children)
 }
 
-fn text_area_section(cx: &mut App) -> AnyElement {
+/// The multi-line box in every state it has, one live entity each.
+fn specimens(cx: &mut Context<BoardGallery>) -> Vec<(&'static str, Entity<TextInput>)> {
+    let build = |cx: &mut Context<BoardGallery>,
+                 label: &'static str,
+                 rows: usize,
+                 text: &str,
+                 placeholder: Option<&'static str>,
+                 mono: bool,
+                 invalid: Option<&'static str>| {
+        cx.new(|cx| {
+            let mut input = TextInput::new(
+                InputMode::Multiline {
+                    min_rows: rows,
+                    max_rows: rows,
+                },
+                cx,
+            );
+            input.set_label(Some(label.into()), cx);
+            if let Some(placeholder) = placeholder {
+                input.set_placeholder(placeholder, cx);
+            }
+            input.set_mono(mono, cx);
+            input.set_invalid(invalid.map(Into::into), cx);
+            input.set_text(text, cx);
+            input
+        })
+    };
+    vec![
+        (
+            "filled",
+            build(
+                cx,
+                "description",
+                5,
+                "Reproduce with `fleet board sync`.\nThe second line wraps as soon as the box is narrower than the sentence it holds.",
+                None,
+                false,
+                None,
+            ),
+        ),
+        (
+            "placeholder",
+            build(
+                cx,
+                "comment",
+                3,
+                "",
+                Some("Leave a comment. ctrl-s saves, esc cancels."),
+                false,
+                None,
+            ),
+        ),
+        (
+            "resting",
+            build(
+                cx,
+                "resting",
+                3,
+                "Unfocused: no caret, resting border.",
+                None,
+                false,
+                None,
+            ),
+        ),
+        (
+            "mono \u{b7} invalid",
+            build(
+                cx,
+                "mono \u{b7} invalid",
+                3,
+                "fleet board move FLT-12 done\nfleet worktree new --card FLT-12",
+                None,
+                true,
+                Some("the second command names no board"),
+            ),
+        ),
+        (
+            "capped at 3 rows",
+            build(
+                cx,
+                "capped at 3 rows",
+                3,
+                "one\ntwo\nthree\nfour\nfive\nsix\nseven",
+                None,
+                false,
+                None,
+            ),
+        ),
+    ]
+}
+
+fn text_input_section(gallery: &BoardGallery, cx: &mut App) -> AnyElement {
     let t = cx.theme().clone();
+    let panels: Vec<AnyElement> = gallery
+        .specimens
+        .iter()
+        .map(|(_, input)| panel(AREA_W, input.clone()))
+        .collect();
+    let labels = gallery
+        .specimens
+        .iter()
+        .map(|(label, _)| *label)
+        .collect::<Vec<_>>()
+        .join(" \u{b7} ");
 
-    let filled = panel(
-        AREA_W,
-        TextArea::new(
-            "Reproduce with `fleet board sync`.\nThe second line wraps as soon as the box is narrower than the sentence it holds.",
-        )
-        .label("description")
-        .cursor(34)
-        .focused(true)
-        .rows(5),
-    );
-    let placeholder = panel(
-        AREA_W,
-        TextArea::new("")
-            .label("comment")
-            .placeholder("Leave a comment. ctrl-s saves, esc cancels.")
-            .focused(true)
-            .rows(3),
-    );
-    let resting = panel(
-        AREA_W,
-        TextArea::new("Unfocused: no caret, resting border.")
-            .label("resting")
-            .rows(3),
-    );
-    let mono_invalid = panel(
-        AREA_W,
-        TextArea::new("fleet board move FLT-12 done\nfleet worktree new --card FLT-12")
-            .label("mono · invalid")
-            .mono(true)
-            .invalid(true)
-            .rows(3),
-    );
-    let capped = panel(
-        AREA_W,
-        TextArea::new("one\ntwo\nthree\nfour\nfive\nsix\nseven")
-            .label("capped at 3 rows")
-            .rows(3)
-            .max_rows(3),
-    );
-
-    let children = vec![
-        LAYOUT.labeled(
-            "focused · placeholder",
-            &t,
-            row_of(&t, vec![filled, placeholder]),
-        ),
-        LAYOUT.labeled(
-            "resting · mono · invalid",
-            &t,
-            row_of(&t, vec![resting, mono_invalid]),
-        ),
-        LAYOUT.labeled("capped", &t, row_of(&t, vec![capped])),
-    ];
-    LAYOUT.section("text area", &t, children)
+    let children = vec![LAYOUT.labeled(labels.as_str(), &t, row_of(&t, panels))];
+    LAYOUT.section("multi-line text input", &t, children)
 }
 
 impl Render for BoardGallery {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme().clone();
         let cards: usize = self.columns.iter().map(|column| column.cards.len()).sum();
-        let editing = self.editing;
+        let typing = self.typing(window, cx);
 
         let sections = vec![
             live_board_section(self, &t, cx),
             card_tile_section(cx),
             priority_section(cx),
             markdown_section(cx),
-            text_area_section(cx),
+            text_input_section(self, cx),
         ];
 
         AppFrame::new()
@@ -900,11 +959,7 @@ impl Render for BoardGallery {
             .body(
                 div()
                     .id("gallery-board-scroll")
-                    .key_context(if editing {
-                        "BoardTyping"
-                    } else {
-                        "BoardNormal"
-                    })
+                    .key_context(if typing { "BoardTyping" } else { "BoardNormal" })
                     .track_focus(&self.focus_handle)
                     .on_action(cx.listener(Self::toggle_theme))
                     .on_action(cx.listener(Self::quit))
@@ -918,7 +973,6 @@ impl Render for BoardGallery {
                     .on_action(cx.listener(Self::edit_description))
                     .on_action(cx.listener(Self::toggle_read_mode))
                     .on_action(cx.listener(Self::escape))
-                    .on_key_down(cx.listener(Self::on_key_down))
                     .size_full()
                     .overflow_y_scroll()
                     .track_scroll(&self.page_scroll)
@@ -932,7 +986,7 @@ impl Render for BoardGallery {
             .status_bar(
                 StatusBar::new()
                     .breadcrumb("fleet-ui-kit › board")
-                    .mode(if editing { Mode::Dialog } else { Mode::Normal })
+                    .mode(if typing { Mode::Dialog } else { Mode::Normal })
                     .ticker(
                         KeyHintRow::new()
                             .key("h l", "column")
@@ -952,6 +1006,7 @@ fn main() {
         (1240.0, 900.0),
         Quit,
         |cx| {
+            cx.bind_keys(support::input::bindings());
             cx.bind_keys([
                 // Always available, in both modes.
                 KeyBinding::new("ctrl-t", ToggleTheme, None),

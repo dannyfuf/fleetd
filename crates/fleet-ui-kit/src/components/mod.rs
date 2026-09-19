@@ -68,8 +68,6 @@ mod sticky_error_slot;
 mod terminal_grid;
 mod terminal_modes;
 mod terminal_tab_strip;
-mod text_area;
-mod text_field;
 mod toast_stack;
 mod toggle;
 mod veil;
@@ -159,9 +157,6 @@ pub use terminal_grid::{
 };
 pub use terminal_modes::{TerminalMode, TerminalModes};
 pub use terminal_tab_strip::{TerminalAgentState, TerminalTab, TerminalTabKind, TerminalTabStrip};
-pub use text_area::{TAB_WIDTH, TEXT_AREA_ROWS, TextArea, TextAreaState};
-pub use text_field::{EditEffect, TEXT_FIELD_KEY_CONTEXT, TextField, TextFieldState};
-pub use text_field::{TextInput as LegacyTextInput, TextInputEvent as LegacyTextInputEvent};
 pub use toast_stack::{COALESCE_WINDOW_MS, Toast, ToastDuration, ToastStack};
 pub use toggle::Toggle;
 pub use veil::Veil;

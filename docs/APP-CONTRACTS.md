@@ -883,9 +883,10 @@ land on a different fleetd) but keeps the descriptors, so the header's label nev
   settings JSON (keeping keys the schema never names, removing the ones a row emptied, writing
   numbers as numbers), and `rows_error(rows)` for the required and numeric rules.
   `PropertyKind` picks the browsing control: `Bool` → `Toggle`, `Select` → `Cycler` over the
-  schema's options, `Number` → `NumberField`, everything else → `TextField`. A focused free-text
-  or number row materializes a single-line `TextInput` (numbers filter to ASCII digits), and
-  `MultiSelect` is typed comma-separated. `PropertySchema` has
+  schema's options, `Number` → `NumberField`, everything else → a read-only `FactRow` (an empty
+  value reads `—`, never a blank box). A focused free-text or number row materializes a
+  single-line `TextInput` (numbers filter to ASCII digits), and `MultiSelect` is typed
+  comma-separated. `PropertySchema` has
   no `required` flag, so a name ending in `fleet_core::board::REQUIRED_MARKER` (`(required)`,
   re-exported as `board_settings::REQUIRED_MARKER`) is the signal; the marker is stripped from
   the label and shown as `∗`. It lives in the core because the daemon reads it the same way: a

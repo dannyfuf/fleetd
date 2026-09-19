@@ -5,10 +5,8 @@
 //! keymap" rule.
 
 use fleet_ui_kit::prelude::*;
-use fleet_ui_kit::{
-    ConfirmDialog, Dialog, Fact, FactList, FuzzyItem, FuzzyList, KeyHintRow, TextField,
-};
-use gpui::{AnyElement, Context, div};
+use fleet_ui_kit::{ConfirmDialog, Dialog, Fact, FactList, FuzzyItem, FuzzyList, KeyHintRow};
+use gpui::{AnyElement, Context, SharedString, div};
 
 use crate::keymap;
 use crate::root::Lazygit;
@@ -62,12 +60,9 @@ pub(crate) fn render(view: &Lazygit, cx: &mut Context<Lazygit>) -> Option<AnyEle
             } else if let Some(input) = &view.prompt_input {
                 input.clone().into_any_element()
             } else {
-                TextField::new(prompt.buffer.value().to_owned())
-                    .caret(prompt.buffer.caret())
-                    .focused(true)
-                    .mono(true)
-                    .hide_status_line(true)
-                    .into_any_element()
+                // `open_prompt` builds the editor for every single-line prompt, so this is
+                // only the shape of a prompt whose editor has already been dropped.
+                Text::data(prompt.buffer.value().to_owned()).into_any_element()
             };
             let hints = if prompt.buffer.is_multiline() {
                 KeyHintRow::new()
@@ -105,13 +100,7 @@ pub(crate) fn render(view: &Lazygit, cx: &mut Context<Lazygit>) -> Option<AnyEle
                 .empty(Text::ui("Nothing matches.").muted());
             let mut body = div().flex().flex_col().gap(cx.theme().space.sm);
             if let Some(filter) = &menu.filter {
-                body = body.child(
-                    TextField::new(filter.value().to_owned())
-                        .caret(filter.caret())
-                        .focused(true)
-                        .placeholder("filter")
-                        .hide_status_line(true),
-                );
+                body = body.child(query_line(filter, cx));
             }
             let body = body.child(list);
             let hints = if menu.filter.is_some() {
@@ -139,6 +128,55 @@ pub(crate) fn render(view: &Lazygit, cx: &mut Context<Lazygit>) -> Option<AnyEle
     }
 }
 
+/// One editor line split around its caret bar.
+///
+/// lazygit's prompts are edited in the crate's own [`Buffer`], not in a kit `TextInput`, so the
+/// two surfaces that still draw one share this rather than each inventing a caret.
+fn caret_split(line: &str, column: usize, theme: &Theme) -> [AnyElement; 3] {
+    let at = line
+        .char_indices()
+        .nth(column)
+        .map_or(line.len(), |(at, _)| at);
+    [
+        Text::data(SharedString::new(&line[..at]))
+            .flex_none()
+            .into_any_element(),
+        div()
+            .w(theme.metrics.focus_ring_w)
+            .h(theme.metrics.diff_caret_h)
+            .flex_none()
+            .bg(theme.colors.accent)
+            .into_any_element(),
+        Text::data(SharedString::new(&line[at..]))
+            .flex_none()
+            .into_any_element(),
+    ]
+}
+
+/// The menu's filter line: one row, the query, its caret, and nothing else.
+fn query_line(filter: &Buffer, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let (lines, _, column) = filter.lines_with_caret();
+    let line = lines.first().cloned().unwrap_or_default();
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .w_full()
+        .h(theme.metrics.pane_header_h)
+        .px(theme.space.sm)
+        .rounded(theme.radii.sm)
+        .bg(theme.colors.bg)
+        .border_1()
+        .border_color(theme.colors.focus_ring)
+        .overflow_hidden()
+        .children(caret_split(&line, column, theme))
+        .when(line.is_empty(), |el| {
+            el.child(Text::ui("filter").muted().flex_none())
+        })
+        .into_any_element()
+}
+
 /// A multi-line editor: one row per line, with a caret bar in the active line.
 fn multiline_body(
     buffer: &Buffer,
@@ -161,20 +199,7 @@ fn multiline_body(
                         .items_center()
                         .h(theme.metrics.diff_row_h);
                     if index == caret_line {
-                        let at = line
-                            .char_indices()
-                            .nth(caret_column)
-                            .map_or(line.len(), |(at, _)| at);
-                        element = element
-                            .child(Text::data(gpui::SharedString::new(&line[..at])).flex_none())
-                            .child(
-                                div()
-                                    .w(theme.metrics.focus_ring_w)
-                                    .h(theme.metrics.diff_caret_h)
-                                    .flex_none()
-                                    .bg(theme.colors.accent),
-                            )
-                            .child(Text::data(gpui::SharedString::new(&line[at..])).flex_none());
+                        element = element.children(caret_split(line, caret_column, theme));
                     } else {
                         element = element.child(Text::data(line.clone()).flex_none());
                     }

@@ -60,11 +60,14 @@ pub(crate) fn render(
                 |input| input.into_any_element(),
             )
         } else {
-            TextField::new(draft.name.clone())
-                .label(SettingRow::Name.label())
-                .placeholder("Fleet")
-                .focused(false)
-                .into_any_element()
+            // §6.4: a value nobody is editing is a read-only fact, not an empty box. The
+            // editor `Enter` opens carries the placeholder and the label.
+            FactRow::new(
+                SettingRow::Name.label(),
+                FactValue::from_option((!draft.name.is_empty()).then(|| draft.name.clone())),
+            )
+            .label_width(px(LABEL_WIDTH))
+            .into_any_element()
         })
         .child(if focused == SettingRow::Prefix {
             input.clone().map_or_else(
@@ -72,12 +75,13 @@ pub(crate) fn render(
                 |input| input.into_any_element(),
             )
         } else {
-            TextField::new(draft.prefix.clone())
-                .label(SettingRow::Prefix.label())
-                .placeholder("FLT")
-                .mono(true)
-                .focused(false)
-                .into_any_element()
+            FactRow::new(
+                SettingRow::Prefix.label(),
+                FactValue::from_option((!draft.prefix.is_empty()).then(|| draft.prefix.clone())),
+            )
+            .label_width(px(LABEL_WIDTH))
+            .mono(true)
+            .into_any_element()
         })
         .child(
             Cycler::labeled(
@@ -298,15 +302,18 @@ fn backend_element(
             field.into_any_element()
         }
         _ => {
-            let mut field = TextField::new(row.value.clone())
-                .label(label)
-                .placeholder(input_placeholder(row))
-                .mono(row.kind == PropertyKind::Number)
-                .focused(false);
+            let mut column = div().flex().flex_col().child(
+                FactRow::new(
+                    label,
+                    FactValue::from_option((!row.value.is_empty()).then(|| row.value.clone())),
+                )
+                .label_width(px(LABEL_WIDTH))
+                .mono(row.kind == PropertyKind::Number),
+            );
             if let Some(message) = row.error() {
-                field = field.invalid(message);
+                column = column.child(FactRow::warning(message));
             }
-            field.into_any_element()
+            column.into_any_element()
         }
     }
 }

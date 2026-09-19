@@ -1319,11 +1319,16 @@ pub(super) fn seed(state: &Entity<AppState>, cx: &mut App) {
         input.set_text(query.clone(), cx);
         input
     });
-    let watched = state.clone();
+    // Weak, like every other editor subscription: the handle lives on `DialogHost`, which
+    // `AppState` owns, so a strong capture here would be a cycle holding the app alive.
+    let watched = state.downgrade();
     let subscription = cx.subscribe(&input, move |input, event: &TextInputEvent, cx| {
         if !matches!(event, TextInputEvent::Changed) {
             return;
         }
+        let Some(watched) = watched.upgrade() else {
+            return;
+        };
         let query = input.read(cx).text().to_owned();
         with_host(&watched, cx, |host| {
             if host.palette.query == query {

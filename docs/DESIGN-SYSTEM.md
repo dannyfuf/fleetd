@@ -358,11 +358,17 @@ this row". An unreachable host forces the session to `Unknown`, never to `NoSess
 
 ## 6. Component catalog
 
-Every component is a `RenderOnce` + `IntoElement` struct with a `new`-style constructor and
-chained builder methods. None of them owns state: the view's entity owns the cursor, the query,
+Almost every component is a `RenderOnce` + `IntoElement` struct with a `new`-style constructor
+and chained builder methods, and owns no state: the view's entity owns the cursor, the query,
 the focus and the timers, and passes them down each frame. That is deliberate — `RenderOnce`
 cannot hold state, and the alternative (an entity per component) would make cursor stability
 under background updates impossible to reason about.
+
+There are exactly three exceptions, and they are gpui **entities** the surface holds:
+`TextInput` (§6.4), which owns a caret, a selection, an undo history, a painted-layout cache and
+an IME session (ADR 0019), and `TranscriptList` and `MultilineInput` (§6.6), which own measured
+row geometry, a scroll machine, and — for the composer — the `TextInput` it wraps. Nothing else
+in the kit implements `Render`.
 
 Legend for the "states" rows: **default · focused · selected · disabled · loading · error**.
 A component that cannot be in a state says so rather than pretending.
@@ -724,9 +730,11 @@ Amber by default, because "in flight" is amber everywhere.
 ### 6.4 Input
 
 Inputs are live entities owned by the surface. The caller holds an `Entity<TextInput>`, focuses
-its `FocusHandle`, reads `text()`, and handles no editing keys around it. `MarkdownText` remains
-grouped here because it is the read half of the description surface currently edited by the
-legacy `TextArea` family.
+its `FocusHandle`, reads `text()`, and handles no editing keys around it. There is exactly one
+input component (ADR 0019); a value that cannot be edited is not an input at all but a read-only
+`FactRow` or a `Label`, with no box — and so is a resting row of a list where only the row under
+the cursor is edited at a time (Settings, Board settings). `MarkdownText` is grouped here because it is the read half
+of the description surface a multi-line `TextInput` edits.
 
 #### `TextInput`
 **Purpose.** Fleet's live IME-safe editor for single-line values and logical multi-line bodies.
@@ -767,8 +775,11 @@ standalone and the kit's tests all bind it. `fleet-app` states the same rows ins
 and a test there asserts the two agree.
 **States.** single-line empty with placeholder · filled · focused with caret · selection ·
 marked IME text · invalid with message · read-only · numeric-filtered · label with leading
-icon; multi-line at minimum rows · grown to maximum rows with scroll and a multi-line selection.
-These are the states in the gallery; a state absent there is not implemented.
+icon · derived preview replaced by a validation message in the same slot; multi-line at minimum
+rows · grown to maximum rows with scroll and a multi-line selection · mono · invalid; embedded
+inside a `FilterBar` header row and inside the palette's query row. These are the states in
+`examples/gallery_input.rs`, `examples/gallery_board.rs` and `examples/kit_gallery.rs`; a state
+absent there is not implemented.
 **Usage rule.** Never decode or forward editing keys around a `TextInput`; bind the exported
 actions and let the entity own editing. Single-line mode propagates `Enter`, `Tab`, `Shift-Tab`,
 `Up` and `Down`; multi-line plain `Newline` is bound under
@@ -777,64 +788,15 @@ actions and let the entity own editing. Single-line mode propagates `Enter`, `Ta
 row (selection-extending motion stops there), allowing an owner to bind history. A dialog's bare-letter bindings must live under a
 context word that is absent while the input is focused. Read-only inputs still support motion,
 selection and copy. Surface code may call `submit` after handling its own single-line submit
-action.
-
-#### `TextField`
-**Migration status.** `TextField`, `TextFieldState`, and the old live `TextInput` exported as
-`LegacyTextInput` are being replaced and will be removed once every surface is migrated.
-**Purpose.** A single-line input with a blue caret and a zero-shift validation line.
-**Anatomy.** optional label · 36 px box (optional leading icon, value, caret) · an 18 px line
-below that holds **either** the derived preview **or** the validation message — never both, and
-the slot is always present.
-**API.** `TextField::new(value).label(..).placeholder(..).caret(usize).focused(bool).icon(Icon)
-.preview(..).invalid(message).mono(bool).height(Pixels).hide_status_line(bool)`.
-`TextFieldState` is the editing model. `LegacyTextInput` is its live entity and emits
-`LegacyTextInputEvent` under `TEXT_FIELD_KEY_CONTEXT`.
-**States.** default · focused (accent border + caret) · placeholder (muted) · invalid (red
-border, red message) · disabled (not modelled: Fleet has no disabled inputs — a field that
-cannot be edited is rendered as a read-only `FactRow` with no box).
-**Keyboard (the caller implements).** printable · `Backspace` · `ctrl-w` · `ctrl-u` · `ctrl-a` ·
-`ctrl-e` · `←`/`→`.
-**Usage rule.** The validation line replaces the preview so a failing branch name causes **zero
-layout shift**. Fail before a job starts, with the exact failing rule.
-An entity that installs the platform input handler must call `handle_edit_keystroke`, not
-`handle_keystroke`, or every printable character is inserted twice. Dialog-level bare-letter
-bindings must also be shadowed with `gpui::NoAction` in `TEXT_FIELD_KEY_CONTEXT`, or the outer
-action must be removed while the field owns the keyboard.
-
-#### `TextArea` / `TextAreaState`
-**Migration status.** `TextArea` and `TextAreaState` are being replaced and will be removed once
-every surface is migrated.
-**Purpose.** The multi-line sibling of `TextField`: card descriptions and comments.
-**Anatomy.** optional label · a box with the same border ladder as `TextField` (danger beats
-focus beats rest) · line-wrapped value · the same 2 px accent caret bar. There is **no** 18 px
-status slot: a multi-line body has no derived preview, so `invalid` is a `bool` that reddens
-the border and the message belongs to the field that names the rule.
-**API.** `TextArea::new(value).cursor(byte_offset).focused(bool).placeholder(..).label(..)
-.rows(u32).max_rows(u32).scroll_row(usize).scroll(id, ScrollHandle).mono(bool).invalid(bool)`;
-`TEXT_AREA_ROWS` is the
-6-row default and `TAB_WIDTH` is 2.
-`TextAreaState::{new, from_text, text, shared_text, is_empty, set_text, clear, cursor,
-set_cursor, line_col, lines, line_count, scroll_row, set_scroll_row, reveal_cursor, insert,
-insert_newline, insert_tab, backspace, delete_forward, delete_word_before, delete_word_after,
-delete_to_line_start, delete_to_line_end, move_left, move_right, move_up, move_down,
-move_to_line_start, move_to_line_end, move_to_start, move_to_end, handle_edit_keystroke,
-handle_keystroke}`.
-**States.** default · focused (accent border + caret) · placeholder (muted, caret before it) ·
-invalid (red border) · mono · capped (`max_rows` clips and the caller calls `reveal_cursor`).
-**Keyboard (the caller implements).** printable · `Enter` newline · `Tab` = `TAB_WIDTH` (2)
-spaces · `Backspace` / `Delete` · `←` `→` `↑` `↓` · `Home` / `End` = line start / end ·
-`ctrl-a` / `ctrl-e` = line start / end · `ctrl-w` / `alt-d` word · `ctrl-u` / `ctrl-k` line.
-**Usage rule.** The cursor is a **byte** offset (`TextField`'s is a character index), because a
-multi-line model has to slice lines. `↑` / `↓` keep a preferred column and every other
-operation clears it. `\r\n`, `\r` and `\t` are normalized on the way in, so what the store
-receives is exactly what `MarkdownText` will render. A host that installs the platform input
-handler binds `handle_edit_keystroke`, never `handle_keystroke`, or every character is inserted
-twice.
+action. The single-line status slot is always present and the validation message **replaces** the
+preview in it, so a failing branch name causes **zero layout shift**; fail before a job starts,
+with the exact failing rule. `set_hide_status_line(true)` is only for a surface that can carry
+neither, because it states its rule elsewhere: a settings row inside `NumberField`'s chrome, the
+rename-terminal dialog, the board filter, a `lazygit` prompt.
 
 #### `MarkdownText` / `parse_markdown`
 **Purpose.** Read mode for a card description, a comment and any other stored markdown — the
-read half of the surface `TextArea` edits, which is why it sits in this group.
+read half of the surface a multi-line `TextInput` edits, which is why it sits in this group.
 **API.** `MarkdownText::new(source).muted(bool)`; `parse_markdown(&str) -> Vec<MdBlock>`;
 `MdBlock::{Heading{level,text}, Paragraph(Vec<MdSpan>), List{ordered,items}, Code(String)}`;
 `MdSpan::{Text, Code, Bold, Link}` with `.text()`; `MAX_HEADING_LEVEL` = 3 and
@@ -927,7 +889,7 @@ rows at full opacity.
 **API.** `Select::new(value).label(..).placeholder(..).open(bool).focused(bool).options(..)
 .disabled(bool).invalid(..).hint(..)`.
 **Usage rule.** `Cycler` for 2–5 options, `Select` for a closed list, `FuzzyList` under a
-`TextField` for a searchable set.
+`TextInput` for a searchable set.
 
 #### `ConfirmDialog`
 **Purpose.** Show exactly what will be lost, in facts, with their age.
@@ -1155,9 +1117,9 @@ renders the scrim and `drops_keys()` states the contract the caller must honour.
 
 ### 6.6 Native agent transcript
 
-Three of these are the exception to §6's "no component owns state": a transcript and a composer
-cannot be `RenderOnce`, because the list caches measured row heights and the scroll machine, and
-the composer owns a caret, a selection and an IME session. They are gpui **entities** that emit
+Two of these are among §6's stateful exceptions: a transcript and a composer cannot be
+`RenderOnce`, because the list caches measured row heights and the scroll machine, and the
+composer wraps the `TextInput` entity that owns the caret, the selection and the IME session. They are gpui **entities** that emit
 events and never act on a thread; the screen that owns them decides what an event means.
 `components::agent::metrics` holds their fixed dimensions (§2.8); `components::agent::format`
 holds their copy — `format_duration`, `format_token_count`, `format_file_delta`,

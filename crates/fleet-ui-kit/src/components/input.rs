@@ -2,29 +2,29 @@
 //!
 //! The entity owns the focus handle, selection, undo history, platform input bridge, layout
 //! cache and scroll position that must survive frames. Callers hold one `Entity<TextInput>` and
-//! never decode editing keys around it. The older presentational input families remain only as
-//! migration shims and should not be used for new surfaces.
+//! never decode editing keys around it; it is the only input the kit has (ADR 0019).
+//!
+//! This file keeps the entity, its fields and its public API. The action handlers live in
+//! [`handlers`], mouse and wheel input in [`pointer`], the painted-layout arithmetic in
+//! [`geometry`], and the box drawn around the value in [`chrome`].
 
 use gpui::{
-    App, ClipboardItem, Context, CursorStyle, EventEmitter, FocusHandle, Focusable, KeyContext,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Point, ScrollWheelEvent,
-    SharedString, Subscription, Window, div, point, prelude::*,
+    App, Context, CursorStyle, EventEmitter, FocusHandle, Focusable, KeyContext, MouseButton,
+    SharedString, Subscription, Window, div, prelude::*,
 };
 
-use crate::{
-    icons::Icon,
-    text::{Text, TextRole, styled_with},
-    theme::ActiveTheme,
-    tone::Tone,
-};
+use crate::{icons::Icon, text::styled_with, theme::ActiveTheme};
 
 pub mod actions;
 mod buffer;
+mod chrome;
 mod element;
+mod geometry;
+mod handlers;
 mod history;
 mod platform;
+mod pointer;
 
-use actions::*;
 pub use buffer::{InputBuffer, InputMode};
 use element::{LineLayoutCache, TextInputElement};
 pub use history::{HISTORY_CAP, TYPING_GROUP_WINDOW};
@@ -468,345 +468,6 @@ impl TextInput {
         }
     }
 
-    fn move_left(&mut self, _: &MoveLeft, _: &mut Window, cx: &mut Context<Self>) {
-        self.motion(cx, |buffer| buffer.move_left(false));
-    }
-
-    fn move_right(&mut self, _: &MoveRight, _: &mut Window, cx: &mut Context<Self>) {
-        self.motion(cx, |buffer| buffer.move_right(false));
-    }
-
-    fn move_word_left(&mut self, _: &MoveWordLeft, _: &mut Window, cx: &mut Context<Self>) {
-        self.motion(cx, |buffer| buffer.move_word_left(false));
-    }
-
-    fn move_word_right(&mut self, _: &MoveWordRight, _: &mut Window, cx: &mut Context<Self>) {
-        self.motion(cx, |buffer| buffer.move_word_right(false));
-    }
-
-    fn move_line_start(&mut self, _: &MoveToLineStart, _: &mut Window, cx: &mut Context<Self>) {
-        self.motion(cx, |buffer| buffer.move_to_line_start(false));
-    }
-
-    fn move_line_end(&mut self, _: &MoveToLineEnd, _: &mut Window, cx: &mut Context<Self>) {
-        self.motion(cx, |buffer| buffer.move_to_line_end(false));
-    }
-
-    fn move_row_start(&mut self, _: &MoveToRowStart, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_to_visual_row_boundary(false, false, cx);
-    }
-
-    fn move_row_end(&mut self, _: &MoveToRowEnd, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_to_visual_row_boundary(true, false, cx);
-    }
-
-    fn move_up(&mut self, _: &MoveUp, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.move_vertical(false, false, cx) {
-            cx.propagate();
-        }
-    }
-
-    fn move_down(&mut self, _: &MoveDown, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.move_vertical(true, false, cx) {
-            cx.propagate();
-        }
-    }
-
-    fn move_start(&mut self, _: &MoveToStart, _: &mut Window, cx: &mut Context<Self>) {
-        self.motion(cx, |buffer| buffer.move_to_document_start(false));
-    }
-
-    fn move_end(&mut self, _: &MoveToEnd, _: &mut Window, cx: &mut Context<Self>) {
-        self.motion(cx, |buffer| buffer.move_to_document_end(false));
-    }
-
-    fn select_left(&mut self, _: &SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
-        self.motion(cx, |buffer| buffer.move_left(true));
-    }
-
-    fn select_right(&mut self, _: &SelectRight, _: &mut Window, cx: &mut Context<Self>) {
-        self.motion(cx, |buffer| buffer.move_right(true));
-    }
-
-    fn select_word_left(&mut self, _: &SelectWordLeft, _: &mut Window, cx: &mut Context<Self>) {
-        self.motion(cx, |buffer| buffer.move_word_left(true));
-    }
-
-    fn select_word_right(&mut self, _: &SelectWordRight, _: &mut Window, cx: &mut Context<Self>) {
-        self.motion(cx, |buffer| buffer.move_word_right(true));
-    }
-
-    fn select_line_start(&mut self, _: &SelectToLineStart, _: &mut Window, cx: &mut Context<Self>) {
-        self.motion(cx, |buffer| buffer.move_to_line_start(true));
-    }
-
-    fn select_line_end(&mut self, _: &SelectToLineEnd, _: &mut Window, cx: &mut Context<Self>) {
-        self.motion(cx, |buffer| buffer.move_to_line_end(true));
-    }
-
-    fn select_row_start(&mut self, _: &SelectToRowStart, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_to_visual_row_boundary(false, true, cx);
-    }
-
-    fn select_row_end(&mut self, _: &SelectToRowEnd, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_to_visual_row_boundary(true, true, cx);
-    }
-
-    fn select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_vertical(false, true, cx);
-    }
-
-    fn select_down(&mut self, _: &SelectDown, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_vertical(true, true, cx);
-    }
-
-    fn select_start(&mut self, _: &SelectToStart, _: &mut Window, cx: &mut Context<Self>) {
-        self.motion(cx, |buffer| buffer.move_to_document_start(true));
-    }
-
-    fn select_end(&mut self, _: &SelectToEnd, _: &mut Window, cx: &mut Context<Self>) {
-        self.motion(cx, |buffer| buffer.move_to_document_end(true));
-    }
-
-    fn select_all_action(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
-        self.select_all(cx);
-    }
-
-    fn backspace(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
-        self.edit(cx, InputBuffer::backspace);
-    }
-
-    fn delete(&mut self, _: &Delete, _: &mut Window, cx: &mut Context<Self>) {
-        self.edit(cx, InputBuffer::delete_forward);
-    }
-
-    fn delete_word_backward(
-        &mut self,
-        _: &DeleteWordBackward,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.edit(cx, InputBuffer::delete_word_backward);
-    }
-
-    fn delete_word_forward(
-        &mut self,
-        _: &DeleteWordForward,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.edit(cx, InputBuffer::delete_word_forward);
-    }
-
-    fn delete_line_start(&mut self, _: &DeleteToLineStart, _: &mut Window, cx: &mut Context<Self>) {
-        self.edit(cx, InputBuffer::delete_to_line_start);
-    }
-
-    fn delete_line_end(&mut self, _: &DeleteToLineEnd, _: &mut Window, cx: &mut Context<Self>) {
-        self.edit(cx, InputBuffer::delete_to_line_end);
-    }
-
-    fn newline(&mut self, _: &Newline, _: &mut Window, cx: &mut Context<Self>) {
-        if matches!(self.mode(), InputMode::SingleLine) {
-            cx.propagate();
-            return;
-        }
-        let accepted = self.filter.is_none_or(|filter| filter('\n'));
-        if accepted {
-            self.edit(cx, InputBuffer::insert_newline);
-        }
-    }
-
-    fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
-        self.copy_selection(cx);
-    }
-
-    fn cut(&mut self, _: &Cut, _: &mut Window, cx: &mut Context<Self>) {
-        if self.read_only || !self.copy_selection(cx) {
-            return;
-        }
-        self.edit(cx, |buffer, now| buffer.insert("", now));
-    }
-
-    fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
-        if self.read_only {
-            return;
-        }
-        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
-            return;
-        };
-        let text = self.filtered(&text);
-        if !text.is_empty() {
-            self.edit(cx, |buffer, now| {
-                buffer.replace_range(buffer.selected_range(), &text, now)
-            });
-        }
-    }
-
-    fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
-        if self.read_only {
-            return;
-        }
-        self.finish_composition();
-        if self.buffer.undo() {
-            self.changed(cx);
-        }
-    }
-
-    fn redo(&mut self, _: &Redo, _: &mut Window, cx: &mut Context<Self>) {
-        if self.read_only {
-            return;
-        }
-        self.finish_composition();
-        if self.buffer.redo() {
-            self.changed(cx);
-        }
-    }
-
-    fn copy_selection(&self, cx: &mut Context<Self>) -> bool {
-        let selected = self.buffer.selected_text();
-        if selected.is_empty() {
-            return false;
-        }
-        cx.write_to_clipboard(ClipboardItem::new_string(selected.to_owned()));
-        true
-    }
-
-    fn on_mouse_down(
-        &mut self,
-        event: &MouseDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        window.focus(&self.focus_handle, cx);
-        let Some(offset) = self.offset_for_point(event.position) else {
-            return;
-        };
-        self.finish_composition();
-        if event.click_count >= 3 {
-            self.buffer.select_line_at(offset);
-            self.drag_anchor = None;
-        } else if event.click_count == 2 {
-            self.buffer.select_word_at(offset);
-            self.drag_anchor = None;
-        } else if event.modifiers.shift {
-            self.buffer.move_to(offset, true);
-            self.drag_anchor = Some(self.buffer.anchor());
-        } else {
-            self.buffer.set_caret(offset);
-            self.drag_anchor = Some(offset);
-        }
-        self.view_changed(cx);
-    }
-
-    fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if !event.dragging() {
-            return;
-        }
-        let (Some(anchor), Some(offset)) =
-            (self.drag_anchor, self.offset_for_point(event.position))
-        else {
-            return;
-        };
-        let before = self.buffer.selected_range();
-        self.buffer.set_selected_range(anchor..offset);
-        if self.buffer.selected_range() != before {
-            self.view_changed(cx);
-        }
-    }
-
-    fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
-        self.drag_anchor = None;
-    }
-
-    fn on_scroll_wheel(
-        &mut self,
-        event: &ScrollWheelEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let InputMode::Multiline { max_rows, .. } = self.mode() else {
-            return;
-        };
-        let visual_rows = self.line_cache.visual_rows().max(1);
-        let visible = visual_rows.min(max_rows.max(1));
-        let max_scroll = visual_rows.saturating_sub(visible);
-        if max_scroll == 0 {
-            return;
-        }
-        let delta = event.delta.pixel_delta(window.line_height()).y;
-        let rows = (f32::from(delta.abs()) / f32::from(window.line_height())).ceil() as usize;
-        let next = if delta > gpui::Pixels::ZERO {
-            self.scroll_row.saturating_sub(rows.max(1))
-        } else {
-            self.scroll_row.saturating_add(rows.max(1)).min(max_scroll)
-        };
-        if next != self.scroll_row {
-            self.scroll_row = next;
-            self.reveal_caret = false;
-            cx.notify();
-        }
-        cx.stop_propagation();
-    }
-
-    pub(super) fn offset_for_point(&self, position: Point<gpui::Pixels>) -> Option<usize> {
-        if self.buffer.is_empty() {
-            return Some(0);
-        }
-        if !self.has_current_layout() {
-            return None;
-        }
-        let bounds = self.last_bounds?;
-        let total_rows = self.line_cache.visual_rows().max(1);
-        let visual_row = if position.y < bounds.top() {
-            0
-        } else if position.y >= bounds.bottom() {
-            total_rows.saturating_sub(1)
-        } else {
-            let local_y = position.y - bounds.top();
-            self.scroll_row + (f32::from(local_y) / f32::from(self.line_height)).floor() as usize
-        }
-        .min(total_rows.saturating_sub(1));
-        let (start, layout, row_in_line) = self.line_cache.line_for_visual_row(visual_row)?;
-        let scroll = if matches!(self.mode(), InputMode::SingleLine) {
-            self.horizontal_scroll
-        } else {
-            gpui::Pixels::ZERO
-        };
-        let y_in_row = if position.y < bounds.top() || position.y >= bounds.bottom() {
-            self.line_height / 2.0
-        } else {
-            (position.y - bounds.top())
-                - self.line_height * visual_row.saturating_sub(self.scroll_row) as f32
-        };
-        let local = layout.closest_index_for_position(
-            point(
-                position.x - bounds.left() + scroll,
-                self.line_height * row_in_line as f32 + y_in_row,
-            ),
-            self.line_height,
-        );
-        Some(start + local)
-    }
-
-    pub(super) fn line_for_offset(&self, offset: usize) -> Option<(usize, usize)> {
-        self.line_cache.line_index_for_offset(offset)
-    }
-
-    pub(super) fn position_for_offset(&self, offset: usize) -> Option<Point<gpui::Pixels>> {
-        if !self.has_current_layout() {
-            return None;
-        }
-        let (line_index, local) = self.line_for_offset(offset)?;
-        let row_start = self.line_cache.visual_row_start(line_index)?;
-        let (_, line) = self.line_cache.line(line_index)?;
-        let position = line.position_for_index(local, self.line_height)?;
-        Some(point(
-            position.x,
-            position.y + self.line_height * row_start as f32,
-        ))
-    }
-
     fn key_context(&self) -> KeyContext {
         let mut context = KeyContext::default();
         context.add(TEXT_INPUT_KEY_CONTEXT);
@@ -828,101 +489,6 @@ impl TextInput {
         context
     }
 
-    fn has_current_layout(&self) -> bool {
-        self.line_height > gpui::Pixels::ZERO && self.line_cache.is_current(self.buffer.revision())
-    }
-
-    fn content_height(&self) -> gpui::Pixels {
-        self.line_height * self.line_cache.visual_rows().max(1) as f32
-    }
-
-    fn move_visual_row(&mut self, down: bool, select: bool) -> bool {
-        let position = match self.position_for_offset(self.buffer.caret()) {
-            Some(position) => position,
-            None => return false,
-        };
-        let x = self.vertical_goal_x.unwrap_or(position.x);
-        let y = if down {
-            position.y + self.line_height
-        } else {
-            position.y - self.line_height
-        };
-        if y < gpui::Pixels::ZERO || y >= self.content_height() {
-            return false;
-        }
-        let Some(offset) = self.offset_for_content_point(point(x, y + self.line_height / 2.0))
-        else {
-            return false;
-        };
-        let moved = self.buffer.move_to(offset, select);
-        if moved {
-            self.vertical_goal_x = Some(x);
-        }
-        moved
-    }
-
-    fn move_to_visual_row_boundary(&mut self, end: bool, select: bool, cx: &mut Context<Self>) {
-        let target = self
-            .position_for_offset(self.buffer.caret())
-            .and_then(|position| {
-                let x = if end {
-                    self.last_bounds?.size.width
-                } else {
-                    gpui::Pixels::ZERO
-                };
-                self.offset_for_content_point(point(x, position.y + self.line_height / 2.0))
-            });
-        let moved = match target {
-            Some(target) => self.buffer.move_to(target, select),
-            None if end => self.buffer.move_to_line_end(select),
-            None => self.buffer.move_to_line_start(select),
-        };
-        self.vertical_goal_x = None;
-        if moved {
-            self.reveal_caret = true;
-            cx.notify();
-        }
-    }
-
-    fn offset_for_content_point(&self, position: Point<gpui::Pixels>) -> Option<usize> {
-        if !self.has_current_layout() {
-            return None;
-        }
-        let total_rows = self.line_cache.visual_rows().max(1);
-        let visual_row = (f32::from(position.y.max(gpui::Pixels::ZERO))
-            / f32::from(self.line_height))
-        .floor() as usize;
-        let visual_row = visual_row.min(total_rows.saturating_sub(1));
-        let (start, layout, row_in_line) = self.line_cache.line_for_visual_row(visual_row)?;
-        let local = layout.closest_index_for_position(
-            point(
-                position.x,
-                self.line_height * row_in_line as f32 + self.line_height / 2.0,
-            ),
-            self.line_height,
-        );
-        Some(start + local)
-    }
-
-    fn border_color(&self, focused: bool, cx: &App) -> gpui::Hsla {
-        let theme = cx.theme();
-        if self.invalid.is_some() {
-            theme.colors.danger
-        } else if focused {
-            theme.colors.focus_ring
-        } else {
-            theme.colors.border
-        }
-    }
-
-    fn value_role(&self) -> TextRole {
-        if self.mono {
-            TextRole::Data
-        } else {
-            TextRole::Ui
-        }
-    }
-
     #[cfg(test)]
     pub(crate) fn test_bounds(&self) -> Option<gpui::Bounds<gpui::Pixels>> {
         self.last_bounds
@@ -934,7 +500,10 @@ impl TextInput {
     }
 
     #[cfg(test)]
-    pub(crate) fn test_position_for_offset(&self, offset: usize) -> Option<Point<gpui::Pixels>> {
+    pub(crate) fn test_position_for_offset(
+        &self,
+        offset: usize,
+    ) -> Option<gpui::Point<gpui::Pixels>> {
         self.position_for_offset(offset)
     }
 
@@ -965,78 +534,6 @@ impl TextInput {
         } else {
             cx.theme().colors.text
         }
-    }
-
-    fn render_chrome(&self, focused: bool, value: impl IntoElement, cx: &App) -> gpui::Div {
-        let theme = cx.theme();
-        let role = self.value_role();
-        let icon_color = if focused {
-            theme.colors.text_secondary
-        } else {
-            theme.colors.text_muted
-        };
-        let box_element = div()
-            .flex()
-            .items_center()
-            .gap(theme.space.sm)
-            .w_full()
-            .px(theme.space.md)
-            .rounded(theme.radii.sm)
-            .bg(theme.colors.bg)
-            .border(theme.metrics.hairline)
-            .border_color(self.border_color(focused, cx))
-            .overflow_hidden()
-            .children(
-                self.icon
-                    .map(|icon| icon.el().size(crate::IconSize::Medium).color(icon_color)),
-            )
-            .child(
-                styled_with(div(), role.style(theme), theme)
-                    .flex()
-                    .flex_1()
-                    .min_w_0()
-                    .h(role.style(theme).line_height)
-                    .when(
-                        matches!(self.mode(), InputMode::Multiline { .. }),
-                        |element| element.h_auto(),
-                    )
-                    .overflow_hidden()
-                    .text_color(theme.colors.text)
-                    .child(value),
-            )
-            .when_else(
-                matches!(self.mode(), InputMode::SingleLine),
-                |element| element.h(theme.metrics.text_field_h),
-                |element| element.min_h(theme.metrics.text_field_h).py(theme.space.sm),
-            );
-
-        div()
-            .flex()
-            .flex_col()
-            .w_full()
-            .gap(theme.space.xxs)
-            .children(self.label.clone().map(Text::label))
-            .child(box_element)
-            .when(
-                matches!(self.mode(), InputMode::SingleLine) && !self.hide_status_line,
-                |element| {
-                    element.child(
-                        div()
-                            .flex()
-                            .flex_none()
-                            .items_center()
-                            .h(theme.metrics.field_status_h)
-                            .w_full()
-                            .overflow_hidden()
-                            .child(match self.invalid.clone() {
-                                Some(message) => Text::hint(message).tone(Tone::Danger).ellipsize(),
-                                None => Text::hint(self.preview.clone().unwrap_or_default())
-                                    .faint()
-                                    .ellipsize(),
-                            }),
-                    )
-                },
-            )
     }
 }
 

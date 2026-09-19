@@ -539,8 +539,8 @@ impl Shell {
         {
             return Some(self.hub.board_filter_focus_handle(cx));
         }
-        // The remaining dialogs join this ownership gate as they migrate off the presentational
-        // fields.
+        // `None` is not "no input on screen": it means no live editor owns the keyboard on this
+        // surface, so the coarse focus handle keeps it.
         None
     }
 }

@@ -1042,9 +1042,9 @@ mod tests {
 
     /// Printable owner keys intentionally retained by text-input host contexts.
     const TEXT_INPUT_HOST_EXCEPTIONS: &[(&str, &str)] = &[
-        // The picker's query is a filter: `space` toggles the highlighted card, so the query never
-        // contains a space. When it migrates to `TextInput` in P3-T05, its character filter will
-        // reject `' '` so the model and this binding agree.
+        // The picker's query is a filter: `space` toggles the highlighted card, so the query
+        // never contains a space. Its `TextInput` filters `' '` out of typing and paste, so the
+        // model and this binding agree.
         ("Dialog > CardPicker", "space"),
     ];
 
@@ -1096,10 +1096,10 @@ mod tests {
     }
 
     /// The floor sits within ten rows of the live table, so a silent loss is caught and a
-    /// deliberate retirement is a one-line edit here. P3-T06 retired the seven `Dialog`
-    /// legacy-editor rows (`backspace`, `ctrl-w`, `ctrl-u`, `ctrl-a`, `ctrl-e`, `left`,
-    /// `right`) to the `FleetTextInput` table and added back the two `Dialog > Settings`
-    /// arrows that used to ride on them.
+    /// deliberate retirement is a one-line edit here. The seven per-dialog editing rows
+    /// (`backspace`, `ctrl-w`, `ctrl-u`, `ctrl-a`, `ctrl-e`, `left`, `right`) moved to the
+    /// `FleetTextInput` table, and the two `Dialog > Settings` arrows that used to ride on
+    /// them were added back.
     #[test]
     fn key_table_is_well_formed() {
         let bindings = bindings();

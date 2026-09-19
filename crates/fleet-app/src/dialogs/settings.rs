@@ -24,6 +24,10 @@ use crate::{
 /// The section rail's width (§3.8.6).
 const RAIL_WIDTH: f32 = 180.0;
 
+/// The label column of a read-only row, wide enough for the longest label the pane carries
+/// (`Claude default effort`); anything longer ellipsizes rather than breaking the grid.
+const LABEL_WIDTH: f32 = 170.0;
+
 mod draft;
 mod persistence;
 

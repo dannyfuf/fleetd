@@ -1314,10 +1314,12 @@ The footer sentence is mandatory: the action *sounds* destructive and is not.
 
 #### 3.8.6 Settings (`,`)
 
-720 × 560, two columns: a 180 px section rail and a 540 px pane. Editable fields carry a
-normal-contrast value in an input box; read-only facts are `fg.muted` **with no input chrome** —
-the absence of a box is how "you cannot edit this here" is said, instead of a disabled style.
-Each section shows a faint trailing `edit in config.json` **once**, not per row.
+720 × 560, two columns: a 180 px section rail and a 540 px pane. A value is in an input box
+**only while it is being edited**: browsing draws every text value as a `label   value` fact
+line, an editable one in the data face and an unset one as `—`, and `Enter` is what opens a box
+on the row under the cursor. Nothing here is ever drawn in a disabled style. A row that cannot be
+edited here has nothing behind `Enter`, and its section says where its editor is with a faint
+trailing `edit in config.json` **once**, not per row.
 
 | Section | Rows |
 | --- | --- |
@@ -1825,9 +1827,8 @@ each component's full API. `Modal` is an alias of `Dialog` and `TabBar` an alias
 
 | Component | Responsibility | Used by |
 | --- | --- | --- |
-| `TextInput` | The live editor: the whole editing vocabulary, selection, undo, IME and clipboard, in single-line and multi-line modes | board dialogs, Filter, Palette, agent composer, lazygit prompt |
-| `TextField` | The presentational predecessor, kept only for the surfaces still to migrate | Create, Clone, Context, Settings |
-| `FuzzyList` | Debounced query → ranked rows, capped, `ctrl-n`/`ctrl-p` + arrows (and `j`/`k` **only** when no text field is present) | Clone results, Create base list, Palette, Assign |
+| `TextInput` | The one editor (ADR 0019): the whole editing vocabulary, selection, undo, IME and clipboard, in single-line and multi-line modes | every text surface — Create, Clone, Context, Rename, Hooks, Settings, board dialogs, Filter, Palette, agent composer, lazygit prompt |
+| `FuzzyList` | Debounced query → ranked rows, capped, `ctrl-n`/`ctrl-p` + arrows (and `j`/`k` **only** when no text input is present) | Clone results, Create base list, Palette, Assign |
 | `FilterBar` | In-place pane-header replacement with live `shown/total`, two-stage `Esc`, retained chip | every list (§3.10) |
 | `Cycler` | `◂ value ▸`, `←`/`→` | host selector, Settings choices |
 | `Toggle` | `[x]` / `[ ]`, `Space` | Settings |
@@ -2041,8 +2042,8 @@ change the user believes happened.
 
 ### The other three dialogs
 
-* **New card** (560 px) — a title `TextField` and an optional description `TextArea`. `Enter`
-  creates and closes; `ctrl-Enter` creates and opens the card it made. Nothing else is asked for,
+* **New card** (560 px) — a single-line title `TextInput` and an optional multi-line one for
+  the description. `Enter` creates and closes; `ctrl-Enter` creates and opens the card it made. Nothing else is asked for,
   because every other field has a one-letter picker on the board.
 * **Card property** (560 px) — one surface for every field: a query input over a `FuzzyList` of
   the values that field can take. The open-ended kinds (assignee, estimate, due date, and `Text` /

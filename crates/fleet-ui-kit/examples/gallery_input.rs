@@ -1,10 +1,10 @@
 //! The visual and behavioural test bench for the **input** group of `fleet-ui-kit`.
 //!
-//! `TextInput` · legacy text field family · `FuzzyList` · `FilterBar` · `Cycler` ·
-//! `Toggle` · `NumberField` · `SegmentedTabs` · `Select` · `ConfirmDialog` · `Palette`.
+//! `TextInput` · `FuzzyList` · `FilterBar` · `Cycler` · `Toggle` · `NumberField` ·
+//! `SegmentedTabs` · `Select` · `ConfirmDialog` · `Palette`.
 //!
 //! Every component appears in every state it can be in, in both themes, and the interactive
-//! ones are *live*: the text field really edits, the palette really filters and highlights, the
+//! ones are *live*: the inputs really edit, the palette really filters and highlights, the
 //! lists really move. If a state is not visible or not operable here, it is not implemented.
 //!
 //! ```sh
@@ -14,7 +14,7 @@
 //! | Key | What |
 //! | --- | --- |
 //! | `ctrl-t` | toggle light / dark |
-//! | `ctrl-i` | focus the live editor · `esc` leaves it |
+//! | `ctrl-i` | focus the branch field · `esc` leaves it |
 //! | `/` | focus the filter bar · `esc` leaves it, `esc` again clears it |
 //! | `:` | open the palette · `esc` closes it |
 //! | `d` / `D` | the compact / expanded confirm · `y` `Y` `n` `esc` answer it |
@@ -153,7 +153,8 @@ fn branch_error(value: &str) -> Option<SharedString> {
 
 struct InputGallery {
     focus_handle: FocusHandle,
-    editor: Entity<LegacyTextInput>,
+    /// The branch field whose preview line turns into a validation line in the same slot.
+    branch: Entity<TextInput>,
     live_empty: Entity<TextInput>,
     live_filled: Entity<TextInput>,
     live_focused: Entity<TextInput>,
@@ -190,15 +191,15 @@ const HOSTS: &[&str] = &["local", "devbox", "ci-runner"];
 
 impl InputGallery {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let editor = cx.new(|cx| {
-            LegacyTextInput::new(cx)
-                .with_label("branch")
-                .with_placeholder("feat/rut-validator")
-                .with_icon(Icon::GitBranchPlus)
-                .with_mono(true)
-                .with_text("feat/rut-validator")
+        let branch = cx.new(|cx| {
+            let mut input = TextInput::new(InputMode::SingleLine, cx);
+            input.set_label(Some("branch".into()), cx);
+            input.set_placeholder("feat/rut-validator", cx);
+            input.set_icon(Some(Icon::GitBranchPlus), cx);
+            input.set_mono(true, cx);
+            input.set_text("feat/rut-validator", cx);
+            input
         });
-        cx.subscribe(&editor, Self::on_editor_event).detach();
         let live_empty = cx.new(|cx| {
             let mut input = TextInput::new(InputMode::SingleLine, cx);
             input.set_placeholder("empty with placeholder", cx);
@@ -309,8 +310,15 @@ impl InputGallery {
             input.set_text("pay", cx);
             input
         });
-        // A re-ranked list must never leave the cursor past its end.
+        // A re-ranked list must never leave the cursor past its end, and the branch field's
+        // preview and validation line are derived from what was just typed into it.
         let query_subscriptions = vec![
+            cx.subscribe(&branch, |gallery, _, event, cx| {
+                if *event == TextInputEvent::Changed {
+                    gallery.refresh_branch_status(cx);
+                    cx.notify();
+                }
+            }),
             cx.subscribe(&filter, |gallery, _, event, cx| {
                 if *event == TextInputEvent::Changed {
                     gallery.fuzzy_cursor = 0;
@@ -326,7 +334,7 @@ impl InputGallery {
         ];
         let mut gallery = Self {
             focus_handle: cx.focus_handle(),
-            editor,
+            branch,
             live_empty,
             live_filled,
             live_focused,
@@ -356,36 +364,25 @@ impl InputGallery {
             confirm: ConfirmDemo::None,
             answer: None,
         };
-        gallery.refresh_editor_status(cx);
+        gallery.refresh_branch_status(cx);
         gallery
     }
 
-    /// Keep the preview and the validation line in step with the value.
-    fn on_editor_event(
-        &mut self,
-        _editor: Entity<LegacyTextInput>,
-        event: &LegacyTextInputEvent,
-        cx: &mut Context<Self>,
-    ) {
-        if *event == LegacyTextInputEvent::Changed {
-            self.refresh_editor_status(cx);
-            cx.notify();
-        }
-    }
-
-    fn refresh_editor_status(&mut self, cx: &mut Context<Self>) {
-        let value = self.editor.read(cx).text().to_string();
+    /// Keep the preview and the validation line in step with the value (§3.8.1).
+    fn refresh_branch_status(&mut self, cx: &mut Context<Self>) {
+        let value = self.branch.read(cx).text().to_string();
         let error = branch_error(&value);
         let preview = (!value.is_empty() && error.is_none())
             .then(|| SharedString::from(format!("\u{2192} buk/payroll#{value}")));
-        self.editor.update(cx, |editor, cx| {
-            editor.set_invalid(error, cx);
-            editor.set_preview(preview, cx);
+        self.branch.update(cx, |input, cx| {
+            input.set_invalid(error, cx);
+            input.set_preview(preview, cx);
         });
     }
 
     fn live_input_focused(&self, window: &Window, cx: &App) -> bool {
-        self.live_empty.read(cx).focus_handle().is_focused(window)
+        self.branch.read(cx).focus_handle().is_focused(window)
+            || self.live_empty.read(cx).focus_handle().is_focused(window)
             || self.live_filled.read(cx).focus_handle().is_focused(window)
             || self.live_focused.read(cx).focus_handle().is_focused(window)
             || self
@@ -509,8 +506,7 @@ impl InputGallery {
 
     fn focus_editor(&mut self, _: &FocusEditor, window: &mut Window, cx: &mut Context<Self>) {
         self.capture = Capture::None;
-        self.live_focused
-            .update(cx, |input, cx| input.focus(window, cx));
+        self.branch.update(cx, |input, cx| input.focus(window, cx));
         cx.notify();
     }
 
@@ -696,87 +692,24 @@ fn card(theme: &Theme, width: gpui::Pixels, child: impl IntoElement) -> AnyEleme
         .into_any_element()
 }
 
-fn text_field_section(theme: &Theme) -> AnyElement {
-    let width = px(380.0);
+fn branch_section(gallery: &InputGallery, theme: &Theme, cx: &App) -> AnyElement {
+    let input = gallery.branch.read(cx);
+    let caret = input.buffer().caret();
+    let value_len = input.text().len();
     LAYOUT.section(
-        "text field \u{b7} presentational",
+        "text input \u{b7} preview and validation (^i to focus)",
         theme,
         vec![
             LAYOUT.labeled(
-                "focused + preview",
+                "branch field",
                 theme,
-                div().w(width).child(
-                    TextField::new("feat/rut-validator")
-                        .label("branch")
-                        .mono(true)
-                        .focused(true)
-                        .caret(4)
-                        .preview("\u{2192} buk/payroll#feat-rut-validator"),
-                ),
-            ),
-            LAYOUT.labeled(
-                "invalid (same slot)",
-                theme,
-                div().w(width).child(
-                    TextField::new("feat/../rut")
-                        .label("branch")
-                        .mono(true)
-                        .focused(true)
-                        .caret(7)
-                        .preview("\u{2192} never shown while invalid")
-                        .invalid("branch cannot contain \"..\""),
-                ),
-            ),
-            LAYOUT.labeled(
-                "unfocused",
-                theme,
-                div()
-                    .w(width)
-                    .child(TextField::new("origin/main").label("base").mono(true)),
-            ),
-            LAYOUT.labeled(
-                "placeholder + icon",
-                theme,
-                div().w(width).child(
-                    TextField::new("")
-                        .placeholder("Type to search GitHub repos in buk's owners.")
-                        .icon(Icon::Search)
-                        .focused(true),
-                ),
-            ),
-            LAYOUT.labeled(
-                "44 px, no status slot",
-                theme,
-                div().w(width).child(
-                    TextField::new("pay fix")
-                        .icon(Icon::Command)
-                        .focused(true)
-                        .height(px(44.0))
-                        .hide_status_line(true),
-                ),
-            ),
-        ],
-    )
-}
-
-fn live_editor_section(gallery: &InputGallery, theme: &Theme, cx: &App) -> AnyElement {
-    let state = gallery.editor.read(cx);
-    let caret = state.state().caret_chars();
-    let value_len = state.text().chars().count();
-    LAYOUT.section(
-        "legacy text input \u{b7} live (ctrl-i to focus)",
-        theme,
-        vec![
-            LAYOUT.labeled(
-                "real editor",
-                theme,
-                div().w(px(380.0)).child(gallery.editor.clone()),
+                div().w(px(380.0)).child(gallery.branch.clone()),
             ),
             LAYOUT.labeled(
                 "state",
                 theme,
                 Text::hint(format!(
-                    "caret {caret} of {value_len} \u{b7} printable \u{b7} backspace \u{b7} delete \u{b7} ^w \u{b7} ^u \u{b7} ^k \u{b7} ^a \u{b7} ^e \u{b7} \u{2190} \u{2192} \u{b7} IME-composed text is underlined"
+                    "caret {caret} of {value_len} bytes \u{b7} the validation line replaces the preview in the same 18 px slot, so a failing name costs zero layout shift"
                 ))
                 .faint(),
             ),
@@ -1207,13 +1140,10 @@ fn expanded_confirm() -> ConfirmDialog {
 impl Render for InputGallery {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let editor_focused = self.editor.focus_handle(cx).is_focused(window);
-        let typing =
-            editor_focused || self.live_input_focused(window, cx) || self.capture != Capture::None;
+        let typing = self.live_input_focused(window, cx) || self.capture != Capture::None;
 
         let sections = vec![
-            text_field_section(&theme),
-            live_editor_section(self, &theme, cx),
+            branch_section(self, &theme, cx),
             text_input_section(self, &theme),
             fuzzy_section(self, &theme, cx),
             filter_section(self, &theme, cx),

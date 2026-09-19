@@ -64,6 +64,8 @@ struct StructureGallery {
     focus_handle: FocusHandle,
     /// The pane header's filter demo edits a live input, like the real Hub's.
     filter_query: Entity<TextInput>,
+    /// The dialog demo's branch field, the one input a real `Dialog` body carries.
+    dialog_branch: Entity<TextInput>,
     banner: bool,
     dialog: bool,
     dialog_error: bool,
@@ -83,6 +85,13 @@ impl StructureGallery {
                 let mut input = TextInput::new(InputMode::SingleLine, cx);
                 input.set_embedded(true, cx);
                 input.set_text("rut", cx);
+                input
+            }),
+            dialog_branch: cx.new(|cx| {
+                let mut input = TextInput::new(InputMode::SingleLine, cx);
+                input.set_label(Some("Branch".into()), cx);
+                input.set_mono(true, cx);
+                input.set_text("feat/rut-validator", cx);
                 input
             }),
             banner: false,
@@ -1268,12 +1277,7 @@ impl Render for StructureGallery {
                         .flex()
                         .flex_col()
                         .gap(t.space.sm)
-                        .child(
-                            TextField::new("feat/rut-validator")
-                                .label("Branch")
-                                .caret(18)
-                                .focused(true),
-                        )
+                        .child(self.dialog_branch.clone())
                         .child(Text::ui("~/.fleet/worktrees/payroll/feat-rut-validator").muted()),
                 )
                 .hints(

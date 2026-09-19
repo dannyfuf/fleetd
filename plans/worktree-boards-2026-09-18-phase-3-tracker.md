@@ -61,8 +61,19 @@
     Two key changes forced by the ownership rule, documented in KEYMAP/UX-SPEC: context-dialog
     delete is `ctrl-shift-d` (`ctrl-d` is delete-forward in the input and the dialog has no
     browsing state) and `enter` on a settings text/number row opens the editor instead of saving.
-- [ ] P3-T07 — Delete the old input families and record the decision
+- [x] P3-T07 — Delete the old input families and record the decision
+  - verified: `make lint`, `make test` (3262 passed, 0 failed on a quiet run; the agent's five
+    daemon failures were load flakes), `make harness` 59 of 59 (agent run `20260919-205151` and an
+    independent run). `text_field*`/`text_area*` deleted; `input.rs` split into
+    `input/{handlers,pointer,geometry,chrome}.rs` (all under 900 lines); ADR 0019 written and
+    indexed. Resting settings/board-settings text rows are `FactRow`s per DESIGN-SYSTEM §6.4.
 - [ ] P3-T08 — Drive typing, selection and undo in the harness
+- [ ] P3-T10 — Fix the phase-review findings (banner keys shadow inputs; mouse focus vs field marker; shared hub-filter predicate)
+  - added 2026-09-19 from the P3-T07 review: P0 `Daemon > Banner` binds bare `r`/`l` innermost on
+    every chain so those letters cannot be typed while the banner is up; P1 clicking a second
+    input in card create/context/hooks lets `reconcile_focus` yank the caret back because the
+    dialog's field marker only follows keyboard focus; P2 `hub_filter_owns_keys` and the bar's
+    mount predicate are two functions.
 - [x] P3-T09 — Soft-wrap the multi-line mode of `TextInput`
   - verified: `cargo test -p fleet-ui-kit` (395 passed), `cargo build --example gallery_input`,
     `cargo fmt --check` and kit clippy `-D warnings` passed. Vertical motion and `home`/`end` stay
@@ -140,6 +151,14 @@
 
 ## Follow-ups
 (Things discovered mid-flight that are out of scope for this plan. Each gets a one-line description.)
+
+- From the P3-T07 review, not fixed in this phase: `keymap.rs` (1775 lines) and `shell/root/tests.rs`
+  (1022) exceed the 900-line guideline; lazygit binds the kit's editor rows outside its `key_table!`
+  so its Help overlay cannot list them and its `Prompt` rows are now out-depthed; the lazygit
+  operation-menu filter and multi-line commit prompt were never migrated and the filter draws a
+  caret with no motion bindings; `board_settings/draft.rs::materialize_input` rebuilds the editor
+  entity on every row move; `DialogHost`'s fourteen editor fields have no `assert_released`
+  teardown test; `settings.rs` `LABEL_WIDTH` is an app-side pixel literal.
 
 - `components/input.rs` is about 1100 lines after P3-T04; split the entity from its chrome/actions
   in P3-T07 per `rust-workspace-architecture`.
