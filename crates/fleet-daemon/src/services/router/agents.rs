@@ -347,6 +347,7 @@ pub(crate) fn classify_agent(body: &RequestBody, resolver: &dyn Resolver) -> Tar
         AgentThreadOpen { thread, .. }
         | AgentItemBody { thread, .. }
         | AgentThreadClose { thread }
+        | AgentThreadReopen { thread }
         | AgentSend { thread, .. }
         | AgentInterrupt { thread }
         | AgentRespond { thread, .. }

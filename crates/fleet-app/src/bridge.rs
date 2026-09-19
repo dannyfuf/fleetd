@@ -103,6 +103,8 @@ pub enum BridgeEvent {
     AgentSummary(AgentThreadSummary),
     /// Persisted cursors belonging to this installation, refreshed after Hello/reconnect.
     AgentSeenCursors(Vec<(ThreadId, Seq)>),
+    /// Persisted closed threads belonging to this installation, fetched after Hello/reconnect.
+    AgentClosedThreads(Vec<ThreadId>),
     /// Capability-gated delegation census fetched after Hello/reconnect.
     Delegations(Vec<Delegation>),
     /// The daemon answered and sent its first snapshot (§3.12 A resolved).
@@ -202,6 +204,11 @@ pub enum BridgeCommand {
     },
     /// Close a client thread lease.
     AgentThreadClose {
+        /// Target thread.
+        thread: ThreadId,
+    },
+    /// Re-register this installation's interest in a thread.
+    AgentThreadReopen {
         /// Target thread.
         thread: ThreadId,
     },
@@ -310,6 +317,7 @@ impl From<BridgeCommand> for RequestBody {
                 limit,
             },
             BridgeCommand::AgentThreadClose { thread } => Self::AgentThreadClose { thread },
+            BridgeCommand::AgentThreadReopen { thread } => Self::AgentThreadReopen { thread },
             BridgeCommand::AgentSend { thread, input } => Self::AgentSend { thread, input },
             BridgeCommand::AgentInterrupt { thread } => Self::AgentInterrupt { thread },
             BridgeCommand::AgentRespond {

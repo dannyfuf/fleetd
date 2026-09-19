@@ -760,9 +760,10 @@ prefix.
 
 A Claude Code or Codex session is a numbered tab in the **same strip** as the terminals —
 `[2] claude — rounding fix`, `[6] codex — tz shifts` — drawn by Fleet rather than by a PTY.
-`^s a` starts Claude, `^s A` starts Codex, `^s x` closes the tab and keeps the transcript, and
-`^s F` opens the PTY popup below as the explicit fallback. There is no thread-list sidebar, no
-inspector and no detached diff pane. `docs/NATIVE-AGENTS.md` is the authority for the event
+`^s a` starts Claude, `^s A` starts Codex, `^s x` closes the tab and keeps the transcript, the
+close survives a relaunch and a daemon restart, and `^s F` opens the PTY popup below as the
+explicit fallback. There is no thread-list sidebar, no inspector and no detached diff pane.
+`docs/NATIVE-AGENTS.md` is the authority for the event
 model and the state machine, `docs/KEYMAP.md` for exactly which `^s` keys an agent tab binds;
 this section is what the screen shows.
 

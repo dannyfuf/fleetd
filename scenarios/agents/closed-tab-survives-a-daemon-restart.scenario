@@ -1,0 +1,25 @@
+# Closing a top-level thread is an installation preference. A daemon restart must preserve it,
+# while the AGENTS picker remains able to reopen the thread explicitly.
+fixture: agents
+await idle
+key o
+await screen == Workspace 20000
+
+key ctrl-s a
+await agents.threads[0].provider == claude 20000
+assert agents.threads[0].attached == true
+key ctrl-s x
+await agents.threads[0].attached == false 10000
+assert agents.threads[0].attached == false
+
+daemon restart
+await daemon.link == reconnected 60000
+wait 5000
+assert agents.threads[0].attached == false
+
+key ctrl-s d
+key enter
+await agents.threads[0].attached == true 20000
+assert agents.threads[0].attached == true
+dump reopened-after-restart
+quit

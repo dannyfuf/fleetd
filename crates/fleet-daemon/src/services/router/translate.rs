@@ -31,6 +31,7 @@ pub fn to_remote(
         AgentThreadOpen { .. }
         | AgentItemBody { .. }
         | AgentThreadClose { .. }
+        | AgentThreadReopen { .. }
         | AgentSend { .. }
         | AgentInterrupt { .. }
         | AgentRespond { .. }
@@ -124,6 +125,7 @@ pub fn to_remote(
         }
         AgentThreadList
         | AgentSeenCursors
+        | AgentClosedThreads
         | ListBoards { .. }
         | GetBoard { .. }
         | EnsureBoard { .. }
@@ -204,6 +206,7 @@ pub fn response_to_local(mut body: ResponseBody, host: &HostId, ids: &RemoteIds)
         | AgentReverted(_)
         | AgentAccountLogin { .. }
         | AgentSeenCursors(_)
+        | AgentClosedThreads(_)
         // Delegation responses are always local, so none enters remote-id translation.
         | DelegationStarted { .. }
         | Delegations(_)
@@ -604,9 +607,11 @@ pub(crate) fn unavailable_fanout_response(
         RequestBody::PruneWorktrees { ids: None, .. }
         | RequestBody::AgentThreadList
         | RequestBody::AgentSeenCursors
+        | RequestBody::AgentClosedThreads
         | RequestBody::AgentThreadCreate { .. }
         | RequestBody::AgentThreadOpen { .. }
         | RequestBody::AgentThreadClose { .. }
+        | RequestBody::AgentThreadReopen { .. }
         | RequestBody::AgentSend { .. }
         | RequestBody::AgentInterrupt { .. }
         | RequestBody::AgentRespond { .. }

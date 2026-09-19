@@ -119,6 +119,83 @@ async fn seen_cursors_are_monotonic_and_isolated_per_client() -> anyhow::Result<
 }
 
 #[tokio::test]
+async fn marking_a_thread_closed_lists_it_for_the_installation() -> anyhow::Result<()> {
+    let (_directory, store) = store()?;
+    let thread = ThreadId::new();
+
+    store
+        .mark_closed("client-a".to_owned(), thread, 100)
+        .await?;
+
+    assert_eq!(
+        store.closed_threads("client-a".to_owned()).await?,
+        vec![thread]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn clearing_a_closed_thread_removes_it_from_the_installation() -> anyhow::Result<()> {
+    let (_directory, store) = store()?;
+    let thread = ThreadId::new();
+    store
+        .mark_closed("client-a".to_owned(), thread, 100)
+        .await?;
+
+    store.clear_closed("client-a".to_owned(), thread).await?;
+
+    assert!(
+        store
+            .closed_threads("client-a".to_owned())
+            .await?
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn closed_threads_are_isolated_per_installation() -> anyhow::Result<()> {
+    let (_directory, store) = store()?;
+    let thread = ThreadId::new();
+    store
+        .mark_closed("client-a".to_owned(), thread, 100)
+        .await?;
+
+    assert_eq!(
+        store.closed_threads("client-a".to_owned()).await?,
+        vec![thread]
+    );
+    assert!(
+        store
+            .closed_threads("client-b".to_owned())
+            .await?
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn closed_threads_survive_reopening_the_store() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir().context("create an agent store directory")?;
+    let home = fleet_core::paths::FleetHome::new(directory.path());
+    let thread = ThreadId::new();
+    {
+        let store = SqliteAgentStore::open(home.agents_db_path())?;
+        store
+            .mark_closed("client-a".to_owned(), thread, 100)
+            .await?;
+    }
+
+    let reopened = SqliteAgentStore::open(home.agents_db_path())?;
+
+    assert_eq!(
+        reopened.closed_threads("client-a".to_owned()).await?,
+        vec![thread]
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_clean_stop_advances_only_cursors_that_were_already_caught_up() -> anyhow::Result<()> {
     let (_directory, store) = store()?;
     let thread = ThreadId::new();

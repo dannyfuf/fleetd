@@ -54,10 +54,11 @@ The canvas fixes these decisions; do not relitigate them in code.
 - **Agents are workspace tabs, not a separate screen.** A Claude or Codex session is a numbered
   tab in the same strip as terminals: `[2] claude — rounding fix`, `[6] codex — tz shifts`.
   `^s a` starts Claude, `^s A` starts Codex, `^s 1–9` selects, `^s x` closes the *tab*, not the
-  thread — §8 keeps every thread browsable, so the daemon goes on listing one this window has
-  closed and the strip is what forgets it. No thread-list sidebar, no inspector, no detached diff
-  pane. Wide windows leave the right side empty on purpose; the content measure is 760 px with a
-  16 px inset.
+  thread. §8 keeps every thread browsable. The installation remembers the close, the daemon
+  persists it beside the read cursor, and the `AGENTS` picker reopens it. The marker is daemon-side
+  because §9.2 permits no app-side on-disk mirror or cache. No thread-list sidebar, no inspector,
+  no detached diff pane. Wide windows leave the right side empty on purpose; the content measure
+  is 760 px with a 16 px inset.
   A child thread is in the strip only when attached; detaching it changes this window's tab set,
   not the daemon-owned thread or its durable delegation.
 - **The pane is a transcript above a docked composer.** The transcript is bottom-anchored. The
@@ -1129,7 +1130,8 @@ list read never touches `items`, `turns` or `gates`), `turns`, `items` (with app
 `reasoning` columns concatenated **in SQL**, which collapses thousands of delta rows into one row
 for reads while the log keeps every delta for replay), `gates`, `checkpoints`, `sessions`,
 `item_attachments`, `seen` (the monotonic per-installation read cursors written by
-`AgentMarkSeen`), `agent_events_quarantine`, and `fleet_migrations`. No foreign keys — deletes are explicit
+`AgentMarkSeen`), `closed_threads` (the per-installation closed-tab markers),
+`agent_events_quarantine`, and `fleet_migrations`. No foreign keys — deletes are explicit
 multi-table statements in the projector, which is what you want when you also have to delete
 files.
 
@@ -1143,6 +1145,9 @@ result and delivery state; nudge/recovery counters; headline; and creation/finis
 relationship and distinguish a user Stop from a provider exit. The delegation record is not
 rebuilt from the transcript log: rebuild and quarantine leave both delegation tables alone, while
 the service derives and advances only the lifecycle status columns from thread events.
+
+Migration 4 adds the delegation submission state. Migration 5 adds `closed_threads`, keyed by
+`(client_id, thread_id)` with `closed_at`, so one installation's strip does not change another's.
 
 Three columns exist to keep the denormalized `attention` byte-identical to what
 `ThreadProjection::attention` derives, rather than approximately equal to it: `threads.retrying_json`
@@ -1415,6 +1420,12 @@ the app's health pass refreshes it after a transparent client reconnect. Every b
 separate from `AgentThreadSummary`: summary broadcasts remain one shared O(1) fan-out, instead of
 performing a per-connection database lookup for every summary event. Cursor upserts are monotonic.
 
+`agent.closed` gates the per-installation closed-tab set without a protocol-version bump. A capable
+client asks with `AgentClosedThreads` after Hello and receives `Vec<ThreadId>` before the first
+snapshot. `AgentThreadClose` records the marker before routing, and `AgentThreadReopen` clears it
+when the picker or top-level navigation restores the tab. An older client keeps ack-only close
+behaviour. An older daemon leaves the app on its in-memory set.
+
 Two additive fields close seams that used to be guesses rather than answers. `UserInput.item`
 carries the identity the client already drew its optimistic bubble under, and the adapter adopts
 it — Claude's announced `TurnStarted.user_item`, Codex's `clientUserMessageId` — so reconciliation
@@ -1570,7 +1581,7 @@ this build does not do**, named here rather than softened in the section that sp
 | 1 | **Domain.** New item/event model in `fleet-core::agents`, indexed projection replacing the O(n²) scans, `projection.rs` split under ~900 lines, `should_apply_lifecycle` | **done**; `providers/opencode/**` was deleted with it. `ItemKind::UserMessage` later gained `steered` and `UserInput` gained `item`, both additive and both with a producer |
 | 2 | **Storage.** `rusqlite`, the schema, the owned writer thread, the read pool, the migration ladder, `FleetHome::agents_*`, the one-shot NDJSON import, the one-`SELECT` thread list, lazy hydration and the background boot repair | **done**. The `seen` table has a monotonic owned-writer upsert and bounded per-install census. Owed: `item_attachments` has no writer because attachments are not built |
 | 3 | **Harnesses.** The `Harness` trait and probe; Claude stream-json; Codex app-server; scripted fixtures | **done** against Claude 2.1.275 and Codex 0.154.0. Claude discovers `initialize.models` (with `list_models` and a static fallback), publishes per-model effort ladders, and restarts with resume for every model/effort/mode change. Codex discovers every `model/list` page, sends launch effort through `config.model_reasoning_effort`, and updates effort plus permissions in place. Both adapters publish their supported mode lists. The manager reads the adapter's `Submitted::JoinedActive { turn }` versus `Submitted::QueuedNew { turn }` answer, so a steer is distinguishable from a queued turn. **Owed**: the per-thread raw NDJSON log, Codex cold rehydration from its own store, and per-instance homes (multi-account is out of scope per §14). |
-| 4 | **Protocol.** Windowed open, `AgentItemBody`, the sync/resync events, real `AgentMarkSeen`, byte-exact goldens, per-request timeouts, the capability strings | **done**. Nine `agent.*` capabilities are advertised and served — `agent.delegation` is the newest, gating the six delegation requests and `DelegationChanged`; `agent.account` gates `AgentAccountLogin`/`AgentAccountLogout`. `agent.seen` added `HelloClient.client_id`, `AgentSeenCursors`, `AgentThreadWindow.seen_seq`, and a monotonic store write additively in protocol 7; anonymous peers retain validate-only compatibility. Protocol 8 is the later exact-version boundary for defaulted agent creates and the expanded permission enum. The app seeds its cursor map after every Hello, so reconnecting does not restore a cleared amber dot |
+| 4 | **Protocol.** Windowed open, `AgentItemBody`, the sync/resync events, real `AgentMarkSeen`, durable closed tabs, byte-exact goldens, per-request timeouts, the capability strings | **done**. Ten `agent.*` capabilities are advertised and served. `agent.delegation` gates the six delegation requests and `DelegationChanged`; `agent.account` gates `AgentAccountLogin`/`AgentAccountLogout`. `agent.seen` added `HelloClient.client_id`, `AgentSeenCursors`, `AgentThreadWindow.seen_seq`, and a monotonic store write additively in protocol 7; anonymous peers retain validate-only compatibility. `agent.closed` additively gates `AgentClosedThreads` and `AgentThreadReopen` without changing protocol 8. The app seeds its cursor and closed sets after every Hello, so reconnecting neither restores a cleared amber dot nor a closed tab. Protocol 8 remains the exact-version boundary for defaulted agent creates and the expanded permission enum |
 | 5 | **Transcript.** The flat row model, the eighteen row kinds, `TranscriptList`, `ToolRow`, the fold and group logic, the scroll machine, `gallery_agent` | **done**. Kit (5a): the flat `TranscriptRow`, all eighteen kinds, `TranscriptList` over `list` with the three-state scroll machine and its generation counter, the six-state `ToolRow`, the group summarizer, the streaming-safe `Markdown` with its highlight cache, `gallery_agent`. Screen (5b): `screens/agent_thread/rows/` projects a thread into those rows — the §B1.4 emission order, the fold exemption table, the live-activity tail walk and its present-tense rule, the group summarizer's inputs, and the settled-gate record — memoised behind a `RowsKey` so a stream chunk rewrites one row and re-runs no grouping. Scroll-back paging is closed end to end: `TranscriptEvent::ReachedOldest` reports the gesture, the workspace asks the mirror for a page cursor, and `merge_older_page` prepends the answer. Deferred scroll refresh no longer borrows list state from inside its own callback; the two-turn `scroll-wheel.scenario` exercises wheel input up and back at a 600-pixel viewport |
 | 6 | **Decisions and controls.** `DecisionDock`, the three gate kinds, the composer, the control cluster and pickers, `MetadataRow` overflow | **done**. Kit (5a): `DecisionDock` with its attachment seam, the `Decision` priority ladder and key vocabulary, `MetadataRow` with its per-width fit memo, `MultilineInput`'s three trigger reports. Screen (6): `/login` and `/logout` join the `/` built-ins on a Codex thread and nowhere else, and the metadata row's last trailing segment is the account — `signed out`, or the email, or the plan, or nothing at all; the docked drawer wired to daemon state so a gate owns the keyboard in the same frame, `⏎` unbound on a permission, the question wizard with per-question drafts, the plan verbs on the composer, `ComposerMode`'s capability table, the three control tiers with the restart rule, six completion surfaces, provider-described Codex effort rows and refreshed `$` skills, and the §12 key contexts including row focus inside scroll mode. The harness projects a prepared decision on each thread as `{kind,title,paths,has_diff}`, and the regular corpus proves a Codex file approval joins its exact item. **Not built**: attachments (nothing uploads one, so `--add-dir` is not granted either — granting a directory nothing can put a file in is an affordance with no behaviour behind it) and the `$`-to-`/` skill rewrite (the daemon's adapter boundary owns it) |
 | 7 | **Remote.** The mirror column and its authority rules, snapshot-then-delta, the admission ladder | **done**: `store/mirror.rs` owns the `owner_host` columns and the only statements that write them, `manager/mirror.rs` the read-through cache, `router/agents.rs` the `AgentMirror` seam the link hangs on, and `manager/window.rs` the windowed open and the admission ladder. All four authority rules have a test. The app sends window fields on every open, so the warm-mirror path is reachable from the UI. **Owed**: the SQL-native window read of spec-C C.2.5 — the window's *content* still comes from the reducer's projection, so a windowed open of a cold thread replays its log once — and `mirror_oldest_seq` stays `NULL` because the mirror only ever stores prefixes from sequence 1 |

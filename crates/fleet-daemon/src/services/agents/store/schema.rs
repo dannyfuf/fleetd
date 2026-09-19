@@ -59,6 +59,15 @@ CREATE TABLE IF NOT EXISTS fleet_migrations (
 ) WITHOUT ROWID;
 ";
 
+/// Slot 005 — per-installation native-agent threads hidden from the tab strip.
+pub(super) const CLOSED_THREADS: &str = r#"CREATE TABLE closed_threads (
+  client_id TEXT    NOT NULL,
+  thread_id TEXT    NOT NULL,
+  closed_at INTEGER NOT NULL,
+  PRIMARY KEY (client_id, thread_id)
+) WITHOUT ROWID;
+"#;
+
 /// Slot 001 — the append-only log and every read model derived from it.
 ///
 /// Conventions this text follows, and every later slot must too: timestamps are `INTEGER` unix
@@ -342,6 +351,7 @@ pub(super) const REQUIRED_TABLES: &[&str] = &[
     "agent_events",
     "agent_events_quarantine",
     "checkpoints",
+    "closed_threads",
     "delegation_outbox",
     "delegations",
     "fleet_migrations",

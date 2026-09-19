@@ -30,6 +30,7 @@ Keyboard input reaches the focused view in both lanes. Scenarios with `shot` lin
 | `codex-mode-menu.scenario` | `^s t` consumes Codex's smaller declared access-mode set and keeps the draft | `NATIVE-AGENTS.md` §7 |
 | `unread-mark.scenario` | a turn that reaches its gate while you are on another tab marks the thread; looking clears the mark and not the gate | `NATIVE-AGENTS.md` §3.3, §6.1 |
 | `unread-mark-survives-a-reconnect.scenario` | a thread read before a daemon restart remains read after reconnect through its persisted installation cursor | `NATIVE-AGENTS.md` §3.3, §10 |
+| `closed-tab-survives-a-daemon-restart.scenario` | a closed top-level thread stays hidden across a daemon restart and remains reopenable from `AGENTS` | `NATIVE-AGENTS.md` §2, §10 |
 | `prefix-inside-a-thread.scenario` | agent controls plus `^s 1`–`9`, `^s Tab`, `^s w`, and `^s s` are bound in an agent tab while an unknown second key is swallowed | `KEYMAP.md` §Shadowing, §Native agent thread |
 | `turn-cut-by-a-daemon-restart.scenario` | a gated running turn is cut off and settled after restart, then resumes lazily on the next send | `NATIVE-AGENTS.md` §3.3, §8, §9.2 |
 | `scroll-wheel.scenario` | two fixture turns complete; wheel input moves up and back through the transcript without crashing | `NATIVE-AGENTS.md` §5 |

@@ -112,6 +112,7 @@ impl Services {
     ) -> DaemonResult<ResponseBody> {
         match body {
             RequestBody::AgentSeenCursors => Ok(ResponseBody::AgentSeenCursors(Vec::new())),
+            RequestBody::AgentClosedThreads => Ok(ResponseBody::AgentClosedThreads(Vec::new())),
             RequestBody::AgentThreadList => self.agent_response(self.agents.list().await),
             RequestBody::AgentThreadCreate {
                 worktree,
@@ -148,6 +149,9 @@ impl Services {
             }
             RequestBody::AgentThreadClose { thread } => {
                 self.agent_response(self.agents.close(thread).await)
+            }
+            RequestBody::AgentThreadReopen { thread } => {
+                self.agent_response(self.agents.reopen(thread).await)
             }
             RequestBody::AgentSend { thread, input } => {
                 self.agent_response(self.agents.send(thread, input).await)
