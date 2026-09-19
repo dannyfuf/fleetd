@@ -498,12 +498,6 @@ pub mod filter {
             CursorDown,
             /// `ctrl-p` / `↑` — move the list cursor up while still typing.
             CursorUp,
-            /// `Backspace` — delete the character before the caret.
-            Backspace,
-            /// `ctrl-w` — delete the word before the caret.
-            DeleteWord,
-            /// `ctrl-u` — clear the query.
-            Clear,
         ]
     );
 }
@@ -522,12 +516,6 @@ pub mod palette {
             CursorDown,
             /// `ctrl-p` / `↑` — move to the previous row.
             CursorUp,
-            /// `Backspace` — delete the character before the caret.
-            Backspace,
-            /// `ctrl-w` — delete the word before the caret.
-            DeleteWord,
-            /// `ctrl-u` — clear the query.
-            Clear,
         ]
     );
 }

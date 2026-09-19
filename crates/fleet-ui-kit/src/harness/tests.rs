@@ -127,7 +127,9 @@ fn the_app_frame_is_the_frame_boundary(cx: &mut TestAppContext) {
 /// A view over the kit components that own a frozen target name, so each one renders inside a
 /// real window: several of them reach for view-scoped window state and cannot be drawn as a
 /// bare element.
-struct FrozenTargets;
+struct FrozenTargets {
+    palette_query: gpui::Entity<crate::components::TextInput>,
+}
 
 impl gpui::Render for FrozenTargets {
     fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
@@ -150,10 +152,12 @@ impl gpui::Render for FrozenTargets {
                     .show_plus(false)
                     .agents_from(2),
                 )
-                .child(Palette::new("wo").section(PaletteSection::new(
-                    PaletteSectionKind::Go,
-                    [PaletteRow::new("Worktrees"), PaletteRow::new("Board")],
-                )))
+                .child(
+                    Palette::new(self.palette_query.clone()).section(PaletteSection::new(
+                        PaletteSectionKind::Go,
+                        [PaletteRow::new("Worktrees"), PaletteRow::new("Board")],
+                    )),
+                )
                 .child(
                     SegmentedTabs::new([
                         SegmentedTab::new("mine", 2),
@@ -179,8 +183,13 @@ fn the_kit_paints_the_frozen_component_targets(cx: &mut TestAppContext) {
     set_recording(true);
     cx.update(|cx| cx.set_global(Theme::dark()));
     let window = cx.update(|cx| {
-        cx.open_window(Default::default(), |_, cx| cx.new(|_| FrozenTargets))
-            .expect("test window")
+        cx.open_window(Default::default(), |_, cx| {
+            let palette_query = cx.new(|cx| {
+                crate::components::TextInput::new(crate::components::InputMode::SingleLine, cx)
+            });
+            cx.new(|_| FrozenTargets { palette_query })
+        })
+        .expect("test window")
     });
     let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
     cx.run_until_parked();

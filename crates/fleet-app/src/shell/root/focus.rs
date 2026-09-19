@@ -521,6 +521,11 @@ impl Shell {
         if let Some(input) = crate::dialogs::focused_input(&self.state, cx) {
             return Some(input);
         }
+        if hub_filter_owns_keys(self.state.read(cx)) {
+            // §3.10's filter is drawn in the pane header of whichever Hub pane has focus, so
+            // one editor serves the rail, the worktrees list and the PR screen.
+            return Some(self.hub.filter_focus_handle(cx));
+        }
         let state = self.state.read(cx);
         if state.overlay.is_none()
             && state.agent_popup.is_none()
@@ -534,7 +539,8 @@ impl Shell {
         {
             return Some(self.hub.board_filter_focus_handle(cx));
         }
-        // Future migrated Hub filters, palette editors, and dialog inputs join this ownership gate.
+        // The remaining dialogs join this ownership gate as they migrate off the presentational
+        // fields.
         None
     }
 }
@@ -549,13 +555,33 @@ enum FocusTarget {
     AgentThread,
 }
 
-fn focus_target(state: &AppState) -> FocusTarget {
-    let splash = state.doctor.is_none()
+/// Whether §3.10's Hub filter editor is mounted and owns the keyboard.
+///
+/// The editor is drawn in the pane header, so it exists only while the Hub body is what the
+/// frame is showing: a splash, the first-run card and the doctor report all replace that body
+/// while `Overlay::Filter` may still be set, and focus must stay on the surface that is there.
+fn hub_filter_owns_keys(state: &AppState) -> bool {
+    matches!(state.overlay, Some(crate::state::Overlay::Filter))
+        && matches!(state.screen, Screen::Hub { .. })
+        && !shows_splash(state)
+        && state.doctor.is_none()
+        && !state.is_first_run()
+}
+
+/// Whether §3.12's startup or failure surface replaces the body.
+fn shows_splash(state: &AppState) -> bool {
+    state.doctor.is_none()
         && matches!(
             state.daemon,
             DaemonLink::Starting | DaemonLink::Failed { .. }
-        );
-    if state.overlay.is_some() {
+        )
+}
+
+fn focus_target(state: &AppState) -> FocusTarget {
+    let splash = shows_splash(state);
+    // §3.10's filter has no overlay layer of its own: its editor is part of the Hub body, and
+    // when that body is not showing the surface behind it keeps the keyboard.
+    if state.overlay.is_some() && !matches!(state.overlay, Some(crate::state::Overlay::Filter)) {
         FocusTarget::Overlay
     } else if !splash && state.agent_popup.is_some() {
         FocusTarget::Agent

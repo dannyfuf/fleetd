@@ -29,7 +29,7 @@ use fleet_git::{
     ResetMode, StashOptions,
 };
 use fleet_ui_kit::prelude::*;
-use fleet_ui_kit::{AppFrame, LegacyTextInput, Toast};
+use fleet_ui_kit::{AppFrame, InputMode, TextInput, Toast};
 use gpui::{
     AnyElement, App, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, KeyDownEvent,
     Pixels, Render, Size, Task, UniformListScrollHandle, Window, canvas, div,
@@ -112,7 +112,7 @@ pub struct Lazygit {
     _theme_subscription: gpui::Subscription,
     _focus_subscription: Option<gpui::Subscription>,
     overlay_focused: bool,
-    pub(crate) prompt_input: Option<Entity<LegacyTextInput>>,
+    pub(crate) prompt_input: Option<Entity<TextInput>>,
     pending_prompt: Option<String>,
     last_error_label: Option<String>,
     pub(crate) help_context: Option<Vec<&'static str>>,

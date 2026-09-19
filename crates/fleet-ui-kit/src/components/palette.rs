@@ -1,7 +1,7 @@
 //! `Palette` — sectioned `GO` / `DO` / `CONTEXT` results with right-aligned key hints.
 //!
-//! §3.9. The palette is a [`TextField`] over a stack of [`FuzzyList`]s, one per section, sharing
-//! a single flat cursor. Three rules are structural rather than stylistic:
+//! §3.9. The palette is a live query editor over a stack of [`FuzzyList`]s, one per section,
+//! sharing a single flat cursor. Three rules are structural rather than stylistic:
 //!
 //! * `GO` (objects) always comes **first**, so a session is reachable from inside another
 //!   session with `ctrl-s s : pay fix ⏎` and no list scan. The order is normalised on render,
@@ -15,14 +15,18 @@
 //! Ranking, matching and the flat cursor belong to the caller; [`Palette::shown`] and
 //! [`Palette::flat_len`] give it the two numbers it needs to move that cursor with
 //! [`FuzzyList::next_cursor`] / [`FuzzyList::prev_cursor`] on `ctrl-n` / `ctrl-p`.
+//!
+//! The query is a [`TextInput`] the caller owns, built embedded
+//! ([`TextInput::set_embedded`]) because the 44 px query row below is the palette's own chrome
+//! and a framed field inside it would draw a second box.
 
-use gpui::{AnyElement, App, SharedString, Window, div, prelude::*};
+use gpui::{AnyElement, App, Entity, SharedString, Window, div, prelude::*};
 
 use crate::{
-    components::{FuzzyItem, FuzzyList, KeyHintRow, TextField},
+    components::{FuzzyItem, FuzzyList, KeyHintRow, TextInput},
     harness::HarnessTargetExt as _,
     icons::Icon,
-    text::Text,
+    text::{Text, TextRole, styled_with},
     theme::ActiveTheme,
     tone::Tone,
 };
@@ -171,8 +175,7 @@ impl PaletteSection {
 /// The command palette card. Wrap it in an [`super::Overlay`].
 #[derive(IntoElement)]
 pub struct Palette {
-    query: SharedString,
-    caret: Option<usize>,
+    input: Entity<TextInput>,
     sections: Vec<PaletteSection>,
     cursor: usize,
     cap: usize,
@@ -181,11 +184,10 @@ pub struct Palette {
 }
 
 impl Palette {
-    /// A palette over ranked sections.
-    pub fn new(query: impl Into<SharedString>) -> Self {
+    /// A palette over ranked sections, editing through `input`.
+    pub fn new(input: Entity<TextInput>) -> Self {
         Self {
-            query: query.into(),
-            caret: None,
+            input,
             sections: Vec::new(),
             cursor: 0,
             cap: 10,
@@ -197,12 +199,6 @@ impl Palette {
     /// Append a section. Order is normalised on render.
     pub fn section(mut self, section: PaletteSection) -> Self {
         self.sections.push(section);
-        self
-    }
-
-    /// Caret position in characters. Defaults to the end of the query.
-    pub fn caret(mut self, caret: usize) -> Self {
-        self.caret = Some(caret);
         self
     }
 
@@ -336,13 +332,32 @@ impl RenderOnce for Palette {
                         // so it is the one field allowed to drop the 18 px status slot.
                         // §3.9's prompt is `:` — the key that opens the palette. A `command`
                         // glyph there advertises `⌘`, which Fleet binds nowhere.
-                        TextField::new(self.query)
-                            .placeholder("go to, or do")
-                            .prefix(":")
-                            .focused(true)
-                            .height(theme.metrics.palette_input_h)
-                            .hide_status_line(true)
-                            .when_some(self.caret, TextField::caret)
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(theme.space.sm)
+                            .h(theme.metrics.palette_input_h)
+                            .w_full()
+                            .px(theme.space.md)
+                            .rounded(theme.radii.sm)
+                            .bg(theme.colors.bg)
+                            // The query owns the keyboard for as long as the palette is open,
+                            // so the box is always drawn in its focused state.
+                            .border(theme.metrics.hairline)
+                            .border_color(theme.colors.focus_ring)
+                            .overflow_hidden()
+                            .child(Text::data(":").color(theme.colors.text_secondary))
+                            .child(
+                                styled_with(div(), TextRole::Ui.style(&theme), &theme)
+                                    .flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .items_center()
+                                    .h(TextRole::Ui.style(&theme).line_height)
+                                    .overflow_hidden()
+                                    .text_color(theme.colors.text)
+                                    .child(self.input),
+                            )
                             .harness_target("palette.input"),
                     ),
             )
@@ -374,14 +389,20 @@ impl RenderOnce for Palette {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::components::InputMode;
 
     fn section(kind: PaletteSectionKind, n: usize) -> PaletteSection {
         PaletteSection::new(kind, (0..n).map(|i| PaletteRow::new(format!("row {i}"))))
     }
 
-    #[test]
-    fn the_cap_bounds_the_whole_palette_not_each_section() {
-        let palette = Palette::new("pay")
+    fn palette(cx: &mut gpui::TestAppContext) -> Palette {
+        let input = cx.new(|cx| TextInput::new(InputMode::SingleLine, cx));
+        Palette::new(input)
+    }
+
+    #[gpui::test]
+    fn the_cap_bounds_the_whole_palette_not_each_section(cx: &mut gpui::TestAppContext) {
+        let palette = palette(cx)
             .section(section(PaletteSectionKind::Go, 6))
             .section(section(PaletteSectionKind::Do, 8))
             .section(section(PaletteSectionKind::Context, 3));
@@ -389,9 +410,9 @@ mod tests {
         assert_eq!(palette.shown(), 10);
     }
 
-    #[test]
-    fn a_short_palette_shows_everything() {
-        let palette = Palette::new("").section(section(PaletteSectionKind::Do, 3));
+    #[gpui::test]
+    fn a_short_palette_shows_everything(cx: &mut gpui::TestAppContext) {
+        let palette = palette(cx).section(section(PaletteSectionKind::Do, 3));
         assert_eq!(palette.shown(), 3);
     }
 

@@ -179,7 +179,7 @@ is always `Fleet`.
 | Workspace, `fleet://` tab | `Fleet > Workspace > Native`, then the embedded view's own chain (`> Lazygit > Panels > Files`, …) |
 | Workspace, native agent tab | `Fleet > Agent > AgentIdle` \| `AgentWorking` \| `AgentNativeScroll`, or `Fleet > Agent > AgentDecision > AgentPermission` \| `AgentQuestion` \| `AgentPlan` while a gate is open |
 | Floating agent terminal | `Fleet > Agent > Terminal` \| `Prefix` \| `Scroll` |
-| Filter / Palette / Jobs | `Fleet > Filter` (`> BoardFilter` on the board) \| `Palette` \| `Jobs` |
+| Filter / Palette / Jobs | `Fleet > Filter` (`> BoardFilter` on the board) \| `Palette` \| `Jobs`, then the focused editor's `FleetTextInput` context for the first two |
 | Dialog browsing | `Fleet > Dialog > CardDetail` \| `BoardSettings` \| `CardPicker` \| `Settings` \| `Create` (or the dialog's other stable name) |
 | Dialog text editing | `Fleet > Dialog > CardDetailEditing` \| `BoardSettingsEditing` \| `SettingsEditing` \| `CreateEditing`, then the focused component's `FleetTextInput` context |
 | Daemon banner showing (§3.12 C) | the base chain **plus** `Daemon > Banner`, innermost |
@@ -189,6 +189,12 @@ is always `Fleet`.
 Two consequences worth knowing:
 
 * A deeper context wins, so `Hub > Prs`'s `l` (next PR tab) beats `Hub`'s `l` (next pane).
+* **`Overlay::Filter` mounts no overlay layer.** §3.10 replaces the pane header in place, so the
+  Hub's filter editor is part of the Hub body and the `Filter` key context wraps that body
+  rather than a layer above it — the arrangement the board filter already had. The shell's
+  focus reconciliation hands the keyboard to that editor, and the container keys the editor does
+  not own (`ctrl-n` / `ctrl-p`, `Enter`) are listeners on the Hub body; `Esc` is the shell's,
+  and it names `body_focus` explicitly because the editor is *inside* that handle's subtree.
 * **Except for the card picker, a browsing word never remains in the chain while that dialog is
   editing text.** Bare-letter and caret-collision rows live only on `CardDetail`, `BoardSettings`,
   `Settings` and `Create`; their `*Editing` partners carry only container actions such as confirm, cancel,
@@ -792,6 +798,12 @@ Escape. `DialogHost` owns these public fields:
 | `card_create` + `card_create_title` / `card_create_description` | `card_create::CardCreateState` + two `Option<Entity<TextInput>>` fields | board id, focused field, save generation and error; submit reads both live inputs |
 | `card_picker` + `card_picker_input` | `card_picker::CardPickerState` + `Option<Entity<TextInput>>` | kind, card id, row cursor, selected values, return flags and error; `Changed` prepares filtered rows |
 | `board_settings` + `board_settings_input` | `board_settings::BoardSettingsState` + `Option<Entity<TextInput>>` | serializable board values, backend rows, focused row and error; a text-row input is materialized on focus and mirrors through `Changed` |
+
+`DialogHost.palette + palette_input` is the §3.9 query: `PaletteState.query` is a `String`
+mirrored from a live single-line `TextInput` created when the palette opens and dropped with the
+rest of the drafts when it closes, and its `Changed` event re-ranks the `GO` / `DO` / `CONTEXT`
+rows and returns the flat cursor to the top. `dialogs::focused_input` reports it, so the shell's
+focus reconciliation treats the palette exactly like a migrated dialog.
 
 `DialogHost.behind_palette` names the dialog the open palette replaced — the palette does not
 stack on a dialog, and a `Card detail:` palette row reopens that dialog instead of reseeding it

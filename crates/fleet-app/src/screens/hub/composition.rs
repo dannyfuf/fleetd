@@ -34,7 +34,7 @@ impl HubScreen {
         };
         let tabs = hub_tabs(state.read(cx));
 
-        div()
+        let root = div()
             .when(!on_board, |el| el.track_focus(focus))
             .size_full()
             .flex()
@@ -114,8 +114,11 @@ impl HubScreen {
             .on_action(ctx.act(|ctx, _: &prs::Inspect, _w, cx| ctx.inspect_pr(cx)))
             .on_action(ctx.act(|ctx, _: &prs::CopyUrl, _w, cx| ctx.copy_pr_url(cx)))
             .on_action(ctx.act(|ctx, _: &prs::Refresh, _w, cx| ctx.fetch_pull_requests(true, cx)))
-            .on_action(ctx.act(|ctx, _: &prs::Back, _w, cx| ctx.back_to_worktrees(cx)))
-            .into_any_element()
+            .on_action(ctx.act(|ctx, _: &prs::Back, _w, cx| ctx.back_to_worktrees(cx)));
+        // While the filter input owns the keyboard the chain is `Filter`, so the keys the
+        // *container* keeps — the list cursor and `Enter` — hang off the same body the editor
+        // is drawn in (§3.10).
+        dialogs::filter::key_owner(root, state, ctx).into_any_element()
     }
 
     /// The rail, the list or the PR screen, and the detail panel.
@@ -157,7 +160,7 @@ impl HubScreen {
             RailProps {
                 header_override: (state.filter.editing && state.hub_pane == HubPane::Repos).then(
                     || {
-                        dialogs::filter::bar(state)
+                        dialogs::filter::bar(state, self.filter_input.clone())
                             .harness_target("filter.input")
                             .into_any_element()
                     },
@@ -192,7 +195,7 @@ impl HubScreen {
                 ListProps {
                     header_override: (state.filter.editing && state.hub_pane == HubPane::List)
                         .then(|| {
-                            dialogs::filter::bar(state)
+                            dialogs::filter::bar(state, self.filter_input.clone())
                                 .harness_target("filter.input")
                                 .into_any_element()
                         }),
@@ -219,7 +222,7 @@ impl HubScreen {
                     PrScreenProps {
                         header_override: (state.filter.editing && state.hub_pane == HubPane::List)
                             .then(|| {
-                                dialogs::filter::bar(state)
+                                dialogs::filter::bar(state, self.filter_input.clone())
                                     .harness_target("filter.input")
                                     .into_any_element()
                             }),

@@ -742,7 +742,9 @@ horizontally instead. Both use the border ladder danger → focus → rest.
 `insert(text, cx)` (filtered user-style insertion that replaces the selection in one undo step),
 `select_all(cx)`, `move_to_end(cx)`, `set_placeholder(value, cx)`, `set_label(option, cx)`,
 `set_icon(option, cx)`, `set_mono(bool, cx)`, `set_preview(option, cx)`,
-`set_hide_status_line(bool, cx)`, `set_read_only(bool, cx)`, `set_invalid(option, cx)`,
+`set_hide_status_line(bool, cx)`, `set_embedded(bool, cx)` (draw the editing surface alone, for
+a surface that already owns the frame around it — the filter bar's 30 px header row and the
+palette's 44 px query row), `set_read_only(bool, cx)`, `set_invalid(option, cx)`,
 `set_filter(option, cx)`, `set_enter_inserts_newline(bool, cx)`, `is_empty()`, `is_composing()`, `is_read_only()`, `is_invalid()`,
 `has_selection()`, `focus_handle()`, `focus(window, cx)`, `mode()`, `buffer()`, and
 `submit(cx)`, plus `move_vertical(down, select, cx) -> bool` for owners that route a claimed
@@ -758,6 +760,11 @@ SelectToStart, SelectToEnd, SelectAll, Backspace, Delete, DeleteWordBackward,
 DeleteWordForward, DeleteToLineStart, DeleteToLineEnd, Newline, Copy, Cut, Paste, Undo, Redo}`.
 **Key context.** `TEXT_INPUT_KEY_CONTEXT` is `FleetTextInput`; its `mode` attribute is
 `single_line` or `multiline`, and `enter` is `newline` (the default) or `owner`.
+**Bindings.** `text_input::default_bindings()` is the whole `FleetTextInput` table as
+`Vec<KeyBinding>`, for an app with no key table of its own: the galleries, `fleet-lazygit`
+standalone and the kit's tests all bind it. `fleet-app` states the same rows inside its
+`key_table!`, because that macro also feeds the Help overlay and the documentation-drift test,
+and a test there asserts the two agree.
 **States.** single-line empty with placeholder · filled · focused with caret · selection ·
 marked IME text · invalid with message · read-only · numeric-filtered · label with leading
 icon; multi-line at minimum rows · grown to maximum rows with scroll and a multi-line selection.
@@ -860,12 +867,14 @@ than completeness, and the footer says `9 of 63`.
 
 #### `FilterBar`
 **Purpose.** Narrow a list without moving it.
-**API.** `FilterBar::new(query, shown, total).focused(bool).caret(usize).placeholder(..)`;
-`.is_empty_result()`, `.count_tone()`.
-**States.** typing (caret, `esc` hint) · exited but retained (rendered by
-`PaneHeader::filter_chip`) · no match (`shown/total` turns amber).
-**Keyboard.** printable · `Backspace` · `ctrl-w` · `ctrl-u` · `ctrl-n`/`↓` and `ctrl-p`/`↑` move
-the **list** cursor while still typing · `Enter` opens the selected row · first `Esc` leaves the
+**API.** `FilterBar::new(input: Entity<TextInput>, shown, total)`; `.query_slot()`,
+`.is_empty_result()`, `.count_tone()`. The owner builds the editor **embedded**
+(`set_embedded(true, cx)`) so it fits the 30 px header row, and sets its placeholder.
+**States.** typing (caret, `esc` hint) · no match (`shown/total` turns amber). "Exited but
+retained" is a state of `PaneHeader::filter_chip`, not of this component: the bar is drawn only
+while the editor owns the keyboard.
+**Keyboard.** editing is the `FleetTextInput` table; `ctrl-n`/`↓` and `ctrl-p`/`↑` move the
+**list** cursor while still typing · `Enter` opens the selected row · first `Esc` leaves the
 input keeping the filter · second `Esc` clears it. `Esc` **never** quits the app.
 **Usage rule.** Pass it into `PaneHeader::query_slot`, so it replaces the header in the same 30 px
 row. A hidden active filter is the classic "where did my rows go" bug, so always show the
@@ -935,10 +944,12 @@ and name the irreversibility.
 **Purpose.** Jump to anything by name, or do the thing whose key you do not remember.
 **Anatomy.** 640 px card at y = 120 · 44 px input · default sections `GO` → `DO` → `CONTEXT`,
 or one seeded `AGENTS` section · ≤ 10 rows of 34 px · footer `9 of 63 · ⏎ run · esc cancel`.
-**API.** `Palette::new(query).section(PaletteSection::new(PaletteSectionKind::Go, rows))
-.cursor(usize).caret(usize).cap(usize).total(usize).empty(..)`; `.shown()`, `.flat_len()`;
+**API.** `Palette::new(input: Entity<TextInput>).section(PaletteSection::new(PaletteSectionKind::Go, rows))
+.cursor(usize).cap(usize).total(usize).empty(..)`; `.shown()`, `.flat_len()`;
 `PaletteSection::{len, is_empty}`;
 `PaletteRow::new(label).icon(Icon).leading(..).detail(..).key(..).destructive(bool).matches(..)`.
+The owner builds the query editor **embedded** (`set_embedded(true, cx)`) and sets its
+placeholder: the 44 px row with its `:` prompt is the palette's own chrome.
 `PaletteSectionKind::Agents` titles the seeded section. Its five row slots are attention mark,
 provider/title label, worktree detail, child/caller relationship, and optional strip-index key.
 **Usage rule.** `GO` (objects) always first — that is what makes a session reachable from inside

@@ -50,6 +50,9 @@ pub(crate) struct DialogHost {
     pub(super) board_settings_input_subscription: Option<Subscription>,
     /// Whether the palette's draft has been seeded for the currently open palette.
     pub palette_open: bool,
+    /// The palette's query editor, alive for exactly as long as the palette is open.
+    pub(super) palette_input: Option<Entity<TextInput>>,
+    pub(super) palette_input_subscription: Option<Subscription>,
     pub create: create_worktree::CreateState,
     pub clone: clone_repo::CloneState,
     pub confirm: confirm::ConfirmState,
@@ -390,6 +393,10 @@ fn dialog_key_context(dialog: &Dialogs, host: &DialogHost) -> &'static str {
 fn focused_input_entity(state: &Entity<AppState>, cx: &mut App) -> Option<Entity<TextInput>> {
     let dialog = match state.read(cx).overlay.as_ref() {
         Some(Overlay::Dialog(dialog)) => dialog.clone(),
+        // §3.9's query owns the keyboard for the whole life of the palette.
+        Some(Overlay::Palette) => {
+            return read_host(state, cx, |host, _| host.palette_input.clone());
+        }
         _ => return None,
     };
     read_host(state, cx, |host, _| {
@@ -407,7 +414,7 @@ fn focused_input_entity(state: &Entity<AppState>, cx: &mut App) -> Option<Entity
     })
 }
 
-/// The live input that should receive focus for the current board dialog.
+/// The live input that should receive focus for the current dialog or the palette.
 pub(crate) fn focused_input(state: &Entity<AppState>, cx: &mut App) -> Option<FocusHandle> {
     focused_input_entity(state, cx).map(|input| input.read(cx).focus_handle())
 }
@@ -514,6 +521,8 @@ fn close_with(state: &Entity<AppState>, preserve_card_detail: bool, cx: &mut App
         host.card_picker_input_subscription = None;
         host.board_settings_input = None;
         host.board_settings_input_subscription = None;
+        host.palette_input = None;
+        host.palette_input_subscription = None;
         if !preserve_card_detail {
             host.card_detail_input = None;
             host.card_detail_input_subscription = None;

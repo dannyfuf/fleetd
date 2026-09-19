@@ -47,6 +47,12 @@
   - split into two sequential runs: (a) Hub filter, palette, kit `FilterBar`/`Palette`, lazygit
     overlay; (b) create worktree, clone, context, rename, hooks, settings, `NumberField`, delete
     `dialogs/input.rs` and the old action families.
+  - (a) verified: `cargo test -p fleet-ui-kit` (383), `cargo test -p fleet-lazygit` (135),
+    `cargo test -p fleet-app` (874 lib, 0 failed), `make lint`, `make harness` 59 of 59 (agent run
+    and an independent orchestrator run). `filter::`/`palette::` editing families deleted.
+    `Overlay::Filter` no longer mounts an overlay layer: the editor lives in the pane header, so
+    `Filter` wraps the Hub body (APP-CONTRACTS §3). Fixed en route: Hub filter `ctrl-n`/`ctrl-p`
+    never moved the selection anchor. `TextInput::set_embedded` is public for 30/44 px rows.
 - [ ] P3-T07 — Delete the old input families and record the decision
 - [ ] P3-T08 — Drive typing, selection and undo in the harness
 - [x] P3-T09 — Soft-wrap the multi-line mode of `TextInput`
@@ -116,6 +122,9 @@
   `tab`/`shift-tab` under `Filter > BoardFilter`. Card picker query gets a `' '` filter so `space`
   stays the toggle. Card detail creates its input when an edit begins and drops it when it ends;
   `tab` inserts a tab through a new `TextInput::insert`.
+- 2026-09-19 — Executor switch: Codex hit its usage limit (reset Sep 22) at the start of P3-T06a,
+  so P3-T06 onward runs on an Opus agent on the host, which can also run the socket tests and
+  the GUI harness itself.
 - 2026-09-18 — Decisions fixed at planning time: one engine seeded from the composer buffer; inputs are live
   entities owned by the surface; bytes inside, UTF-16 at the IME boundary, graphemes for motion; word and line rules
   as written in the plan; key-ownership rule via a browsing/editing context word (board-filter precedent), not

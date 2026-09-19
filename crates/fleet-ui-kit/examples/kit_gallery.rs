@@ -17,7 +17,7 @@ const LAYOUT: support::layout::GalleryLayout = support::layout::GalleryLayout {
 };
 use fleet_ui_kit::prelude::*;
 use gpui::{
-    AnyElement, App, Context, FocusHandle, Focusable, KeyBinding, SharedString,
+    AnyElement, App, Context, Entity, FocusHandle, Focusable, KeyBinding, SharedString,
     UniformListScrollHandle, Window, actions, div, px,
 };
 
@@ -27,6 +27,9 @@ struct Gallery {
     focus_handle: FocusHandle,
     list_scroll: UniformListScrollHandle,
     cursor: usize,
+    /// The filter bar and the palette both edit a live input, so the gallery owns one each.
+    filter_query: Entity<TextInput>,
+    palette_query: Entity<TextInput>,
 }
 
 impl Gallery {
@@ -35,6 +38,8 @@ impl Gallery {
             focus_handle: cx.focus_handle(),
             list_scroll: UniformListScrollHandle::new(),
             cursor: 1,
+            filter_query: demo_query(cx, "rut"),
+            palette_query: demo_query(cx, "pay fix"),
         }
     }
 
@@ -678,7 +683,18 @@ fn rows_section(cx: &mut App, cursor: usize, scroll: &UniformListScrollHandle) -
     LAYOUT.section("rows and lists", &t, children)
 }
 
-fn structure_section(cx: &mut App) -> AnyElement {
+/// An embedded single-line editor seeded with the text a static demo card shows.
+fn demo_query(cx: &mut Context<Gallery>, text: &str) -> Entity<TextInput> {
+    let text = text.to_owned();
+    cx.new(|cx| {
+        let mut input = TextInput::new(InputMode::SingleLine, cx);
+        input.set_embedded(true, cx);
+        input.set_text(text, cx);
+        input
+    })
+}
+
+fn structure_section(cx: &mut App, filter_query: Entity<TextInput>) -> AnyElement {
     let t = cx.theme().clone();
     let pane = box_of(
         &t,
@@ -738,7 +754,7 @@ fn structure_section(cx: &mut App) -> AnyElement {
         PaneHeader::new("worktrees")
             .shown(2)
             .total(12)
-            .query_slot(FilterBar::new("rut", 2, 12).query_slot()),
+            .query_slot(FilterBar::new(filter_query, 2, 12).query_slot()),
     );
     let retained = box_of(
         &t,
@@ -1233,7 +1249,7 @@ fn input_section(cx: &mut App) -> AnyElement {
     LAYOUT.section("input", &t, children)
 }
 
-fn overlays_section(cx: &mut App) -> AnyElement {
+fn overlays_section(cx: &mut App, palette_query: Entity<TextInput>) -> AnyElement {
     let t = cx.theme().clone();
     let dialog = box_of(
         &t,
@@ -1295,7 +1311,7 @@ fn overlays_section(cx: &mut App) -> AnyElement {
         &t,
         px(320.0),
         Overlay::new().top(px(12.0)).width(px(560.0)).content(
-            Palette::new("pay fix")
+            Palette::new(palette_query)
                 .total(63)
                 .section(PaletteSection::new(
                     PaletteSectionKind::Go,
@@ -1602,6 +1618,8 @@ impl Render for Gallery {
         let pad = cx.theme().space.xl;
         let cursor = self.cursor;
         let scroll = self.list_scroll.clone();
+        let filter_query = self.filter_query.clone();
+        let palette_query = self.palette_query.clone();
 
         let sections = vec![
             colors_section(cx),
@@ -1610,11 +1628,11 @@ impl Render for Gallery {
             glyphs_section(cx),
             facts_section(cx),
             rows_section(cx, cursor, &scroll),
-            structure_section(cx),
+            structure_section(cx, filter_query),
             terminal_section(cx),
             input_section(cx),
             board_section(cx),
-            overlays_section(cx),
+            overlays_section(cx, palette_query),
         ];
 
         AppFrame::new()

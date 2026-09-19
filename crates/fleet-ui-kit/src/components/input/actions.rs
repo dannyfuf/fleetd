@@ -79,3 +79,75 @@ gpui::actions!(
         Redo,
     ]
 );
+
+/// The key context of a [`super::TextInput`] in multi-line mode.
+const MULTILINE_CONTEXT: &str = "FleetTextInput && mode == multiline";
+/// The key context of a multi-line [`super::TextInput`] whose owner left `enter` to the text.
+const MULTILINE_NEWLINE_CONTEXT: &str = "FleetTextInput && mode == multiline && enter == newline";
+
+/// Every binding a [`super::TextInput`] needs, for an app that has no key table of its own.
+///
+/// This is the whole editing vocabulary of `docs/KEYMAP.md`'s `FleetTextInput` table, in one
+/// place, so the gallery, `fleet-lazygit` and the kit's own tests cannot drift from each other
+/// or from the app. `fleet-app` re-states the same rows inside its `key_table!`, because that
+/// macro also feeds the Help overlay and the documentation-drift test; a test there asserts the
+/// two agree.
+///
+/// Nothing here belongs to a container: `enter`, `escape`, `tab` and every navigation key of the
+/// surface around the editor stay unbound, and `ctrl-v` is never bound at all — it belongs to
+/// the shells Fleet hosts.
+#[must_use]
+pub fn default_bindings() -> Vec<gpui::KeyBinding> {
+    let context = Some(super::TEXT_INPUT_KEY_CONTEXT);
+    vec![
+        gpui::KeyBinding::new("left", MoveLeft, context),
+        gpui::KeyBinding::new("right", MoveRight, context),
+        gpui::KeyBinding::new("alt-left", MoveWordLeft, context),
+        gpui::KeyBinding::new("alt-right", MoveWordRight, context),
+        gpui::KeyBinding::new("home", MoveToRowStart, context),
+        gpui::KeyBinding::new("end", MoveToRowEnd, context),
+        gpui::KeyBinding::new("cmd-left", MoveToLineStart, context),
+        gpui::KeyBinding::new("cmd-right", MoveToLineEnd, context),
+        gpui::KeyBinding::new("up", MoveUp, context),
+        gpui::KeyBinding::new("down", MoveDown, context),
+        gpui::KeyBinding::new("cmd-up", MoveToStart, context),
+        gpui::KeyBinding::new("cmd-down", MoveToEnd, context),
+        gpui::KeyBinding::new("shift-left", SelectLeft, context),
+        gpui::KeyBinding::new("shift-right", SelectRight, context),
+        gpui::KeyBinding::new("alt-shift-left", SelectWordLeft, context),
+        gpui::KeyBinding::new("alt-shift-right", SelectWordRight, context),
+        gpui::KeyBinding::new("shift-home", SelectToRowStart, context),
+        gpui::KeyBinding::new("shift-end", SelectToRowEnd, context),
+        gpui::KeyBinding::new("cmd-shift-left", SelectToLineStart, context),
+        gpui::KeyBinding::new("cmd-shift-right", SelectToLineEnd, context),
+        gpui::KeyBinding::new("shift-up", SelectUp, context),
+        gpui::KeyBinding::new("shift-down", SelectDown, context),
+        gpui::KeyBinding::new("cmd-shift-up", SelectToStart, context),
+        gpui::KeyBinding::new("cmd-shift-down", SelectToEnd, context),
+        gpui::KeyBinding::new("ctrl-a", MoveToLineStart, context),
+        gpui::KeyBinding::new("ctrl-e", MoveToLineEnd, context),
+        gpui::KeyBinding::new("ctrl-shift-a", SelectToLineStart, context),
+        gpui::KeyBinding::new("ctrl-shift-e", SelectToLineEnd, context),
+        gpui::KeyBinding::new("ctrl-b", MoveLeft, context),
+        gpui::KeyBinding::new("ctrl-f", MoveRight, context),
+        gpui::KeyBinding::new("backspace", Backspace, context),
+        gpui::KeyBinding::new("delete", Delete, context),
+        gpui::KeyBinding::new("alt-backspace", DeleteWordBackward, context),
+        gpui::KeyBinding::new("alt-delete", DeleteWordForward, context),
+        gpui::KeyBinding::new("cmd-backspace", DeleteToLineStart, context),
+        gpui::KeyBinding::new("cmd-delete", DeleteToLineEnd, context),
+        gpui::KeyBinding::new("ctrl-w", DeleteWordBackward, context),
+        gpui::KeyBinding::new("ctrl-u", DeleteToLineStart, context),
+        gpui::KeyBinding::new("ctrl-k", DeleteToLineEnd, context),
+        gpui::KeyBinding::new("ctrl-h", Backspace, context),
+        gpui::KeyBinding::new("ctrl-d", Delete, context),
+        gpui::KeyBinding::new("cmd-a", SelectAll, context),
+        gpui::KeyBinding::new("cmd-c", Copy, context),
+        gpui::KeyBinding::new("cmd-x", Cut, context),
+        gpui::KeyBinding::new("cmd-v", Paste, context),
+        gpui::KeyBinding::new("cmd-z", Undo, context),
+        gpui::KeyBinding::new("cmd-shift-z", Redo, context),
+        gpui::KeyBinding::new("enter", Newline, Some(MULTILINE_NEWLINE_CONTEXT)),
+        gpui::KeyBinding::new("shift-enter", Newline, Some(MULTILINE_CONTEXT)),
+    ]
+}

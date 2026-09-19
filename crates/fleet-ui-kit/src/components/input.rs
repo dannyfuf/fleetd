@@ -261,8 +261,13 @@ impl TextInput {
         }
     }
 
-    /// Render only the editing surface so a crate-owned wrapper can supply its own chrome.
-    pub(crate) fn set_embedded(&mut self, embedded: bool, cx: &mut Context<Self>) {
+    /// Render only the editing surface so the owner can supply its own chrome.
+    ///
+    /// An embedded editor draws no box, no border and no status line: it is one line of text
+    /// with a caret, sized by its text role, for a surface that already owns the frame around
+    /// it — the pane header's filter slot and the palette's query row are both 30-44 px rows
+    /// that a framed field would not fit in.
+    pub fn set_embedded(&mut self, embedded: bool, cx: &mut Context<Self>) {
         if self.embedded != embedded {
             self.embedded = embedded;
             cx.notify();

@@ -93,7 +93,7 @@ impl Shell {
     pub(super) fn open_filter(
         &mut self,
         _: &hub::OpenFilter,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.state.update(cx, |state, cx| {
@@ -101,6 +101,7 @@ impl Shell {
             state.open_overlay(Overlay::Filter);
             cx.notify();
         });
+        self.hub.focus_filter(window, cx);
     }
 
     pub(super) fn cancel(&mut self, _: &fleet::Cancel, _: &mut Window, cx: &mut Context<Self>) {
@@ -114,14 +115,21 @@ impl Shell {
     pub(super) fn filter_escape(
         &mut self,
         _: &filter::Escape,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let was_editing = self.state.read(cx).filter.editing;
         self.state.update(cx, |state, cx| {
             if state.cancel() {
                 cx.notify();
             }
         });
+        if was_editing && !self.state.read(cx).filter.editing {
+            // §3.10 draws the filter editor *inside* the body, so leaving the input is a move
+            // focus reconciliation cannot see: `body_focus` already contains the focused
+            // element. Stage one of the two-stage `Esc` hands the keyboard back by name.
+            window.focus(&self.body_focus, cx);
+        }
     }
 
     pub(super) fn close_palette(

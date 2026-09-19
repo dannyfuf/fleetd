@@ -8,16 +8,17 @@ use fleet_core::{
     sessions::{AgentActivity, SessionKind, SessionState},
 };
 use fleet_proto::{request::RequestBody, snapshot::Snapshot};
-use fleet_ui_kit::{Icon, IconSize, Spinner, StatusDot, Tone, prelude::*};
+use fleet_ui_kit::{
+    Icon, IconSize, InputMode, Spinner, StatusDot, TextInput, TextInputEvent, Tone, prelude::*,
+};
 use gpui::{AnyElement, App, Entity, FocusHandle, Window, div};
 
 use crate::{
     actions::{board, card_detail, fleet, palette as palette_actions},
     bridge::Bridge,
     dialogs::{
-        ConfirmRequest, DialogHost, Dialogs, SessionTransport, clear_all, notify,
-        open_agent_session, open_agent_thread_worktree, open_worktree, request_confirm, step,
-        type_into, with_host,
+        ConfirmRequest, DialogHost, Dialogs, SessionTransport, notify, open_agent_session,
+        open_agent_thread_worktree, open_worktree, request_confirm, step, with_host,
     },
     keymap,
     presentation::{FuzzyQuery, SnapshotIndex, pretty_keys, selected_worktree_id},
@@ -38,8 +39,8 @@ const ATTENTION_MARK_SIZE: f32 = 16.0;
 /// The palette's draft.
 #[derive(Debug, Clone, Default)]
 pub struct PaletteState {
-    /// The query.
-    pub(crate) query: TextFieldState,
+    /// The query, mirrored from the live editor the host owns.
+    pub(crate) query: String,
     /// The flat cursor across all sections.
     pub(crate) cursor: usize,
     rows: std::rc::Rc<[Entry]>,
@@ -1164,23 +1165,29 @@ pub(super) fn render(
     _window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let (query, cursor, rows, total) = {
-        let draft = &host.read(cx).palette;
+    let (query, cursor, rows, total, input) = {
+        let host = host.read(cx);
         (
-            draft.query.clone(),
-            draft.cursor,
-            draft.rows.clone(),
-            draft.total,
+            host.palette.query.clone(),
+            host.palette.cursor,
+            host.palette.rows.clone(),
+            host.palette.total,
+            host.palette_input.clone(),
         )
     };
+    let Some(input) = input else {
+        // `seed` runs before the first paint of an open palette; without its editor there is
+        // nothing to draw and nothing to type into.
+        return div().track_focus(focus).size_full().into_any_element();
+    };
 
-    let windowed = is_session_switcher(query.text()) || is_agents_picker(query.text());
+    let windowed = is_session_switcher(&query) || is_agents_picker(&query);
     let (visible_rows, visible_cursor) = visible_rows(&rows, cursor, windowed);
-    let mut card = fleet_ui_kit::Palette::new(query.text().to_owned())
+    let mut card = fleet_ui_kit::Palette::new(input)
         .cursor(visible_cursor)
         .cap(ROW_CAP)
         .total(total)
-        .empty(format!("Nothing matches \"{}\".", query.text()));
+        .empty(format!("Nothing matches \"{query}\"."));
     for kind in [
         PaletteSectionKind::Go,
         PaletteSectionKind::Do,
@@ -1232,21 +1239,6 @@ pub(super) fn render(
     div()
         .track_focus(focus)
         .size_full()
-        .on_key_down({
-            let state = state.clone();
-            move |event, _window, cx| {
-                let typed = with_host(&state, cx, |host| {
-                    let typed = type_into(&mut host.palette.query, event);
-                    if typed {
-                        host.palette.cursor = 0;
-                    }
-                    typed
-                });
-                if typed {
-                    notify(&state, cx);
-                }
-            }
-        })
         .on_action({
             let state = state.clone();
             move |_: &palette_actions::CursorDown, _window, cx| move_cursor(&state, 1, cx)
@@ -1254,30 +1246,6 @@ pub(super) fn render(
         .on_action({
             let state = state.clone();
             move |_: &palette_actions::CursorUp, _window, cx| move_cursor(&state, -1, cx)
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &palette_actions::Backspace, _window, cx| {
-                if with_host(&state, cx, |host| host.palette.query.backspace()) {
-                    notify(&state, cx);
-                }
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &palette_actions::DeleteWord, _window, cx| {
-                if with_host(&state, cx, |host| host.palette.query.delete_word_before()) {
-                    notify(&state, cx);
-                }
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &palette_actions::Clear, _window, cx| {
-                if with_host(&state, cx, |host| clear_all(&mut host.palette.query)) {
-                    notify(&state, cx);
-                }
-            }
         })
         .on_action(move |_: &palette_actions::Run, window, cx| {
             run_selected(&run_state, &run_bridge, window, cx);
@@ -1331,17 +1299,50 @@ fn visible_rows(rows: &[Entry], cursor: usize, windowed: bool) -> (&[Entry], usi
     (&rows[start..start + ROW_CAP], cursor - start)
 }
 
-/// Resets the draft the first time the open palette is rendered.
+/// Builds the query editor and resets the draft when the palette opens.
+///
+/// The editor lives exactly as long as the palette: `host::close_with` drops it with the rest
+/// of the drafts, so a reopened palette never inherits the last one's text, selection or undo
+/// history.
 pub(super) fn seed(state: &Entity<AppState>, cx: &mut App) {
     let seed = state.update(cx, |app, _| app.palette_seed.take());
-    with_host(state, cx, |host| {
-        if !host.palette_open {
-            host.palette = PaletteState::default();
-            if let Some(seed) = seed {
-                host.palette.query = TextFieldState::from_text(seed);
-            }
-            host.palette_open = true;
+    if with_host(state, cx, |host| host.palette_open) {
+        refresh(state, cx);
+        return;
+    }
+    let query = seed.unwrap_or_default();
+    let input = cx.new(|cx| {
+        let mut input = TextInput::new(InputMode::SingleLine, cx);
+        // §3.9's query row is the palette's own 44 px chrome, so the editor brings no box.
+        input.set_embedded(true, cx);
+        input.set_placeholder("go to, or do", cx);
+        input.set_text(query.clone(), cx);
+        input
+    });
+    let watched = state.clone();
+    let subscription = cx.subscribe(&input, move |input, event: &TextInputEvent, cx| {
+        if !matches!(event, TextInputEvent::Changed) {
+            return;
         }
+        let query = input.read(cx).text().to_owned();
+        with_host(&watched, cx, |host| {
+            if host.palette.query == query {
+                return;
+            }
+            host.palette.query = query;
+            // A re-ranked palette must never keep a cursor past the end of its new rows.
+            host.palette.cursor = 0;
+        });
+        notify(&watched, cx);
+    });
+    with_host(state, cx, |host| {
+        host.palette = PaletteState {
+            query,
+            ..PaletteState::default()
+        };
+        host.palette_input = Some(input);
+        host.palette_input_subscription = Some(subscription);
+        host.palette_open = true;
     });
     refresh(state, cx);
 }
@@ -1351,7 +1352,7 @@ pub(super) fn refresh(state: &Entity<AppState>, cx: &mut App) {
     // rows exist at all, so they are read with the query the rows are prepared from.
     let (query, behind, detail_card) = with_host(state, cx, |host| {
         (
-            host.palette.query.text().to_owned(),
+            host.palette.query.clone(),
             host.behind_palette.clone(),
             host.card_detail.card_id.clone(),
         )
@@ -2739,7 +2740,7 @@ mod tests {
         let before = cx.update(|cx| {
             seed(&state, cx);
             with_host(&state, cx, |host| {
-                assert_eq!(host.palette.query.text(), "sessions");
+                assert_eq!(host.palette.query, "sessions");
                 assert!(!host.palette.rows.is_empty());
                 host.palette.rows.clone()
             })
@@ -2748,7 +2749,7 @@ mod tests {
             move_cursor(&state, 1, cx);
             let after = with_host(&state, cx, |host| host.palette.rows.clone());
             assert!(std::rc::Rc::ptr_eq(&before, &after));
-            with_host(&state, cx, |host| host.palette.query.insert("missing"));
+            with_host(&state, cx, |host| host.palette.query.push_str("missing"));
             super::super::notify(&state, cx);
             let after = with_host(&state, cx, |host| host.palette.rows.clone());
             assert!(after.is_empty());

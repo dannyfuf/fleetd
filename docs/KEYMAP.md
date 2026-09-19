@@ -543,7 +543,7 @@ opens `config.json` in a new terminal tab. The two never coexist in one key cont
 
 | Key | Action |
 | --- | --- |
-| printable, `Backspace`, `ctrl-w`, `ctrl-u` | edit through the full `FleetTextInput` table above on the board; edit the legacy query in the Hub until P3-T06 |
+| printable, `Backspace`, `ctrl-w`, `ctrl-u`, motion, selection, undo | edit the query through the full `FleetTextInput` table above |
 | `ctrl-n` / `↓`, `ctrl-p` / `↑` | move the **list** cursor while still typing |
 | `Enter` | open the highlighted row directly from inside the input [A24] |
 | `Esc` | first press leaves the input keeping the filter, second press clears it — **never quits** [A13] |
@@ -552,7 +552,7 @@ opens `config.json` in a new terminal tab. The two never coexist in one key cont
 
 | Key | Action |
 | --- | --- |
-| printable, `Backspace`, `ctrl-w`, `ctrl-u` | edit the legacy query until this surface migrates to the full `FleetTextInput` table above |
+| printable, `Backspace`, `ctrl-w`, `ctrl-u`, motion, selection, undo | edit the query through the full `FleetTextInput` table above |
 | `ctrl-n` / `↓`, `ctrl-p` / `↑` | move between `GO` / `DO` / `CONTEXT` rows |
 | `Enter` | run the highlighted row (destructive commands still route through their confirm) |
 | `Esc` | close (`q` remains a printable query character) |
@@ -619,7 +619,7 @@ side.
 Board shortcuts override the inherited Hub shortcuts. `j` moves down (next),
 and `k` moves up (previous), following the global nvim convention.
 
-`/` does **not** open the Hub's filter overlay: the board owns `BoardState.filter`,
+`/` does **not** open the Hub's filter: the board owns `BoardState.filter`,
 and while its input has the keyboard the screen publishes the `Filter` key context
 instead of `Hub > Board`. Every row below is therefore shadowed while you are typing
 a filter, and the `Filter` rows above apply instead — including their two-stage `Esc`.

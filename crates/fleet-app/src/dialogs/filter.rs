@@ -1,20 +1,24 @@
 //! §3.10 Filter bar (`/`) — *narrow this list without moving it*.
+//!
+//! The query is a live [`TextInput`] the Hub screen owns, so this module decodes no editing
+//! keys at all: `backspace`, `ctrl-w` and `ctrl-u` are rows of the `FleetTextInput` table
+//! (`docs/KEYMAP.md`). What stays here is everything the *container* owns while the input has
+//! the keyboard — the list cursor, `Enter` and the two-stage `Esc`.
 
-use fleet_ui_kit::prelude::*;
-use gpui::{AnyElement, App, Entity, FocusHandle, Window, div};
+use fleet_ui_kit::{TextInput, prelude::*};
+use gpui::{App, Div, Entity};
 
 use crate::{
     actions::filter as filter_actions,
-    dialogs::typed_char,
     presentation::{filter_counts, filter_target},
     screens::hub::HubCtx,
-    state::{AppState, HubPane, HubTab, Screen},
+    state::AppState,
 };
 
 #[cfg(test)]
 use crate::{
     presentation::{DisplayedPr, DisplayedTarget},
-    state::RepoScope,
+    state::{HubPane, HubTab, RepoScope, Screen},
 };
 
 /// How many rows the focused list shows, and how many it has in total (`2/12`).
@@ -25,148 +29,31 @@ fn counts(state: &AppState) -> (usize, usize) {
 
 /// The header row while the input owns the keyboard (§3.10, line 2 of the mock).
 #[must_use]
-pub fn bar(state: &AppState) -> FilterBar {
+pub fn bar(state: &AppState, input: Entity<TextInput>) -> FilterBar {
     let (shown, total) = counts(state);
-    FilterBar::new(state.filter.query.clone(), shown, total).focused(state.filter.editing)
+    FilterBar::new(input, shown, total)
 }
 
-/// The invisible element that owns Filter mode's keyboard.
+/// Attaches the keys Filter mode's **container** owns to the Hub body.
 ///
-/// It draws nothing: the bar itself lives in the pane header, which is the whole point of
-/// §3.10 ("no overlay, no reflow"). The shell renders this in the overlay layer so the
-/// `Filter` key context really does shadow the list behind it.
-pub(crate) fn render(
-    state: &Entity<AppState>,
-    hub: HubCtx,
-    focus: &FocusHandle,
-    _window: &mut Window,
-    _cx: &mut App,
-) -> AnyElement {
+/// The bar is drawn in the pane header, which is part of the body, so the focused editor and
+/// these listeners are on one dispatch path — the same arrangement the board screen uses.
+pub(crate) fn key_owner(element: Div, state: &Entity<AppState>, hub: HubCtx) -> Div {
     let accept_state = state.clone();
-    let accept_hub = hub;
-    div()
-        .track_focus(focus)
-        .size_full()
-        .on_key_down({
-            let state = state.clone();
-            move |event, _window, cx| {
-                let Some(text) = typed_char(event) else {
-                    return;
-                };
-                state.update(cx, |app, cx| {
-                    app.filter.query.push_str(text);
-                    reset_cursor(app);
-                    cx.notify();
-                });
-            }
+    let accept_hub = hub.clone();
+    let down_hub = hub.clone();
+    element
+        // §3.10's `ctrl-n` / `↓` is the list's own movement, not a second implementation of it:
+        // it must move the anchored row too, or the next projection snaps the cursor back.
+        .on_action(move |_: &filter_actions::CursorDown, window, cx| {
+            down_hub.move_by(1, window, cx);
         })
-        .on_action({
-            let state = state.clone();
-            move |_: &filter_actions::Backspace, _window, cx| {
-                state.update(cx, |app, cx| {
-                    app.filter.query.pop();
-                    cx.notify();
-                });
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &filter_actions::DeleteWord, _window, cx| {
-                state.update(cx, |app, cx| {
-                    app.filter.query = delete_word(&app.filter.query);
-                    cx.notify();
-                });
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &filter_actions::Clear, _window, cx| {
-                state.update(cx, |app, cx| {
-                    app.filter.query.clear();
-                    cx.notify();
-                });
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &filter_actions::CursorDown, _window, cx| move_cursor(&state, 1, cx)
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &filter_actions::CursorUp, _window, cx| move_cursor(&state, -1, cx)
+        .on_action(move |_: &filter_actions::CursorUp, window, cx| {
+            hub.move_by(-1, window, cx);
         })
         .on_action(move |_: &filter_actions::Accept, _window, cx| {
             accept(&accept_state, &accept_hub, cx);
         })
-        .into_any_element()
-}
-
-/// `ctrl-w`: drop trailing spaces, then the word before the caret.
-#[must_use]
-pub fn delete_word(query: &str) -> String {
-    let trimmed = query.trim_end();
-    match trimmed.rfind(char::is_whitespace) {
-        Some(index) => {
-            let end = trimmed[index..]
-                .chars()
-                .next()
-                .map_or(index, |ch| index + ch.len_utf8());
-            trimmed[..end].to_owned()
-        }
-        None => String::new(),
-    }
-}
-
-/// `ctrl-n` / `ctrl-p`: move the **list** cursor while the input still owns the keyboard.
-fn move_cursor(state: &Entity<AppState>, delta: isize, cx: &mut App) {
-    state.update(cx, |app, cx| {
-        let (shown, _) = counts(app);
-        match (app.hub_pane, &app.screen) {
-            (HubPane::Repos, _) => {
-                app.cursors.repos = crate::state::move_cursor(app.cursors.repos, delta, shown)
-            }
-            (
-                HubPane::List,
-                Screen::Hub {
-                    tab: HubTab::Worktrees,
-                },
-            ) => {
-                app.cursors.worktrees =
-                    crate::state::move_cursor(app.cursors.worktrees, delta, shown)
-            }
-            (HubPane::List, Screen::Hub { tab: HubTab::Prs }) => match app.pr_tab {
-                fleet_core::github::PrTab::Mine => {
-                    app.cursors.prs_mine =
-                        crate::state::move_cursor(app.cursors.prs_mine, delta, shown)
-                }
-                fleet_core::github::PrTab::Review => {
-                    app.cursors.prs_review =
-                        crate::state::move_cursor(app.cursors.prs_review, delta, shown)
-                }
-            },
-            // The board owns its own filter and its own cursor keys, and the Workspace has no
-            // Hub list at all: neither is reachable from the Hub's filter overlay.
-            (HubPane::List, Screen::Hub { tab: HubTab::Board } | Screen::Workspace { .. }) => {}
-        }
-        cx.notify();
-    });
-}
-
-fn reset_cursor(app: &mut AppState) {
-    match (app.hub_pane, &app.screen) {
-        (HubPane::Repos, _) => app.cursors.repos = 0,
-        (
-            HubPane::List,
-            Screen::Hub {
-                tab: HubTab::Worktrees,
-            },
-        ) => app.cursors.worktrees = 0,
-        (HubPane::List, Screen::Hub { tab: HubTab::Prs }) => match app.pr_tab {
-            fleet_core::github::PrTab::Mine => app.cursors.prs_mine = 0,
-            fleet_core::github::PrTab::Review => app.cursors.prs_review = 0,
-        },
-        (HubPane::List, Screen::Hub { tab: HubTab::Board } | Screen::Workspace { .. }) => {}
-    }
 }
 
 /// `Enter`: open the highlighted row straight from the input, so `/rut⏎` is a complete open.
@@ -202,14 +89,6 @@ mod tests {
             repo: repo.map(|id| id.parse().expect("repo id")),
             job: job.map(|id| id.parse().expect("job id")),
         }
-    }
-
-    #[test]
-    fn delete_word_eats_the_trailing_word_only() {
-        assert_eq!(delete_word("feat rut "), "feat ");
-        assert_eq!(delete_word("feat\u{2003}rut "), "feat\u{2003}");
-        assert_eq!(delete_word("feat"), "");
-        assert_eq!(delete_word(""), "");
     }
 
     #[test]

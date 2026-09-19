@@ -273,7 +273,7 @@ impl HubCtx {
         )
     }
 
-    pub(super) fn move_by(&self, delta: isize, _window: &mut Window, cx: &mut App) {
+    pub(crate) fn move_by(&self, delta: isize, _window: &mut Window, cx: &mut App) {
         // The board replaced the worktrees pane: a shared cursor key must move the cards the
         // user can see, not the hidden list underneath them.
         if self.on_board(cx) {

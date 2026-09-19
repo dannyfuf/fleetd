@@ -640,7 +640,7 @@ because they are cross-screen rules:
 - **The board owns the body and its own keys.** While it is up, the Hub's rail and list are not
   composed at all, and the board's bindings shadow the inherited `Hub` ones (`docs/KEYMAP.md`
   "Board and card detail").
-- **`/` is not the Hub's filter overlay.** The board's rows are cards in columns, not worktrees, so
+- **`/` is not the Hub's filter.** The board's rows are cards in columns, not worktrees, so
   it keeps its own query in `BoardState.filter` and publishes the `Filter` key context while the
   input has the keyboard — which is what makes bare letters type instead of fire (§3.10's two-stage
   `Esc` still applies: leave the input, then clear the filter).
@@ -1519,9 +1519,11 @@ The filter **replaces the pane header in place** — 30 px, same row, no overlay
 | `esc` hint | faint, right of the count | right | the two-stage `Esc` is non-obvious |
 | Retained chip | `⌕rut` in accent inside the restored header, with a blue dot | same row | a hidden active filter is the classic "where did my rows go" bug |
 
-**Keyboard:** printable · `Backspace` · `ctrl-w` · `ctrl-u` · `ctrl-n`/`↓` and `ctrl-p`/`↑` move
-the list cursor **while still typing** · `Enter` opens the selected row (so `/rut⏎` is a complete
-open in 5 keys) · first `Esc` leaves the input keeping the filter · second `Esc` clears it.
+**Keyboard:** the query is a live `TextInput`, so editing is the whole `FleetTextInput` table
+(KEYMAP) — printable, `Backspace`, `ctrl-w`, `ctrl-u`, motion, selection, undo. `ctrl-n`/`↓` and
+`ctrl-p`/`↑` move the list cursor **while still typing** · `Enter` opens the selected row (so
+`/rut⏎` is a complete open in 5 keys) · first `Esc` leaves the input keeping the filter · second
+`Esc` clears it. Typing narrows the list and returns the cursor to its top row.
 **[D-15]** `Esc` in the Hub **never quits the app** — swarm's "clear filter, else quit" is
 retired (KEYMAP A13).
 
@@ -1813,7 +1815,8 @@ each component's full API. `Modal` is an alias of `Dialog` and `TabBar` an alias
 
 | Component | Responsibility | Used by |
 | --- | --- | --- |
-| `TextField` | Printable + `Backspace` + `ctrl-w`/`ctrl-u`/`ctrl-a`/`ctrl-e`, blue caret, inline validation line that replaces the preview slot with zero layout shift | Create, Clone, Context, Settings, Filter, Palette |
+| `TextInput` | The live editor: the whole editing vocabulary, selection, undo, IME and clipboard, in single-line and multi-line modes | board dialogs, Filter, Palette, agent composer, lazygit prompt |
+| `TextField` | The presentational predecessor, kept only for the surfaces still to migrate | Create, Clone, Context, Settings |
 | `FuzzyList` | Debounced query → ranked rows, capped, `ctrl-n`/`ctrl-p` + arrows (and `j`/`k` **only** when no text field is present) | Clone results, Create base list, Palette, Assign |
 | `FilterBar` | In-place pane-header replacement with live `shown/total`, two-stage `Esc`, retained chip | every list (§3.10) |
 | `Cycler` | `◂ value ▸`, `←`/`→` | host selector, Settings choices |

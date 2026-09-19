@@ -2,12 +2,15 @@ use super::{Shell, first_run_import_allowed, focus::*};
 use crate::{
     actions::{fleet::OpenJobs, native_agent, prefix},
     dialogs::Dialogs,
-    state::{AppState, DaemonLink, DaemonLossReason, HubTab, Overlay, Screen, TerminalMode},
+    state::{
+        AppState, DaemonLink, DaemonLossReason, HubPane, HubTab, Overlay, Screen, TerminalMode,
+    },
 };
 use fleet_core::{
     board::{BoardView, CardDraft, create_card, new_board},
     config::Agent,
-    model::Context as FleetContext,
+    ids::RepoId,
+    model::{Context as FleetContext, Repo, RepoHooks, Worktree},
 };
 use fleet_proto::snapshot::{DaemonInfo, Snapshot};
 use gpui::{Action, Entity, FocusHandle, KeyDownEvent, Keystroke, VisualTestContext};
@@ -352,8 +355,43 @@ struct RootInputFixture {
     state: Entity<AppState>,
     body_focus: FocusHandle,
     board_filter_focus: FocusHandle,
+    hub_filter_focus: FocusHandle,
     focus_owner_keys: Rc<RefCell<FocusOwnerKeys>>,
     visual: VisualTestContext,
+}
+
+/// The one repository the filter fixture's worktrees belong to.
+fn filter_repo() -> Repo {
+    let id: RepoId = "acme/api".parse().unwrap();
+    Repo {
+        owner: id.owner().to_owned(),
+        name: id.name().to_owned(),
+        id,
+        url: "https://github.com/acme/api.git".to_owned(),
+        context_id: "work".parse().unwrap(),
+        default_branch: "main".to_owned(),
+        path: "/tmp/acme/api".to_owned(),
+        cloned_at: "2026-09-19T09:00:00Z".to_owned(),
+        hooks: RepoHooks::default(),
+    }
+}
+
+/// One row of the list §3.10's filter narrows. The fixture publishes four: three that `feat`
+/// matches, so `ctrl-n` and `down` have somewhere to go, and one that it excludes.
+fn filter_worktree(slug: &str) -> Worktree {
+    Worktree {
+        id: format!("acme/api#{slug}").parse().unwrap(),
+        repo_id: "acme/api".parse().unwrap(),
+        slug: slug.to_owned(),
+        branch: slug.to_owned(),
+        base_ref: "main".to_owned(),
+        path: format!("/tmp/{slug}"),
+        session: format!("acme/api#{slug}"),
+        host: None,
+        created_at: "2026-09-19T12:00:00Z".to_owned(),
+        last_opened_at: None,
+        degraded: None,
+    }
 }
 
 fn board_context() -> FleetContext {
@@ -390,9 +428,14 @@ fn board_snapshot(context: FleetContext) -> Snapshot {
         generated_at: "2026-09-19T12:00:00Z".to_owned(),
         revision: None,
         contexts: vec![context.clone()],
-        repos: Vec::new(),
+        repos: vec![filter_repo()],
         clones: Vec::new(),
-        worktrees: Vec::new(),
+        worktrees: vec![
+            filter_worktree("feat-one"),
+            filter_worktree("feat-two"),
+            filter_worktree("feat-three"),
+            filter_worktree("chore-lint"),
+        ],
         active_context: Some(context.id),
         sessions: Vec::new(),
         agent_threads: Vec::new(),
@@ -420,6 +463,7 @@ fn root_input_fixture(cx: &mut gpui::TestAppContext, name: &str) -> RootInputFix
     let mut state = None;
     let mut body_focus = None;
     let mut board_filter_focus = None;
+    let mut hub_filter_focus = None;
     let mut focus_owner_keys = None;
     let home = format!("/tmp/fleet-shell-input-focus-{name}");
     let window = cx.add_window(|window, cx| {
@@ -443,6 +487,7 @@ fn root_input_fixture(cx: &mut gpui::TestAppContext, name: &str) -> RootInputFix
         state = Some(shell.state.clone());
         body_focus = Some(shell.body_focus.clone());
         board_filter_focus = Some(shell.hub.board_filter_focus_handle(cx));
+        hub_filter_focus = Some(shell.hub.filter_focus_handle(cx));
         focus_owner_keys = Some(Rc::clone(&shell.focus_owner_keys));
         shell.observe_window(window, cx);
         shell
@@ -456,9 +501,48 @@ fn root_input_fixture(cx: &mut gpui::TestAppContext, name: &str) -> RootInputFix
         state: state.unwrap(),
         body_focus: body_focus.unwrap(),
         board_filter_focus: board_filter_focus.unwrap(),
+        hub_filter_focus: hub_filter_focus.unwrap(),
         focus_owner_keys,
         visual,
     }
+}
+
+/// The same real shell, showing the worktrees list §3.10's filter narrows.
+fn root_hub_fixture(cx: &mut gpui::TestAppContext, name: &str) -> RootInputFixture {
+    let mut fixture = root_input_fixture(cx, name);
+    let state = fixture.state.clone();
+    fixture.visual.update(|_, cx| {
+        state.update(cx, |app, cx| {
+            app.screen = Screen::Hub {
+                tab: HubTab::Worktrees,
+            };
+            app.hub_pane = HubPane::List;
+            cx.notify();
+        });
+    });
+    fixture.visual.run_until_parked();
+    fixture
+        .visual
+        .update(|window, cx| window.draw(cx).clear(cx));
+    fixture.visual.run_until_parked();
+    finish_test_render(&fixture.focus_owner_keys);
+    fixture
+}
+
+/// Draws the frame the last input produced, the way `dispatch_root_key` does for a key.
+fn settle(fixture: &mut RootInputFixture) {
+    fixture.visual.run_until_parked();
+    fixture
+        .visual
+        .update(|window, cx| window.draw(cx).clear(cx));
+    fixture.visual.run_until_parked();
+    finish_test_render(&fixture.focus_owner_keys);
+}
+
+fn hub_filter_query(fixture: &mut RootInputFixture) -> String {
+    fixture
+        .state
+        .read_with(&fixture.visual, |app, _| app.filter.query.clone())
 }
 
 fn finish_test_render(keys: &Rc<RefCell<FocusOwnerKeys>>) {
@@ -557,4 +641,97 @@ fn real_shell_board_settings_text_row_accepts_platform_text(cx: &mut gpui::TestA
     let before = dialog_input_text(&mut fixture);
     fixture.visual.simulate_input(" revised");
     assert_eq!(dialog_input_text(&mut fixture), format!("{before} revised"));
+}
+
+#[gpui::test]
+fn real_shell_hub_filter_types_and_still_moves_the_list_cursor(cx: &mut gpui::TestAppContext) {
+    let mut fixture = root_hub_fixture(cx, "hub-filter-cursor");
+
+    dispatch_root_key(&mut fixture, "/");
+    fixture.visual.update(|window, _| {
+        assert!(fixture.hub_filter_focus.is_focused(window));
+    });
+    fixture.visual.simulate_input("feat");
+    settle(&mut fixture);
+    assert_eq!(hub_filter_query(&mut fixture), "feat");
+    // Three of the fixture's four worktrees match, so the cursor has somewhere to go.
+    assert_eq!(
+        fixture.state.read_with(&fixture.visual, |app, _| (
+            app.displayed_hub.worktrees.len(),
+            app.displayed_hub.worktree_total
+        )),
+        (3, 4)
+    );
+    assert_eq!(
+        fixture
+            .state
+            .read_with(&fixture.visual, |app, _| app.cursors.worktrees),
+        0
+    );
+
+    // §3.10: `ctrl-n` and `↓` move the **list** while the editor keeps the keyboard. `↓` is
+    // also a `FleetTextInput` row, which a single-line editor declines, so the `Filter` row
+    // behind it still fires.
+    dispatch_root_key(&mut fixture, "ctrl-n");
+    dispatch_root_key(&mut fixture, "down");
+    assert_eq!(
+        fixture
+            .state
+            .read_with(&fixture.visual, |app, _| app.cursors.worktrees),
+        2
+    );
+    assert_eq!(hub_filter_query(&mut fixture), "feat");
+    fixture.visual.update(|window, _| {
+        assert!(fixture.hub_filter_focus.is_focused(window));
+    });
+}
+
+#[gpui::test]
+fn real_shell_hub_filter_escape_keeps_then_clears_the_query(cx: &mut gpui::TestAppContext) {
+    let mut fixture = root_hub_fixture(cx, "hub-filter-escape");
+
+    dispatch_root_key(&mut fixture, "/");
+    fixture.visual.simulate_input("feat");
+    assert_eq!(hub_filter_query(&mut fixture), "feat");
+
+    // [A13] stage one: the input closes, the filter stays, focus returns to the body.
+    dispatch_root_key(&mut fixture, "escape");
+    fixture.visual.update(|window, _| {
+        assert!(!fixture.hub_filter_focus.is_focused(window));
+        assert!(fixture.body_focus.is_focused(window));
+    });
+    assert_eq!(hub_filter_query(&mut fixture), "feat");
+    assert!(
+        fixture
+            .state
+            .read_with(&fixture.visual, |app, _| app.overlay.is_none())
+    );
+
+    // Stage two clears it, and the editor follows the state it mirrors.
+    dispatch_root_key(&mut fixture, "escape");
+    assert_eq!(hub_filter_query(&mut fixture), "");
+}
+
+#[gpui::test]
+fn real_shell_palette_query_accepts_platform_text(cx: &mut gpui::TestAppContext) {
+    let mut fixture = root_hub_fixture(cx, "palette-query");
+
+    dispatch_root_key(&mut fixture, ":");
+    assert!(fixture.state.read_with(&fixture.visual, |app, _| matches!(
+        app.overlay,
+        Some(Overlay::Palette)
+    )));
+    assert_dialog_input_focused(&mut fixture);
+    fixture.visual.simulate_input("Pull");
+    assert_eq!(dialog_input_text(&mut fixture), "Pull");
+
+    dispatch_root_key(&mut fixture, "escape");
+    fixture.visual.update(|window, _| {
+        assert!(fixture.body_focus.is_focused(window));
+    });
+    assert!(
+        fixture
+            .state
+            .read_with(&fixture.visual, |app, _| app.overlay.is_none())
+    );
 }

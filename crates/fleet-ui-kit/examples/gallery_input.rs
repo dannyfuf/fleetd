@@ -40,7 +40,7 @@ const LAYOUT: support::layout::GalleryLayout = support::layout::GalleryLayout {
 use fleet_ui_kit::prelude::*;
 use gpui::{
     AnyElement, App, Context, Entity, EntityInputHandler, FocusHandle, Focusable, KeyBinding,
-    KeyDownEvent, SharedString, Window, actions, div, px,
+    SharedString, Subscription, Window, actions, div, px,
 };
 
 actions!(
@@ -165,8 +165,11 @@ struct InputGallery {
     live_labeled: Entity<TextInput>,
     live_multiline_min: Entity<TextInput>,
     live_multiline_grown: Entity<TextInput>,
-    filter: TextFieldState,
-    palette_query: TextFieldState,
+    filter: Entity<TextInput>,
+    filter_no_match: Entity<TextInput>,
+    palette_query: Entity<TextInput>,
+    /// Re-ranking on every keystroke: a list that re-ranked must not keep a stale cursor.
+    _query_subscriptions: Vec<Subscription>,
     capture: Capture,
     filter_focused: bool,
     fuzzy_cursor: usize,
@@ -275,6 +278,42 @@ impl InputGallery {
             input.select_all(cx);
             input
         });
+        let filter = cx.new(|cx| {
+            let mut input = TextInput::new(InputMode::SingleLine, cx);
+            // The bar lives in a 30 px pane header, so the editor brings no box of its own.
+            input.set_embedded(true, cx);
+            input.set_placeholder("filter branches", cx);
+            input.set_text("rut", cx);
+            input
+        });
+        let filter_no_match = cx.new(|cx| {
+            let mut input = TextInput::new(InputMode::SingleLine, cx);
+            input.set_embedded(true, cx);
+            input.set_text("zzz", cx);
+            input
+        });
+        let palette_query = cx.new(|cx| {
+            let mut input = TextInput::new(InputMode::SingleLine, cx);
+            input.set_embedded(true, cx);
+            input.set_placeholder("go to, or do", cx);
+            input.set_text("pay", cx);
+            input
+        });
+        // A re-ranked list must never leave the cursor past its end.
+        let query_subscriptions = vec![
+            cx.subscribe(&filter, |gallery, _, event, cx| {
+                if *event == TextInputEvent::Changed {
+                    gallery.fuzzy_cursor = 0;
+                    cx.notify();
+                }
+            }),
+            cx.subscribe(&palette_query, |gallery, _, event, cx| {
+                if *event == TextInputEvent::Changed {
+                    gallery.palette_cursor = 0;
+                    cx.notify();
+                }
+            }),
+        ];
         let mut gallery = Self {
             focus_handle: cx.focus_handle(),
             editor,
@@ -289,8 +328,10 @@ impl InputGallery {
             live_labeled,
             live_multiline_min,
             live_multiline_grown,
-            filter: TextFieldState::from_text("rut"),
-            palette_query: TextFieldState::from_text("pay"),
+            filter,
+            filter_no_match,
+            palette_query,
+            _query_subscriptions: query_subscriptions,
             capture: Capture::None,
             filter_focused: true,
             fuzzy_cursor: 0,
@@ -363,18 +404,19 @@ impl InputGallery {
     }
 
     /// The rows the fuzzy list shows for the current filter query.
-    fn ranked_branches(&self) -> Vec<(&'static str, &'static str, Vec<usize>)> {
+    fn ranked_branches(&self, cx: &App) -> Vec<(&'static str, &'static str, Vec<usize>)> {
+        let query = self.filter.read(cx).text().to_owned();
         BRANCHES
             .iter()
             .filter_map(|(name, detail)| {
-                subsequence(name, self.filter.text()).map(|hits| (*name, *detail, hits))
+                subsequence(name, &query).map(|hits| (*name, *detail, hits))
             })
             .collect()
     }
 
     /// The palette's three sections for the current query, already ranked.
-    fn palette_sections(&self) -> (Vec<PaletteSection>, usize, usize) {
-        let query = self.palette_query.text();
+    fn palette_sections(&self, cx: &App) -> (Vec<PaletteSection>, usize, usize) {
+        let query = self.palette_query.read(cx).text();
         let go: Vec<PaletteRow> = GO_ROWS
             .iter()
             .filter_map(|(label, detail)| {
@@ -435,13 +477,13 @@ impl InputGallery {
     }
 
     /// How many rows the cursor may land on right now.
-    fn cursor_len(&self) -> usize {
+    fn cursor_len(&self, cx: &App) -> usize {
         if self.palette_open {
-            let (sections, matched, _) = self.palette_sections();
+            let (sections, matched, _) = self.palette_sections(cx);
             let _ = sections;
             matched.min(10)
         } else {
-            self.ranked_branches().len()
+            self.ranked_branches(cx).len()
         }
     }
 
@@ -464,7 +506,7 @@ impl InputGallery {
     fn focus_filter(&mut self, _: &FocusFilter, window: &mut Window, cx: &mut Context<Self>) {
         self.capture = Capture::Filter;
         self.filter_focused = true;
-        window.focus(&self.focus_handle, cx);
+        self.filter.update(cx, |input, cx| input.focus(window, cx));
         cx.notify();
     }
 
@@ -472,7 +514,8 @@ impl InputGallery {
         self.palette_open = true;
         self.capture = Capture::Palette;
         self.palette_cursor = 0;
-        window.focus(&self.focus_handle, cx);
+        self.palette_query
+            .update(cx, |input, cx| input.focus(window, cx));
         cx.notify();
     }
 
@@ -484,13 +527,15 @@ impl InputGallery {
         } else if self.palette_open {
             self.palette_open = false;
             self.capture = Capture::None;
+            window.focus(&self.focus_handle, cx);
         } else if self.capture == Capture::Filter {
             // Stage one: leave the input, keep the filter.
             self.capture = Capture::None;
             self.filter_focused = false;
-        } else if !self.filter_focused && !self.filter.is_empty() {
+            window.focus(&self.focus_handle, cx);
+        } else if !self.filter_focused && !self.filter.read(cx).is_empty() {
             // Stage two: clear it.
-            self.filter.clear();
+            self.filter.update(cx, |input, cx| input.clear(cx));
             self.filter_focused = true;
         } else {
             window.focus(&self.focus_handle, cx);
@@ -512,7 +557,7 @@ impl InputGallery {
     }
 
     fn cursor_next(&mut self, _: &CursorNext, _window: &mut Window, cx: &mut Context<Self>) {
-        let len = self.cursor_len();
+        let len = self.cursor_len(cx);
         if self.palette_open {
             self.palette_cursor = FuzzyList::next_cursor(self.palette_cursor, len);
         } else {
@@ -522,7 +567,7 @@ impl InputGallery {
     }
 
     fn cursor_prev(&mut self, _: &CursorPrev, _window: &mut Window, cx: &mut Context<Self>) {
-        let len = self.cursor_len();
+        let len = self.cursor_len(cx);
         if self.palette_open {
             self.palette_cursor = FuzzyList::prev_cursor(self.palette_cursor, len);
         } else {
@@ -618,25 +663,6 @@ impl InputGallery {
             self.answer = Some("cancelled".into());
         }
         cx.notify();
-    }
-
-    /// Feed keystrokes to whichever presentational field owns the keyboard.
-    ///
-    /// This is the pattern §3.10 describes for the real Hub: `FilterBar` and `Palette` render
-    /// the caret, and the view owns a [`TextFieldState`] that implements the edit set.
-    fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        let target = match self.capture {
-            Capture::Filter => &mut self.filter,
-            Capture::Palette => &mut self.palette_query,
-            Capture::None => return,
-        };
-        if target.handle_keystroke(&event.keystroke) {
-            cx.stop_propagation();
-            // A re-ranked list must never leave the cursor past its end.
-            self.fuzzy_cursor = 0;
-            self.palette_cursor = 0;
-            cx.notify();
-        }
     }
 }
 
@@ -812,8 +838,8 @@ fn text_input_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
     )
 }
 
-fn fuzzy_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
-    let ranked = gallery.ranked_branches();
+fn fuzzy_section(gallery: &InputGallery, theme: &Theme, cx: &App) -> AnyElement {
+    let ranked = gallery.ranked_branches(cx);
     let items = ranked.iter().map(|(name, detail, hits)| {
         let mut item = FuzzyItem::new(*name).matches(hits.clone());
         if !detail.is_empty() {
@@ -838,7 +864,7 @@ fn fuzzy_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
                         .under_text_field(true)
                         .empty(EmptyState::new(format!(
                             "Nothing matches \"{}\".",
-                            gallery.filter.text()
+                            gallery.filter.read(cx).text()
                         ))),
                 ),
             ),
@@ -875,8 +901,8 @@ fn fuzzy_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
     )
 }
 
-fn filter_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
-    let shown = gallery.ranked_branches().len();
+fn filter_section(gallery: &InputGallery, theme: &Theme, cx: &App) -> AnyElement {
+    let shown = gallery.ranked_branches(cx).len();
     let total = BRANCHES.len();
     LAYOUT.section(
         "filter bar",
@@ -888,25 +914,19 @@ fn filter_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
                 card(
                     theme,
                     px(460.0),
-                    FilterBar::new(gallery.filter.shared_text(), shown, total)
-                        .caret(gallery.filter.caret_chars())
-                        .focused(gallery.capture == Capture::Filter)
-                        .placeholder("filter branches"),
+                    FilterBar::new(gallery.filter.clone(), shown, total),
                 ),
             ),
+            // Stage two of the two-stage `Esc` is the retained chip, which belongs to
+            // `PaneHeader`; the bar itself exists only while the input owns the keyboard.
             LAYOUT.labeled(
-                "retained (input exited)",
+                "no match",
                 theme,
                 card(
                     theme,
                     px(460.0),
-                    FilterBar::new("rut", 2, 12).focused(false),
+                    FilterBar::new(gallery.filter_no_match.clone(), 0, 12),
                 ),
-            ),
-            LAYOUT.labeled(
-                "no match",
-                theme,
-                card(theme, px(460.0), FilterBar::new("zzz", 0, 12)),
             ),
         ],
     )
@@ -1175,16 +1195,15 @@ impl Render for InputGallery {
             text_field_section(&theme),
             live_editor_section(self, &theme, cx),
             text_input_section(self, &theme),
-            fuzzy_section(self, &theme),
-            filter_section(self, &theme),
+            fuzzy_section(self, &theme, cx),
+            filter_section(self, &theme, cx),
             choice_section(self, &theme),
             tabs_and_select_section(self, &theme),
             confirm_hint_section(self, &theme),
         ];
 
-        let (palette_sections, matched, total) = self.palette_sections();
-        let palette_query = self.palette_query.shared_text();
-        let palette_caret = self.palette_query.caret_chars();
+        let (palette_sections, matched, total) = self.palette_sections(cx);
+        let palette_query = self.palette_query.clone();
         let palette_cursor = self.palette_cursor;
 
         div()
@@ -1216,7 +1235,6 @@ impl Render for InputGallery {
             .on_action(cx.listener(Self::confirm_expanded))
             .on_action(cx.listener(Self::confirm_yes))
             .on_action(cx.listener(Self::confirm_no))
-            .on_key_down(cx.listener(Self::on_key_down))
             .relative()
             .size_full()
             .flex()
@@ -1291,7 +1309,6 @@ impl Render for InputGallery {
                     Overlay::new().content(
                         palette_sections.into_iter().fold(
                             Palette::new(palette_query)
-                                .caret(palette_caret)
                                 .cursor(palette_cursor)
                                 .total(total)
                                 .empty("Nothing matches that query."),

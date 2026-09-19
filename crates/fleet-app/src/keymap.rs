@@ -845,10 +845,6 @@ key_table! {
     "down",         "Filter" => filter::CursorDown;
     "ctrl-p",       "Filter" => filter::CursorUp;
     "up",           "Filter" => filter::CursorUp;
-    // Removed when the filter surfaces migrate to TextInput.
-    "backspace",    "Filter" => filter::Backspace;
-    "ctrl-w",       "Filter" => filter::DeleteWord;
-    "ctrl-u",       "Filter" => filter::Clear;
 
     "shift-tab", "Filter > BoardFilter" => board::PrevColumn;
     "tab", "Filter > BoardFilter" => board::NextColumn;
@@ -859,10 +855,6 @@ key_table! {
     "down",         "Palette" => palette::CursorDown;
     "ctrl-p",       "Palette" => palette::CursorUp;
     "up",           "Palette" => palette::CursorUp;
-    // Removed when the palette surface migrates to TextInput.
-    "backspace",    "Palette" => palette::Backspace;
-    "ctrl-w",       "Palette" => palette::DeleteWord;
-    "ctrl-u",       "Palette" => palette::Clear;
 
     "J",            "Jobs" => jobs::Close;
     "escape",       "Jobs" => jobs::Close;
@@ -1115,6 +1107,38 @@ mod tests {
             "the table lost rows: {}",
             bindings.len()
         );
+    }
+
+    /// One editing vocabulary, stated twice: `key_table!` feeds the Help overlay and the
+    /// documentation-drift test, and `text_input::default_bindings` serves every app that has
+    /// no key table of its own. They must not drift.
+    #[test]
+    fn the_kit_editor_table_matches_this_one() {
+        fn shape(bindings: Vec<gpui::KeyBinding>) -> Vec<String> {
+            let mut rows: Vec<String> = bindings
+                .iter()
+                .filter(|binding| {
+                    binding.predicate().is_some_and(|predicate| {
+                        format!("{predicate:?}").contains(fleet_ui_kit::TEXT_INPUT_KEY_CONTEXT)
+                    })
+                })
+                .map(|binding| {
+                    format!(
+                        "{:?} {} {:?}",
+                        binding.keystrokes(),
+                        binding.action().name(),
+                        binding
+                            .predicate()
+                            .map(|predicate| format!("{predicate:?}"))
+                    )
+                })
+                .collect();
+            rows.sort();
+            rows
+        }
+        let app = shape(bindings());
+        assert!(!app.is_empty());
+        assert_eq!(app, shape(fleet_ui_kit::text_input::default_bindings()));
     }
 
     #[test]
