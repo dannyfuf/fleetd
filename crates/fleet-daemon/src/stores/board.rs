@@ -158,23 +158,6 @@ impl BoardStore {
         }
         self.bundle_with_worktree(paths, worktree_trash)
     }
-    /// Moves already-enumerated quarantined documents into a worktree's trash entry.
-    pub(crate) fn delete_quarantined_with_worktree(
-        &self,
-        id: &BoardId,
-        paths: Vec<PathBuf>,
-        worktree_trash: &Path,
-    ) -> DaemonResult<()> {
-        if paths
-            .iter()
-            .any(|path| quarantined_board_id(path).as_ref() != Some(id))
-        {
-            return Err(DaemonError::Validation(format!(
-                "quarantined board paths do not all belong to {id}"
-            )));
-        }
-        self.bundle_with_worktree(paths, worktree_trash)
-    }
     fn bundle_with_worktree(&self, paths: Vec<PathBuf>, worktree_trash: &Path) -> DaemonResult<()> {
         if paths.is_empty() {
             return Ok(());

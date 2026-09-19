@@ -82,6 +82,12 @@
   - verified: `cargo test -p fleet-daemon --test boards_service
     moving_a_repo_rehomes_its_worktree_board_before_old_context_deletion` passed (1 selected);
     `make lint` passed.
+- [x] P1-T24 — Preserve quarantined boards whose cascade ownership is unverifiable
+  - supersedes the quarantine sweep added by P1-T09/P1-T20: a derived filename cannot establish
+    ownership after the persisted scope has become unreadable.
+  - verified: `cargo test -p fleet-daemon --test boards_service
+    deleting_a_worktree_preserves_an_unverifiable_cross_scope_quarantine` passed (1 selected);
+    `make lint` passed.
 
 ## Notes / decisions log
 (Append-only. Date-stamp entries. Capture anything that surprised you or that future-you will want.)

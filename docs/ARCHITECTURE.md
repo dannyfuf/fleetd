@@ -657,7 +657,8 @@ apply to the worktree and board together. A failure is warned but cannot roll ba
 move. Restore validation is non-mutating: an unreadable bundled board stays restored in place for
 a newer build or manual repair instead of being quarantined again. Deletion cascades likewise
 preserve unreadable live documents, because the shared board id cannot establish whether their
-persisted scope belongs to the context or worktree being deleted.
+persisted scope belongs to the context or worktree being deleted. Quarantined remains are
+preserved for the same reason: their derived filename is not proof of ownership across scopes.
 
 `BoardBackends` resolves the `BoardBackend` adapter by `BackendRef.kind`. Each adapter
 validates its own settings, describes statuses and properties, and maps pull/push

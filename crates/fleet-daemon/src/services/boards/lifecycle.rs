@@ -597,14 +597,6 @@ impl Boards {
                 self.changed(&id, BoardChangeReason::Deleted);
             }
         }
-        // A board whose only remains are quarantined is in no listing, and leaving them behind
-        // would refuse a board to every later context that derives the same id.
-        if let Ok(id) = BoardId::try_from(context.as_str())
-            && !self.store.quarantined(&id)?.is_empty()
-        {
-            let _guard = self.gate(&id).await;
-            self.store.delete(&id)?;
-        }
         Ok(())
     }
 
@@ -614,7 +606,6 @@ impl Boards {
         worktree: &WorktreeId,
         trash: &std::path::Path,
     ) -> DaemonResult<()> {
-        let base = worktree_board_id(worktree);
         for id in self.store.list()? {
             let owned = match self.store.peek(&id) {
                 Ok(Some(doc)) => doc.board.worktree_id.as_ref() == Some(worktree),
@@ -635,16 +626,6 @@ impl Boards {
                 self.index.write().await.retain(|_, board| *board != id);
                 self.changed(&id, BoardChangeReason::Deleted);
             }
-        }
-        // Quarantined documents are absent from `list`, but still reserve every derived id.
-        // List once: repository deletion can run this cascade for many worktrees in sequence.
-        for (id, paths) in self.store.quarantined_documents()? {
-            if id != base && !is_suffixed_worktree_board_id(&id, &base) {
-                continue;
-            }
-            let _guard = self.gate(&id).await;
-            self.store
-                .delete_quarantined_with_worktree(&id, paths, trash)?;
         }
         Ok(())
     }
@@ -741,13 +722,4 @@ fn suffixed_board_id(base: &BoardId, suffix: u32) -> BoardId {
     let mut stem = base.as_str()[..keep].trim_end_matches('-').to_owned();
     stem.push_str(&suffix);
     BoardId::try_from(stem).expect("a suffixed worktree board id is always a valid board slug")
-}
-
-fn is_suffixed_worktree_board_id(id: &BoardId, base: &BoardId) -> bool {
-    id.as_str()
-        .rsplit_once('-')
-        .and_then(|(_, suffix)| suffix.parse::<u32>().ok())
-        .is_some_and(|suffix| {
-            (2..=MAX_BOARD_ID_SUFFIX).contains(&suffix) && suffixed_board_id(base, suffix) == *id
-        })
 }

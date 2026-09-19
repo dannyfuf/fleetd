@@ -61,7 +61,9 @@ Old board documents and snapshots continue to decode with no worktree scope, and
 lookup must explicitly reject scoped boards. Listings skip a scoped board after its worktree is
 gone, while the deletion cascade removes the live document so a repeated worktree id cannot
 inherit it. The recoverable copy stays inside the worktree trash entry and returns on restore.
-The CLI and phase 2 app surface must capability-gate the new requests.
+Unreadable live documents and quarantined remains survive cascades when their persisted scope
+cannot be verified; a shared derived filename is not ownership evidence. The CLI and phase 2 app
+surface must capability-gate the new requests.
 
 Phase 2 deliberately keeps a single scope-aware `BoardState`: the Hub context board and a
 Workspace worktree board are never visible at the same time. If a later feature displays or keeps

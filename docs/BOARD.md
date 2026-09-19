@@ -497,7 +497,7 @@ impl BoardStore {
     /// would let the `ensure` that scanned for a board create an empty one in its place.
     pub fn peek(&self, id: &BoardId) -> DaemonResult<Option<BoardDocument>>;
     pub fn quarantined(&self, id: &BoardId) -> DaemonResult<Vec<PathBuf>>;   // `<id>.json.broken-*`
-    pub(crate) fn quarantined_documents(&self) -> DaemonResult<BTreeMap<BoardId, Vec<PathBuf>>>; // one directory scan for cascade filtering
+    pub(crate) fn quarantined_documents(&self) -> DaemonResult<BTreeMap<BoardId, Vec<PathBuf>>>; // one directory scan for id lookup
     pub fn stamp(&self, id: &BoardId) -> Option<(u64, SystemTime)>;          // size+mtime; memoizes summaries
     pub fn save(&self, doc: &BoardDocument) -> DaemonResult<()>;
     pub fn delete(&self, id: &BoardId) -> DaemonResult<()>;   // board and its quarantined remains to trash_dir
@@ -580,9 +580,10 @@ Cards whose `worktree_id` no longer exists in `State.worktrees` are reported wit
 None` (not persisted), and a `repo_id` — on a card or as `Board.default_repo_id` — naming a
 repository the state no longer has in the board's context is reported the same way and skipped
 when `create_worktree_from_card` picks a repository. `ensure`/`create` refuse a context whose
-board document is quarantined rather than creating an empty board over it; `delete_for_context`
-takes the quarantined remains with it. Cascades preserve a live document this build cannot read,
-because its persisted context/worktree scope cannot be inferred safely from the shared board id.
+board document is quarantined rather than creating an empty board over it. Cascades preserve both
+a live document this build cannot read and any quarantined remains, because their persisted
+context/worktree scope cannot be inferred safely from the shared board id. Explicit board deletion
+can remove quarantined remains because the caller supplies the authoritative board identity.
 `context_board` accepts only a board with the requested `context_id` and no `worktree_id`, on both
 its derived-id fast path and its fallback scan;
 `worktree_board` similarly treats the derived id only as a fast path and falls back to the

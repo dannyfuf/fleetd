@@ -817,7 +817,7 @@ async fn deleting_a_worktree_does_not_claim_an_unreadable_context_board_by_filen
 }
 
 #[tokio::test]
-async fn deleting_a_worktree_sweeps_its_quarantined_suffixed_board_id() {
+async fn deleting_a_worktree_preserves_an_unverifiable_cross_scope_quarantine() {
     let f = Fixture::new(pull_caps()).await;
     let worktree = f.publish_worktree("acme/api#feature").await;
     let context = f.state.load().await.unwrap().contexts[0].clone();
@@ -830,16 +830,24 @@ async fn deleting_a_worktree_sweeps_its_quarantined_suffixed_board_id() {
             cards: Vec::new(),
         })
         .unwrap();
-    let board = f
-        .boards
-        .ensure_for_worktree(&worktree.id)
-        .await
-        .unwrap()
-        .board;
-    assert_eq!(board.id.as_str(), "wt-acme-api-feature-2");
-    std::fs::write(f.home.board_path(&board.id), "not json").unwrap();
-    assert!(f.store.load(&board.id).is_err());
-    assert_eq!(f.store.quarantined(&board.id).unwrap().len(), 1);
+    let mut colliding_context_board = new_board(&context, "2026-09-06T12:00:00Z");
+    colliding_context_board.id = "wt-acme-api-feature-2".parse().unwrap();
+    f.store
+        .save(&BoardDocument {
+            version: BOARD_DOCUMENT_VERSION,
+            board: colliding_context_board.clone(),
+            cards: Vec::new(),
+        })
+        .unwrap();
+    std::fs::write(f.home.board_path(&colliding_context_board.id), "not json").unwrap();
+    assert!(f.store.load(&colliding_context_board.id).is_err());
+    assert_eq!(
+        f.store
+            .quarantined(&colliding_context_board.id)
+            .unwrap()
+            .len(),
+        1
+    );
 
     let response = f
         .services
@@ -852,18 +860,16 @@ async fn deleting_a_worktree_sweeps_its_quarantined_suffixed_board_id() {
         panic!("expected worktree deletion response");
     };
     assert!(results[0].ok);
-    assert!(f.store.quarantined(&board.id).unwrap().is_empty());
+    assert_eq!(
+        f.store
+            .quarantined(&colliding_context_board.id)
+            .unwrap()
+            .len(),
+        1
+    );
 
     let recreated = f.publish_worktree("acme/api#feature").await;
-    assert_eq!(
-        f.boards
-            .ensure_for_worktree(&recreated.id)
-            .await
-            .unwrap()
-            .board
-            .id,
-        board.id
-    );
+    assert!(f.boards.ensure_for_worktree(&recreated.id).await.is_err());
 }
 
 #[tokio::test]
