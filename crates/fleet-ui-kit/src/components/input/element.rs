@@ -87,22 +87,36 @@ impl ShapedTextLine {
         }
     }
 
-    fn row_boundaries(&self) -> Vec<usize> {
-        let Self::Wrapped(line) = self else {
-            return Vec::new();
+    /// The byte offsets the wrapped rows of this logical line start at, after the first.
+    ///
+    /// Borrowed rather than collected: a selection asks every visible line for these on every
+    /// frame, and a `Vec` per line is an allocation per frame per line.
+    fn row_boundaries(&self) -> impl Iterator<Item = usize> + '_ {
+        let wrapped = match self {
+            Self::Wrapped(line) => Some(line),
+            Self::Unwrapped(_) => None,
         };
-        line.wrap_boundaries
-            .iter()
-            .map(|boundary| line.runs()[boundary.run_ix].glyphs[boundary.glyph_ix].index)
-            .collect()
+        wrapped.into_iter().flat_map(|line| {
+            line.wrap_boundaries
+                .iter()
+                .map(move |boundary| line.runs()[boundary.run_ix].glyphs[boundary.glyph_ix].index)
+        })
     }
 }
 
 struct CachedLine {
     start: usize,
     len: usize,
+    /// The document visual row this logical line's first row occupies.
+    row_start: usize,
     shape_key: LineShapeKey,
-    layout: Option<Arc<ShapedTextLine>>,
+    layout: Arc<ShapedTextLine>,
+}
+
+impl CachedLine {
+    fn row_end(&self) -> usize {
+        self.row_start + self.layout.visual_rows()
+    }
 }
 
 /// Memoised logical-line layouts used by paint, pointer hit testing and the platform bridge.
@@ -125,20 +139,15 @@ impl LineLayoutCache {
             .as_ref()
             .is_some_and(|key| key.revision == revision)
             && !self.lines.is_empty()
-            && self.lines.iter().all(|line| line.layout.is_some())
     }
 
     pub(super) fn line(&self, index: usize) -> Option<(usize, &ShapedTextLine)> {
         let line = self.lines.get(index)?;
-        Some((line.start, line.layout.as_deref()?))
+        Some((line.start, line.layout.as_ref()))
     }
 
     pub(super) fn visual_rows(&self) -> usize {
-        self.lines
-            .iter()
-            .filter_map(|line| line.layout.as_ref())
-            .map(|line| line.visual_rows())
-            .sum()
+        self.lines.last().map_or(0, CachedLine::row_end)
     }
 
     #[cfg(test)]
@@ -157,27 +166,27 @@ impl LineLayoutCache {
     }
 
     pub(super) fn visual_row_start(&self, line_index: usize) -> Option<usize> {
-        let mut rows = 0;
-        for line in self.lines.get(..line_index)? {
-            rows += line.layout.as_ref()?.visual_rows();
-        }
-        Some(rows)
+        Some(self.lines.get(line_index)?.row_start)
     }
 
     pub(super) fn line_for_visual_row(
         &self,
         visual_row: usize,
     ) -> Option<(usize, &ShapedTextLine, usize)> {
-        let mut row_start = 0;
-        for line in &self.lines {
-            let layout = line.layout.as_deref()?;
-            let row_end = row_start + layout.visual_rows();
-            if visual_row < row_end {
-                return Some((line.start, layout, visual_row - row_start));
-            }
-            row_start = row_end;
-        }
-        None
+        let line = self.lines.get(self.line_index_for_row(visual_row))?;
+        Some((
+            line.start,
+            line.layout.as_ref(),
+            visual_row.checked_sub(line.row_start)?,
+        ))
+    }
+
+    /// The first logical line whose rows reach `row`, or `lines.len()` past the last row.
+    ///
+    /// Rows are contiguous and ascending, so this is a binary search rather than a walk over
+    /// the document.
+    fn line_index_for_row(&self, row: usize) -> usize {
+        self.lines.partition_point(|line| line.row_end() <= row)
     }
 
     pub(super) fn line_index_for_offset(&self, offset: usize) -> Option<(usize, usize)> {
@@ -187,20 +196,35 @@ impl LineLayoutCache {
         })
     }
 
-    fn take_lines(&self) -> Vec<(usize, usize, Arc<ShapedTextLine>)> {
-        self.lines
+    /// The lines whose rows intersect `rows` rows from `first_row`, and the row the first of
+    /// them starts at.
+    ///
+    /// Prepaint carries only these into paint, so a long value costs one `Arc` clone per
+    /// *visible* line per frame rather than one per line of the document.
+    fn visible_lines(
+        &self,
+        first_row: usize,
+        rows: usize,
+    ) -> (usize, Vec<(usize, usize, Arc<ShapedTextLine>)>) {
+        let end_row = first_row.saturating_add(rows);
+        let first = self.line_index_for_row(first_row);
+        let visible = self.lines[first..]
             .iter()
-            .filter_map(|line| {
-                line.layout
-                    .clone()
-                    .map(|layout| (line.start, line.len, layout))
-            })
-            .collect()
+            .take_while(|line| line.row_start < end_row)
+            .map(|line| (line.start, line.len, line.layout.clone()))
+            .collect();
+        let row = self
+            .lines
+            .get(first)
+            .map_or(first_row, |line| line.row_start);
+        (row, visible)
     }
 }
 
 pub(super) struct InputLayout {
     lines: Vec<(usize, usize, Arc<ShapedTextLine>)>,
+    /// The document visual row `lines[0]` starts at.
+    first_row: usize,
     selections: Vec<PaintQuad>,
     caret: Option<PaintQuad>,
     thumb: Option<PaintQuad>,
@@ -291,17 +315,21 @@ impl Element for TextInputElement {
             prepare_scroll(input, bounds, &theme);
             let horizontal_scroll = input.horizontal_scroll;
             let scroll_row = input.scroll_row;
-            let lines = input.line_cache.take_lines();
-            let selections = selection_quads(input, &lines, bounds, &theme);
-            let caret = caret_quad(input, &lines, bounds, &theme);
+            let (first_row, lines) = input
+                .line_cache
+                .visible_lines(scroll_row, visible_rows(bounds, line_height));
+            let selections = selection_quads(input, &lines, first_row, bounds, &theme);
+            let caret = caret_quad(input, bounds, &theme);
             let thumb = scroll_thumb_quad(input, bounds, &theme);
             #[cfg(test)]
             {
-                input.last_selection_quad_count = selections.len();
+                input.last_selection_rows =
+                    selection_rows(&selections, bounds, line_height, scroll_row);
             }
             input.reveal_caret = false;
             InputLayout {
                 lines,
+                first_row,
                 selections,
                 caret,
                 thumb,
@@ -335,6 +363,7 @@ impl Element for TextInputElement {
             .update(cx, |input, cx| input.ensure_focus_subscriptions(window, cx));
 
         let line_height = window.line_height();
+        let first_row = prepaint.first_row;
         let horizontal_scroll = prepaint.horizontal_scroll;
         let scroll_row = prepaint.scroll_row;
         let lines = std::mem::take(&mut prepaint.lines);
@@ -346,7 +375,7 @@ impl Element for TextInputElement {
             for selection in selections {
                 window.paint_quad(selection);
             }
-            let mut row_start = 0usize;
+            let mut row_start = first_row;
             for (_, _, line) in &lines {
                 let top =
                     bounds.top() + line_height * row_start as f32 - line_height * scroll_row as f32;
@@ -380,6 +409,32 @@ impl Element for TextInputElement {
             }
         });
     }
+}
+
+/// How many visual rows the box can show, which is how much of the document paint can reach.
+fn visible_rows(bounds: Bounds<Pixels>, line_height: Pixels) -> usize {
+    if line_height <= Pixels::ZERO {
+        return 1;
+    }
+    ((f32::from(bounds.size.height) / f32::from(line_height)).ceil() as usize).max(1)
+}
+
+/// The document visual row each selection quad sits on, for the tests that pin the viewport.
+#[cfg(test)]
+fn selection_rows(
+    quads: &[PaintQuad],
+    bounds: Bounds<Pixels>,
+    line_height: Pixels,
+    scroll_row: usize,
+) -> Vec<usize> {
+    quads
+        .iter()
+        .map(|quad| {
+            let offset =
+                (f32::from(quad.bounds.top() - bounds.top()) / f32::from(line_height)).round();
+            scroll_row + offset.max(0.0) as usize
+        })
+        .collect()
 }
 
 fn scroll_thumb_quad(
@@ -426,13 +481,7 @@ fn prepare_lines(
         font_size_bits: f32::from(font_size).to_bits(),
         theme_mode: theme.mode,
     };
-    if input.line_cache.key.as_ref() == Some(&key)
-        && input
-            .line_cache
-            .lines
-            .iter()
-            .all(|line| line.layout.is_some())
-    {
+    if input.line_cache.key.as_ref() == Some(&key) {
         return;
     }
 
@@ -451,6 +500,7 @@ fn prepare_lines(
         .then(|| input.buffer.marked_range())
         .flatten();
     let mut start = 0usize;
+    let mut row_start = 0usize;
     let mut lines = Vec::new();
     #[cfg(test)]
     let mut misses = 0;
@@ -511,12 +561,15 @@ fn prepare_lines(
             .line_cache
             .shapes
             .insert(shape_key.clone(), layout.clone());
+        let rows = layout.visual_rows();
         lines.push(CachedLine {
             start,
             len: raw_line.len(),
+            row_start,
             shape_key,
-            layout: Some(layout),
+            layout,
         });
+        row_start += rows;
         start = line_end + '\n'.len_utf8();
     }
     input.line_cache.shapes.retain(|shape_key, _| {
@@ -581,8 +634,7 @@ fn widest_line(cache: &LineLayoutCache) -> Pixels {
     cache
         .lines
         .iter()
-        .filter_map(|line| line.layout.as_ref())
-        .map(|line| line.width())
+        .map(|line| line.layout.width())
         .max()
         .unwrap_or(Pixels::ZERO)
 }
@@ -631,9 +683,12 @@ fn prepare_scroll(input: &mut TextInput, bounds: Bounds<Pixels>, theme: &Theme) 
     }
 }
 
+/// The selection rectangles of the rows `lines` covers, which prepaint has already cut to the
+/// viewport; `first_row` is the document visual row `lines[0]` starts at.
 fn selection_quads(
     input: &TextInput,
     lines: &[(usize, usize, Arc<ShapedTextLine>)],
+    first_row: usize,
     bounds: Bounds<Pixels>,
     theme: &Theme,
 ) -> Vec<PaintQuad> {
@@ -642,12 +697,14 @@ fn selection_quads(
         return Vec::new();
     }
     let mut quads = Vec::new();
-    let mut logical_row_start = 0usize;
-    for (start, len, line) in lines {
-        let mut row_boundaries = line.row_boundaries();
-        row_boundaries.push(*len);
+    let mut logical_row_start = first_row;
+    'lines: for (start, len, line) in lines {
         let mut row_start = 0usize;
-        for (row, row_end) in row_boundaries.into_iter().enumerate() {
+        for (row, row_end) in line
+            .row_boundaries()
+            .chain(std::iter::once(*len))
+            .enumerate()
+        {
             let visual_row = logical_row_start + row;
             if visual_row < input.scroll_row {
                 row_start = row_end;
@@ -655,7 +712,7 @@ fn selection_quads(
             }
             let top = bounds.top() + input.line_height * (visual_row - input.scroll_row) as f32;
             if top >= bounds.bottom() {
-                break;
+                break 'lines;
             }
             let end = start + len;
             let local_start = (selected.start.max(*start).min(end) - start).max(row_start);
@@ -693,17 +750,11 @@ fn selection_quads(
     quads
 }
 
-fn caret_quad(
-    input: &TextInput,
-    lines: &[(usize, usize, Arc<ShapedTextLine>)],
-    bounds: Bounds<Pixels>,
-    theme: &Theme,
-) -> Option<PaintQuad> {
+fn caret_quad(input: &TextInput, bounds: Bounds<Pixels>, theme: &Theme) -> Option<PaintQuad> {
     if input.buffer.has_selection() {
         return None;
     }
-    let caret = input.buffer.caret();
-    let position = position_for_offset(lines, caret, input.line_height)?;
+    let position = input.position_for_offset(input.buffer.caret())?;
     let top = bounds.top() + position.y - input.line_height * input.scroll_row as f32;
     (top < bounds.bottom()).then(|| {
         let x = bounds.left() + position.x - input.horizontal_scroll;
@@ -715,24 +766,4 @@ fn caret_quad(
             theme.colors.accent,
         )
     })
-}
-
-fn position_for_offset(
-    lines: &[(usize, usize, Arc<ShapedTextLine>)],
-    offset: usize,
-    line_height: Pixels,
-) -> Option<gpui::Point<Pixels>> {
-    let mut row_start = 0usize;
-    for (start, len, line) in lines {
-        if offset >= *start && offset <= start + len {
-            let local = offset.saturating_sub(*start).min(*len);
-            let position = line.position_for_index(local, line_height)?;
-            return Some(point(
-                position.x,
-                position.y + line_height * row_start as f32,
-            ));
-        }
-        row_start += line.visual_rows();
-    }
-    None
 }

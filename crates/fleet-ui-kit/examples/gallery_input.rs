@@ -484,12 +484,22 @@ impl InputGallery {
         (sections, matched, total)
     }
 
+    /// How many palette rows the current query matches, without building any of them.
+    fn palette_matches(&self, cx: &App) -> usize {
+        let query = self.palette_query.read(cx).text();
+        GO_ROWS
+            .iter()
+            .map(|(label, _)| *label)
+            .chain(DO_ROWS.iter().map(|(label, _, _)| *label))
+            .chain(CONTEXT_ROWS.iter().map(|(label, _)| *label))
+            .filter(|label| subsequence(label, query).is_some())
+            .count()
+    }
+
     /// How many rows the cursor may land on right now.
     fn cursor_len(&self, cx: &App) -> usize {
         if self.palette_open {
-            let (sections, matched, _) = self.palette_sections(cx);
-            let _ = sections;
-            matched.min(10)
+            self.palette_matches(cx).min(10)
         } else {
             self.ranked_branches(cx).len()
         }

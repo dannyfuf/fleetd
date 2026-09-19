@@ -67,8 +67,8 @@ fn at(base: Instant, millis: u64) -> Instant {
     base + Duration::from_millis(millis)
 }
 
-// Seed parity: these preserve every generic editing contract previously covered by
-// MultilineBuffer's pure unit tests. Composer-only triggers and prompt history remain with the
+// Seed parity: these preserve every generic editing contract that the composer's own removed
+// buffer covered with pure unit tests. Composer-only triggers and prompt history remain with the
 // composer and are intentionally not generic input behavior.
 
 #[test]

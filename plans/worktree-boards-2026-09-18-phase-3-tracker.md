@@ -67,7 +67,7 @@
     independent run). `text_field*`/`text_area*` deleted; `input.rs` split into
     `input/{handlers,pointer,geometry,chrome}.rs` (all under 900 lines); ADR 0019 written and
     indexed. Resting settings/board-settings text rows are `FactRow`s per DESIGN-SYSTEM §6.4.
-- [ ] P3-T08 — Drive typing, selection and undo in the harness
+- [~] P3-T08 — Drive typing, selection and undo in the harness
 - [x] P3-T10 — Fix the phase-review findings (banner keys shadow inputs; mouse focus vs field marker; shared hub-filter predicate)
   - added 2026-09-19 from the P3-T07 review: P0 `Daemon > Banner` binds bare `r`/`l` innermost on
     every chain so those letters cannot be typed while the banner is up; P1 clicking a second
@@ -81,7 +81,7 @@
     editor owns keys, every key context must be classified against a live input in a keymap
     test, `TextInputEvent::Focused` mirrors mouse focus into the dialog field markers, and the
     Hub/board filter predicates live once on `AppState`.
-- [ ] P3-T11 — Kit review follow-ups from the late reviewer
+- [x] P3-T11 — Kit review follow-ups from the late reviewer
   - added 2026-09-19: `docs/research/agents-contracts.md` still lists the deleted
     `multiline_input/{buffer,element,platform}.rs` and `MultilineBuffer` as the shipped API (docs
     authoritative rule); `input/actions.rs` doc comments spell `shift-alt-`/`shift-cmd-` where the
@@ -89,6 +89,8 @@
     line's `Arc` and `selection_quads` allocates per line per frame (slice to the viewport);
     `Focused` is only observable after the first paint (document or emit on registration);
     `gallery_input.rs` builds and discards palette sections in `cursor_len`.
+  - verified: `cargo test -p fleet-ui-kit` (344 passed), kit clippy `-D warnings`, `cargo fmt --check`,
+    `grep MultilineBuffer docs crates` empty; the workspace gate runs with P3-T08.
 - [x] P3-T09 — Soft-wrap the multi-line mode of `TextInput`
   - verified: `cargo test -p fleet-ui-kit` (395 passed), `cargo build --example gallery_input`,
     `cargo fmt --check` and kit clippy `-D warnings` passed. Vertical motion and `home`/`end` stay

@@ -49,7 +49,8 @@ pub enum TextInputEvent {
     Changed,
     /// A single-line owner explicitly submitted the value through [`TextInput::submit`].
     Submitted,
-    /// The component's focus handle gained focus, including from a click on the value.
+    /// The component's focus handle gained focus, including from a click on the value, and on
+    /// the first paint when the handle was already focused before that paint.
     ///
     /// A surface that remembers *which* of its editors owns the keyboard must mirror this
     /// event into that marker, or a pointer-driven focus change and the marker disagree and
@@ -85,7 +86,7 @@ pub struct TextInput {
     composition_group_open: bool,
     focus_subscriptions: Option<[Subscription; 2]>,
     #[cfg(test)]
-    last_selection_quad_count: usize,
+    last_selection_rows: Vec<usize>,
 }
 
 impl TextInput {
@@ -117,7 +118,7 @@ impl TextInput {
             composition_group_open: false,
             focus_subscriptions: None,
             #[cfg(test)]
-            last_selection_quad_count: 0,
+            last_selection_rows: Vec::new(),
         }
     }
 
@@ -411,6 +412,11 @@ impl TextInput {
     /// Both are registered from the painted element, because the handle only joins the focus
     /// tree once the element exists. `on_focus` is what makes a click on the value visible to
     /// the surface that remembers which of its editors owns the keyboard.
+    ///
+    /// A listener registered here only activates at the end of the current effect cycle, so it
+    /// cannot see the focus change a surface made before this editor's first paint. Report that
+    /// initial focus directly instead, or an owner that focuses an editor in the frame it
+    /// creates it never hears [`TextInputEvent::Focused`] at all.
     pub(super) fn ensure_focus_subscriptions(
         &mut self,
         window: &mut Window,
@@ -434,6 +440,9 @@ impl TextInput {
             cx.emit(TextInputEvent::Blurred);
         });
         self.focus_subscriptions = Some([focused, blurred]);
+        if focus.is_focused(window) {
+            cx.emit(TextInputEvent::Focused);
+        }
     }
 
     fn finish_composition(&mut self) {

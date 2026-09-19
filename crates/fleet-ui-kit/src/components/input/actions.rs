@@ -31,13 +31,13 @@ gpui::actions!(
         SelectLeft,
         /// `shift-right`: extend the selection right by one grapheme.
         SelectRight,
-        /// `shift-alt-left`: extend the selection to the previous word boundary.
+        /// `alt-shift-left`: extend the selection to the previous word boundary.
         SelectWordLeft,
-        /// `shift-alt-right`: extend the selection to the next word boundary.
+        /// `alt-shift-right`: extend the selection to the next word boundary.
         SelectWordRight,
-        /// `shift-cmd-left`: extend to the logical line start.
+        /// `cmd-shift-left` / `ctrl-shift-a`: extend to the logical line start.
         SelectToLineStart,
-        /// `shift-cmd-right`: extend to the logical line end.
+        /// `cmd-shift-right` / `ctrl-shift-e`: extend to the logical line end.
         SelectToLineEnd,
         /// `shift-home`: extend to the current visual row start.
         SelectToRowStart,
@@ -47,9 +47,9 @@ gpui::actions!(
         SelectUp,
         /// `shift-down`: extend one visual row down, or one logical line without a layout.
         SelectDown,
-        /// `shift-cmd-up`: extend to the document start.
+        /// `cmd-shift-up`: extend to the document start.
         SelectToStart,
-        /// `shift-cmd-down`: extend to the document end.
+        /// `cmd-shift-down`: extend to the document end.
         SelectToEnd,
         /// `cmd-a`: select the whole value.
         SelectAll,

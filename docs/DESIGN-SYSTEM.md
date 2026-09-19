@@ -761,7 +761,9 @@ The filter is `Option<fn(char) -> bool>` and applies only to user insertion and 
 **Events.** `TextInputEvent::{Changed, Submitted, Focused, Blurred}`. `Submitted` is emitted only
 when a single-line owner explicitly calls `submit`; the input does not consume `Enter` itself.
 `Focused` and `Blurred` report the editor's own focus handle, including the focus a click on the
-value takes for itself. A surface with more than one editor must mirror `Focused` into whatever
+value takes for itself. `Focused` also fires on the input's first paint when its handle is already
+focused, so a surface that focuses an editor in the same frame it creates it still learns of it —
+the focus listeners only join the focus tree once the element has painted. A surface with more than one editor must mirror `Focused` into whatever
 marker it uses to remember which editor owns the keyboard, or a click and that marker disagree and
 the next focus reconciliation moves the caret back to the marked field.
 **Actions.** `text_input::{MoveLeft, MoveRight, MoveWordLeft, MoveWordRight, MoveToLineStart,

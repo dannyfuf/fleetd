@@ -26,6 +26,8 @@ struct InputHost {
     input: Entity<TextInput>,
     focus: FocusHandle,
     propagated: Rc<Cell<Propagated>>,
+    /// A second editor a test adds to a window that is already live and drawn.
+    extra: Option<Entity<TextInput>>,
     _event_subscription: Subscription,
 }
 
@@ -65,6 +67,7 @@ impl Render for InputHost {
             .on_action(cx.listener(Self::parent_enter))
             .w(px(360.0))
             .child(self.input.clone())
+            .children(self.extra.clone())
     }
 }
 
@@ -121,6 +124,7 @@ fn hosted(
                     input,
                     focus: cx.focus_handle(),
                     propagated: propagated_for_host,
+                    extra: None,
                     _event_subscription: subscription,
                 }
             })
@@ -289,7 +293,42 @@ fn wrapped_hit_testing_bounds_and_selection_share_visual_geometry(cx: &mut gpui:
         window.draw(cx).clear(cx);
     });
     input.read_with(&visual, |input, _| {
-        assert_eq!(input.last_selection_quad_count, 2)
+        assert_eq!(input.last_selection_rows.len(), 2)
+    });
+}
+
+#[gpui::test]
+fn a_selection_paints_quads_for_visible_rows_only(cx: &mut gpui::TestAppContext) {
+    let mode = InputMode::Multiline {
+        min_rows: 1,
+        max_rows: 3,
+    };
+    let text = (0..8)
+        .map(|row| format!("line {row}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (mut visual, input, _, _, _) = hosted(cx, mode, &text, |_, _| {});
+    input.read_with(&visual, |input, _| {
+        assert_eq!(input.line_cache.logical_lines(), 8);
+        assert_eq!(input.line_cache.visual_rows(), 8);
+    });
+
+    // The caret lands at the end, so the last three rows are the visible ones.
+    visual.simulate_keystrokes("cmd-a");
+    input.read_with(&visual, |input, _| {
+        assert_eq!(input.scroll_row, 5);
+        assert_eq!(input.last_selection_rows, vec![5, 6, 7]);
+    });
+
+    visual.update(|window, cx| {
+        input.update(cx, |input, cx| {
+            input.scroll_row = 0;
+            cx.notify();
+        });
+        window.draw(cx).clear(cx);
+    });
+    input.read_with(&visual, |input, _| {
+        assert_eq!(input.last_selection_rows, vec![0, 1, 2]);
     });
 }
 
@@ -493,6 +532,40 @@ fn a_click_on_a_blurred_input_emits_focused(cx: &mut gpui::TestAppContext) {
         assert_eq!(input.buffer().caret(), "alpha".len());
     });
     assert_eq!(events.borrow().as_slice(), &[TextInputEvent::Focused]);
+}
+
+#[gpui::test]
+fn focus_taken_before_the_first_paint_emits_focused(cx: &mut gpui::TestAppContext) {
+    let (mut visual, _input, _, _, _) = hosted(cx, InputMode::SingleLine, "first", |_, _| {});
+    let host = visual
+        .window_handle()
+        .downcast::<InputHost>()
+        .expect("text input host")
+        .root(&mut visual)
+        .expect("text input host");
+    let events = Rc::new(RefCell::new(Vec::new()));
+
+    // The surface builds a second editor and focuses it in the same update, so the focus is
+    // already settled when the element paints for the first time.
+    let events_for_second = events.clone();
+    let subscription = visual.update(|window, cx| {
+        let second = cx.new(|cx| TextInput::new(InputMode::SingleLine, cx));
+        let subscription = cx.subscribe(&second, move |_second, event, _cx| {
+            events_for_second.borrow_mut().push(*event);
+        });
+        second.update(cx, |second, cx| second.focus(window, cx));
+        host.update(cx, |host, cx| {
+            host.extra = Some(second);
+            cx.notify();
+        });
+        subscription
+    });
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    visual.run_until_parked();
+
+    assert_eq!(events.borrow().as_slice(), &[TextInputEvent::Focused]);
+    // Held until here: dropping the subscription earlier would stop recording the events.
+    drop(subscription);
 }
 
 #[gpui::test]
