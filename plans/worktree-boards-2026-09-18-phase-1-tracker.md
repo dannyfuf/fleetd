@@ -47,3 +47,5 @@
 (Things discovered mid-flight that are out of scope for this plan. Each gets a one-line description.)
 
 - Expose `DeleteBoard` as `fleet board delete` so an optional worktree board can be detached without deleting the worktree.
+- Fix the reproducible `AgentThreadView` handle leak when the headless
+  `agents/subagent-reopen-closed-caller.scenario` quits after reopening its caller.
