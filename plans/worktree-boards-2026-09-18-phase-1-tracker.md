@@ -10,12 +10,15 @@
 - Definition of done is not met until every box is ticked and this tracker matches reality.
 
 ## Kickoff
-- [ ] I have read the plan end to end.
-- [ ] I have run the project-wide verification commands once on a clean tree to confirm a green baseline (`make lint && make test`).
-- [ ] I am ready to start.
+- [x] I have read the plan end to end.
+- [x] I have run the project-wide verification commands once on a clean tree to confirm a green baseline (`make lint && make test`).
+  - verified: orchestrator `make lint` was green (`/tmp/wb-baseline-lint-p1.log`); orchestrator
+    `make test` completed with `exit=0` (`/tmp/wb-baseline-test-p3.log`).
+- [x] I am ready to start.
 
 ## Tasks
-- [ ] P1-T01 — Add the worktree scope to the core board model
+- [x] P1-T01 — Add the worktree scope to the core board model
+  - verified: `cargo test -p fleet-core board` (117 passed) and `make lint` passed.
 - [ ] P1-T02 — Make board lookup and listing scope-aware in the daemon
 - [ ] P1-T03 — Add ensure/create for worktree boards to the `Boards` service
 - [ ] P1-T04 — Cascade board deletion when a worktree is deleted or pruned

@@ -1,8 +1,8 @@
-use super::defaults::default_prefix;
+use super::defaults::{default_prefix, new_worktree_board, worktree_board_id};
 use super::*;
 use crate::{
-    ids::{CardId, ContextId},
-    model::Context,
+    ids::{BoardId, CardId, ContextId, WorktreeId},
+    model::{Context, Worktree},
 };
 use serde::{Serialize, de::DeserializeOwned};
 use std::{collections::BTreeMap, fmt::Debug};
@@ -32,6 +32,24 @@ fn round_trip<T: Serialize + DeserializeOwned + PartialEq + Debug>(value: &T) {
         value
     );
 }
+
+fn worktree(id: &str) -> Worktree {
+    let id = WorktreeId::try_from(id).unwrap();
+    Worktree {
+        repo_id: id.repo().parse().unwrap(),
+        slug: id.slug().into(),
+        id,
+        branch: "feature".into(),
+        base_ref: "origin/main".into(),
+        path: "/tmp/worktree".into(),
+        session: "api/feature".into(),
+        host: None,
+        created_at: "2026-09-06T12:00:00Z".into(),
+        last_opened_at: None,
+        degraded: None,
+    }
+}
+
 #[test]
 fn board_card_and_document_round_trip() {
     let board = board();
@@ -59,6 +77,64 @@ fn board_card_and_document_round_trip() {
         board,
         cards: vec![card],
     });
+}
+
+#[test]
+fn board_scope_is_additive_and_uses_worktree_id_on_the_wire() {
+    let mut old_json = serde_json::to_value(board()).unwrap();
+    old_json.as_object_mut().unwrap().remove("worktreeId");
+    let old_board: Board = serde_json::from_value(old_json).unwrap();
+    assert_eq!(old_board.worktree_id, None);
+
+    let mut scoped = board();
+    scoped.worktree_id = Some("acme/api#feature".parse().unwrap());
+    let scoped_json = serde_json::to_value(&scoped).unwrap();
+    assert_eq!(scoped_json["worktreeId"], "acme/api#feature");
+    round_trip(&scoped);
+
+    let summary = summarize(&scoped, &[]);
+    assert_eq!(summary.worktree_id, scoped.worktree_id);
+    round_trip(&summary);
+}
+
+#[test]
+fn worktree_defaults_derive_valid_ids_and_prefixes() {
+    assert_eq!(
+        worktree_board_id(&"acme/api#feature".parse().unwrap()).as_str(),
+        "wt-acme-api-feature"
+    );
+    let unusual: WorktreeId = "ACME/Prój.ect#Fïx_Ünicode".parse().unwrap();
+    assert_eq!(
+        worktree_board_id(&unusual).as_str(),
+        "wt-acme-pr-j-ect-f-x-nicode"
+    );
+
+    let long: WorktreeId = format!("{}/{}#{}", "a".repeat(80), "b".repeat(80), "c".repeat(80))
+        .parse()
+        .unwrap();
+    let long_id = worktree_board_id(&long);
+    assert!(long_id.as_str().len() <= 64);
+    assert!(!long_id.as_str().ends_with('-'));
+    assert!(BoardId::try_from(long_id.as_str()).is_ok());
+
+    let context = Context {
+        id: "work".parse().unwrap(),
+        name: "Work".into(),
+        owners: vec![],
+        created_at: "2026-09-06T12:00:00Z".into(),
+    };
+    let scoped = new_worktree_board(&context, &worktree("acme/api#中文"), "2026-09-06T12:00:00Z");
+    assert_eq!(scoped.id.as_str(), "wt-acme-api-x");
+    assert_eq!(
+        scoped.worktree_id.as_ref().map(WorktreeId::as_str),
+        Some("acme/api#中文")
+    );
+    assert_eq!(scoped.name, "中文");
+    assert_eq!(scoped.prefix, "WT");
+    assert_eq!(
+        scoped.default_repo_id.as_ref().map(|id| id.as_str()),
+        Some("acme/api")
+    );
 }
 #[test]
 fn property_value_wire_tags_and_display() {

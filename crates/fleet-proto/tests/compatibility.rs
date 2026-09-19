@@ -214,6 +214,7 @@ fn response_wire_goldens() {
             result: Ok(ResponseBody::Boards(vec![BoardSummary {
                 id: "work".parse().unwrap(),
                 context_id: "work".parse().unwrap(),
+                worktree_id: None,
                 name: "Fleet".to_owned(),
                 prefix: "FLT".to_owned(),
                 backend_kind: "jira".to_owned(),

@@ -11,9 +11,11 @@ markdown crate, and the protocol bump the board's messages needed — are record
 
 ## 0. What we are building
 
-A Linear-style kanban **board of cards**, one board per **context** (`fleet_core::Context`). Cards
-are the unit of project tracking: identifier (`FLT-12`), title, markdown description, status
-column, priority, labels, assignee, estimate, due date, parent, custom properties, comments,
+A Linear-style kanban **board of cards**, one board per **context** (`fleet_core::Context`) and,
+optionally, one additional board per **worktree**. A worktree board remains associated with the
+worktree's context and repository while keeping that worktree's cards separate from the context
+board. Cards are the unit of project tracking: identifier (`FLT-12`), title, markdown description,
+status column, priority, labels, assignee, estimate, due date, parent, custom properties, comments,
 activity. A card can **spawn a worktree** (the existing prepared-copy pipeline) and remembers it.
 
 The **core is backend-agnostic and reusable**. A `BoardBackend` adapter (daemon side) plus a
@@ -66,6 +68,8 @@ string_id!(LabelId,  "label",  validate_slug);        // "bug"
 pub struct Board {
     pub id: BoardId,
     pub context_id: ContextId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_id: Option<WorktreeId>,
     pub name: String,
     /// Identifier prefix; `FLT` → `FLT-12`. Uppercase, 1..=8 chars, [A-Z0-9].
     pub prefix: String,
@@ -199,7 +203,9 @@ pub struct StatusMap { pub remote_to_local: BTreeMap<String, StatusId>, pub loca
 /// Lightweight row for `Snapshot.boards`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BoardSummary { pub id: BoardId, pub context_id: ContextId, pub name: String, pub prefix: String,
+pub struct BoardSummary { pub id: BoardId, pub context_id: ContextId,
+                          #[serde(default, skip_serializing_if = "Option::is_none")] pub worktree_id: Option<WorktreeId>,
+                          pub name: String, pub prefix: String,
                           pub backend_kind: String, pub card_count: usize, pub open_count: usize,
                           pub dirty_count: usize, pub conflict_count: usize,
                           pub last_synced_at: Option<String>, pub last_error: Option<String> }
@@ -246,6 +252,8 @@ impl PropertyValue { pub fn display(&self) -> String; pub fn matches_kind(&self,
 pub fn default_statuses() -> Vec<Status>;   // backlog/Backlog, todo/Unstarted, in-progress/Started, done/Completed, canceled/Canceled
 pub fn default_prefix(context: &Context) -> String;   // first 3 alnum chars of context name uppercased, fallback "FLT"
 pub fn new_board(context: &Context, now: &str) -> Board; // id = context.id as BoardId, name = context.name, default statuses, next_number = 1
+pub fn worktree_board_id(worktree: &WorktreeId) -> BoardId; // wt-<owner>-<repo>-<slug>, slugified and capped at 64 bytes
+pub fn new_worktree_board(context: &Context, worktree: &Worktree, now: &str) -> Board; // worktree scope, slug name/prefix, worktree repo default
 ```
 
 ```rust

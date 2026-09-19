@@ -8,7 +8,7 @@ pub mod sync;
 #[cfg(test)]
 mod tests;
 
-pub use defaults::{default_statuses, new_board};
+pub use defaults::{default_statuses, new_board, new_worktree_board, worktree_board_id};
 pub use model::{
     Activity, ActivityKind, BOARD_DOCUMENT_VERSION, BackendRef, Board, BoardDocument,
     BoardSettings, BoardSummary, BoardView, Card, Comment, Conflict, ConflictPolicy, Label,
