@@ -935,12 +935,22 @@ mod tests {
 
 /// Board selection and nested operations.
 #[derive(Debug, Args, PartialEq, Eq)]
+#[command(subcommand_precedence_over_arg = true)]
 pub struct BoardArgs {
-    /// Explicit board ID; mutually exclusive with --context.
-    #[arg(long, global = true, conflicts_with = "context")]
+    /// Explicit board ID; mutually exclusive with --context and --worktree.
+    #[arg(long, global = true, conflicts_with_all = ["context", "worktree"])]
     pub board: Option<fleet_core::ids::BoardId>,
+    /// Worktree ID, or the current terminal's worktree when no ID is given.
+    #[arg(
+        long,
+        global = true,
+        num_args = 0..=1,
+        default_missing_value = "@session",
+        conflicts_with_all = ["board", "context"]
+    )]
+    pub worktree: Option<BoardWorktreeSelector>,
     /// Context ID; defaults to the daemon's active context.
-    #[arg(long, global = true, conflicts_with = "board")]
+    #[arg(long, global = true, conflicts_with_all = ["board", "worktree"])]
     pub context: Option<fleet_core::ids::ContextId>,
     /// Emit a protocol-one JSON envelope.
     #[arg(long, global = true)]
@@ -950,18 +960,40 @@ pub struct BoardArgs {
     pub command: BoardCommand,
 }
 
+/// Worktree selected explicitly or inferred from the current Fleet session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BoardWorktreeSelector {
+    /// A worktree named directly on the command line.
+    Explicit(fleet_core::ids::WorktreeId),
+    /// The worktree owning the session named by `FLEET_SESSION`.
+    FromSession,
+}
+
+impl std::str::FromStr for BoardWorktreeSelector {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value == "@session" {
+            return Ok(Self::FromSession);
+        }
+        fleet_core::ids::WorktreeId::try_from(value)
+            .map(Self::Explicit)
+            .map_err(|error| error.to_string())
+    }
+}
+
 /// Operations accepted by `fleet board`.
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum BoardCommand {
     /// Show columns and their cards.
     Show,
-    /// List board summaries across contexts.
+    /// List board summaries across context and worktree scopes.
     List,
     /// List registered backend kinds, their capabilities, and their setting keys.
     Backends,
     /// Print what the board's backend reports: statuses, labels, properties, read-only fields.
     Describe,
-    /// Create a board for a context.
+    /// Create a board for a context or worktree.
     Create(BoardCreateArgs),
     /// Update board properties and settings.
     Set(BoardSetArgs),
@@ -994,7 +1026,7 @@ fn parse_setting(value: &str) -> Result<(String, String), String> {
 /// New board properties.
 #[derive(Debug, Args, PartialEq, Eq)]
 pub struct BoardCreateArgs {
-    /// Board name; defaults to the context name.
+    /// Board name; defaults to the context name or worktree slug.
     #[arg(long)]
     pub name: Option<String>,
     /// Uppercase identifier prefix.

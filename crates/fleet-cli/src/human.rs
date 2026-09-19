@@ -273,6 +273,7 @@ pub fn boards(boards: &[fleet_core::board::BoardSummary]) -> String {
     let header = [
         "BOARD",
         "CONTEXT",
+        "SCOPE",
         "NAME",
         "BACKEND",
         "CARDS",
@@ -287,6 +288,10 @@ pub fn boards(boards: &[fleet_core::board::BoardSummary]) -> String {
         let mut row = vec![
             board.id.to_string(),
             board.context_id.to_string(),
+            board
+                .worktree_id
+                .as_ref()
+                .map_or_else(|| "context".to_owned(), ToString::to_string),
             crate::envelope::single_line(&board.name),
             crate::envelope::single_line(&board.backend_kind),
             board.card_count.to_string(),
@@ -354,10 +359,16 @@ pub fn board(
     backend: Option<&fleet_core::board::BackendDescriptor>,
     now: i64,
 ) -> String {
+    let scope = view
+        .board
+        .worktree_id
+        .as_ref()
+        .map_or_else(String::new, |id| format!(" · worktree {id}"));
     let mut sections = vec![format!(
-        "{} ({})\n{}",
+        "{} ({}){}\n{}",
         crate::envelope::single_line(&view.board.name),
         crate::envelope::single_line(&view.board.prefix),
+        scope,
         board_header(view, backend, now)
     )];
     for status in &view.board.statuses {

@@ -3,8 +3,8 @@
 mod parsing {
     use crate::{
         args::{
-            BoardArgs, BoardCardCommand, BoardCommand, BoardConflictPolicy, BoardPriority, Cli,
-            Command,
+            BoardArgs, BoardCardCommand, BoardCommand, BoardConflictPolicy, BoardPriority,
+            BoardWorktreeSelector, Cli, Command,
         },
         envelope::{
             BoardBackendSchemaEnvelope, BoardBackendsEnvelope, BoardCardEnvelope, BoardEnvelope,
@@ -48,6 +48,35 @@ mod parsing {
         let args = parse(&["show", "--context", "work"]);
         assert_eq!(args.context.unwrap().as_str(), "work");
         assert!(parse(&["show"]).board.is_none());
+    }
+
+    #[test]
+    fn parses_bare_and_explicit_worktree_selectors_and_their_conflicts() {
+        assert_eq!(
+            parse(&["--worktree", "show"]).worktree,
+            Some(BoardWorktreeSelector::FromSession)
+        );
+        let args = parse(&["show", "--worktree", "acme/api#feature"]);
+        assert!(matches!(
+            args.worktree,
+            Some(BoardWorktreeSelector::Explicit(id)) if id.as_str() == "acme/api#feature"
+        ));
+        for arguments in [
+            ["show", "--worktree", "acme/api#feature", "--board", "work"].as_slice(),
+            [
+                "show",
+                "--worktree",
+                "acme/api#feature",
+                "--context",
+                "work",
+            ]
+            .as_slice(),
+        ] {
+            let argv = ["fleet", "board"]
+                .into_iter()
+                .chain(arguments.iter().copied());
+            assert!(Cli::try_parse_from(argv).is_err(), "accepted {arguments:?}");
+        }
     }
 
     #[test]
@@ -744,6 +773,35 @@ mod parsing {
     }
 
     #[test]
+    fn board_list_names_context_and_worktree_scopes() {
+        let view = view();
+        let context = summarize(&view.board, &view.cards);
+        let mut worktree = context.clone();
+        worktree.id = "wt-feature".parse().unwrap();
+        worktree.worktree_id = Some("acme/api#feature".parse().unwrap());
+        let text = human::boards(&[context, worktree]);
+        assert!(text.lines().next().unwrap().contains("SCOPE"), "{text}");
+        assert!(text.lines().nth(1).unwrap().contains("context"), "{text}");
+        assert!(
+            text.lines().nth(2).unwrap().contains("acme/api#feature"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn worktree_board_header_names_its_worktree() {
+        let mut view = view();
+        view.board.worktree_id = Some("acme/api#feature".parse().unwrap());
+        assert!(
+            human::board(&view, None, 0)
+                .lines()
+                .next()
+                .unwrap()
+                .contains("worktree acme/api#feature")
+        );
+    }
+
+    #[test]
     fn card_header_stays_one_line_and_an_author_less_comment_names_nobody() {
         let mut view = view();
         view.cards[0].title = "Fix login\nand logout".into();
@@ -1165,14 +1223,16 @@ mod orchestration {
     use clap::Parser;
     use fleet_core::{
         board::{RemoteLink, new_board},
+        config::Agent,
         model::Context,
+        sessions::{Session, SessionKind},
     };
     use fleet_proto::{
         PROTOCOL_VERSION,
         codec::FleetCodec,
         job::JobKind,
         request::{Request, RequestBody},
-        response::{Response, ResponseBody},
+        response::{BOARD_WORKTREE_CAPABILITY, HelloResponse, Response, ResponseBody},
         snapshot::Snapshot,
     };
     use futures_util::{SinkExt, StreamExt};
@@ -1233,18 +1293,26 @@ mod orchestration {
         UnixListener::bind(home.join("fleetd.sock")).unwrap()
     }
 
-    async fn authenticate(transport: &mut ServerTransport) {
+    async fn authenticate(transport: &mut ServerTransport, capabilities: Vec<String>) {
         let hello = next_request(transport).await;
         assert!(matches!(hello.body, RequestBody::Hello { .. }));
-        send_result(
-            transport,
-            hello.id,
-            Ok(ResponseBody::Hello {
-                protocol: PROTOCOL_VERSION,
-                server: "test-daemon".to_owned(),
-            }),
-        )
-        .await;
+        let response = HelloResponse {
+            response: Response {
+                id: hello.id,
+                result: Ok(ResponseBody::Hello {
+                    protocol: PROTOCOL_VERSION,
+                    server: "test-daemon".to_owned(),
+                }),
+            },
+            snapshot_revision: None,
+            capabilities,
+            daemon_id: "test-daemon".to_owned(),
+            build_commit: None,
+        };
+        transport
+            .send(serde_json::to_value(response).unwrap())
+            .await
+            .unwrap();
         let subscribe = next_request(transport).await;
         assert!(matches!(subscribe.body, RequestBody::Subscribe { .. }));
         send_result(transport, subscribe.id, Ok(ResponseBody::Ack)).await;
@@ -1268,13 +1336,21 @@ mod orchestration {
         arguments: &[&str],
         steps: Vec<(RequestBody, Result<ResponseBody, ProtoError>)>,
     ) -> Result<CommandOutput, ProtoError> {
+        run_with_capabilities(arguments, Vec::new(), steps).await
+    }
+
+    async fn run_with_capabilities(
+        arguments: &[&str],
+        capabilities: Vec<String>,
+        steps: Vec<(RequestBody, Result<ResponseBody, ProtoError>)>,
+    ) -> Result<CommandOutput, ProtoError> {
         timeout(Duration::from_secs(5), async {
             let home = TempDir::new().unwrap();
             let listener = bind(home.path()).await;
             let server = tokio::spawn(async move {
                 let (socket, _) = listener.accept().await.unwrap();
                 let mut transport = Framed::new(socket, FleetCodec::new());
-                authenticate(&mut transport).await;
+                authenticate(&mut transport, capabilities).await;
                 for (expected, result) in steps {
                     let request = next_request(&mut transport).await;
                     assert_eq!(request.body, expected);
@@ -1293,6 +1369,19 @@ mod orchestration {
         })
         .await
         .expect("board CLI socket test timed out")
+    }
+
+    fn session(id: &str, kind: SessionKind) -> Session {
+        Session {
+            id: id.parse().unwrap(),
+            host: None,
+            kind,
+            cwd: "/tmp".into(),
+            terminals: Vec::new(),
+            active_terminal: None,
+            slept_at: None,
+            kept_terminals: Vec::new(),
+        }
     }
 
     fn link(key: &str) -> RemoteLink {
@@ -1375,6 +1464,112 @@ mod orchestration {
         .unwrap_err();
         assert_eq!(error.kind, ErrorKind::Validation);
         assert!(error.message.contains("--board and --context"));
+
+        let error = run(
+            &[
+                "--worktree",
+                "acme/api#feature",
+                "card",
+                "show",
+                "FLT-12",
+                "--context",
+                "personal",
+            ],
+            vec![],
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Validation);
+        assert!(error.message.contains("--context and --worktree"));
+    }
+
+    #[test]
+    fn resolves_only_worktree_sessions_from_the_snapshot() {
+        let worktree: WorktreeId = "acme/api#feature".parse().unwrap();
+        let mut snapshot = empty_snapshot();
+        snapshot.sessions = vec![
+            session("api/feature", SessionKind::Worktree(worktree.clone())),
+            session("api/agent", SessionKind::Agent(Agent::Opencode)),
+        ];
+        assert_eq!(
+            worktree_from_session(&snapshot, Some("api/feature")).unwrap(),
+            worktree
+        );
+        for id in [Some("api/agent"), Some("api/missing"), None] {
+            let error = worktree_from_session(&snapshot, id).unwrap_err();
+            assert_eq!(error.kind, ErrorKind::Validation);
+            assert_eq!(
+                error.message,
+                "no worktree session: pass --worktree <owner/name#slug> or run inside a worktree terminal"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn worktree_selector_requires_capability_then_ensures_the_board() {
+        let error = run(
+            &["show", "--worktree", "acme/api#feature", "--json"],
+            vec![],
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Validation);
+        assert_eq!(
+            error.message,
+            "this daemon does not support worktree boards; run `fleet daemon restart`"
+        );
+
+        let mut view = view();
+        view.board.worktree_id = Some("acme/api#feature".parse().unwrap());
+        let output = run_with_capabilities(
+            &["show", "--worktree", "acme/api#feature", "--json"],
+            vec![BOARD_WORKTREE_CAPABILITY.to_owned()],
+            vec![(
+                RequestBody::EnsureWorktreeBoard {
+                    worktree_id: "acme/api#feature".parse().unwrap(),
+                },
+                Ok(ResponseBody::Board(view)),
+            )],
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.exit_code, 0);
+    }
+
+    #[tokio::test]
+    async fn board_create_uses_the_worktree_request() {
+        let mut view = view();
+        view.board.worktree_id = Some("acme/api#feature".parse().unwrap());
+        let output = run_with_capabilities(
+            &[
+                "create",
+                "--worktree",
+                "acme/api#feature",
+                "--name",
+                "Feature",
+                "--prefix",
+                "FEAT",
+                "--backend",
+                "local",
+                "--json",
+            ],
+            vec![BOARD_WORKTREE_CAPABILITY.to_owned()],
+            vec![(
+                RequestBody::CreateWorktreeBoard {
+                    worktree_id: "acme/api#feature".parse().unwrap(),
+                    name: Some("Feature".into()),
+                    prefix: Some("FEAT".into()),
+                    backend: Some(BackendRef {
+                        kind: "local".into(),
+                        settings: serde_json::Value::Null,
+                    }),
+                },
+                Ok(ResponseBody::Board(view)),
+            )],
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.exit_code, 0);
     }
 
     #[tokio::test]

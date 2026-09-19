@@ -610,14 +610,15 @@ enum BoardChangeReason { Created, Updated, Deleted, CardChanged, Synced, SyncFai
 `create_worktree_from_card`, `sync_board`, `resolve_card_conflict`, `describe_board_backend`).
 
 CLI (`fleet board …`, JSON envelopes v1 with `--json`, human tables otherwise; board resolved from
-`--board <id>` else `--context <id>` else the active context via `EnsureBoard`):
+`--board <id>` else `--worktree [<owner/name#slug>]` else `--context <id>` else the active context
+via `EnsureBoard`; a bare `--worktree` resolves `FLEET_SESSION` to a worktree session):
 ```
-fleet board show [--context C|--board B]                          # columns + cards
-fleet board list                                                  # summaries
-fleet board create [--context C] [--name N] [--prefix P] [--backend local|jira] [--setting k=v]...
+fleet board show [--context C|--worktree [W]|--board B]           # columns + cards
+fleet board list                                                  # summaries with context/worktree scope
+fleet board create [--context C|--worktree [W]] [--name N] [--prefix P] [--backend local|jira] [--setting k=v]...
 fleet board set [--name] [--prefix] [--default-repo owner/name] [--clear-default-repo] [--start-on-worktree [true|false]] [--conflict-policy manual|remote_wins|local_wins] [--push-new-cards [true|false]] [--branch-template "{key}-{slug}"] [--add-label NAME]... [--remove-label L]... [--backend KIND] [--setting k=v]...
 fleet board backends                                              # registered kinds, capabilities, setting keys
-fleet board describe [--context C|--board B]                      # what this board's backend reports about itself
+fleet board describe [--context C|--worktree [W]|--board B]       # what this board's backend reports about itself
 fleet board sync [--wait] [--full]                                # --full ignores the incremental cursor
 fleet board card new <title> [--desc] [--status S] [--priority urgent|high|medium|low|none] [--label L]... [--assignee] [--estimate] [--due YYYY-MM-DD] [--repo]
 fleet board card show <key|id>

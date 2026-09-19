@@ -116,10 +116,13 @@ neither the bug-fix program nor the native-agent work changed CLI envelope versi
 
 ### Board
 
-Each context has one board, created on first use. `fleet board show` displays its
-columns and cards under a header naming the backend, its project, the age of the last
-sync, and the dirty and conflict counts; `fleet board list` lists board summaries.
-Use `fleet board create` with `--name`, `--prefix`, or `--backend local`, and
+Each context has one board, created on first use, and a published worktree can have its own
+optional board. Select one with `--board <id>`, `--worktree <owner/name#slug>`, or bare
+`--worktree` inside a Fleet worktree terminal; otherwise `--context <id>` or the active context
+is used. `fleet board show` displays its columns and cards under a header naming its scope and
+backend, its project, the age of the last sync, and the dirty and conflict counts; `fleet board
+list` lists board summaries with their context or worktree scope. Use `fleet board create` with
+`--name`, `--prefix`, or `--backend local`, and
 `fleet board set` to change its name, prefix, default repository
 (`--default-repo owner/name`, `--clear-default-repo`), worktree-start setting,
 conflict policy, branch template (`--branch-template "{key}-{slug}"`), or whether new
@@ -164,8 +167,8 @@ also takes `--archive` and the `--clear-labels`, `--clear-assignee`,
 `--clear-estimate`, `--clear-due` and `--clear-repo` flags, which are the only way
 to unset a field; `new` refuses them, since a card is born with nothing to clear.
 
-Select a board with `--board <id>` or `--context <id>`; otherwise Fleet uses the
-active context. Card selectors accept a display key, a card ID, or — for a card with no
+Selector precedence is `--board`, then `--worktree`, then `--context`, then the active context.
+Card selectors accept a display key, a card ID, or — for a card with no
 remote issue — its local key.
 Every board command accepts `--json` for protocol 1 envelopes. In the app, `g b`
 opens the board, `c` creates a card, `enter` opens its detail, `x` opens the focused

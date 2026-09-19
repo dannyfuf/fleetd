@@ -29,7 +29,10 @@
   - verified: `cargo test -p fleet-proto` passed; `FLEET_DAEMON="$PWD/target/debug/fleetd" cargo test -p fleet-daemon` passed (768 library tests); `make lint` passed; private `make restart FLEET_HOME=/tmp/wb-p1-home` succeeded.
 - [x] P1-T06 — Add the typed client methods
   - verified: `cargo test -p fleet-client` passed (including both worktree-board socket round trips) and `make lint` passed.
-- [ ] P1-T07 — Add the `--worktree` selector to `fleet board`
+- [x] P1-T07 — Add the `--worktree` selector to `fleet board`
+  - verified: `cargo test -p fleet-cli` passed (118 library and 9 integration tests); `make lint`
+    passed; the private daemon exercised explicit and session-derived `board show`, `card new`,
+    `card move`, and the scope-aware `board list`, then was stopped.
 - [ ] P1-T08 — Record the decision and finish the docs
 
 ## Notes / decisions log
