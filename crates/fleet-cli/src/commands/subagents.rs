@@ -103,7 +103,7 @@ async fn run(
     let brief = read_text(arguments.brief_file.as_deref(), "brief")?;
     let provider = provider(arguments.provider);
     let mode = arguments.mode.map(permission_mode);
-    let model = arguments.model.map(model_selection).transpose()?;
+    let model = model_selection(arguments.model, arguments.effort)?;
     let (delegation, warning) = client
         .delegation_run(DelegationRunRequest {
             caller,
@@ -217,14 +217,20 @@ async fn wait(client: &Client, arguments: SubagentWaitArgs) -> Result<CommandOut
         .delegation_wait(arguments.id, arguments.timeout.saturating_mul(1_000))
         .await?;
     let terminal = delegation.status.is_terminal();
+    // `delivered_message` is the *terminal* template: it opens with "finished:" and prints a
+    // report body. Rendering it for a timed-out wait told the caller its live child had finished
+    // running, so the non-terminal answer gets its own line. JSON is unchanged either way — the
+    // envelope already carries the status, and callers parse it.
     let text = if arguments.json {
         to_json(&SubagentEnvelope {
             protocol: PROTOCOL,
             delegation: &delegation,
             warning: None,
         })?
-    } else {
+    } else if terminal {
         human::delivered_message(&delegation, SystemTime::now())
+    } else {
+        human::still_running_message(&delegation, SystemTime::now())
     };
     Ok(CommandOutput::with_exit_code(
         text,
@@ -290,15 +296,45 @@ fn permission_mode(choice: AgentModeChoice) -> PermissionMode {
     }
 }
 
-fn model_selection(value: String) -> Result<ModelSelection, ProtoError> {
-    if value.trim().is_empty() {
-        return Err(validation("model cannot be empty"));
+/// Builds the optional `ModelSelection` from `--model` and `--effort`.
+///
+/// Neither flag means no selection at all, which is what lets the daemon apply its configured
+/// per-provider defaults; naming only the model keeps that default effort, because `create_with`
+/// fills an absent effort and leaves a stated one alone.
+///
+/// An effort without a model is refused rather than sent. `ModelSelection.model` is a required
+/// `String` that both adapters spend as a launch argument — Claude emits `--effort` only inside
+/// the `--model` branch of its argv, and Codex reads `model_reasoning_effort` from the same
+/// object — so there is no value for it that means "the provider's default". Sending an empty
+/// one would launch the child with an empty model name, and dropping the effort silently would
+/// give the caller a child that is not the one it asked for. Refusing says so while the caller
+/// can still fix it.
+fn model_selection(
+    model: Option<String>,
+    effort: Option<String>,
+) -> Result<Option<ModelSelection>, ProtoError> {
+    if effort
+        .as_ref()
+        .is_some_and(|effort| effort.trim().is_empty())
+    {
+        return Err(validation("effort cannot be empty"));
     }
-    Ok(ModelSelection {
-        model: value,
-        effort: None,
-        provider: None,
-    })
+    match (model, effort) {
+        (None, None) => Ok(None),
+        (None, Some(_)) => Err(validation(
+            "--effort requires --model: a reasoning effort is a qualifier on a named model, and the provider's default model is resolved by the daemon",
+        )),
+        (Some(model), effort) => {
+            if model.trim().is_empty() {
+                return Err(validation("model cannot be empty"));
+            }
+            Ok(Some(ModelSelection {
+                model,
+                effort,
+                provider: None,
+            }))
+        }
+    }
 }
 
 fn fallback_id<T>(
@@ -396,6 +432,59 @@ mod tests {
                 .message
                 .contains("required fallback")
         );
+    }
+
+    #[test]
+    fn a_model_selection_is_built_from_every_legal_flag_pairing() {
+        assert_eq!(model_selection(None, None).unwrap(), None);
+        assert_eq!(
+            model_selection(Some("opus".to_owned()), None).unwrap(),
+            Some(ModelSelection {
+                model: "opus".to_owned(),
+                effort: None,
+                provider: None,
+            })
+        );
+        assert_eq!(
+            model_selection(Some("opus".to_owned()), Some("high".to_owned())).unwrap(),
+            Some(ModelSelection {
+                model: "opus".to_owned(),
+                effort: Some("high".to_owned()),
+                provider: None,
+            })
+        );
+        // Free text, never an enum: the ladder belongs to the provider, which is the only thing
+        // that can say a value is wrong.
+        assert_eq!(
+            model_selection(Some("opus".to_owned()), Some("xhigh".to_owned()))
+                .unwrap()
+                .and_then(|selection| selection.effort),
+            Some("xhigh".to_owned())
+        );
+    }
+
+    #[test]
+    fn an_effort_without_a_model_is_refused_rather_than_dropped() {
+        let refusal = model_selection(None, Some("high".to_owned())).unwrap_err();
+        assert!(
+            refusal.message.contains("--effort requires --model"),
+            "{}",
+            refusal.message
+        );
+        for empty in ["", "   "] {
+            assert!(
+                model_selection(Some("opus".to_owned()), Some(empty.to_owned()))
+                    .unwrap_err()
+                    .message
+                    .contains("effort cannot be empty")
+            );
+            assert!(
+                model_selection(Some(empty.to_owned()), None)
+                    .unwrap_err()
+                    .message
+                    .contains("model cannot be empty")
+            );
+        }
     }
 
     #[test]

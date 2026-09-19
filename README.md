@@ -98,8 +98,14 @@ Run `fleet --help` or `fleet <command> --help` for generated help.
 | `fleet agent respond <THREAD> <GATE> <ANSWER>` | Answer an open permission, question, or plan gate with provider-neutral words. | — |
 | `fleet agent interrupt <THREAD>` | Interrupt the active turn; the provider's terminal event stays authoritative. | — |
 | `fleet agent stop <THREAD>` | Stop the provider and retain the transcript. | — |
-| `fleet agent tail <THREAD> [--replay]` | Print one JSON `SeqEvent` per line until the provider exits; `--replay` starts from sequence 1. | One `SeqEvent` object per line |
+| `fleet agent tail <THREAD> [--replay] [--no-follow] [--last <N>]` | Print one JSON `SeqEvent` per line until the provider exits; `--replay` starts from sequence 1. `--no-follow` prints the retained history and exits instead of following, and `--last <N>` keeps only its newest N events; both imply `--replay`, and `--last` trims the replay only. | One `SeqEvent` object per line |
 | `fleet agent terminal [claude\|codex]` | Ensure a repository-level PTY agent session exists (the terminal fallback); defaults to `config.agent`. | — |
+| `fleet subagent run --provider <claude\|codex> [--brief-file <FILE>] --expect <TEXT> [--worktree <ID>] [--mode <MODE>] [--model <MODEL>] [--effort <EFFORT>] [--title <TITLE>] [--eager] [--caller <THREAD>] [--json]` | Start a delegated child thread, reading the brief from the file or stdin; the caller is `--caller` or `FLEET_SESSION`. `--effort` is provider-native free text and requires `--model`. | `protocol`, `delegation`, optional `warning` |
+| `fleet subagent complete [<ID>] [--result-file <FILE>] [--blocked] [--json-result] [--json]` | Report the current child's result, read from the file or stdin; the id falls back to `FLEET_DELEGATION`, and `FLEET_SESSION` plus `FLEET_DELEGATION_TOKEN` are required. | `protocol`, `delegation` |
+| `fleet subagent wait <ID> [--timeout <SECONDS>] [--json]` | Wait for a delegation, returning the child's report on success. `--timeout` defaults to 540 seconds and has no upper bound; a timeout exits 2 with a still-running line, a terminal record exits 0. | `protocol`, `delegation` |
+| `fleet subagent status <ID> [--json]` | Show one delegation as a fixed-field row. | `protocol`, `delegation` |
+| `fleet subagent list [--caller <THREAD>] [--json]` | List delegations, optionally for one calling thread. | `protocol`, `delegations` |
+| `fleet subagent cancel <ID> [--json]` | Cancel one live delegation. | `protocol`, `delegation` |
 | `fleet agent-status <working\|finished\|permission\|question\|plan> [--session <SESSION>] [--terminal-id <ID>] [--json]` | Report agent lifecycle or attention; target flags default to `FLEET_SESSION` and `FLEET_TERMINAL_ID`. Silent on non-JSON success. | `protocol`, `ok`, `session`, `terminalId`, `activity`, optional `attention` |
 | `fleet host list [--json]` | List configured hosts with provider, reachability, daemon link state, version, address, and known agent binaries. | `protocol`, `hosts` |
 | `fleet host doctor <ID>` | Diagnose resolution, SSH/authentication, remote `fleetd`, protocol compatibility, and agent binaries for one host. | — |

@@ -662,6 +662,151 @@ async fn agent_list_includes_the_owning_worktree_host_column() {
     server.await.unwrap();
 }
 
+/// One retained event that only advances the cursor, so a tail test can count printed lines.
+fn sample_agent_event(seq: u64) -> fleet_core::agents::SeqEvent {
+    fleet_core::agents::SeqEvent {
+        seq: fleet_core::agents::Seq(seq),
+        at: "2026-09-18T12:00:00Z".parse().unwrap(),
+        raw: None,
+        event: fleet_core::agents::AgentEvent::SessionActivity {
+            phase: format!("phase-{seq}"),
+        },
+    }
+}
+
+/// Answers exactly one cursored `AgentThreadOpen` with a retained tail and nothing else.
+fn tail_snapshot_server(
+    listener: UnixListener,
+    thread: fleet_core::agents::ThreadId,
+    retained: Vec<fleet_core::agents::SeqEvent>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut transport = Framed::new(socket, FleetCodec::new());
+        authenticate(&mut transport).await;
+        let request = next_request(&mut transport).await;
+        // A tail always opens with a cursor so reading a thread never resumes its provider.
+        assert_eq!(
+            request.body,
+            RequestBody::AgentThreadOpen {
+                thread,
+                from_seq: Some(fleet_core::agents::Seq(0)),
+                after_seq: None,
+                turn_limit: None,
+                before_cursor: None,
+                request_sync_marker: false,
+            }
+        );
+        send_result(
+            &mut transport,
+            request.id,
+            Ok(ResponseBody::AgentThreadSnapshot {
+                projection: fleet_core::agents::ThreadProjection::new(
+                    thread,
+                    "acme/api#feature".parse().unwrap(),
+                    fleet_core::agents::AgentKind::Claude,
+                ),
+                events_after: retained,
+            }),
+        )
+        .await;
+    })
+}
+
+#[tokio::test]
+async fn agent_tail_no_follow_prints_the_retained_snapshot_and_returns() {
+    let home = TempDir::new().unwrap();
+    let listener = bind(home.path()).await;
+    let thread: fleet_core::agents::ThreadId =
+        "00000000-0000-4000-8000-000000000009".parse().unwrap();
+    let retained = (1..=3).map(sample_agent_event).collect::<Vec<_>>();
+    let server = tail_snapshot_server(listener, thread, retained.clone());
+
+    let client = Client::connect(home.path()).await.unwrap();
+    let mut output = Vec::new();
+    // The reported failure: a live thread with retained history and no new event printed
+    // nothing at all, because without `--replay` the history is only folded into the
+    // projection. `--no-follow` implies the replay and returns instead of blocking.
+    agents::tail_to(
+        &client,
+        crate::args::AgentTailArgs {
+            thread,
+            replay: false,
+            no_follow: true,
+            last: None,
+        },
+        &mut output,
+    )
+    .await
+    .unwrap();
+
+    let printed = String::from_utf8(output).unwrap();
+    assert_eq!(
+        printed,
+        retained
+            .iter()
+            .map(|event| format!("{}\n", serde_json::to_string(event).unwrap()))
+            .collect::<String>()
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn agent_tail_last_trims_the_replay_to_its_newest_events() {
+    let home = TempDir::new().unwrap();
+    let listener = bind(home.path()).await;
+    let thread: fleet_core::agents::ThreadId =
+        "00000000-0000-4000-8000-000000000009".parse().unwrap();
+    let retained = (1..=5).map(sample_agent_event).collect::<Vec<_>>();
+    let server = tail_snapshot_server(listener, thread, retained.clone());
+
+    let client = Client::connect(home.path()).await.unwrap();
+    let mut output = Vec::new();
+    agents::tail_to(
+        &client,
+        crate::args::AgentTailArgs {
+            thread,
+            replay: false,
+            no_follow: true,
+            last: Some(2),
+        },
+        &mut output,
+    )
+    .await
+    .unwrap();
+
+    let printed = String::from_utf8(output).unwrap();
+    assert_eq!(
+        printed,
+        retained[3..]
+            .iter()
+            .map(|event| format!("{}\n", serde_json::to_string(event).unwrap()))
+            .collect::<String>()
+    );
+    // The trim is a print filter: asking for more than exists still prints everything rather
+    // than erroring, which is what makes `--last` safe to hardcode in a script.
+    let second_home = TempDir::new().unwrap();
+    let listener = bind(second_home.path()).await;
+    let server_all = tail_snapshot_server(listener, thread, retained.clone());
+    let client = Client::connect(second_home.path()).await.unwrap();
+    let mut all = Vec::new();
+    agents::tail_to(
+        &client,
+        crate::args::AgentTailArgs {
+            thread,
+            replay: false,
+            no_follow: true,
+            last: Some(50),
+        },
+        &mut all,
+    )
+    .await
+    .unwrap();
+    assert_eq!(String::from_utf8(all).unwrap().lines().count(), 5);
+    server.await.unwrap();
+    server_all.await.unwrap();
+}
+
 #[test]
 fn maps_parser_and_domain_validation_failures_to_validation_errors() {
     let duplicate = Cli::try_parse_from(["fleet", "list", "--json", "--json"]).unwrap_err();
@@ -824,7 +969,7 @@ fn parse_subagent(arguments: &[&str]) -> crate::args::SubagentCommand {
 }
 
 #[test]
-fn every_subagent_verb_parses_its_flags_defaults_and_ceiling() {
+fn every_subagent_verb_parses_its_flags_and_defaults() {
     use crate::args::{
         AgentChoice, AgentModeChoice, SubagentArgs, SubagentCommand, SubagentCompleteArgs,
         SubagentIdArgs, SubagentListArgs, SubagentRunArgs, SubagentWaitArgs,
@@ -848,6 +993,8 @@ fn every_subagent_verb_parses_its_flags_defaults_and_ceiling() {
             "full-access",
             "--model",
             "opus",
+            "--effort",
+            "high",
             "--title",
             "worker",
             "--eager",
@@ -862,6 +1009,7 @@ fn every_subagent_verb_parses_its_flags_defaults_and_ceiling() {
             worktree: Some("acme/api#feature".parse().unwrap()),
             mode: Some(AgentModeChoice::FullAccess),
             model: Some("opus".to_owned()),
+            effort: Some("high".to_owned()),
             title: Some("worker".to_owned()),
             eager: true,
             caller: Some(CALLER.parse().unwrap()),
@@ -879,6 +1027,7 @@ fn every_subagent_verb_parses_its_flags_defaults_and_ceiling() {
             worktree: None,
             mode: None,
             model: None,
+            effort: None,
             title: None,
             eager: false,
             caller: None,
@@ -931,12 +1080,26 @@ fn every_subagent_verb_parses_its_flags_defaults_and_ceiling() {
             json: true,
         })
     );
-    // 540 is a ceiling, not just a default: a Claude Bash tool call must not outlive its own
-    // timeout waiting for a child.
-    let above_ceiling =
-        Cli::try_parse_from(["fleet", "subagent", "wait", DELEGATION, "--timeout", "541"])
-            .unwrap_err();
-    assert_eq!(clap_error(&above_ceiling).kind, ErrorKind::Validation);
+    // 540 is a default, not a ceiling. A caller whose own tool timeout is longer than Claude
+    // Code's — or who is not a tool call at all — may wait as long as it likes, and the CLI was
+    // the only thing that ever said otherwise.
+    assert_eq!(
+        parse_subagent(&["wait", DELEGATION, "--timeout", "3600"]),
+        SubagentCommand::Wait(SubagentWaitArgs {
+            id: DELEGATION.parse().unwrap(),
+            timeout: 3_600,
+            json: false,
+        })
+    );
+    // Zero still parses and still means "ask once and answer with whatever is recorded now".
+    assert_eq!(
+        parse_subagent(&["wait", DELEGATION, "--timeout", "0"]),
+        SubagentCommand::Wait(SubagentWaitArgs {
+            id: DELEGATION.parse().unwrap(),
+            timeout: 0,
+            json: false,
+        })
+    );
 
     assert_eq!(
         parse_subagent(&["status", DELEGATION]),
@@ -1158,7 +1321,7 @@ async fn subagent_verbs_use_typed_requests_and_render_human_and_json_output() {
                 mode: Some(PermissionMode::FullAccess),
                 model: Some(ModelSelection {
                     model: "gpt-5".to_owned(),
-                    effort: None,
+                    effort: Some("high".to_owned()),
                     provider: None,
                 }),
                 title: Some("parser worker".to_owned()),
@@ -1283,6 +1446,7 @@ async fn subagent_verbs_use_typed_requests_and_render_human_and_json_output() {
             worktree: Some("acme/api#feature".parse().unwrap()),
             mode: Some(AgentModeChoice::FullAccess),
             model: Some("gpt-5".to_owned()),
+            effort: Some("high".to_owned()),
             title: Some("parser worker".to_owned()),
             eager: true,
             // The environment below is the child's (its session, delegation and token), so the
@@ -1336,7 +1500,29 @@ async fn subagent_verbs_use_typed_requests_and_render_human_and_json_output() {
     .await
     .unwrap();
     assert_eq!(timed_out.exit_code, 2);
-    assert!(timed_out.text.contains("finished: running"));
+    assert!(
+        !timed_out.text.contains("finished:"),
+        "a timed-out wait must not claim the child finished: {}",
+        timed_out.text
+    );
+    // A live delegation has no `finished`, so its elapsed time is measured against the wall
+    // clock and cannot be pinned; everything around it can.
+    assert!(
+        timed_out.text.starts_with(&format!(
+            "[fleet subagent {} still running after ",
+            delegation.id
+        )),
+        "{}",
+        timed_out.text
+    );
+    assert!(
+        timed_out
+            .text
+            .ends_with(&format!(", status: running, thread: {}]", delegation.child)),
+        "{}",
+        timed_out.text
+    );
+    assert_eq!(timed_out.text.lines().count(), 1);
 
     let waited = subagents::execute(
         &client,
@@ -1398,6 +1584,73 @@ async fn subagent_verbs_use_typed_requests_and_render_human_and_json_output() {
     .await
     .unwrap();
     assert_eq!(cancelled.text, "cancelled");
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn subagent_wait_json_bytes_are_unchanged_for_a_live_delegation() {
+    use crate::args::{SubagentCommand, SubagentWaitArgs};
+
+    let home = TempDir::new().unwrap();
+    let listener = bind(home.path()).await;
+    let delegation = sample_delegation();
+    let expected = delegation.clone();
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut transport = Framed::new(socket, FleetCodec::new());
+        authenticate(&mut transport).await;
+        let request = next_request(&mut transport).await;
+        assert_eq!(
+            request.body,
+            RequestBody::DelegationWait {
+                delegation: expected.id,
+                timeout_ms: 1_000,
+            }
+        );
+        let mut answer = expected;
+        answer.status = fleet_core::agents::DelegationStatus::Running;
+        answer.finished = None;
+        answer.result = None;
+        send_result(
+            &mut transport,
+            request.id,
+            Ok(ResponseBody::Delegation(answer)),
+        )
+        .await;
+    });
+
+    let client = Client::connect(home.path()).await.unwrap();
+    let timed_out = subagents::execute(
+        &client,
+        SubagentCommand::Wait(SubagentWaitArgs {
+            id: delegation.id,
+            timeout: 1,
+            json: true,
+        }),
+        &subagents::Environment::default(),
+    )
+    .await
+    .unwrap();
+
+    // The whole envelope, byte for byte. Rewording the human timeout line must not move a
+    // comma here: the JSON branch is what other programs parse, and it already carries the
+    // status they need to tell a timeout from a finished child.
+    assert_eq!(
+        timed_out.text,
+        concat!(
+            r#"{"protocol":1,"delegation":{"#,
+            r#""id":"00000000-0000-4000-8000-000000000003","#,
+            r#""caller":"00000000-0000-4000-8000-000000000001","#,
+            r#""callerTurn":"00000000-0000-4000-8000-000000000004","#,
+            r#""callerItem":"00000000-0000-4000-8000-000000000005","#,
+            r#""child":"00000000-0000-4000-8000-000000000002","#,
+            r#""provider":"codex","depth":1,"brief":"inspect the parser","#,
+            r#""expectation":"tests pass","eager":true,"status":"running","#,
+            r#""nudges":0,"recoveries":0,"delivery":{"type":"pending"},"#,
+            r#""created":"2026-09-18T12:00:00Z"}}"#,
+        )
+    );
+    assert_eq!(timed_out.exit_code, 2);
     server.await.unwrap();
 }
 

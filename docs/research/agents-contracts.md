@@ -775,23 +775,43 @@ stack, so `fleet-ui-kit` gains no `fleet-git` dependency: the payload rows come 
 `commands/agents.rs`: `list`, `new <WORKTREE> --provider <claude|codex> [--model M]
 [--mode ask|accept-edits|plan|auto|dont-ask|full-access]`, `send <THREAD> <TEXT>`,
 `respond <THREAD> <GATE> <ANSWER…>`, `interrupt <THREAD>`, `stop <THREAD>`,
-`tail <THREAD> [--replay]`, and `terminal [claude|codex]` — the last being the former
+`tail <THREAD> [--replay] [--no-follow] [--last N]`, and `terminal [claude|codex]` — the last being the former
 `fleet agent [claude|codex]`, kept under its own verb as the §10 PTY fallback. Read-only verbs
 open with `Some(Seq(0))` so looking at a thread never triggers the §6 lazy resume.
+
+`tail` prints one JSON `SeqEvent` per line, flushed per line. Without `--replay` the retained
+history is folded into the projection and only future events print, so a tail killed by its
+caller's timeout before the thread said anything new printed nothing at all. `--no-follow` prints
+the retained history and exits 0 instead of entering the follow loop, and `--last N` keeps only
+the newest N of it; both **imply `--replay`**, because a flag that printed nothing would repeat
+the bug they exist to fix. `--last` is a client-side trim of the history the cursored open
+already returned, never a paginated request, and it bounds the replay only — the trimmed prefix
+is still applied to the projection, and a tail that goes on to follow still prints every live
+event.
 
 `fleet subagent` is implemented in `commands/subagents.rs`. Every verb accepts `--json`; human
 output otherwise follows the exact copy in `NATIVE-AGENTS.md` §15.
 
 - `run --provider <claude|codex> [--brief-file F] --expect <text> [--worktree W] [--mode M]
-  [--model M] [--title T] [--eager] [--caller <thread>]` reads the brief from the file or stdin.
-  Caller selection is `--caller`, then `FLEET_SESSION`; neither being present is a validation
-  error.
+  [--model M] [--effort E] [--title T] [--eager] [--caller <thread>]` reads the brief from the
+  file or stdin. Caller selection is `--caller`, then `FLEET_SESSION`; neither being present is a
+  validation error. `--effort` is free text, never a clap enum — the legal ladder is per provider
+  and per model and is published by the harness — and it **requires `--model`**: a reasoning
+  effort reaches both adapters as a qualifier on the model they were launched with
+  (`ModelSelection.model` is a required `String`, Claude emits `--effort` only inside its
+  `--model` branch), so there is no value for the model that means "the daemon's default".
+  `--effort` without `--model` is a validation error rather than a silently dropped flag.
 - `complete [<id>] [--result-file F] [--blocked] [--json-result]` reads the result from the file
   or stdin. Its id is the argument or `FLEET_DELEGATION`; its child is `FLEET_SESSION`; its bearer
   token is `FLEET_DELEGATION_TOKEN`. All three are required after fallback. `--json-result`
   validates the result as JSON but does not change its wire type.
-- `wait <id> [--timeout S]` defaults to 540 seconds and caps the flag at 540; timeout exits 2 and
-  a terminal record exits 0.
+- `wait <id> [--timeout S]` defaults to 540 seconds — the Claude Code shell-tool ceiling, so the
+  common caller outlives its own wait — and imposes **no upper bound**: a larger value is
+  accepted, though the caller's own tool timeout may still kill the wait first. A timeout exits 2
+  and prints a distinct single line naming the delegation, its live status and its elapsed time;
+  it never renders the terminal "finished:" template. A terminal record exits 0 and returns the
+  child's report body, in human output and as `delegation.result.text` in the JSON envelope. The
+  `--json` output is identical in both cases: callers read `delegation.status`.
 - `status <id>` prints one delegation.
 - `list [--caller T]` prints all delegations or those belonging to one caller.
 - `cancel <id>` cancels one live delegation.

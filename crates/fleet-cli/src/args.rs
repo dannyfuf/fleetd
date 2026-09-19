@@ -378,6 +378,10 @@ pub enum SubagentCommand {
     /// Report the current delegated child's result.
     Complete(SubagentCompleteArgs),
     /// Wait for a delegation to finish or for a timeout.
+    ///
+    /// On success the child's own report body is printed: in human output under the delivered
+    /// message, and in `--json` as the envelope's `delegation.result.text`. There is no second
+    /// verb to run for it.
     Wait(SubagentWaitArgs),
     /// Show one delegation.
     Status(SubagentIdArgs),
@@ -408,6 +412,14 @@ pub struct SubagentRunArgs {
     /// Provider-native model override.
     #[arg(long)]
     pub model: Option<String>,
+    /// Provider-native reasoning effort for the model named by `--model`.
+    ///
+    /// Free text, never an enum: the legal ladder is per provider and per model and is published
+    /// by the harness, so Fleet passes whatever is given straight through and lets the provider
+    /// reject a value it does not know. `--model` is required with it, because a reasoning effort
+    /// reaches both providers as a qualifier on the model they were launched with.
+    #[arg(long)]
+    pub effort: Option<String>,
     /// Child-thread title override.
     #[arg(long)]
     pub title: Option<String>,
@@ -446,8 +458,14 @@ pub struct SubagentCompleteArgs {
 pub struct SubagentWaitArgs {
     /// Delegation id.
     pub id: fleet_core::agents::DelegationId,
-    /// Maximum wait in seconds.
-    #[arg(long, default_value_t = 540, value_parser = clap::value_parser!(u64).range(..=540))]
+    /// Maximum wait in seconds; defaults to 540.
+    ///
+    /// 540 is a default, not a ceiling: it sits under the Claude Code shell-tool timeout so the
+    /// common caller outlives its own wait. Larger values are accepted and Fleet imposes no
+    /// upper bound of its own, but the caller's tool timeout may still kill the wait before this
+    /// one elapses. A timeout exits 2 and says the child is still running; a terminal record
+    /// exits 0 and returns the child's report.
+    #[arg(long, default_value_t = 540)]
     pub timeout: u64,
     /// Emit a protocol-versioned JSON envelope.
     #[arg(long)]
@@ -552,6 +570,20 @@ pub struct AgentTailArgs {
     /// Print retained history before following live events.
     #[arg(long)]
     pub replay: bool,
+    /// Print the retained history and exit instead of following; implies `--replay`.
+    ///
+    /// Without it a tail that is killed by its caller's timeout before the thread says anything
+    /// new prints nothing at all, because the retained events are only folded into the
+    /// projection. This is the flag for taking a snapshot from a script.
+    #[arg(long)]
+    pub no_follow: bool,
+    /// Print only the last N retained events; implies `--replay`.
+    ///
+    /// A client-side trim of the history this tail already received, not a paginated request.
+    /// It bounds the replay only: when the tail goes on to follow, every live event still
+    /// prints.
+    #[arg(long, value_name = "N")]
+    pub last: Option<usize>,
 }
 
 /// Activity values accepted by `fleet agent-status`.
@@ -837,13 +869,25 @@ mod tests {
             vec!["fleet", "path", "acme/api#slug", "extra"],
             vec!["fleet", "delete"],
             vec!["fleet", "import"],
+            // `--timeout` no longer has a ceiling, but it is still a number.
             vec![
                 "fleet",
                 "subagent",
                 "wait",
                 "00000000-0000-4000-8000-000000000003",
                 "--timeout",
-                "541",
+                "forever",
+            ],
+            // `--effort` takes a value; a bare flag is still a parse error.
+            vec![
+                "fleet",
+                "subagent",
+                "run",
+                "--provider",
+                "claude",
+                "--expect",
+                "tests pass",
+                "--effort",
             ],
         ];
 

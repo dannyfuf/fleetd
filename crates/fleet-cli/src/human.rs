@@ -232,6 +232,23 @@ pub fn delivered_message(delegation: &Delegation, now: SystemTime) -> String {
     message
 }
 
+/// Formats the message a caller receives when a wait timed out with the child still live.
+///
+/// One line, and deliberately sharing no phrase with [`delivered_message`]: a caller that
+/// greps for `finished:` must not match this, and a caller reading it must not be told a
+/// duration and a file count that only a finished child has. The duration is the delegation's
+/// age, the same figure the delivered message reports, not the length of this one wait.
+#[must_use]
+pub fn still_running_message(delegation: &Delegation, now: SystemTime) -> String {
+    format!(
+        "[fleet subagent {} still running after {}, status: {}, thread: {}]",
+        delegation.id,
+        duration(elapsed_seconds(delegation, now)),
+        delegation_status_word(delegation.status),
+        delegation.child,
+    )
+}
+
 /// The wire word for a status, which is deliberately not the transcript's.
 ///
 /// `DelegationStatus::word` is written for the app's rows, where a finished child reads `done`

@@ -125,7 +125,7 @@ pub(super) async fn tail(
     Ok(CommandOutput::success(String::new()))
 }
 
-async fn tail_to(
+pub(super) async fn tail_to(
     client: &Client,
     arguments: AgentTailArgs,
     output: &mut impl Write,
@@ -137,14 +137,19 @@ async fn tail_to(
         .agent_thread_open(arguments.thread, Some(Seq(0)))
         .await?;
     let mut projection = snapshot.projection;
-    if arguments.replay {
-        if !print_tail(&mut projection, snapshot.events_after, output)? {
+    // Both new flags exist to make a tail print its retained history, so both imply `--replay`.
+    // A `--no-follow` or a `--last` that printed nothing would be the very bug they fix.
+    let replay = arguments.replay || arguments.no_follow || arguments.last.is_some();
+    if replay {
+        let (applied, printed) = split_for_last(snapshot.events_after, arguments.last);
+        advance(&mut projection, applied)?;
+        if !print_tail(&mut projection, printed, output)? {
             return Ok(());
         }
     } else {
         advance(&mut projection, snapshot.events_after)?;
     }
-    if terminal(&projection) {
+    if arguments.no_follow || terminal(&projection) {
         return Ok(());
     }
 
@@ -189,6 +194,22 @@ async fn read_projection(
     let mut projection = snapshot.projection;
     advance(&mut projection, snapshot.events_after)?;
     Ok(projection)
+}
+
+/// Splits a retained tail into the events `--last N` only applies and the ones it prints.
+///
+/// The trim is a print filter, never a reducer filter. A projection folded from a suffix of its
+/// own history is not the thread's state, and both `terminal` and every later
+/// `seq <= last_seq` comparison read it — so the dropped prefix is still applied, silently.
+fn split_for_last(events: Vec<SeqEvent>, last: Option<usize>) -> (Vec<SeqEvent>, Vec<SeqEvent>) {
+    match last {
+        Some(last) => {
+            let mut applied = events;
+            let printed = applied.split_off(applied.len().saturating_sub(last));
+            (applied, printed)
+        }
+        None => (Vec::new(), events),
+    }
 }
 
 /// Replays events into a projection without printing them.
