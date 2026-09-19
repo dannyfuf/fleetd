@@ -254,15 +254,15 @@ path as the daemon cascade and the protocol goldens.
 - **Touches:** `crates/fleet-cli/src/args.rs`, `commands/board.rs`, `commands/board/tests.rs`,
   `human.rs`, `docs/BOARD.md` §6, `README.md`.
 - **Steps:**
-  - In `BoardArgs`, add a global `--worktree [<id>]` (`num_args(0..=1)`, conflicts with
+  - In `BoardArgs`, add a global `--worktree[=<id>]` (`num_args(0..=1)`, `require_equals = true`, conflicts with
     `--board` and `--context`). Model it as an enum: explicit id, or "from the session".
   - In `resolve_board`, when the selector is present: if "from the session", read
     `FLEET_SESSION`, find that session in `Snapshot.sessions`, require
     `SessionKind::Worktree(id)`; otherwise use the explicit id. Then call
-    `ensure_worktree_board`. Error texts: `no worktree session: pass --worktree
-    <owner/name#slug> or run inside a worktree terminal` and, when the daemon lacks the
+    `ensure_worktree_board`. Error texts: `no worktree session: pass
+    --worktree=<owner/name#slug> or run inside a worktree terminal` and, when the daemon lacks the
     capability, `this daemon does not support worktree boards; run \`fleet daemon restart\``.
-  - `fleet board create --worktree [<id>]` calls `create_worktree_board` with the same
+  - `fleet board create --worktree[=<id>]` calls `create_worktree_board` with the same
     `--name/--prefix/--backend/--setting` flags.
   - `human::boards` gains a `Scope` column (`context` or the worktree id); `board show`'s
     header line names the worktree when the board has one. JSON envelopes need no change

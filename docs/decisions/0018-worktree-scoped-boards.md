@@ -34,8 +34,9 @@ protocol bump would force local and remote daemons to upgrade together for an op
 - `EnsureWorktreeBoard` and `CreateWorktreeBoard` are additive requests advertised by the
   `board.worktree` capability. `PROTOCOL_VERSION` remains 8. The typed client checks the capability
   before sending either request, so every consumer inherits the guard.
-- `fleet board --worktree [<owner/name#slug>]` selects the scoped board. A bare flag resolves the
-  current `FLEET_SESSION`; commands without it keep selecting the context board as before.
+- `fleet board --worktree[=<owner/name#slug>]` selects the scoped board. A bare flag resolves the
+  current `FLEET_SESSION`; an explicit id requires `=` so it cannot consume a subcommand name.
+  Commands without it keep selecting the context board as before.
 
 ## Alternatives rejected
 

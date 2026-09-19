@@ -56,27 +56,35 @@ mod parsing {
             parse(&["--worktree", "show"]).worktree,
             Some(BoardWorktreeSelector::FromSession)
         );
-        let args = parse(&["show", "--worktree", "acme/api#feature"]);
+        let args = parse(&["show", "--worktree=acme/api#feature"]);
         assert!(matches!(
             args.worktree,
             Some(BoardWorktreeSelector::Explicit(id)) if id.as_str() == "acme/api#feature"
         ));
         for arguments in [
-            ["show", "--worktree", "acme/api#feature", "--board", "work"].as_slice(),
-            [
-                "show",
-                "--worktree",
-                "acme/api#feature",
-                "--context",
-                "work",
-            ]
-            .as_slice(),
+            ["show", "--worktree=acme/api#feature", "--board", "work"].as_slice(),
+            ["show", "--worktree=acme/api#feature", "--context", "work"].as_slice(),
         ] {
             let argv = ["fleet", "board"]
                 .into_iter()
                 .chain(arguments.iter().copied());
             assert!(Cli::try_parse_from(argv).is_err(), "accepted {arguments:?}");
         }
+    }
+
+    #[test]
+    fn selector_values_may_match_board_subcommand_names() {
+        let board = parse(&["--board", "list", "show"]);
+        assert_eq!(board.board.as_ref().map(|id| id.as_str()), Some("list"));
+        assert!(matches!(board.command, BoardCommand::Show));
+
+        let context = parse(&["--context", "sync", "show"]);
+        assert_eq!(context.context.as_ref().map(|id| id.as_str()), Some("sync"));
+        assert!(matches!(context.command, BoardCommand::Show));
+
+        let board = parse(&["--board", "card", "describe"]);
+        assert_eq!(board.board.as_ref().map(|id| id.as_str()), Some("card"));
+        assert!(matches!(board.command, BoardCommand::Describe));
     }
 
     #[test]
@@ -1471,8 +1479,7 @@ mod orchestration {
 
         let error = run(
             &[
-                "--worktree",
-                "acme/api#feature",
+                "--worktree=acme/api#feature",
                 "card",
                 "show",
                 "FLT-12",
@@ -1504,19 +1511,16 @@ mod orchestration {
             assert_eq!(error.kind, ErrorKind::Validation);
             assert_eq!(
                 error.message,
-                "no worktree session: pass --worktree <owner/name#slug> or run inside a worktree terminal"
+                "no worktree session: pass --worktree=<owner/name#slug> or run inside a worktree terminal"
             );
         }
     }
 
     #[tokio::test]
     async fn worktree_selector_requires_capability_then_ensures_the_board() {
-        let error = run(
-            &["show", "--worktree", "acme/api#feature", "--json"],
-            vec![],
-        )
-        .await
-        .unwrap_err();
+        let error = run(&["show", "--worktree=acme/api#feature", "--json"], vec![])
+            .await
+            .unwrap_err();
         assert_eq!(error.kind, ErrorKind::Validation);
         assert_eq!(
             error.message,
@@ -1526,7 +1530,7 @@ mod orchestration {
         let mut view = view();
         view.board.worktree_id = Some("acme/api#feature".parse().unwrap());
         let output = run_with_capabilities(
-            &["show", "--worktree", "acme/api#feature", "--json"],
+            &["show", "--worktree=acme/api#feature", "--json"],
             vec![BOARD_WORKTREE_CAPABILITY.to_owned()],
             vec![(
                 RequestBody::EnsureWorktreeBoard {
@@ -1547,8 +1551,7 @@ mod orchestration {
         let output = run_with_capabilities(
             &[
                 "create",
-                "--worktree",
-                "acme/api#feature",
+                "--worktree=acme/api#feature",
                 "--name",
                 "Feature",
                 "--prefix",
@@ -1623,7 +1626,10 @@ mod orchestration {
         .await
         .unwrap_err();
         assert_eq!(error.kind, ErrorKind::Validation);
-        assert!(error.message.contains("no active context"));
+        assert_eq!(
+            error.message,
+            "no active context; select one with --context, --worktree, or --board"
+        );
     }
 
     #[tokio::test]
@@ -1724,7 +1730,7 @@ mod orchestration {
 
     #[tokio::test]
     async fn board_list_rejects_the_worktree_selector() {
-        let error = run(&["list", "--worktree", "acme/api#feature"], vec![])
+        let error = run(&["list", "--worktree=acme/api#feature"], vec![])
             .await
             .unwrap_err();
         assert_eq!(error.kind, ErrorKind::Validation);

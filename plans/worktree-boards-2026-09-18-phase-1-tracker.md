@@ -62,6 +62,9 @@
   - verified: both `deleting_a_worktree_does_not_claim_an_unreadable_context_board_by_filename`
     and `deleting_a_context_does_not_claim_an_unreadable_board_by_filename` passed in
     `cargo test -p fleet-daemon --test boards_service`; `make lint` passed.
+- [x] P1-T19 — Disambiguate optional worktree selectors from board subcommands
+  - verified: `cargo test -p fleet-cli` passed (120 library and 9 integration tests), including
+    selector values `list`, `sync`, and `card`; `make lint` passed.
 
 ## Notes / decisions log
 (Append-only. Date-stamp entries. Capture anything that surprised you or that future-you will want.)

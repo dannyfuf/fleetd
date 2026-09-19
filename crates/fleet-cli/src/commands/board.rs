@@ -247,7 +247,7 @@ async fn resolve_context(
     match context {
         Some(context) => Ok(context),
         None => client.get_snapshot().await?.active_context.ok_or_else(|| {
-            validation("no active context; select one with --context or use --board")
+            validation("no active context; select one with --context, --worktree, or --board")
         }),
     }
 }
@@ -298,7 +298,7 @@ fn worktree_from_session(
         });
     worktree.ok_or_else(|| {
         validation(
-            "no worktree session: pass --worktree <owner/name#slug> or run inside a worktree terminal",
+            "no worktree session: pass --worktree=<owner/name#slug> or run inside a worktree terminal",
         )
     })
 }

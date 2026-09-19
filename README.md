@@ -117,11 +117,12 @@ the CLI envelope remains version 1.
 ### Board
 
 Each context has one board, created on first use, and a published worktree can have its own
-optional board. Select one with `--board <id>`, `--worktree <owner/name#slug>`, or bare
-`--worktree` inside a Fleet worktree terminal; otherwise `--context <id>` or the active context
-is used. `fleet board show` displays its columns and cards under a header naming its scope and
-backend, its project, the age of the last sync, and the dirty and conflict counts; `fleet board
-list` lists board summaries with their context or worktree scope. Use `fleet board create` with
+optional board. Select one with `--board <id>`, `--worktree=<owner/name#slug>`, or bare
+`--worktree` inside a Fleet worktree terminal. The `=` keeps a following subcommand unambiguous.
+Otherwise `--context <id>` or the active context is used. `fleet board show` displays its columns
+and cards under a header naming its scope and backend, its project, the age of the last sync, and
+the dirty and conflict counts; `fleet board list` lists board summaries with their context or
+worktree scope. Use `fleet board create` with
 `--name`, `--prefix`, or `--backend local`, and
 `fleet board set` to change its name, prefix, default repository
 (`--default-repo owner/name`, `--clear-default-repo`), worktree-start setting,

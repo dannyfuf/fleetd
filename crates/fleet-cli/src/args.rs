@@ -935,7 +935,6 @@ mod tests {
 
 /// Board selection and nested operations.
 #[derive(Debug, Args, PartialEq, Eq)]
-#[command(subcommand_precedence_over_arg = true)]
 pub struct BoardArgs {
     /// Explicit board ID; mutually exclusive with --context and --worktree.
     #[arg(long, global = true, conflicts_with_all = ["context", "worktree"])]
@@ -945,6 +944,7 @@ pub struct BoardArgs {
         long,
         global = true,
         num_args = 0..=1,
+        require_equals = true,
         default_missing_value = "@session",
         conflicts_with_all = ["board", "context"]
     )]
