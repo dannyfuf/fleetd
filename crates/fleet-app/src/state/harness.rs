@@ -431,6 +431,8 @@ pub struct HarnessState {
     window: WindowSnapshot,
     targets: BTreeMap<String, TargetSnapshot>,
     targets_revision: u64,
+    /// The open dialog's live editors, in the order `dialog.field[N]` numbers them.
+    dialog_fields: Vec<FieldSnapshot>,
     /// Shared with [`crate::bridge::Bridge`], which claims a slot when a request is admitted.
     /// Mutation replies transfer their claim to `settle` until a causally covering snapshot.
     /// Only legacy unstamped claims use the grace expiry; stamped claims warn and keep waiting.
@@ -538,6 +540,24 @@ impl HarnessState {
     #[must_use]
     pub fn targets(&self) -> &BTreeMap<String, TargetSnapshot> {
         &self.targets
+    }
+
+    /// Records the open dialog's live editor contents, in `dialog.field[N]` order.
+    ///
+    /// The same seam as [`Self::set_targets`], for the same reason: a dialog's text lives in the
+    /// `DialogHost` entity's `TextInput`s, which the builder cannot reach with `&AppState`
+    /// alone. The command about to answer a `dump`, an `assert` or an `await` poll reads them in
+    /// an update path and copies them in here, so the projection stays a pure function of
+    /// `AppState` and the memo key — which contains the whole `DialogSnapshot` — moves exactly
+    /// when the text does.
+    pub fn set_dialog_fields(&mut self, fields: Vec<FieldSnapshot>) {
+        self.dialog_fields = fields;
+    }
+
+    /// The last recorded dialog editor contents.
+    #[must_use]
+    pub fn dialog_fields(&self) -> &[FieldSnapshot] {
+        &self.dialog_fields
     }
 
     /// Installs the bridge-owned idle counters and wake callback.

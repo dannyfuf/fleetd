@@ -653,10 +653,17 @@ still short of it, so no other document has to claim a capability that does not 
   and `fleet-drive/src/{input.rs, predicate.rs}`.
   Each is one coherent subject rather than an accumulation, so splitting them is a deliberate
   refactor, not a drive-by.
-- **`dialog.fields` and `dialog.message` are always empty.** Their live content belongs to the
-  dialog host entity and is not mirrored into `AppState`, so the snapshot deliberately reports
-  `[]` and `null`. Use `targets["dialog.field[N]"]` to assert and reach a field, then exercise its
-  content with keystrokes.
+- **`dialog.message` is always empty, and `dialog.fields` is empty for the dialogs whose tab
+  cycle is not all text.** The dialog host entity, not `AppState`, owns both. `fields` is carried
+  for the dialogs whose whole cycle is live editors — new-card, new/edit context,
+  rename-terminal, clone-repo and edit-hooks — where `fields[N]` is exactly the field
+  `targets["dialog.field[N]"]` paints; the command about to answer a `dump`, an `assert` or an
+  `await` poll reads them across in its update path the same way it brings the target table
+  across. A dialog with a non-editor in its cycle (create-worktree's base list and host cycler,
+  Settings' switch rows) reports `[]` rather than a partial numbering that would not line up with
+  its targets, and `message` stays `null` everywhere. Typing into a field does not itself notify
+  `AppState`, so a scenario reads a field with `assert` or `dump`, which project on demand, and
+  not with `await`.
 - **A headless `await` does not repaint, so `window.frame` freezes for the duration of the wait.**
   The await loop reprojects update-path state but does not draw another headless frame. Use
   `assert` or `dump`, which paint before projecting, when current frame geometry matters.

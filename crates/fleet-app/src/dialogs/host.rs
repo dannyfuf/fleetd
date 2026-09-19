@@ -8,7 +8,7 @@ use fleet_core::{
 use fleet_proto::{error::ProtoError, request::RequestBody, response::ResponseBody};
 
 use super::*;
-use crate::state::Overlay;
+use crate::state::{FieldSnapshot, Overlay};
 use gpui::{
     App, Context, Entity, EntityId, FocusHandle, Global, Render, Subscription, Task, WeakEntity,
     Window,
@@ -458,6 +458,62 @@ fn focused_input_entity(state: &Entity<AppState>, cx: &mut App) -> Option<Entity
 /// The live input that should receive focus for the current dialog or the palette.
 pub(crate) fn focused_input(state: &Entity<AppState>, cx: &mut App) -> Option<FocusHandle> {
     focused_input_entity(state, cx).map(|input| input.read(cx).focus_handle())
+}
+
+/// The open dialog's live text editors, in the order `dialog.field[N]` numbers them.
+///
+/// Only the dialogs whose whole tab cycle is made of editors are reported, so that
+/// `dialog.fields[N]` and the painted `targets["dialog.field[N]"]` always name the same field
+/// (`docs/TESTING-HARNESS.md` §3). Create-worktree's base list and host cycler and Settings'
+/// switch rows are not editors, so those dialogs report nothing rather than a partial numbering
+/// that would not line up with their targets.
+pub(crate) fn dialog_fields(state: &Entity<AppState>, cx: &mut App) -> Vec<FieldSnapshot> {
+    let Some(Overlay::Dialog(dialog)) = state.read(cx).overlay.as_ref().cloned() else {
+        return Vec::new();
+    };
+    let focused = focused_input_entity(state, cx).map(|input| input.entity_id());
+    let inputs: Vec<(String, Entity<TextInput>)> = read_host(state, cx, |host, _| match dialog {
+        Dialogs::CardCreate => named(&[
+            ("title", host.card_create_title.as_ref()),
+            ("description", host.card_create_description.as_ref()),
+        ]),
+        Dialogs::NewContext | Dialogs::EditContext => named(&[
+            ("name", host.context_name.as_ref()),
+            ("owners", host.context_owners.as_ref()),
+        ]),
+        Dialogs::RenameTerminal => named(&[("name", host.rename_input.as_ref())]),
+        Dialogs::CloneRepo => named(&[("search", host.clone_query.as_ref())]),
+        Dialogs::EditHooks => host
+            .hook_inputs
+            .iter()
+            .enumerate()
+            .map(|(index, input)| {
+                let name = if index < host.edit_hooks.prepare_len {
+                    "prepare"
+                } else {
+                    "post-create"
+                };
+                (name.to_owned(), input.clone())
+            })
+            .collect(),
+        _ => Vec::new(),
+    });
+    inputs
+        .into_iter()
+        .map(|(name, input)| FieldSnapshot {
+            name,
+            value: input.read(cx).text().to_owned(),
+            focused: focused == Some(input.entity_id()),
+        })
+        .collect()
+}
+
+/// Pairs each present editor with its field name, dropping the ones this opening never made.
+fn named(fields: &[(&str, Option<&Entity<TextInput>>)]) -> Vec<(String, Entity<TextInput>)> {
+    fields
+        .iter()
+        .filter_map(|(name, input)| Some(((*name).to_owned(), (*input)?.clone())))
+        .collect()
 }
 
 #[cfg(test)]

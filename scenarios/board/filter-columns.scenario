@@ -1,0 +1,62 @@
+# docs/KEYMAP.md §Board and card detail — "Board filtering keeps horizontal navigation on keys
+# the input does not own": `left` / `right` move the caret through `FleetTextInput`, so column
+# navigation while the board filter has the keyboard is `Tab` / `Shift-Tab`.
+#
+# `scenarios/board/filter.scenario` pins that `/` takes the keyboard without opening an overlay
+# and that the two-stage `Esc` holds; this one pins the split those two key pairs make, which is
+# the regression a migrated input invites: a `left` that walks columns eats the caret, and a
+# `Tab` that inserts a tab loses the column cursor.
+#
+# The oracles are `lists.board.selected.label` for the focused column and `lists.board.filter`
+# for the query — the board mirrors both into `AppState`, so both can be waited on. A caret
+# motion changes no text, so where the next character lands is the proof that the caret moved.
+#
+# Paste is deliberately not exercised: `clipboard set` and `clipboard get` fail in every lane by
+# design (`docs/TESTING-HARNESS.md` §1); the kit's own gpui tests cover `cmd-v`.
+#
+# No `shot`: this is a keyboard scenario, so it belongs in the headless subset too (§7).
+fixture: board
+await idle 20000
+key g b
+await hub_tab == Board 10000
+assert lists.board.selected.label == "Backlog" && focused == "board.column[0].card[0]"
+
+key /
+await focused == "board.filter" 5000
+assert mode == "Filter" && key_contexts[1] == "BoardFilter" && overlay absent
+type card
+await lists.board.filter == card 5000
+
+# `Tab` and `Shift-Tab` move the focused column while the input keeps the keyboard and the
+# query keeps its text.
+key tab
+await lists.board.selected.label == "Todo" 5000
+assert focused == "board.filter" && lists.board.filter == card
+key tab
+await lists.board.selected.label == "In Progress" 5000
+key shift-tab
+await lists.board.selected.label == "Todo" 5000
+assert focused == "board.filter" && mode == "Filter"
+
+# `left` and `right` are the caret's, not the column's: the column stays on `Todo` and the next
+# character lands where the caret was left.
+key left left
+type X
+await lists.board.filter == "caXrd" 5000
+assert lists.board.selected.label == "Todo"
+key right
+type Y
+await lists.board.filter == "caXrYd" 5000
+assert lists.board.selected.label == "Todo" && focused == "board.filter"
+dump edited
+
+# The two-stage `Esc` still ends it: the first press leaves the input keeping the filter, the
+# second clears it, and the column the `Tab`s chose is still the focused one.
+key escape
+await focused != "board.filter" 5000
+assert lists.board.filter == "caXrYd" && key_contexts[1] == "Board"
+key escape
+await lists.board.filter == "" 5000
+assert lists.board.selected.label == "Todo" && key_contexts[0] == "Hub"
+dump cleared
+quit

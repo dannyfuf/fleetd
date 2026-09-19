@@ -348,16 +348,16 @@ Targeted while iterating: `cargo test -p fleet-ui-kit`, `cargo test -p fleet-app
 
 ## Definition of done
 
-- [ ] Every P3 task is `[x]` in the tracker and the tracker matches the code.
-- [ ] `make lint` is clean.
-- [ ] `make test` passes (clippy `-D warnings` is this repo's type gate).
-- [ ] `make harness` passes, including the agent and board scenarios that existed before.
-- [ ] One input component in the kit; `TextFieldState`, `TextAreaState`, `dialogs/input.rs`
+- [x] Every P3 task is `[x]` in the tracker and the tracker matches the code.
+- [x] `make lint` is clean.
+- [x] `make test` passes (clippy `-D warnings` is this repo's type gate).
+- [x] `make harness` passes, including the agent and board scenarios that existed before.
+- [x] One input component in the kit; `TextFieldState`, `TextAreaState`, `dialogs/input.rs`
       and the `filter::`/`palette::`/`dialog::` editing actions are gone.
-- [ ] KEYMAP, DESIGN-SYSTEM, APP-CONTRACTS, UX-SPEC and ADR 0019 agree with the code.
-- [ ] No mention of the reference implementation's origin anywhere in the diff.
-- [ ] No IO or `cx.notify` in `render`; no bare `.detach()`; no `unwrap`; tokens only in the kit.
-- [ ] Follow-ups (cursor blink, Linux clipboard keys, masking) captured in the tracker.
+- [x] KEYMAP, DESIGN-SYSTEM, APP-CONTRACTS, UX-SPEC and ADR 0019 agree with the code.
+- [x] No mention of the reference implementation's origin anywhere in the diff.
+- [x] No IO or `cx.notify` in `render`; no bare `.detach()`; no `unwrap`; tokens only in the kit.
+- [x] Follow-ups (cursor blink, Linux clipboard keys, masking) captured in the tracker.
 
 ## Risks and rollback
 

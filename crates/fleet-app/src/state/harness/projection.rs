@@ -398,7 +398,9 @@ impl AppState {
         };
         Some(DialogSnapshot {
             name: dialog.context_name().to_owned(),
-            fields: Vec::new(),
+            // Recorded by the harness command that is about to project, because the live
+            // editors belong to the dialog host entity rather than to `AppState`.
+            fields: self.harness.dialog_fields().to_vec(),
             buttons: Vec::new(),
             message: None,
         })

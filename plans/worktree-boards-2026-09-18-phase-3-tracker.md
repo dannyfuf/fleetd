@@ -67,7 +67,14 @@
     independent run). `text_field*`/`text_area*` deleted; `input.rs` split into
     `input/{handlers,pointer,geometry,chrome}.rs` (all under 900 lines); ADR 0019 written and
     indexed. Resting settings/board-settings text rows are `FactRow`s per DESIGN-SYSTEM §6.4.
-- [~] P3-T08 — Drive typing, selection and undo in the harness
+- [x] P3-T08 — Drive typing, selection and undo in the harness
+  - verified: five scenarios (`board/card-create-editing`, `board/filter-columns`, `hub/filter-editing`,
+    `hub/context-editing`, `agents/composer-editing`), each green twice alone; `make harness` 64 of 64
+    (agent run `20260919-223003` and the orchestrator's phase-gate run); `make harness-headless` 25
+    selected including all five; `dialog.fields` now populated for all-editor dialogs
+    (TESTING-HARNESS §11 gap entry updated; no command, target or grammar changed).
+  - phase gate on the final tree: `make lint` clean, `make test` 3272 passed / 0 failed,
+    `make harness` 64 of 64.
 - [x] P3-T10 — Fix the phase-review findings (banner keys shadow inputs; mouse focus vs field marker; shared hub-filter predicate)
   - added 2026-09-19 from the P3-T07 review: P0 `Daemon > Banner` binds bare `r`/`l` innermost on
     every chain so those letters cannot be typed while the banner is up; P1 clicking a second
@@ -168,6 +175,14 @@
 
 ## Follow-ups
 (Things discovered mid-flight that are out of scope for this plan. Each gets a one-line description.)
+
+- `harness_target("agents.composer")` covers the whole composer column (`agent_thread/view.rs`), so a
+  named `click` lands on the metadata strip and focus cannot type although `focused` still reports
+  the composer; narrow the target to the editor row and make `composer_is_focused` answer from the
+  real handle.
+- Composer drafts and prompt history are not projected in the harness dump (version 1 carries
+  threads only), so `up` recall is unassertable.
+- `examples/gallery_input.rs` is about 1330 lines; split by section.
 
 - The first harness scenario after a fresh build (`agent-approval`, or `unread-mark`/`prefix-inside-a-thread`
   on a `shot`) misses the frame-settle deadline about one run in three and passes solo and on rerun;

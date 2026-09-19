@@ -1,0 +1,60 @@
+# docs/KEYMAP.md §Dialogs and text inputs — `Tab` and `S-Tab` stay container keys while the
+# focused field owns every printable key, and `cmd-a` selects all inside the field it is in.
+# docs/KEYMAP.md §Global — `N` opens the new-context dialog (§3.8.4), whose tab cycle is
+# `dialog.field[0]` name and `dialog.field[1]` owners.
+#
+# The oracle is `dialog.fields[N]` (`docs/TESTING-HARNESS.md` §11). Typing into a dialog editor
+# raises no `AppState` notification, so the text is read with `assert`, which projects on
+# demand, never with `await`.
+#
+# `ctrl-shift-d` is the one row of this dialog deliberately left untested here: it deletes the
+# context, so it belongs to a scenario about deletion rather than to one about typing.
+#
+# Paste is deliberately not exercised: `clipboard set` and `clipboard get` fail in every lane by
+# design (`docs/TESTING-HARNESS.md` §1); the kit's own gpui tests cover `cmd-v`.
+#
+# No `shot`: this is a keyboard scenario, so it belongs in the headless subset too (§7).
+fixture: busy
+await idle 30000
+assert screen == Hub && mode == Normal && overlay absent
+
+key N
+await overlay == Dialog 10000
+await idle 10000
+assert dialog.name == Context && key_contexts[0] == Dialog && key_contexts[1] == Context
+assert dialog.fields[0].name == name && dialog.fields[0].focused == true
+assert dialog.fields[1].name == owners && dialog.fields[1].focused == false
+
+# The name field takes the printable keys and the `FleetTextInput` deletion rows.
+type Beta squad
+assert dialog.fields[0].value == "Beta squad"
+key alt-backspace
+assert dialog.fields[0].value == "Beta "
+type team
+assert dialog.fields[0].value == "Beta team"
+
+# `Tab` hands the keyboard to the owners field, which is a second independent buffer.
+key tab
+assert dialog.fields[1].focused == true && dialog.fields[0].focused == false
+type dannyfuf, sam
+assert dialog.fields[1].value == "dannyfuf, sam"
+key ctrl-w
+assert dialog.fields[1].value == "dannyfuf, "
+
+# `S-Tab` comes back to the name with its text untouched.
+key shift-tab
+assert dialog.fields[0].focused == true && dialog.fields[0].value == "Beta team"
+
+# `cmd-a` selects the whole field, so the next character replaces it — and only it.
+key cmd-a
+type Gamma
+assert dialog.fields[0].value == Gamma && dialog.fields[1].value == "dannyfuf, "
+dump edited
+
+# `Esc` discards the draft: no context was created and the Hub has its keys back.
+key escape
+await overlay absent 10000
+assert screen == Hub && mode == Normal && dialog absent && focused == worktrees.row[0]
+assert lists.repos.rows[1].label == "acme/api" && lists.worktrees.rows[3] exists
+dump discarded
+quit
