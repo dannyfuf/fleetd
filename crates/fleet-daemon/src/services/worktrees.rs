@@ -4,7 +4,7 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, OnceLock,
+        Arc, Mutex, OnceLock, Weak,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -91,7 +91,7 @@ pub struct Worktrees {
     trash_jobs: Arc<Mutex<HashMap<String, JobId>>>,
     startup_ready: Arc<AtomicBool>,
     startup_notify: Arc<tokio::sync::Notify>,
-    cascade: Arc<OnceLock<Arc<dyn WorktreeCascade>>>,
+    cascade: Arc<OnceLock<Weak<dyn WorktreeCascade>>>,
 }
 
 impl Worktrees {
@@ -133,7 +133,7 @@ impl Worktrees {
 
     /// Installs the one cascade observer after dependent services have been composed.
     pub(super) fn set_cascade(&self, cascade: Arc<dyn WorktreeCascade>) {
-        if self.cascade.set(cascade).is_err() {
+        if self.cascade.set(Arc::downgrade(&cascade)).is_err() {
             tracing::warn!("worktree cascade observer was already installed");
         }
     }

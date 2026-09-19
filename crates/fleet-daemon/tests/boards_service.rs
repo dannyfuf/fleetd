@@ -50,6 +50,16 @@ struct Fixture {
     services: Arc<Services>,
 }
 
+#[tokio::test]
+async fn composed_board_and_worktree_services_do_not_retain_each_other() {
+    let boards = {
+        let fixture = Fixture::new(BackendCapabilities::default()).await;
+        Arc::downgrade(&fixture.services.boards)
+    };
+
+    assert!(boards.upgrade().is_none());
+}
+
 impl Fixture {
     async fn new(caps: BackendCapabilities) -> Self {
         let temp = tempfile::tempdir().unwrap();

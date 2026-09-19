@@ -256,7 +256,7 @@ impl Worktrees {
                 .and_then(parse_expiry)
                 .unwrap_or_else(Utc::now),
         );
-        if let Some(cascade) = self.cascade.get()
+        if let Some(cascade) = self.cascade.get().and_then(std::sync::Weak::upgrade)
             && let Err(error) = cascade.delete_for_worktree(&id).await
         {
             // The worktree is already gone, so its successful deletion cannot be rolled back.

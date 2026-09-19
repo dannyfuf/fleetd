@@ -26,9 +26,9 @@ protocol bump would force local and remote daemons to upgrade together for an op
   It is only a fast path. Lookup verifies the persisted `worktree_id` and falls back to scanning
   documents; creation appends `-2`, `-3`, and so on when another board occupies the derived id.
 - Worktree deletion owns the lifetime boundary. `Worktrees` exposes a late-bound
-  `WorktreeCascade`, installed after `Boards` is composed, and invokes it after the worktree has
-  moved to trash. A cascade failure is warned and swallowed because the successful worktree move
-  cannot be rolled back.
+  `WorktreeCascade`, installed weakly after `Boards` is composed, and invokes it after the
+  worktree has moved to trash. The weak observer avoids an object-graph cycle; a cascade failure
+  is warned and swallowed because the successful worktree move cannot be rolled back.
 - `EnsureWorktreeBoard` and `CreateWorktreeBoard` are additive requests advertised by the
   `board.worktree` capability. `PROTOCOL_VERSION` remains 8. Consumers check the capability before
   sending either request.
@@ -45,7 +45,7 @@ protocol bump would force local and remote daemons to upgrade together for an op
   The persisted scope field is authoritative, so lookup remains correct across either event.
 - **Cascading from every delete caller.** Direct deletion, repository deletion, and pruning all
   reach `Worktrees::delete_one`. Registering one observer there avoids three call sites that can
-  drift and does not introduce a `Worktrees` → `Boards` dependency cycle.
+  drift and does not introduce a compile-time `Worktrees` → `Boards` dependency cycle.
 - **Bumping the wire protocol.** Older daemons cannot decode the new request variants, but clients
   can avoid sending them after one capability check. Rejecting every mixed-version daemon pair
   would impose a fleet-wide upgrade for no benefit to clients that do not use scoped boards.

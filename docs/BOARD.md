@@ -557,7 +557,8 @@ impl Boards {
 }
 ```
 The late-bound deletion seam keeps `Worktrees` independent of `Boards`, which already depends on
-`Worktrees` for card-to-worktree creation:
+`Worktrees` for card-to-worktree creation. `Worktrees` stores the observer weakly so composing the
+two services does not keep either allocation alive:
 
 ```rust
 #[async_trait::async_trait]
