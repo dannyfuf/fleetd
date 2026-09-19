@@ -1901,6 +1901,17 @@ provider: codex, thread: <child>, duration: 14m 02s, files changed: 6
 The status word is `succeeded`, `incomplete`, `failed` or `cancelled`. An elided result adds one
 blank line and `(report elided at <n> bytes)`.
 
+A `fleet subagent wait` that reaches its timeout prints one line and nothing else, and exits 2:
+
+```text
+[fleet subagent <id> still running after 9m 47s, status: running, thread: <child>]
+```
+
+It is deliberately not the delivered message's shape: the bracketed prefix matches so a caller
+can scan for it, but there is no `finished:` and no body, because there is nothing to report yet.
+Its status word is the delegation-status name (`starting`, `running`, `blocked`, …) rather than
+the transcript row vocabulary, for the same reason the delivered line's is.
+
 ### 15.5 UI: rows, attachment and attention
 
 The caller transcript projects `ItemKind::Delegation` as a `DelegationRow` joined to the durable
