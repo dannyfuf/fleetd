@@ -2,8 +2,11 @@ use super::*;
 
 use crate::adapters::{clock::SystemClock, files::RealFiles};
 
+/// A proxied session runs on the client's daemon, so only a *process-backed* reserved command
+/// falls back to a program. The board tab is data the owning daemon serves, so it stays native
+/// on a remote worktree exactly as it is locally.
 #[tokio::test]
-async fn proxied_ensure_uses_executing_daemon_layout_and_only_degrades_lazygit() {
+async fn proxied_ensure_uses_executing_daemon_layout_and_degrades_only_the_process_backed_tab() {
     let temp = tempfile::tempdir().expect("temp home");
     let home = temp.path();
     let repos = home.join("repos");
@@ -22,6 +25,10 @@ async fn proxied_ensure_uses_executing_daemon_layout_and_only_degrades_lazygit()
         fleet_core::config::WindowConfig {
             name: "lg".to_owned(),
             command: fleet_core::config::NATIVE_LAZYGIT.to_owned(),
+        },
+        fleet_core::config::WindowConfig {
+            name: "board".to_owned(),
+            command: fleet_core::config::NATIVE_BOARD.to_owned(),
         },
         fleet_core::config::WindowConfig {
             name: "agent".to_owned(),
@@ -84,8 +91,22 @@ async fn proxied_ensure_uses_executing_daemon_layout_and_only_degrades_lazygit()
             .collect::<Vec<_>>(),
         vec![
             ("lg", "lazygit", TerminalKind::Pty),
+            (
+                "board",
+                fleet_core::config::NATIVE_BOARD,
+                TerminalKind::Native
+            ),
             ("agent", "/bin/sleep 30", TerminalKind::Pty),
         ]
+    );
+    let board = ensured
+        .terminals
+        .iter()
+        .find(|terminal| terminal.name == "board")
+        .unwrap_or_else(|| panic!("the board tab must survive a proxied ensure"));
+    assert_eq!(
+        board.shell_pid, None,
+        "a native board tab has no process, proxied or not"
     );
 
     let agent = sessions

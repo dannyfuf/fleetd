@@ -251,9 +251,12 @@ behaviour locally, because the link — not the terminal — is what ended.
 
 ## 8. Proxied degradation
 
-`fleet_core::sessions::default_terminals(config, agent, proxied)` replaces
-`fleet://lazygit` with the plain `lazygit` PTY command when proxied. Native structured agent tabs
-are explicitly exempt because clients draw them from protocol events.
+`fleet_core::sessions::default_terminals(config, agent, proxied)` asks
+`fleet_core::config::proxied_degradation` what a reserved command falls back to, and replaces
+`fleet://lazygit` with the plain `lazygit` PTY command when proxied. Only that one degrades:
+`fleet://board` is daemon-data-driven, so a proxied session keeps the native board tab, and
+native structured agent tabs are exempt for the same reason — clients draw them from protocol
+events.
 
 ## 9. Bootstrap job
 

@@ -248,10 +248,17 @@ pub fn default_terminals(config: &Config, agent: Agent, proxied: bool) -> Vec<Te
         .iter()
         .map(|window| TerminalSpec {
             name: window.name.clone(),
-            command: if proxied && window.command == crate::config::NATIVE_LAZYGIT {
-                "lazygit".to_owned()
-            } else {
-                window.command.replace("{agent}", agent_command)
+            // A proxied session runs on the client's daemon, so a reserved command whose
+            // implementation is embedded in the client has to fall back to the program it
+            // stands for. `crate::config::proxied_degradation` owns that rule: only
+            // `fleet://lazygit` is process-backed, while `fleet://board` is daemon-data-driven
+            // and stays a native tab on a remote worktree.
+            command: match proxied
+                .then(|| crate::config::proxied_degradation(&window.command))
+                .flatten()
+            {
+                Some(program) => program.to_owned(),
+                None => window.command.replace("{agent}", agent_command),
             },
         })
         .collect()
@@ -417,11 +424,17 @@ mod tests {
             name: "structured-agent".to_owned(),
             command: "fleet://agent/claude".to_owned(),
         });
+        config.windows.push(crate::config::WindowConfig {
+            name: "board".to_owned(),
+            command: crate::config::NATIVE_BOARD.to_owned(),
+        });
         let terminals = default_terminals(&config, Agent::Claude, true);
         assert_eq!(terminals[0].command, "nvim .");
         assert_eq!(terminals[1].command, "claude");
         assert_eq!(terminals[2].command, "lazygit");
         assert_eq!(terminals[3].command, "fleet://agent/claude");
+        // The board is daemon data, not a process: a remote worktree keeps the native tab.
+        assert_eq!(terminals[4].command, crate::config::NATIVE_BOARD);
     }
 
     #[test]

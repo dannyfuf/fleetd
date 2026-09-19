@@ -1,4 +1,4 @@
-use fleet_core::config::default_config;
+use fleet_core::config::{NATIVE_BOARD, NATIVE_LAZYGIT, WindowConfig, default_config};
 use gpui::AppContext;
 use std::{cell::RefCell, rc::Rc};
 
@@ -300,6 +300,49 @@ fn the_sleep_section_lists_one_row_per_keep_alive_rule() {
         .as_ref()
         .map_or(0, |config| config.sleep.keep_alive.len());
     assert_eq!(list.len(), 2 + rules);
+}
+
+/// A reserved `fleet://` command is a surface Fleet draws, not a program the user could run, so
+/// every one of them reads the same way: the name, the reserved command, and "built in".
+#[test]
+fn every_reserved_window_command_reads_as_built_in() {
+    let mut probe = draft();
+    probe.section = Section::ALL
+        .iter()
+        .position(|section| *section == Section::Windows)
+        .unwrap_or(0);
+    let config = probe.config.as_mut().unwrap_or_else(|| panic!("no config"));
+    config.windows = vec![
+        WindowConfig {
+            name: "nvim".to_owned(),
+            command: "nvim .".to_owned(),
+        },
+        WindowConfig {
+            name: "lg".to_owned(),
+            command: NATIVE_LAZYGIT.to_owned(),
+        },
+        WindowConfig {
+            name: "board".to_owned(),
+            command: NATIVE_BOARD.to_owned(),
+        },
+    ];
+    let app = AppState::new("/tmp/fleet", std::time::Instant::now());
+    let list = rows(&probe, &app);
+    let values = list
+        .iter()
+        .map(|row| match &row.kind {
+            RowKind::Fact(value) => (row.label.as_str(), value.as_str()),
+            other => panic!("window rows are read-only facts: {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        values,
+        vec![
+            ("1", "nvim \u{2014} nvim ."),
+            ("2", "lg \u{2014} fleet://lazygit (built in)"),
+            ("3", "board \u{2014} fleet://board (built in)"),
+        ]
+    );
 }
 
 #[test]

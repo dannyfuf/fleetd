@@ -133,9 +133,16 @@ system, the native git UI and the diff pipeline — are recorded in `docs/decisi
   proxied session degrades a process-backed native command to the program it stands for
   (`fleet://lazygit` → `lazygit`), because the embedded implementation would run `git` on the
   client machine. Structured native-agent tabs are explicitly exempt: clients draw them from
-  routed protocol events, so their provider still runs on the worktree's owning daemon. The only
-  reserved process-backed command today is `fleet://lazygit`, drawn by `crates/fleet-lazygit`
-  embedded in `fleet-app` (see that crate's README, "Embedding").
+  routed protocol events, so their provider still runs on the worktree's owning daemon.
+
+  Two reserved commands exist, and only the first is process-backed:
+  - `fleet://lazygit` — the git UI, drawn by `crates/fleet-lazygit` embedded in `fleet-app` (see
+    that crate's README, "Embedding"). It degrades to `lazygit` when proxied.
+  - `fleet://board` — the worktree board tab, drawn from the board the owning daemon already
+    serves over the wire. It is daemon-data-driven rather than process-backed, so, like a
+    structured agent tab, it stays native on a proxied session.
+
+  `fleet_core::config::proxied_degradation` is the single place that rule lives.
 
 The native Git pane still executes mutations locally rather than as daemon jobs. Safety-sensitive
 operations carry the identity the user reviewed: partial staging carries the displayed diff
