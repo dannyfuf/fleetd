@@ -10,12 +10,12 @@ use fleet_proto::{
     response::{KeepAliveRuleMatch, ResponseBody},
 };
 use fleet_ui_kit::{Icon, prelude::*};
-use gpui::{AnyElement, App, Entity, FocusHandle, KeyDownEvent, Window, div, px};
+use gpui::{AnyElement, App, AppContext, Entity, FocusHandle, Window, div, px};
 
 use crate::{
     actions::{dialog, settings as settings_actions},
     bridge::Bridge,
-    dialogs::{DialogHost, clear_all, notify, read_host, root, step, typed_char, with_host},
+    dialogs::{DialogHost, notify, read_host, root, step, with_host},
     presentation::{age_secs, now_unix},
     state::{AppState, Screen},
     views::workspace_tabs,
@@ -37,6 +37,7 @@ pub(super) use draft::SettingsState;
 use draft::*;
 pub(crate) use persistence::seed;
 use persistence::*;
+pub(super) use schema::Section;
+pub(crate) use schema::refresh_rows;
 use schema::*;
-pub(super) use schema::{Section, refresh_rows};
 pub(crate) use view::render;

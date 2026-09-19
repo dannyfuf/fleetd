@@ -162,6 +162,8 @@ struct InputGallery {
     live_invalid: Entity<TextInput>,
     live_read_only: Entity<TextInput>,
     live_numeric: Entity<TextInput>,
+    /// The editor a settings number row hands to `NumberField` while it is being typed into.
+    number_row_editor: Entity<TextInput>,
     live_labeled: Entity<TextInput>,
     live_multiline_min: Entity<TextInput>,
     live_multiline_grown: Entity<TextInput>,
@@ -239,6 +241,14 @@ impl InputGallery {
             let mut input = TextInput::new(InputMode::SingleLine, cx);
             input.set_text("2000", cx);
             input.set_filter(Some(|character| character.is_ascii_digit()), cx);
+            input
+        });
+        let number_row_editor = cx.new(|cx| {
+            let mut input = TextInput::new(InputMode::SingleLine, cx);
+            input.set_mono(true, cx);
+            input.set_hide_status_line(true, cx);
+            input.set_filter(Some(|character| character.is_ascii_digit()), cx);
+            input.set_text("2500", cx);
             input
         });
         let live_labeled = cx.new(|cx| {
@@ -328,6 +338,7 @@ impl InputGallery {
             live_labeled,
             live_multiline_min,
             live_multiline_grown,
+            number_row_editor,
             filter,
             filter_no_match,
             palette_query,
@@ -1037,6 +1048,15 @@ fn choice_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
                                 .label_width(px(150.0))
                                 .unit("s")
                                 .invalid("the daemon refused this value"),
+                        )
+                        // Editing: the row hands the field its live editor, and the label,
+                        // the unit and the row chrome stay exactly where they were.
+                        .child(
+                            NumberField::labeled("grace", 2_000)
+                                .label_width(px(150.0))
+                                .unit("ms")
+                                .min(0)
+                                .editor(gallery.number_row_editor.clone()),
                         ),
                 ),
             ),

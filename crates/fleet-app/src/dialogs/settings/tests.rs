@@ -40,27 +40,6 @@ fn draft() -> SettingsState {
 }
 
 #[test]
-fn a_text_row_takes_every_surrendered_key_as_a_character() {
-    for key in ["E", "D", "j", "k", "h", "l", " "] {
-        assert!(
-            accepts(&RowKind::Text(String::new()), key),
-            "a free-text row takes `{key}`"
-        );
-        assert!(
-            !accepts(&RowKind::Toggle(false), key),
-            "a toggle takes nothing, so `{key}` keeps its binding"
-        );
-    }
-    let number = RowKind::Number {
-        value: 1,
-        min: 0,
-        unit: None,
-    };
-    assert!(!accepts(&number, "E"), "a number row is not a text field");
-    assert!(accepts(&number, "7"));
-}
-
-#[test]
 fn a_fresh_draft_is_not_dirty() {
     assert!(!draft().dirty());
 }
@@ -238,29 +217,15 @@ fn config_and_diagnostics_failures_are_retryable(cx: &mut gpui::TestAppContext) 
     });
 }
 
+/// The editor keeps the raw text the user typed; the draft takes only what parses, so a
+/// half-typed number never rewrites the row behind it.
 #[test]
-fn numeric_edit_preserves_raw_buffer_and_caret() {
+fn a_numeric_edit_commits_only_what_parses() {
     let mut config = default_config("/tmp/fleet");
-    let mut input = TextFieldState::from_text("0007");
-    assert!(input.move_left());
-    let caret = input.caret_chars();
-    assert!(commit_value(&mut config, &RowId::GraceMs, input.text()));
-    assert_eq!(input.text(), "0007");
-    assert_eq!(input.caret_chars(), caret);
+    assert!(commit_value(&mut config, &RowId::GraceMs, "0007"));
     assert_eq!(config.sleep.grace_ms, 7);
-
-    input.clear();
-    assert!(!commit_value(&mut config, &RowId::GraceMs, input.text()));
-    assert_eq!(input.text(), "");
+    assert!(!commit_value(&mut config, &RowId::GraceMs, ""));
     assert_eq!(config.sleep.grace_ms, 7);
-}
-
-#[test]
-fn text_row_visual_focus_matches_key_ownership() {
-    let editing = TextFieldState::from_text("claude");
-    assert!(!super::view::input_is_focused(true, None));
-    assert!(!super::view::input_is_focused(false, Some(&editing)));
-    assert!(super::view::input_is_focused(true, Some(&editing)));
 }
 
 #[test]
@@ -301,37 +266,6 @@ fn about_reports_app_version_and_live_link() {
     assert!(
         matches!(&rows[1].kind, RowKind::Fact(status) if status.starts_with("running · pid 42"))
     );
-}
-
-#[test]
-fn a_number_row_refuses_every_non_digit() {
-    let number = number_row(RowId::GraceMs, "Grace", 2_000, 0, "ms");
-    // `j` / `k` / `h` / `l` / space are bound to navigation: none may reach the buffer,
-    // where `commit_value` would clamp `2000j` down to the minimum.
-    for literal in ["j", "k", "h", "l", " ", "-", "x"] {
-        assert!(
-            !accepts(&number.kind, literal),
-            "`{literal}` must never type into a number row"
-        );
-    }
-    assert!(accepts(&number.kind, "7"));
-    assert!(!accepts(&number.kind, ""));
-
-    // A free-text row still takes every printable key, including those letters.
-    let text = text_row(RowId::ClaudeCommand, "Claude command", "claude");
-    for literal in ["j", "k", "h", "l", " ", "7"] {
-        assert!(accepts(&text.kind, literal));
-    }
-
-    // Rows with no input never take typing at all.
-    let toggle = SettingRow {
-        id: RowId::WarnBeforeQuit,
-        label: "Warn".to_owned(),
-        kind: RowKind::Toggle(true),
-        detail: None,
-        invalid: None,
-    };
-    assert!(!accepts(&toggle.kind, "j"));
 }
 
 #[test]
@@ -379,7 +313,6 @@ fn stable_addresses_match_rendered_editable_rows() {
             let focused = draft.focused_row().expect("loaded row");
             assert_eq!(focused.id, row.id);
             if matches!(row.kind, RowKind::Text(_) | RowKind::Number { .. }) {
-                assert_eq!(accepts(&focused.kind, "7"), accepts(&row.kind, "7"));
                 let rendered_value = match row.kind {
                     RowKind::Text(value) => value,
                     RowKind::Number { value, .. } => value.to_string(),
@@ -401,16 +334,33 @@ struct SettingsInput {
     focus: FocusHandle,
 }
 impl gpui::Render for SettingsInput {
-    fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
-        div()
-            .key_context("Dialog")
-            .child(super::view::input_actions(
+    fn render(&mut self, _: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        let state = self.state.clone();
+        // The shell publishes `Settings` while browsing and `SettingsEditing` while a row
+        // editor exists, and mounts that editor inside the dialog's focus subtree. The fixture
+        // reproduces both, because that pair is exactly what this test is about.
+        let editing = read_host(&self.state, cx, |host, _| host.settings_input.clone());
+        let word = if editing.is_some() {
+            "SettingsEditing"
+        } else {
+            "Settings"
+        };
+        div().key_context("Dialog").child(
+            super::view::input_actions(
                 div()
-                    .key_context("Settings")
+                    .key_context(word)
                     .track_focus(&self.focus)
-                    .size_full(),
+                    .size_full()
+                    .children(editing),
                 &self.state,
-            ))
+                &self.focus,
+            )
+            // The dialog's own `Enter` saves after this; the fixture drives only the half
+            // that opens a row, which is what the keys below are about.
+            .on_action(move |_: &dialog::Confirm, window, cx| {
+                confirm_opens_editing(&state, window, cx);
+            }),
+        )
     }
 }
 
@@ -439,21 +389,78 @@ fn dispatched_edits_update_the_selected_setting_and_keep_navigation_available(
             window.focus(&view.focus, cx)
         })
         .expect("focus settings");
-    visual.simulate_keystrokes("backspace j k h l space");
+    // Browsing: `j` / `k` move rows and `space` toggles, because no editor exists yet.
+    visual.simulate_keystrokes("j k");
+    visual.update(|_, cx| {
+        with_host(&state, cx, |host| {
+            assert_eq!(host.settings.row, 1);
+            assert!(host.settings.editing.is_none());
+        })
+    });
+    // `Enter` opens the row and hands its editor the keyboard; `j` is then a letter.
+    visual.simulate_keystrokes("enter");
+    visual.simulate_input("jkhl ");
     visual.update(|_, cx| {
         with_host(&state, cx, |host| {
             assert_eq!(
                 host.settings.config.as_ref().unwrap().agent_commands.claude,
-                "claudjkhl "
+                "claudejkhl "
             );
             assert_eq!(host.settings.row, 1);
         })
     });
-    visual.simulate_keystrokes("down");
+    // `ctrl-n` is the container's, so it still moves the row and closes the editor.
+    visual.simulate_keystrokes("ctrl-n");
     visual.update(|_, cx| {
         with_host(&state, cx, |host| {
             assert_eq!(host.settings.row, 2);
             assert!(host.settings.editing.is_none());
+            assert!(host.settings_input.is_none());
+        })
+    });
+}
+
+/// §3.8.6's number rows filter to ASCII digits, so a letter that would make `commit_value`
+/// clamp the setting to its minimum never reaches the buffer at all.
+#[gpui::test]
+fn a_number_row_refuses_every_non_digit(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| {
+        cx.set_global(fleet_ui_kit::Theme::dark());
+        crate::keymap::init(cx);
+    });
+    let state = cx.new(|_| AppState::new("/tmp/settings-number", std::time::Instant::now()));
+    cx.update(|cx| {
+        with_host(&state, cx, |host| {
+            host.settings = draft();
+            // Sleep › Grace, the first number row of §3.8.6.
+            host.settings.section = 1;
+            host.settings.row = 1;
+        });
+        refresh_rows(&state, cx);
+    });
+    let window = cx.add_window(|_, cx| SettingsInput {
+        state: state.clone(),
+        focus: cx.focus_handle(),
+    });
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    window
+        .update(&mut visual, |view, window, cx| {
+            window.focus(&view.focus, cx)
+        })
+        .expect("focus settings");
+    visual.simulate_keystrokes("enter");
+    visual.simulate_input("4x0j0");
+    visual.update(|_, cx| {
+        read_host(&state, cx, |host, cx| {
+            let input = host
+                .settings_input
+                .as_ref()
+                .unwrap_or_else(|| panic!("the number row materialized an editor"));
+            assert_eq!(input.read(cx).text(), "2000400");
+            assert_eq!(
+                host.settings.config.as_ref().unwrap().sleep.grace_ms,
+                2_000_400
+            );
         })
     });
 }
@@ -469,7 +476,7 @@ fn editing_a_cached_number_preserves_units_and_other_rows(cx: &mut gpui::TestApp
         });
         refresh_rows(&state, cx);
         let label = with_host(&state, cx, |host| host.settings.prepared[0].label.as_ptr());
-        with_host(&state, cx, |host| host.settings.editing = Some(TextFieldState::from_text("4000")));
+        with_host(&state, cx, |host| host.settings.editing = Some("4000".to_owned()));
         flush(&state, cx);
         with_host(&state, cx, |host| {
             assert_eq!(host.settings.prepared[0].label.as_ptr(), label);

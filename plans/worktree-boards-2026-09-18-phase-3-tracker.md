@@ -43,7 +43,7 @@
     regression the unit tests missed: the board filter input lost gpui focus to the shell's
     focus reconciliation, so typed text never reached it; fixed by a shell-level `wanted_input`
     gate plus root-level regression tests that dispatch `/` and type through the real path.
-- [~] P3-T06 — Migrate the remaining dialogs, filters and the lazygit overlay
+- [x] P3-T06 — Migrate the remaining dialogs, filters and the lazygit overlay
   - split into two sequential runs: (a) Hub filter, palette, kit `FilterBar`/`Palette`, lazygit
     overlay; (b) create worktree, clone, context, rename, hooks, settings, `NumberField`, delete
     `dialogs/input.rs` and the old action families.
@@ -53,6 +53,14 @@
     `Overlay::Filter` no longer mounts an overlay layer: the editor lives in the pane header, so
     `Filter` wraps the Hub body (APP-CONTRACTS §3). Fixed en route: Hub filter `ctrl-n`/`ctrl-p`
     never moved the selection anchor. `TextInput::set_embedded` is public for 30/44 px rows.
+  - (b) verified: `cargo test -p fleet-app` (888 passed), `cargo test -p fleet-ui-kit` (383),
+    `cargo test -p fleet-lazygit` (135), `make lint`, `make harness` 59 of 59 (agent run
+    `20260919-193206` and an independent rerun; the first orchestrator run timed out on
+    `agent-approval`'s fake gate right after a full test build and passed on rerun).
+    `dialogs/input.rs` and the `dialog::` editing family deleted; residue grep empty.
+    Two key changes forced by the ownership rule, documented in KEYMAP/UX-SPEC: context-dialog
+    delete is `ctrl-shift-d` (`ctrl-d` is delete-forward in the input and the dialog has no
+    browsing state) and `enter` on a settings text/number row opens the editor instead of saving.
 - [ ] P3-T07 — Delete the old input families and record the decision
 - [ ] P3-T08 — Drive typing, selection and undo in the harness
 - [x] P3-T09 — Soft-wrap the multi-line mode of `TextInput`

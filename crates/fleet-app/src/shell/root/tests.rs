@@ -735,3 +735,288 @@ fn real_shell_palette_query_accepts_platform_text(cx: &mut gpui::TestAppContext)
             .read_with(&fixture.visual, |app, _| app.overlay.is_none())
     );
 }
+
+/// The same real shell with the repos pane focused, which is where `n` clones.
+fn root_repos_fixture(cx: &mut gpui::TestAppContext, name: &str) -> RootInputFixture {
+    let mut fixture = root_hub_fixture(cx, name);
+    let state = fixture.state.clone();
+    fixture.visual.update(|_, cx| {
+        state.update(cx, |app, cx| {
+            app.hub_pane = HubPane::Repos;
+            cx.notify();
+        });
+    });
+    settle(&mut fixture);
+    fixture
+}
+
+/// The key context the shell is publishing right now, innermost word last.
+fn live_contexts(fixture: &mut RootInputFixture) -> Vec<&'static str> {
+    fixture
+        .state
+        .read_with(&fixture.visual, |app, _| app.context_chain())
+}
+
+#[gpui::test]
+fn real_shell_create_worktree_branch_accepts_platform_text(cx: &mut gpui::TestAppContext) {
+    let mut fixture = root_hub_fixture(cx, "create-branch");
+
+    dispatch_root_key(&mut fixture, "n");
+    assert_eq!(
+        fixture
+            .state
+            .read_with(&fixture.visual, |app, _| app.overlay.clone()),
+        Some(Overlay::Dialog(Dialogs::CreateWorktree))
+    );
+    assert_dialog_input_focused(&mut fixture);
+    assert_eq!(live_contexts(&mut fixture), vec!["Dialog", "CreateEditing"]);
+
+    fixture.visual.simulate_input("feat/rut");
+    assert_eq!(dialog_input_text(&mut fixture), "feat/rut");
+    assert_eq!(
+        fixture.visual.update(
+            |_, cx| crate::dialogs::read_host(&fixture.state, cx, |host, _| host
+                .create
+                .branch
+                .clone())
+        ),
+        "feat/rut",
+        "the draft mirrors the editor"
+    );
+
+    // §3.8.1: `Tab` leaves the branch, which is what gives `←` / `→` back to the host cycler.
+    dispatch_root_key(&mut fixture, "tab");
+    assert_eq!(live_contexts(&mut fixture), vec!["Dialog", "Create"]);
+    fixture.visual.update(|window, cx| {
+        assert!(crate::dialogs::focused_input(&fixture.state, cx).is_none());
+        assert!(fixture.body_focus.is_focused(window) || !fixture.body_focus.is_focused(window));
+    });
+}
+
+#[gpui::test]
+fn real_shell_clone_query_accepts_platform_text(cx: &mut gpui::TestAppContext) {
+    let mut fixture = root_repos_fixture(cx, "clone-query");
+
+    dispatch_root_key(&mut fixture, "n");
+    assert_eq!(
+        fixture
+            .state
+            .read_with(&fixture.visual, |app, _| app.overlay.clone()),
+        Some(Overlay::Dialog(Dialogs::CloneRepo))
+    );
+    assert_dialog_input_focused(&mut fixture);
+    fixture.visual.simulate_input("payroll");
+    assert_eq!(dialog_input_text(&mut fixture), "payroll");
+    assert_eq!(
+        fixture.visual.update(
+            |_, cx| crate::dialogs::read_host(&fixture.state, cx, |host, _| host
+                .clone
+                .query
+                .clone())
+        ),
+        "payroll"
+    );
+}
+
+#[gpui::test]
+fn real_shell_context_dialog_types_into_both_fields(cx: &mut gpui::TestAppContext) {
+    let mut fixture = root_hub_fixture(cx, "context-fields");
+
+    dispatch_root_key(&mut fixture, "N");
+    assert_eq!(
+        fixture
+            .state
+            .read_with(&fixture.visual, |app, _| app.overlay.clone()),
+        Some(Overlay::Dialog(Dialogs::NewContext))
+    );
+    assert_dialog_input_focused(&mut fixture);
+    fixture.visual.simulate_input("Buk HR");
+    assert_eq!(dialog_input_text(&mut fixture), "Buk HR");
+
+    dispatch_root_key(&mut fixture, "tab");
+    assert_dialog_input_focused(&mut fixture);
+    fixture.visual.simulate_input("bukhr");
+    assert_eq!(dialog_input_text(&mut fixture), "bukhr");
+    let (name, owners) = fixture.visual.update(|_, cx| {
+        crate::dialogs::read_host(&fixture.state, cx, |host, _| {
+            (host.context.name.clone(), host.context.owner_list())
+        })
+    });
+    assert_eq!(name, "Buk HR");
+    assert_eq!(owners, vec!["bukhr".to_owned()]);
+}
+
+#[gpui::test]
+fn real_shell_repository_hooks_grow_a_row_as_they_are_filled(cx: &mut gpui::TestAppContext) {
+    let mut fixture = root_repos_fixture(cx, "hook-rows");
+
+    // Row 0 is the `All` pseudo-repo; `j` lands on the fixture's one repository, which is what
+    // `e` edits the hooks of.
+    dispatch_root_key(&mut fixture, "j");
+    dispatch_root_key(&mut fixture, "e");
+    assert_eq!(
+        fixture
+            .state
+            .read_with(&fixture.visual, |app, _| app.overlay.clone()),
+        Some(Overlay::Dialog(Dialogs::EditHooks))
+    );
+    assert_dialog_input_focused(&mut fixture);
+    fixture.visual.simulate_input("bundle install");
+    settle(&mut fixture);
+    assert_eq!(dialog_input_text(&mut fixture), "bundle install");
+    assert_eq!(
+        fixture
+            .visual
+            .update(|_, cx| crate::dialogs::hook_row_count(&fixture.state, cx)),
+        3,
+        "the filled prepare row grew a blank one under it"
+    );
+
+    dispatch_root_key(&mut fixture, "tab");
+    assert_dialog_input_focused(&mut fixture);
+    assert_eq!(dialog_input_text(&mut fixture), "");
+}
+
+/// The settings dialog with a configuration already loaded: the fixture's bridge is shut down,
+/// so the daemon's `GetConfig` never answers and the rows are planted directly.
+fn open_loaded_settings(fixture: &mut RootInputFixture) {
+    dispatch_root_key(fixture, ",");
+    let state = fixture.state.clone();
+    fixture.visual.update(|_, cx| {
+        let config = fleet_core::config::default_config("/tmp/fleet");
+        crate::dialogs::with_host(&state, cx, |host| {
+            host.settings.original = Some(config.clone());
+            host.settings.config = Some(config);
+            host.settings.config_loading = false;
+        });
+        crate::dialogs::settings_refresh_rows(&state, cx);
+    });
+    settle(fixture);
+}
+
+#[gpui::test]
+fn real_shell_settings_text_row_opens_on_enter_and_then_types(cx: &mut gpui::TestAppContext) {
+    let mut fixture = root_hub_fixture(cx, "settings-text");
+    open_loaded_settings(&mut fixture);
+    assert_eq!(live_contexts(&mut fixture), vec!["Dialog", "Settings"]);
+
+    // Browsing: `j` moves to `Claude command`, the first free-text row of §3.8.6.
+    dispatch_root_key(&mut fixture, "j");
+    assert_eq!(
+        fixture.visual.update(
+            |_, cx| crate::dialogs::read_host(&fixture.state, cx, |host, _| host.settings.row)
+        ),
+        1
+    );
+    fixture.visual.update(|_, cx| {
+        assert!(crate::dialogs::focused_input(&fixture.state, cx).is_none());
+    });
+
+    dispatch_root_key(&mut fixture, "enter");
+    assert_eq!(
+        live_contexts(&mut fixture),
+        vec!["Dialog", "SettingsEditing"]
+    );
+    assert_dialog_input_focused(&mut fixture);
+
+    // `j` is a letter now, not a row move.
+    fixture.visual.simulate_input("j-code");
+    assert_eq!(dialog_input_text(&mut fixture), "claudej-code");
+    assert_eq!(
+        fixture.visual.update(
+            |_, cx| crate::dialogs::read_host(&fixture.state, cx, |host, _| {
+                (
+                    host.settings.row,
+                    host.settings
+                        .config
+                        .as_ref()
+                        .map(|config| config.agent_commands.claude.clone()),
+                )
+            })
+        ),
+        (1, Some("claudej-code".to_owned()))
+    );
+}
+
+#[gpui::test]
+fn real_shell_settings_number_row_drops_every_letter(cx: &mut gpui::TestAppContext) {
+    let mut fixture = root_hub_fixture(cx, "settings-number");
+    open_loaded_settings(&mut fixture);
+
+    // Sleep › Grace, §3.8.6's first number row.
+    let state = fixture.state.clone();
+    fixture.visual.update(|_, cx| {
+        crate::dialogs::with_host(&state, cx, |host| {
+            host.settings.section = 1;
+            host.settings.row = 1;
+        });
+        crate::dialogs::settings_refresh_rows(&state, cx);
+    });
+    settle(&mut fixture);
+
+    dispatch_root_key(&mut fixture, "enter");
+    assert_dialog_input_focused(&mut fixture);
+    fixture.visual.simulate_input("x4j2");
+    assert_eq!(dialog_input_text(&mut fixture), "200042");
+    assert_eq!(
+        fixture.visual.update(
+            |_, cx| crate::dialogs::read_host(&fixture.state, cx, |host, _| host
+                .settings
+                .config
+                .as_ref()
+                .map(|config| config.sleep.grace_ms))
+        ),
+        Some(200_042)
+    );
+}
+
+/// `ctrl-d` belongs to the focused editor, so §3.8.4's context delete is the shift variant:
+/// this pins both halves, because a documented key that the deeper input swallows is a dead key.
+#[gpui::test]
+fn context_dialog_delete_is_the_key_the_editor_does_not_own(cx: &mut gpui::TestAppContext) {
+    let mut fixture = root_hub_fixture(cx, "context-delete-key");
+    dispatch_root_key(&mut fixture, "E");
+    assert_eq!(
+        fixture
+            .state
+            .read_with(&fixture.visual, |app, _| app.overlay.clone()),
+        Some(Overlay::Dialog(Dialogs::EditContext))
+    );
+    assert_dialog_input_focused(&mut fixture);
+
+    // Plain `ctrl-d` is delete-forward in the editor and never reaches the dialog.
+    dispatch_root_key(&mut fixture, "ctrl-d");
+    assert_eq!(
+        fixture
+            .state
+            .read_with(&fixture.visual, |app, _| app.overlay.clone()),
+        Some(Overlay::Dialog(Dialogs::EditContext))
+    );
+
+    dispatch_root_key(&mut fixture, "ctrl-shift-d");
+    assert_eq!(
+        fixture
+            .state
+            .read_with(&fixture.visual, |app, _| app.overlay.clone()),
+        Some(Overlay::Dialog(Dialogs::Confirm)),
+        "the delete is routed through the expanded `Y` confirm"
+    );
+}
+
+/// The rename prompt is one editor and it owns the keyboard from the moment it opens.
+#[gpui::test]
+fn real_shell_rename_terminal_prompt_takes_the_keyboard(cx: &mut gpui::TestAppContext) {
+    let mut fixture = root_hub_fixture(cx, "rename-terminal");
+    let state = fixture.state.clone();
+    fixture.visual.update(|_, cx| {
+        state.update(cx, |app, cx| {
+            app.open_overlay(Overlay::Dialog(Dialogs::RenameTerminal));
+            cx.notify();
+        });
+    });
+    settle(&mut fixture);
+
+    assert_dialog_input_focused(&mut fixture);
+    fixture.visual.simulate_input("build");
+    assert_eq!(dialog_input_text(&mut fixture), "build");
+}

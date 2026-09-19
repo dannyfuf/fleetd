@@ -1010,9 +1010,11 @@ anywhere** — the hint row states the keys, and this is a keyboard app.
 | Quit (`ctrl-q`) | 520 × auto | `circle-question` |
 | Quit + stop daemon | 560 × auto | `power` |
 
-Dialog text inputs follow KEYMAP exactly: printable keys, `Backspace`, `ctrl-w`, `ctrl-u`,
-`ctrl-a`/`ctrl-e`, `←`/`→`; lists **under a text field** use `ctrl-n`/`ctrl-p` or `↓`/`↑` and
-never `j`/`k`. **A dialog with no text field (Assign, Settings list, Confirm) does bind `j`/`k`.**
+Every dialog field is a live `TextInput`, and editing is the whole `FleetTextInput` table of
+KEYMAP — printable keys, `Backspace`, `ctrl-w`, `ctrl-u`, `ctrl-a`/`ctrl-e`, motion, selection
+and undo. Lists **under a text field** use `ctrl-n`/`ctrl-p` or `↓`/`↑` and never `j`/`k`.
+**A dialog row with no editor open (Assign, the Settings list while browsing, Confirm) does bind
+`j`/`k`.**
 
 ---
 
@@ -1267,9 +1269,9 @@ its one-line explainer is the **only** teaching copy in the app, because `owners
 field whose purpose is not guessable.
 
 **Edit variant** (`E`, KEYMAP A15): title `⬚ Edit context "buk"`, the id shown read-only and faint
-(read-only outright once repos exist), and **context delete lives here** as `ctrl-d` → the
+(read-only outright once repos exist), and **context delete lives here** as `ctrl-shift-d` → the
 expanded confirm. **[D-11]** `D` therefore keeps its KEYMAP-defined meaning as *delete active
-context* but is **routed through the same expanded confirm with `Y`**; `E` + `ctrl-d` is the
+context* but is **routed through the same expanded confirm with `Y`**; `E` + `ctrl-shift-d` is the
 discoverable path. Rationale for not unbinding `D`: KEYMAP is authoritative and a spec must not
 silently retire a documented binding; the risk is handled by `Y` escalation, the fact list and
 the trash undo (`u`), not by hiding the key.
@@ -1340,8 +1342,16 @@ mechanism that makes KEYMAP's `ctrl-q` clause implementable at all (§3.8.9).
 footer line with the exact error and keeps the dialog open. Dirty state marks the title
 `⚙ Settings ·` in accent and the footer becomes `⏎ save · esc discard changes`.
 
-**Keyboard:** `j`/`k`, `↓`/`↑`, `ctrl-n`/`ctrl-p` move (`j`/`k` are surrendered while a text input
-has focus) · `Space` toggles · `←`/`→` cycles a choice · `Enter` saves · `Esc` cancels.
+**Keyboard:** while browsing, `j`/`k`, `↓`/`↑`, `ctrl-n`/`ctrl-p` move · `Space` toggles ·
+`h`/`l` and `←`/`→` cycle a choice · `Enter` **opens** the focused text or number row for
+editing, and saves on every other row · `Esc` discards.
+
+Landing on a row deliberately does not open it: a row that grabbed the keyboard on arrival would
+make the next `j` type into the value instead of moving on. `Enter` is the gesture that opens it,
+and the row then materializes a live `TextInput` — a number row keeps its `NumberField` chrome
+around that editor and filters to ASCII digits, so `j` can never become part of a number. While
+that editor owns the keyboard every printable key types, `Enter` saves, and `↓`/`↑` or
+`ctrl-n`/`ctrl-p` move to the next row and close it.
 
 ---
 
@@ -1737,7 +1747,7 @@ all applied there; cite `docs/KEYMAP.md` rather than restating a binding here.
 | D-8 | Bare-key affordances drawn over Terminal mode | §3.6: every Workspace affordance is prefixed |
 | D-9 | Completed/failed jobs decayed on a timer | §3.7: failures never auto-dismiss; successes obey a user-set retention |
 | D-10 | Uniform `y` for everything up to a context cascade | §3.8.3: `Y` escalation on unknown facts, and for repo/context delete |
-| D-11 | `D` (context delete) adjacency risk | §3.8.4: `D` kept, routed through the expanded `Y` confirm; `E` + `ctrl-d` is the discoverable path |
+| D-11 | `D` (context delete) adjacency risk | §3.8.4: `D` kept, routed through the expanded `Y` confirm; `E` + `ctrl-shift-d` is the discoverable path |
 | D-12 | Assign dialog bound only `⌃n`/`⌃p` | §3.8.5: `j`/`k` restored — the dialog has no text field |
 | D-13 | Settings could not edit grace / pool / TTLs / intervals | §3.8.6: all editable; `windows`/`hosts` read-only with a 1-key `E` escape to `config.json` |
 | D-14 | `ctrl-q` rule contradicted KEYMAP in **both** rival proposals | §3.8.8: opt-in warning implemented exactly as KEYMAP words it |

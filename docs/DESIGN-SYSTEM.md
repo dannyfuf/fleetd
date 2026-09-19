@@ -900,11 +900,15 @@ switch implies a pointer.
 #### `NumberField`
 **Purpose.** An integer with a unit suffix and a clamp.
 **API.** `NumberField::{new(value), labeled(label, value)}().unit(..).range(min, max).min(i64)
-.focused(bool).invalid(message).label_width(Pixels)`; `.clamp(i64)`, `.is_in_range()`,
-`.range_message()`, `.message()`.
-**States.** default · focused · invalid (out of range, red border).
+.focused(bool).invalid(message).label_width(Pixels).editor(Entity<TextInput>)`; `.clamp(i64)`,
+`.is_in_range()`, `.range_message()`, `.message()`, `.is_editing()`.
+**States.** default · focused · invalid (out of range, red border) · editing.
 **Usage rule.** The clamp is part of the contract: §3.8.6 states minimums, and an out-of-range
-value must be refused at the field, not at save time.
+value must be refused at the field, not at save time. `editor` hands the field the live
+`TextInput` the row is being typed into: the field draws that editor where the number would be
+and keeps its own label, unit and message around it, so opening and closing a row never moves it.
+While an editor is present the derived range message is suppressed — the number behind it is the
+last committed one, and the editor states its own rule.
 
 #### `SegmentedTabs`
 Parent Hub navigation uses `underlined(false)` for a selected background; PR sub-tabs retain

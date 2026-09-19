@@ -8,14 +8,13 @@ use fleet_core::{
 };
 use fleet_proto::request::RequestBody;
 use fleet_ui_kit::{Icon, prelude::*};
-use gpui::{AnyElement, App, Entity, FocusHandle, Window, div};
+use gpui::{AnyElement, App, AppContext, Entity, FocusHandle, Window, div};
 
 use crate::{
     actions::{context_dialog, dialog},
     bridge::Bridge,
     dialogs::{
-        ConfirmRequest, DialogHost, Dialogs, field, notify, request_confirm, root, type_into,
-        with_host,
+        ConfirmRequest, DialogHost, Dialogs, notify, read_host, request_confirm, root, with_host,
     },
     state::{AppState, Overlay},
 };
@@ -31,14 +30,17 @@ pub enum Field {
 }
 
 /// The New / Edit context draft.
+///
+/// The two editors live on the [`DialogHost`]; `name` and `owners` are the mirrors their
+/// `Changed` events keep up to date, and everything below reads only those.
 #[derive(Debug, Default)]
 pub struct ContextState {
     /// The context being edited, or `None` when creating one.
     pub(crate) editing: Option<ContextId>,
     /// The display name.
-    pub(crate) name: TextFieldState,
+    pub(crate) name: String,
     /// The comma-separated owner list.
-    pub(crate) owners: TextFieldState,
+    pub(crate) owners: String,
     /// Which field owns the keyboard.
     pub(crate) field: Field,
     /// Every existing context id, for the duplicate check.
@@ -52,7 +54,7 @@ impl ContextState {
     #[must_use]
     pub fn preview_id(&self) -> String {
         self.editing.as_ref().map_or_else(
-            || normalize_context_id(self.name.text()),
+            || normalize_context_id(&self.name),
             |id| id.as_str().to_owned(),
         )
     }
@@ -61,7 +63,6 @@ impl ContextState {
     #[must_use]
     pub fn owner_list(&self) -> Vec<String> {
         self.owners
-            .text()
             .split(',')
             .map(str::trim)
             .filter(|owner| !owner.is_empty())
@@ -92,7 +93,7 @@ impl ContextState {
     /// Whether `Enter` may create or save.
     #[must_use]
     pub fn can_submit(&self) -> bool {
-        !self.name.text().trim().is_empty()
+        !self.name.trim().is_empty()
             && !self.preview_id().is_empty()
             && self.duplicate().is_none()
             && ContextId::try_from(self.preview_id()).is_ok()
@@ -143,8 +144,8 @@ pub(crate) fn seed(state: &Entity<AppState>, cx: &mut App, editing: bool) {
                     .find(|entry| Some(&entry.id) == app.active_context())
             {
                 draft.editing = Some(context.id.clone());
-                draft.name = TextFieldState::from_text(context.name.clone());
-                draft.owners = TextFieldState::from_text(context.owners.join(", "));
+                draft.name = context.name.clone();
+                draft.owners = context.owners.join(", ");
                 draft.cascade = cascade_counts(
                     &context.id,
                     &snapshot.repos,
@@ -154,26 +155,98 @@ pub(crate) fn seed(state: &Entity<AppState>, cx: &mut App, editing: bool) {
             }
         }
     }
-    with_host(state, cx, |host| host.context = draft);
+    let name_text = draft.name.clone();
+    let owners_text = draft.owners.clone();
+    let name = cx.new(|cx| {
+        let mut input = TextInput::new(InputMode::SingleLine, cx);
+        input.set_label(Some("Name".into()), cx);
+        input.set_placeholder("Buk HR", cx);
+        input.set_text(name_text, cx);
+        input
+    });
+    let owners = cx.new(|cx| {
+        let mut input = TextInput::new(InputMode::SingleLine, cx);
+        input.set_label(Some("Owners".into()), cx);
+        input.set_placeholder("bukhr, dannyfuf", cx);
+        input.set_preview(Some("GitHub orgs/users used to scope PRs".into()), cx);
+        input.set_text(owners_text, cx);
+        input
+    });
+    let host = crate::dialogs::host::host_for(state, cx);
+    host.update(cx, |host, _| {
+        host.context = draft;
+        host.context_name = Some(name.clone());
+        host.context_owners = Some(owners.clone());
+    });
+    let subscriptions = vec![
+        {
+            let weak_state = state.downgrade();
+            cx.subscribe(&name, move |input, event, cx| {
+                if !matches!(event, TextInputEvent::Changed) {
+                    return;
+                }
+                let Some(state) = weak_state.upgrade() else {
+                    return;
+                };
+                let typed = input.read(cx).text().to_owned();
+                with_host(&state, cx, |host| host.context.name = typed);
+                sync_name_status(&state, cx);
+                notify(&state, cx);
+            })
+        },
+        {
+            let weak_state = state.downgrade();
+            cx.subscribe(&owners, move |input, event, cx| {
+                if !matches!(event, TextInputEvent::Changed) {
+                    return;
+                }
+                let Some(state) = weak_state.upgrade() else {
+                    return;
+                };
+                let typed = input.read(cx).text().to_owned();
+                with_host(&state, cx, |host| host.context.owners = typed);
+                notify(&state, cx);
+            })
+        },
+    ];
+    host.update(cx, |host, _| {
+        host.context_input_subscriptions = subscriptions
+    });
+    sync_name_status(state, cx);
 }
 
-/// The name input, carrying either the collision or the id it would produce.
-fn name_field(draft: &ContextState, duplicate: Option<&str>) -> TextField {
-    let input = field(&draft.name)
-        .label("Name")
-        .placeholder("Buk HR")
-        .focused(draft.field == Field::Name);
-    let preview_id = draft.preview_id();
-    match (duplicate, draft.editing.is_some(), preview_id.is_empty()) {
-        (Some(message), _, _) => input.invalid(message.to_owned()),
-        // §1.2 zero-suppression: with no name there is no id to preview, and a bare `→` with
-        // nothing after it is a dangling arrow, not information.
-        (None, _, true) => input,
-        // §3.8.4: once repos exist the id is read-only outright, and saying so beats a
-        // disabled-looking input.
-        (None, true, false) => input.preview(format!("\u{2192} {preview_id} (id is fixed)")),
-        (None, false, false) => input.preview(format!("\u{2192} {preview_id}")),
-    }
+/// Publishes §3.8.4's collision message, or the id the typed name would produce, on the name
+/// editor.
+///
+/// It is derived state, so it is computed here — on every `Changed` and once at seeding — and
+/// never inside `render`.
+fn sync_name_status(state: &Entity<AppState>, cx: &mut App) {
+    let Some(input) = read_host(state, cx, |host, _| host.context_name.clone()) else {
+        return;
+    };
+    let (duplicate, preview) = read_host(state, cx, |host, _| {
+        let draft = &host.context;
+        let preview_id = draft.preview_id();
+        let preview = match (draft.editing.is_some(), preview_id.is_empty()) {
+            // \u{00a7}1.2 zero-suppression: with no name there is no id to preview, and a bare
+            // arrow with nothing after it is a dangling arrow, not information.
+            (_, true) => None,
+            // \u{00a7}3.8.4: once repos exist the id is read-only outright, and saying so beats
+            // a disabled-looking input.
+            (true, false) => Some(format!("\u{2192} {preview_id} (id is fixed)")),
+            (false, false) => Some(format!("\u{2192} {preview_id}")),
+        };
+        (draft.duplicate(), preview)
+    });
+    let preview = duplicate.is_none().then_some(preview).flatten();
+    // `Changed` is emitted from inside the editor's own update, so the status it derives is
+    // published on the next update turn.
+    cx.defer(move |cx| {
+        input.update(cx, |input, cx| {
+            input.set_invalid(duplicate.map(Into::into), cx);
+            input.set_preview(preview.map(Into::into), cx);
+        });
+    });
 }
 
 /// Renders the dialog (§3.8.4).
@@ -187,29 +260,31 @@ pub(crate) fn render(
     cx: &mut App,
 ) -> AnyElement {
     let gap = cx.theme().space.md;
-    let draft = &host.read(cx).context;
-    let editing = draft.editing.clone();
-    let duplicate = draft.duplicate();
+    let (editing, owners_empty, name, owners) = {
+        let draft = &host.read(cx).context;
+        (
+            draft.editing.clone(),
+            draft.owner_list().is_empty(),
+            host.read(cx).context_name.clone(),
+            host.read(cx).context_owners.clone(),
+        )
+    };
+    let (Some(name), Some(owners)) = (name, owners) else {
+        return root(focus).into_any_element();
+    };
 
     let body = div()
         .flex()
         .flex_col()
         .gap(gap)
-        .child(name_field(draft, duplicate.as_deref()).harness_target_indexed("dialog.field", 0))
-        .child(
-            field(&draft.owners)
-                .label("Owners")
-                .placeholder("bukhr, dannyfuf")
-                .focused(draft.field == Field::Owners)
-                .preview("GitHub orgs/users used to scope PRs")
-                .harness_target_indexed("dialog.field", 1),
-        );
+        .child(name.harness_target_indexed("dialog.field", 0))
+        .child(owners.harness_target_indexed("dialog.field", 1));
 
     let mut hints = KeyHintRow::new()
         .key("\u{21e5}", "field")
         .key("esc", "cancel");
     if editing.is_some() {
-        hints = hints.key("\u{2303}d", "delete context");
+        hints = hints.key("\u{2303}\u{21e7}d", "delete context");
     }
     let mut card = Dialog::new(if editing.is_some() {
         "Edit context"
@@ -228,7 +303,7 @@ pub(crate) fn render(
     if let Some(open) = editing.as_ref() {
         card = card.subtitle(format!("\u{00b7} {}", open.as_str()));
     }
-    if draft.owner_list().is_empty() {
+    if owners_empty {
         // §3.8.4: empty owners is *allowed* and the footer warns. §2.4 keeps red for failures,
         // so a permitted configuration is amber, not an error band.
         card = card.warning("Without owners, GitHub repo search and PR \"mine\" are empty.");
@@ -238,52 +313,40 @@ pub(crate) fn render(
     let confirm_bridge = bridge.clone();
     let delete_state = state.clone();
 
-    super::input::actions(
-        root(focus),
-        state,
-        |host| match host.context.field {
-            Field::Name => &mut host.context.name,
-            Field::Owners => &mut host.context.owners,
-        },
-        notify,
-    )
-    .on_key_down({
-        let state = state.clone();
-        move |event, _window, cx| {
-            let changed = with_host(&state, cx, |host| match host.context.field {
-                Field::Name => type_into(&mut host.context.name, event),
-                Field::Owners => type_into(&mut host.context.owners, event),
-            });
-            if changed {
-                notify(&state, cx);
-            }
-        }
-    })
-    .on_action({
-        let state = state.clone();
-        move |_: &dialog::NextField, _window, cx| toggle_field(&state, cx)
-    })
-    .on_action({
-        let state = state.clone();
-        move |_: &dialog::PrevField, _window, cx| toggle_field(&state, cx)
-    })
-    .on_action(move |_: &dialog::Confirm, _window, cx| {
-        submit(&confirm_state, &confirm_bridge, cx);
-    })
-    .on_action(move |_: &context_dialog::Delete, _window, cx| {
-        open_delete_confirm(&delete_state, cx);
-    })
-    .child(card)
-    .into_any_element()
+    root(focus)
+        .on_action({
+            let state = state.clone();
+            move |_: &dialog::NextField, window, cx| toggle_field(&state, window, cx)
+        })
+        .on_action({
+            let state = state.clone();
+            move |_: &dialog::PrevField, window, cx| toggle_field(&state, window, cx)
+        })
+        .on_action(move |_: &dialog::Confirm, _window, cx| {
+            submit(&confirm_state, &confirm_bridge, cx);
+        })
+        .on_action(move |_: &context_dialog::Delete, _window, cx| {
+            open_delete_confirm(&delete_state, cx);
+        })
+        .child(card)
+        .into_any_element()
 }
 
-fn toggle_field(state: &Entity<AppState>, cx: &mut App) {
-    with_host(state, cx, |host| {
+/// `Tab` / `S-Tab`: two fields, so both keys swap them.
+fn toggle_field(state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
+    let input = with_host(state, cx, |host| {
         host.context.field = match host.context.field {
             Field::Name => Field::Owners,
             Field::Owners => Field::Name,
         };
+        match host.context.field {
+            Field::Name => host.context_name.clone(),
+            Field::Owners => host.context_owners.clone(),
+        }
     });
+    if let Some(input) = input {
+        input.update(cx, |input, cx| input.focus(window, cx));
+    }
     notify(state, cx);
 }
 
@@ -295,7 +358,7 @@ fn submit(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
         }
         Some((
             host.context.editing.clone(),
-            host.context.name.text().to_owned(),
+            host.context.name.clone(),
             host.context.owner_list(),
         ))
     }) else {
@@ -315,12 +378,12 @@ fn submit(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
     });
 }
 
-/// `ctrl-d`: hand the delete to the expanded `Y` confirm instead of doing it here.
+/// `ctrl-shift-d`: hand the delete to the expanded `Y` confirm instead of doing it here.
 fn open_delete_confirm(state: &Entity<AppState>, cx: &mut App) {
     let Some((context, name, cascade)) = with_host(state, cx, |host| {
         Some((
             host.context.editing.clone()?,
-            host.context.name.text().to_owned(),
+            host.context.name.clone(),
             host.context.cascade,
         ))
     }) else {
@@ -349,11 +412,11 @@ mod tests {
     #[test]
     fn the_id_preview_is_the_slugified_name() {
         let mut draft = ContextState {
-            name: TextFieldState::from_text("Buk HR"),
+            name: "Buk HR".to_owned(),
             ..ContextState::default()
         };
         assert_eq!(draft.preview_id(), "buk-hr");
-        draft.name = TextFieldState::from_text("  ");
+        draft.name = "  ".to_owned();
         assert_eq!(draft.preview_id(), "");
         assert!(!draft.can_submit());
     }
@@ -361,7 +424,7 @@ mod tests {
     #[test]
     fn owners_are_split_on_commas_and_trimmed() {
         let draft = ContextState {
-            owners: TextFieldState::from_text(" bukhr ,dannyfuf, "),
+            owners: " bukhr ,dannyfuf, ".to_owned(),
             ..ContextState::default()
         };
         assert_eq!(draft.owner_list(), vec!["bukhr", "dannyfuf"]);
@@ -370,7 +433,7 @@ mod tests {
     #[test]
     fn a_duplicate_id_blocks_enter_but_editing_its_own_id_does_not() {
         let mut draft = ContextState {
-            name: TextFieldState::from_text("Buk"),
+            name: "Buk".to_owned(),
             existing: vec!["buk".to_owned()],
             ..ContextState::default()
         };
@@ -387,7 +450,7 @@ mod tests {
     #[test]
     fn empty_owners_are_allowed() {
         let draft = ContextState {
-            name: TextFieldState::from_text("Personal"),
+            name: "Personal".to_owned(),
             ..ContextState::default()
         };
         assert!(draft.owner_list().is_empty());
@@ -398,7 +461,7 @@ mod tests {
     fn editing_keeps_persisted_context_id() {
         let draft = ContextState {
             editing: ContextId::try_from("buk-hr").ok(),
-            name: TextFieldState::from_text("People Operations"),
+            name: "People Operations".to_owned(),
             existing: vec!["buk-hr".to_owned(), "people-operations".to_owned()],
             ..ContextState::default()
         };

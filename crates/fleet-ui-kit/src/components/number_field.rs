@@ -8,10 +8,14 @@
 //! When the value is out of range and the caller supplied no message, the field states the rule
 //! itself ([`NumberField::range_message`]), because §3.8's law is that a failure names the
 //! exact rule it failed.
+//!
+//! A row that is being typed into hands the field its live editor with [`NumberField::editor`];
+//! the field then draws that editor where the number would be and keeps its own label, unit and
+//! message around it, so entering and leaving editing never moves the row.
 
-use gpui::{App, Pixels, SharedString, Window, div, prelude::*};
+use gpui::{App, Entity, Pixels, SharedString, Window, div, prelude::*};
 
-use crate::{text::Text, theme::ActiveTheme, tone::Tone};
+use crate::{components::input::TextInput, text::Text, theme::ActiveTheme, tone::Tone};
 
 /// An integer input.
 #[derive(IntoElement)]
@@ -24,6 +28,7 @@ pub struct NumberField {
     focused: bool,
     invalid: Option<SharedString>,
     label_width: Option<Pixels>,
+    editor: Option<Entity<TextInput>>,
 }
 
 impl NumberField {
@@ -38,6 +43,7 @@ impl NumberField {
             focused: false,
             invalid: None,
             label_width: None,
+            editor: None,
         }
     }
 
@@ -89,6 +95,20 @@ impl NumberField {
         self
     }
 
+    /// The live editor the row is being typed into, drawn in place of the value.
+    ///
+    /// The editor owns the text, the caret and the validation of what is typed; the field keeps
+    /// only the label, the unit and the row chrome around it.
+    pub fn editor(mut self, editor: Entity<TextInput>) -> Self {
+        self.editor = Some(editor);
+        self
+    }
+
+    /// Whether this field is being typed into.
+    pub fn is_editing(&self) -> bool {
+        self.editor.is_some()
+    }
+
     /// Clamp a candidate value into the field's range.
     pub fn clamp(&self, value: i64) -> i64 {
         let value = self.min.map_or(value, |min| value.max(min));
@@ -127,9 +147,16 @@ impl NumberField {
 impl RenderOnce for NumberField {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
-        let message = self.message();
+        // While an editor owns the row, the value behind it is whatever was last committed and
+        // the editor states its own rule; deriving a range message from the stale number would
+        // contradict the field the user is typing into.
+        let message = if self.editor.is_some() {
+            self.invalid.clone()
+        } else {
+            self.message()
+        };
         let valid = message.is_none();
-        let focused = self.focused;
+        let focused = self.focused || self.editor.is_some();
         let border = if !valid {
             theme.colors.danger
         } else if focused {
@@ -165,11 +192,14 @@ impl RenderOnce for NumberField {
                     .bg(theme.colors.bg)
                     .border(theme.metrics.hairline)
                     .border_color(border)
-                    .child(Text::data(self.value.to_string()).tone(if valid {
-                        Tone::Default
-                    } else {
-                        Tone::Danger
-                    }))
+                    .map(|slot| match self.editor {
+                        Some(editor) => slot.child(editor),
+                        None => slot.child(Text::data(self.value.to_string()).tone(if valid {
+                            Tone::Default
+                        } else {
+                            Tone::Danger
+                        })),
+                    })
                     // The unit is a label, not a value: it never competes with the number.
                     .children(self.unit.map(|unit| Text::data(unit).faint())),
             )

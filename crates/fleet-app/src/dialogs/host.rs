@@ -54,15 +54,34 @@ pub(crate) struct DialogHost {
     pub(super) palette_input: Option<Entity<TextInput>>,
     pub(super) palette_input_subscription: Option<Subscription>,
     pub create: create_worktree::CreateState,
+    /// The branch editor, alive for the whole life of the create-worktree dialog.
+    pub(super) create_branch: Option<Entity<TextInput>>,
+    pub(super) create_branch_subscription: Option<Subscription>,
     pub clone: clone_repo::CloneState,
+    /// The clone dialog's search editor, alive for its whole lifetime.
+    pub(super) clone_query: Option<Entity<TextInput>>,
+    pub(super) clone_query_subscription: Option<Subscription>,
     pub confirm: confirm::ConfirmState,
     pub context: context::ContextState,
+    /// The context dialog's name and owners editors.
+    pub(super) context_name: Option<Entity<TextInput>>,
+    pub(super) context_owners: Option<Entity<TextInput>>,
+    pub(super) context_input_subscriptions: Vec<Subscription>,
     pub assign: assign_repo::AssignState,
     /// Repository hook editor.
     pub edit_hooks: edit_hooks::EditHooksState,
+    /// One editor per hook row, prepare commands first and post-create after them.
+    pub(super) hook_inputs: Vec<Entity<TextInput>>,
+    pub(super) hook_input_subscriptions: Vec<Subscription>,
     pub settings: settings::SettingsState,
+    /// The input materialized for the settings row that entered editing.
+    pub(super) settings_input: Option<Entity<TextInput>>,
+    pub(super) settings_input_subscription: Option<Subscription>,
     /// Rename-terminal draft.
     pub rename_terminal: rename_terminal::RenameState,
+    /// The rename dialog's one editor, alive for its whole lifetime.
+    pub(super) rename_input: Option<Entity<TextInput>>,
+    pub(super) rename_input_subscription: Option<Subscription>,
     pub palette: palette::PaletteState,
     /// What the next Confirm dialog asks about, published by whoever opens it.
     pub pending_confirm: Option<ConfirmRequest>,
@@ -360,6 +379,15 @@ fn watch(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
         ) {
             card_picker::refresh(&state, cx);
         }
+        // The branch preview names the worktree the create would produce, and whether that
+        // worktree already exists is a snapshot fact: a create that landed elsewhere has to
+        // turn this dialog's `Create` into `Open` without a keystroke.
+        if matches!(
+            state.read(cx).overlay,
+            Some(Overlay::Dialog(Dialogs::CreateWorktree))
+        ) {
+            create_worktree::refresh_status(&state, cx);
+        }
         if matches!(
             state.read(cx).overlay,
             Some(Overlay::Dialog(Dialogs::Settings))
@@ -408,6 +436,19 @@ fn focused_input_entity(state: &Entity<AppState>, cx: &mut App) -> Option<Entity
             Dialogs::CardDetail => host.card_detail_input.as_ref(),
             Dialogs::CardPicker => host.card_picker_input.as_ref(),
             Dialogs::BoardSettings => host.board_settings_input.as_ref(),
+            // §3.8.1 gives the arrows to the host cycler while the branch field is not the
+            // focused one, so the branch editor owns the keyboard only then.
+            Dialogs::CreateWorktree => (host.create.field == create_worktree::Field::Branch)
+                .then_some(host.create_branch.as_ref())
+                .flatten(),
+            Dialogs::CloneRepo => host.clone_query.as_ref(),
+            Dialogs::NewContext | Dialogs::EditContext => match host.context.field {
+                context::Field::Name => host.context_name.as_ref(),
+                context::Field::Owners => host.context_owners.as_ref(),
+            },
+            Dialogs::EditHooks => host.hook_inputs.get(host.edit_hooks.field),
+            Dialogs::RenameTerminal => host.rename_input.as_ref(),
+            Dialogs::Settings => host.settings_input.as_ref(),
             _ => None,
         }?;
         Some(input.clone())
@@ -417,6 +458,12 @@ fn focused_input_entity(state: &Entity<AppState>, cx: &mut App) -> Option<Entity
 /// The live input that should receive focus for the current dialog or the palette.
 pub(crate) fn focused_input(state: &Entity<AppState>, cx: &mut App) -> Option<FocusHandle> {
     focused_input_entity(state, cx).map(|input| input.read(cx).focus_handle())
+}
+
+#[cfg(test)]
+/// How many hook rows the open editor holds, for the blank-row regression.
+pub(crate) fn hook_row_count(state: &Entity<AppState>, cx: &mut App) -> usize {
+    read_host(state, cx, |host, _| host.hook_inputs.len())
 }
 
 #[cfg(test)]
@@ -523,6 +570,19 @@ fn close_with(state: &Entity<AppState>, preserve_card_detail: bool, cx: &mut App
         host.board_settings_input_subscription = None;
         host.palette_input = None;
         host.palette_input_subscription = None;
+        host.create_branch = None;
+        host.create_branch_subscription = None;
+        host.clone_query = None;
+        host.clone_query_subscription = None;
+        host.context_name = None;
+        host.context_owners = None;
+        host.context_input_subscriptions.clear();
+        host.hook_inputs.clear();
+        host.hook_input_subscriptions.clear();
+        host.settings_input = None;
+        host.settings_input_subscription = None;
+        host.rename_input = None;
+        host.rename_input_subscription = None;
         if !preserve_card_detail {
             host.card_detail_input = None;
             host.card_detail_input_subscription = None;

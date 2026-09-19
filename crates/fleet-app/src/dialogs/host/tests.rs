@@ -24,7 +24,7 @@ fn editing_context_words_follow_the_existing_dialog_drafts(cx: &mut TestAppConte
     );
 
     assert_eq!(dialog_key_context(&Dialogs::Settings, &host), "Settings");
-    host.settings.editing = Some(TextFieldState::from_text("claude"));
+    host.settings.editing = Some("claude".to_owned());
     assert_eq!(
         dialog_key_context(&Dialogs::Settings, &host),
         "SettingsEditing"
@@ -60,7 +60,7 @@ fn derived_dialog_word_is_mirrored_into_the_app_context_chain(cx: &mut TestAppCo
     cx.update(|cx| {
         let host = host_for(&state, cx);
         host.update(cx, |host, _| {
-            host.settings.editing = Some(TextFieldState::from_text("claude"));
+            host.settings.editing = Some("claude".to_owned());
         });
         sync_dialog_key_context(&state, &host, cx);
         assert_eq!(
@@ -77,16 +77,16 @@ fn drafts_are_isolated_and_released_with_their_window_model(cx: &mut TestAppCont
     let weak = cx.update(|cx| {
         with_host(&first, cx, |host| {
             host.open = Some(Dialogs::NewContext);
-            host.context.name = TextFieldState::from_text("first");
+            host.context.name = "first".to_owned();
         });
         with_host(&second, cx, |host| {
             host.open = Some(Dialogs::NewContext);
-            host.context.name = TextFieldState::from_text("second");
+            host.context.name = "second".to_owned();
         });
         close(&first, cx);
         assert!(with_host(&first, cx, |host| host.context.name.is_empty()));
         assert_eq!(
-            with_host(&second, cx, |host| host.context.name.text().to_owned()),
+            with_host(&second, cx, |host| host.context.name.clone()),
             "second"
         );
         host_for(&first, cx).downgrade()

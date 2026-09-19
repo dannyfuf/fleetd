@@ -206,7 +206,8 @@ Two consequences worth knowing:
   `mode` attribute is `single_line` or `multiline`, and only the latter satisfies
   `FleetTextInput && mode == multiline` for `Enter`. `CardPicker` is the documented exception: its
   query is a filter that never contains a space, so it keeps the browsing word and `space` toggles
-  the highlighted card.
+  the highlighted card. The rule is now complete: the `Dialog` container binds no editing key of
+  its own, so there is no legacy editor row left for a dialog to fall back on.
 * Inside a native agent tab, `^s` never reaches gpui's two-key matcher. The shell's keystroke
   interceptor consumes it, resolves the second key against the *live* chain through
   `keymap::chord_action_for_chain`, and consumes that key too — running its row, or toasting
@@ -798,6 +799,19 @@ Escape. `DialogHost` owns these public fields:
 | `card_create` + `card_create_title` / `card_create_description` | `card_create::CardCreateState` + two `Option<Entity<TextInput>>` fields | board id, focused field, save generation and error; submit reads both live inputs |
 | `card_picker` + `card_picker_input` | `card_picker::CardPickerState` + `Option<Entity<TextInput>>` | kind, card id, row cursor, selected values, return flags and error; `Changed` prepares filtered rows |
 | `board_settings` + `board_settings_input` | `board_settings::BoardSettingsState` + `Option<Entity<TextInput>>` | serializable board values, backend rows, focused row and error; a text-row input is materialized on focus and mirrors through `Changed` |
+
+The §3.8 dialogs own their editors the same way. Each is created by that dialog's `seed` and
+dropped by `close_with`, and every one of them is reported by `dialogs::focused_input`, so the
+shell's focus reconciliation hands the keyboard to whichever editor the draft says owns it:
+
+| Field | Type | What the editor owns |
+| --- | --- | --- |
+| `create` + `create_branch` | `create_worktree::CreateState` + `Option<Entity<TextInput>>` | the branch text; `CreateState.branch` is its `String` mirror, and `Changed` republishes the validation message and the worktree-id preview through `set_invalid` / `set_preview`. It owns the keyboard only while `field == Branch`, which is what leaves `←` / `→` to the host cycler while browsing |
+| `clone` + `clone_query` | `clone_repo::CloneState` + `Option<Entity<TextInput>>` | the search query; `Changed` mirrors it into `CloneState.query` and re-arms the 150 ms debounce, and the leading glyph swaps between `search` and `loader-circle` in the same update paths |
+| `context` + `context_name` / `context_owners` | `context::ContextState` + two `Option<Entity<TextInput>>` fields | the display name and the comma-separated owners; `Changed` mirrors both and republishes the collision message or the id preview on the name editor |
+| `edit_hooks` + `hook_inputs` | `edit_hooks::EditHooksState` + `Vec<Entity<TextInput>>` | one editor per command row, prepare commands first and post-create after them, split by `prepare_len`. Each list always ends in a blank row; typing into that row appends the next one and renumbers the labels below it |
+| `rename_terminal` + `rename_input` | `rename_terminal::RenameState` + `Option<Entity<TextInput>>` | the terminal name; the draft keeps only the target terminal, the refusal and the in-flight flag |
+| `settings` + `settings_input` | `settings::SettingsState` + `Option<Entity<TextInput>>` | the row `Enter` opened; `SettingsState.editing` is its `String` mirror and the `SettingsEditing` predicate, `Changed` commits through `commit_value`, and a number row filters to ASCII digits |
 
 `DialogHost.palette + palette_input` is the §3.9 query: `PaletteState.query` is a `String`
 mirrored from a live single-line `TextInput` created when the palette opens and dropped with the

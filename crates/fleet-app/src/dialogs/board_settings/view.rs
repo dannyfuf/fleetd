@@ -202,14 +202,6 @@ pub(crate) fn render(
         })
         .on_action({
             let state = state.clone();
-            move |_: &dialog::CursorRight, _window, cx| cycle(&state, 1, cx)
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::CursorLeft, _window, cx| cycle(&state, -1, cx)
-        })
-        .on_action({
-            let state = state.clone();
             move |_: &settings_actions::Toggle, _window, cx| toggle(&state, cx)
         })
         .on_action(move |_: &dialog::Confirm, _window, cx| {

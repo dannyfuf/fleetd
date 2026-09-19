@@ -574,20 +574,6 @@ pub mod dialog {
             CursorDown,
             /// `ctrl-p` / `↑` — move the list selection up.
             CursorUp,
-            /// `Backspace` — delete the character before the caret.
-            Backspace,
-            /// `ctrl-w` — delete the word before the caret.
-            DeleteWord,
-            /// `ctrl-u` — clear the focused text input.
-            ClearInput,
-            /// `ctrl-a` — move the caret to the start of the input.
-            LineStart,
-            /// `ctrl-e` — move the caret to the end of the input.
-            LineEnd,
-            /// `←` — move the caret left.
-            CursorLeft,
-            /// `→` — move the caret right.
-            CursorRight,
         ]
     );
 }
@@ -634,7 +620,7 @@ pub mod context_dialog {
     actions!(
         context_dialog,
         [
-            /// `ctrl-d` — delete this context, routed through the expanded `Y` confirm.
+            /// `ctrl-shift-d` — delete this context, routed through the expanded `Y` confirm.
             Delete,
         ]
     );

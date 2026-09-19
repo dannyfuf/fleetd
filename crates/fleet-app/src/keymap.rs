@@ -882,14 +882,6 @@ key_table! {
     "down",         "Dialog" => dialog::CursorDown;
     "ctrl-p",       "Dialog" => dialog::CursorUp;
     "up",           "Dialog" => dialog::CursorUp;
-    // Removed when the remaining dialogs migrate to TextInput.
-    "backspace",    "Dialog" => dialog::Backspace;
-    "ctrl-w",       "Dialog" => dialog::DeleteWord;
-    "ctrl-u",       "Dialog" => dialog::ClearInput;
-    "ctrl-a",       "Dialog" => dialog::LineStart;
-    "ctrl-e",       "Dialog" => dialog::LineEnd;
-    "left",         "Dialog" => dialog::CursorLeft;
-    "right",        "Dialog" => dialog::CursorRight;
 
     "left",         "Dialog > Create" => create_worktree::HostPrev;
     "right",        "Dialog > Create" => create_worktree::HostNext;
@@ -905,7 +897,11 @@ key_table! {
     "I",            "Dialog > Confirm" => confirm::Recheck;
     "s",            "Dialog > Confirm" => confirm::ToggleKeep;
 
-    "ctrl-d",       "Dialog > Context" => context_dialog::Delete;
+    // `ctrl-d` is `FleetTextInput`'s delete-forward, and this dialog is two live editors with
+    // no browsing state between them: the deeper input would win every time. The stronger
+    // shift variant collides with nothing the editor owns, and matches the Hub, where the
+    // same delete is the uppercase `D`.
+    "ctrl-shift-d", "Dialog > Context" => context_dialog::Delete;
 
     "j",            "Dialog > Assign" => dialog::CursorDown;
     "k",            "Dialog > Assign" => dialog::CursorUp;
@@ -913,9 +909,10 @@ key_table! {
     "space",        "Dialog > Settings" => settings::Toggle;
     "h",            "Dialog > Settings" => settings::CyclePrev;
     "l",            "Dialog > Settings" => settings::CycleNext;
-    // `left` / `right` stay on the shared `dialog::CursorLeft` / `CursorRight` of the `Dialog`
-    // context: the settings dialog moves the caret when a text row has the keyboard and cycles
-    // the choice otherwise, so one binding serves both halves of §3.8.6.
+    // The arrows cycle only while browsing: a materialized row publishes `SettingsEditing`,
+    // this row leaves the chain with `Settings`, and `FleetTextInput` moves the caret instead.
+    "left",         "Dialog > Settings" => settings::CyclePrev;
+    "right",        "Dialog > Settings" => settings::CycleNext;
     "j",            "Dialog > Settings" => settings::MoveDown;
     "k",            "Dialog > Settings" => settings::MoveUp;
     "E",            "Dialog > Settings" => settings::OpenConfigFile;
@@ -1098,12 +1095,17 @@ mod tests {
         assert_eq!(documented, registered);
     }
 
+    /// The floor sits within ten rows of the live table, so a silent loss is caught and a
+    /// deliberate retirement is a one-line edit here. P3-T06 retired the seven `Dialog`
+    /// legacy-editor rows (`backspace`, `ctrl-w`, `ctrl-u`, `ctrl-a`, `ctrl-e`, `left`,
+    /// `right`) to the `FleetTextInput` table and added back the two `Dialog > Settings`
+    /// arrows that used to ride on them.
     #[test]
     fn key_table_is_well_formed() {
         let bindings = bindings();
         assert_eq!(bindings.len(), table().len());
         assert!(
-            bindings.len() > 250,
+            bindings.len() > 640,
             "the table lost rows: {}",
             bindings.len()
         );
@@ -1190,20 +1192,23 @@ mod tests {
         }
     }
 
+    /// Every dialog edits through a live input now, so `backspace` belongs to the component
+    /// wherever one is mounted and to nothing at all where none is.
     #[test]
-    fn text_input_owns_backspace_below_migrated_hosts() {
+    fn text_input_owns_backspace_below_every_dialog() {
         let backspace = Keystroke::parse("backspace").unwrap_or_else(|error| panic!("{error}"));
-        assert_eq!(
-            action_for_chain(
-                &["Dialog", "CardDetailEditing", "FleetTextInput"],
-                &backspace
-            )
-            .map(|action| action.name()),
-            Some("text_input::Backspace")
-        );
+        for host in ["CardDetailEditing", "Clone", "Context", "Rename", "Hooks"] {
+            assert_eq!(
+                action_for_chain(&["Dialog", host, "FleetTextInput"], &backspace)
+                    .map(|action| action.name()),
+                Some("text_input::Backspace"),
+                "`Dialog > {host}` must leave backspace to its input"
+            );
+        }
         assert_eq!(
             action_for_chain(&["Dialog", "Clone"], &backspace).map(|action| action.name()),
-            Some("dialog::Backspace")
+            None,
+            "the `Dialog` container binds no editing key of its own"
         );
     }
 

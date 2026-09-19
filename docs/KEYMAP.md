@@ -76,8 +76,10 @@ behind it (`shell/root/focus.rs`, `focus_owner`).
 | `ctrl-q` | quit app (daemon keeps running) |
 | `ctrl-shift-q` | quit app and stop daemon (confirm; lists running jobs/sessions) |
 
-`E` opens the Edit-context dialog, from which `ctrl-d` deletes the context. `D` keeps its
-meaning and routes to the same expanded `Y` confirm.
+`E` opens the Edit-context dialog, from which `ctrl-shift-d` deletes the context. `D` keeps its
+meaning and routes to the same expanded `Y` confirm. The dialog's key is the **shift** variant
+because its two fields are live editors: plain `ctrl-d` is `FleetTextInput`'s delete-forward and
+would never reach the dialog.
 
 ## Hub › Repos pane
 
@@ -512,26 +514,28 @@ multi-line input. The agent composer publishes `owner`, so its plain `Enter` rea
 | `enter` | insert under `FleetTextInput && mode == multiline && enter == newline` only |
 | `shift-enter` | insert under `FleetTextInput && mode == multiline` |
 
-**Key ownership.** A surface with bare-letter or caret-collision commands publishes its existing
-word while browsing and a distinct `*Editing` word while a field owns typing. The browsing words
-are `CardDetail`, `BoardSettings`, `Settings`, and `Create`; their editing partners are
-`CardDetailEditing`, `BoardSettingsEditing`, `SettingsEditing`, and `CreateEditing`. Editing words
-contain only container commands, so a migrated surface's deeper `FleetTextInput` rows own editing
-and no dialog action can steal an accepted character; until migration,
-the generic `Dialog` legacy editor rows preserve the same dialog behavior. Lists under an input use
-`ctrl-n` / `ctrl-p` or `down` / `up`; `Tab` / `S-Tab` move fields, `Enter` confirms where the
-single-line container says so, and `Esc` cancels. `CardPicker` is the documented exception: its
-query is a filter that never contains a space, so it always publishes `Dialog > CardPicker` and
-`space` toggles the highlighted card.
+**Key ownership.** Every dialog field is a live `TextInput`, so the `Dialog` container binds no
+editing key of its own: `Backspace`, `ctrl-w`, `ctrl-u`, `ctrl-a` / `ctrl-e` and `←` / `→` all
+belong to the `FleetTextInput` table above wherever an editor owns the keyboard. A surface with
+bare-letter or caret-collision commands publishes its existing word while browsing and a distinct
+`*Editing` word while a field owns typing. The browsing words are `CardDetail`, `BoardSettings`,
+`Settings`, and `Create`; their editing partners are `CardDetailEditing`, `BoardSettingsEditing`,
+`SettingsEditing`, and `CreateEditing`. Editing words contain only container commands, so the
+deeper `FleetTextInput` rows own editing and no dialog action can steal an accepted character.
+Lists under an input use `ctrl-n` / `ctrl-p` or `down` / `up`; `Tab` / `S-Tab` move fields, `Enter`
+confirms where the single-line container says so, and `Esc` cancels. `CardPicker` is the documented
+exception: its query is a filter that never contains a space, so it always publishes
+`Dialog > CardPicker` and `space` toggles the highlighted card.
 
 | Dialog | Keys beyond the shared frame |
 | --- | --- |
-| Create worktree | under browsing `Dialog > Create`, `←` / `→` cycle the host; branch focus publishes `Dialog > CreateEditing` · `Enter` create & open · `⌥Enter` create **without** opening [A8] |
+| Create worktree | under browsing `Dialog > Create`, `←` / `→` cycle the host; the branch editor publishes `Dialog > CreateEditing`, where the same arrows move its caret · `Tab` / `S-Tab` move between branch, base and host · `Enter` create & open · `⌥Enter` create **without** opening [A8] |
 | Clone repo | type to search · `ctrl-n` / `ctrl-p` or `↓` / `↑` · `Enter` clone · `Esc` cancels only the search request, never a started clone |
 | Confirm (delete / prune / kill / close terminal) | `y` / `Enter` confirm · `Y` **required instead of `y`** when any decisive safety fact is unknown or the inspection errored, and for repo / context delete [A12] · `n` / `Esc` / `q` cancel · `I` re-check (delete) · `s` toggle the KEEP list (prune). Nothing else is bound. |
-| New / Edit context | `ctrl-d` delete this context (routes to the expanded `Y` confirm) |
+| New / Edit context | `Tab` / `S-Tab` move between name and owners · `ctrl-shift-d` delete this context (routes to the expanded `Y` confirm); plain `ctrl-d` belongs to the focused editor |
+| Repository hooks (`e`) | one editor per command row, `Tab` / `S-Tab` between them; a filled trailing row grows the next blank one · `Enter` saves |
 | Assign repo to context (`m`) | this dialog has **no** text field, so `j` / `k` move the selection as well as `↓` / `↑` and `ctrl-n` / `ctrl-p` |
-| Settings (`,`) | browsing is `Dialog > Settings`: `Space` toggles · `h` / `l` or `←` / `→` cycle a choice · `j` / `k` move · `E` opens `config.json` · `D` runs doctor. A materialized row input publishes `Dialog > SettingsEditing`; `Enter` saves and `Esc` discards in either word. |
+| Settings (`,`) | browsing is `Dialog > Settings`: `Space` toggles · `h` / `l` or `←` / `→` cycle a choice · `j` / `k` move · `E` opens `config.json` · `D` runs doctor · `Enter` on a text or number row opens it for editing, and saves on every other row. That row's editor publishes `Dialog > SettingsEditing`, where every printable key types and `Enter` saves; `ctrl-n` / `ctrl-p` or `↓` / `↑` move to the next row and close it, and `Esc` discards in either word. |
 | Help (`?`) | `Esc` / `?` close |
 | Quit (`ctrl-q`) | `y` quit · `n` / `Esc` cancel · `J` open the jobs panel · `W` never warn again (writes `jobs.warnBeforeQuit=false`) and quit [A23] |
 | Quit and stop daemon (`ctrl-shift-q`) | `Y` stop and quit · `n` / `Esc` cancel |
