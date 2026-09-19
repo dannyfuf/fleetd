@@ -58,6 +58,10 @@
   - verified: `cargo test -p fleet-daemon --test boards_service restore` passed (3 selected) and
     `cargo test -p fleet-daemon --test boards_service restoring_an_unreadable_board_preserves_it_without_quarantine`
     passed (1 selected); `make lint` passed.
+- [x] P1-T18 — Preserve unreadable boards whose cascade ownership cannot be verified
+  - verified: both `deleting_a_worktree_does_not_claim_an_unreadable_context_board_by_filename`
+    and `deleting_a_context_does_not_claim_an_unreadable_board_by_filename` passed in
+    `cargo test -p fleet-daemon --test boards_service`; `make lint` passed.
 
 ## Notes / decisions log
 (Append-only. Date-stamp entries. Capture anything that surprised you or that future-you will want.)

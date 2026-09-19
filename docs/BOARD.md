@@ -523,8 +523,8 @@ impl Boards {
     pub async fn update(&self, id: &BoardId, patch: BoardPatch) -> DaemonResult<BoardView>;   // validates+normalizes backend settings via the registry, and only when the patch changed the BackendRef: a rename or a label must not wait on (or fail with) a backend it never mentioned
     pub async fn delete(&self, id: &BoardId) -> DaemonResult<()>;
     /// Deletes every board of a context; the `DeleteContext` cascade calls it before the context goes.
-    /// A document this build cannot read goes to trash with its context rather than blocking it:
-    /// the cascade has already deleted the context's repositories by then.
+    /// An unreadable document is preserved because its persisted scope cannot be verified from
+    /// the filename in the board id space shared by contexts and worktrees.
     pub async fn delete_for_context(&self, context: &ContextId) -> DaemonResult<()>;
     /// Bundles the scoped board into the worktree's trash entry after the worktree moves there.
     pub async fn delete_for_worktree(&self, worktree: &WorktreeId, trash: &Path) -> DaemonResult<()>;
@@ -578,8 +578,10 @@ None` (not persisted), and a `repo_id` — on a card or as `Board.default_repo_i
 repository the state no longer has in the board's context is reported the same way and skipped
 when `create_worktree_from_card` picks a repository. `ensure`/`create` refuse a context whose
 board document is quarantined rather than creating an empty board over it; `delete_for_context`
-takes the quarantined remains with it. `context_board` accepts only a board with the requested
-`context_id` and no `worktree_id`, on both its derived-id fast path and its fallback scan;
+takes the quarantined remains with it. Cascades preserve a live document this build cannot read,
+because its persisted context/worktree scope cannot be inferred safely from the shared board id.
+`context_board` accepts only a board with the requested `context_id` and no `worktree_id`, on both
+its derived-id fast path and its fallback scan;
 `worktree_board` similarly treats the derived id only as a fast path and falls back to the
 persisted `worktree_id`. Creating either scope appends `-2` through `-99` when another scope
 already occupies its default id, and refuses creation if all candidates are occupied. `summaries`

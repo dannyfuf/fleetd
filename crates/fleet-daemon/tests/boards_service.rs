@@ -743,6 +743,41 @@ async fn restoring_an_unreadable_board_preserves_it_without_quarantine() {
 }
 
 #[tokio::test]
+async fn deleting_a_worktree_does_not_claim_an_unreadable_context_board_by_filename() {
+    let f = Fixture::new(pull_caps()).await;
+    let worktree = f.publish_worktree("acme/api#feature").await;
+    let context = f.state.load().await.unwrap().contexts[0].clone();
+    let mut board = new_board(&context, "2026-09-06T12:00:00Z");
+    board.id = "wt-acme-api-feature-2".parse().unwrap();
+    let mut document = BoardDocument {
+        version: BOARD_DOCUMENT_VERSION,
+        board,
+        cards: Vec::new(),
+    };
+    f.store.save(&document).unwrap();
+    document.version += 1;
+    std::fs::write(
+        f.home.board_path(&document.board.id),
+        serde_json::to_string(&document).unwrap(),
+    )
+    .unwrap();
+
+    let response = f
+        .services
+        .dispatch(RequestBody::DeleteWorktrees {
+            ids: vec![worktree.id],
+        })
+        .await
+        .unwrap();
+    let ResponseBody::WorktreesDeleted(results) = response else {
+        panic!("expected worktree deletion response");
+    };
+
+    assert!(results[0].ok);
+    assert!(f.home.board_path(&document.board.id).exists());
+}
+
+#[tokio::test]
 async fn deleting_a_worktree_sweeps_its_quarantined_suffixed_board_id() {
     let f = Fixture::new(pull_caps()).await;
     let worktree = f.publish_worktree("acme/api#feature").await;
@@ -2642,7 +2677,7 @@ async fn an_unreadable_document_hides_only_its_own_board() {
 }
 
 #[tokio::test]
-async fn a_context_stays_deletable_when_its_board_document_is_unreadable() {
+async fn deleting_a_context_does_not_claim_an_unreadable_board_by_filename() {
     let f = Fixture::new(BackendCapabilities::default()).await;
     let board = f.local().await.board;
     std::fs::write(
@@ -2650,15 +2685,14 @@ async fn a_context_stays_deletable_when_its_board_document_is_unreadable() {
         serde_json::json!({"version": 99, "board": {}, "cards": []}).to_string(),
     )
     .unwrap();
-    // `DeleteContext` has already cascaded the context's repositories by the time it reaches
-    // the board: refusing here leaves a context nobody can delete and repositories that are
-    // already gone. The document goes to trash unread, exactly as the warning promises.
+    // Context and worktree boards share the id space, so an unreadable document's filename
+    // cannot prove which scope owns it.
     f.boards
         .delete_for_context(&"work".parse().unwrap())
         .await
         .unwrap();
-    assert!(!f.home.board_path(&board.id).exists());
-    assert!(f.store.list().unwrap().is_empty());
+    assert!(f.home.board_path(&board.id).exists());
+    assert_eq!(f.store.list().unwrap(), vec![board.id]);
 }
 
 #[tokio::test]

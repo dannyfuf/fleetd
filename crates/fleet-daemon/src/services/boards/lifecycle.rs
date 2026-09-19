@@ -460,10 +460,11 @@ impl Boards {
             let owned = match self.store.peek(&id) {
                 Ok(Some(doc)) => doc.board.context_id == *context,
                 Ok(None) => false,
-                // An unreadable document still belongs to the context by its file name.
                 Err(error) => {
-                    tracing::warn!(%id, %error, "deleting unreadable board with its context");
-                    id.as_str() == context.as_str()
+                    // Board ids are shared across context and worktree scopes, so a filename
+                    // cannot prove ownership when the persisted scope is unreadable.
+                    tracing::warn!(%context, %id, %error, "preserving unreadable board whose context ownership cannot be verified");
+                    false
                 }
             };
             if owned {
@@ -499,13 +500,11 @@ impl Boards {
             let owned = match self.store.peek(&id) {
                 Ok(Some(doc)) => doc.board.worktree_id.as_ref() == Some(worktree),
                 Ok(None) => false,
-                // An unreadable document can only be associated by its derived filename.
                 Err(error) => {
-                    let candidate = id == base || is_suffixed_worktree_board_id(&id, &base);
-                    if candidate {
-                        tracing::warn!(%id, %error, "deleting unreadable board with its worktree");
-                    }
-                    candidate
+                    // Derived ids are shared with context boards, so the filename cannot prove
+                    // ownership when the persisted worktree scope is unreadable.
+                    tracing::warn!(%worktree, %id, %error, "preserving unreadable board whose worktree ownership cannot be verified");
+                    false
                 }
             };
             if owned {
@@ -615,11 +614,4 @@ fn suffixed_board_id(base: &BoardId, suffix: u32) -> BoardId {
 fn worktree_board_id_candidates(base: &BoardId) -> impl Iterator<Item = BoardId> + '_ {
     std::iter::once(base.clone())
         .chain((2..=MAX_BOARD_ID_SUFFIX).map(|suffix| suffixed_board_id(base, suffix)))
-}
-
-fn is_suffixed_worktree_board_id(id: &BoardId, base: &BoardId) -> bool {
-    id.as_str()
-        .rsplit_once('-')
-        .and_then(|(_, suffix)| suffix.parse::<u32>().ok())
-        .is_some_and(|suffix| suffix >= 2 && suffixed_board_id(base, suffix) == *id)
 }
