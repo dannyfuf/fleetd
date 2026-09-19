@@ -3,9 +3,10 @@
 > Plan: ./subagent-feedback-fixes-2026-09-19-plan.md
 > READ ME FIRST. Update this file as you work. The plan is reference; this tracker is the source of truth for state. If reality diverges from the plan, update both.
 
-**Status: complete, 2026-09-19.** Seven tasks, eight commits on `fix/native-subagents`, nothing
-pushed. `make lint` and `make test` are green; the live field check passed every assertion
-against a private daemon. The one thing the batch could not do is restart the *shared* `fleetd`,
+**Status: complete, 2026-09-19.** Seven tasks, nine commits on `fix/native-subagents`, nothing
+pushed. `make lint` is green and the live field check passed every assertion against a private
+daemon. `make test` is **red**, in `fleet-app --test harness_headless` alone, for two reasons
+proved by A/B against `703fe95` to predate this batch — see Notes and `SESSION_TODO.md`. The one thing the batch could not do is restart the *shared* `fleetd`,
 which hosted the session that executed it — `SESSION_TODO.md` says exactly what a human must do
 next, and why `make restart` needs a rebase first.
 
@@ -18,7 +19,7 @@ next, and why `make restart` needs a rebase first.
 | `703fe95` | T02 — `daemon: put a fleet on the delegated child's PATH and stop warning on an explicit --worktree` |
 | `0a1dbc3` | T06 — `daemon: let subagent --effort stand alone without --model` |
 | `7d40fca` | T07 — `daemon: keep a fleet on a resumed delegated child's PATH` |
-| *(this one)* | T05 — `docs: consolidate the subagent feedback batch tracker and session TODO` |
+| `35e1912` | T05 — `docs: consolidate the subagent feedback batch tracker and session TODO` |
 
 ## Working agreement
 
@@ -82,8 +83,8 @@ constraint. It is kept because it explains why the first four tasks are cut the 
       verified: `cargo test -p fleet-core -p fleet-cli` pass (216 + 119 + 9), `cargo test -p fleet-daemon --lib` 782 pass, `cargo fmt --all -- --check` and `cargo clippy --workspace --all-targets --all-features -- -D warnings` clean. New cases: the four-way resolution matrix in `manager/commands.rs`, the empty-model launch line in `claude/argv.rs`, the empty-model `start_params` golden in `codex/tests/wire.rs`, the `model_selection` matrix and a wire-level `subagent run --effort` with no `--model` in `fleet-cli`.
 - [x] T07 — A resumed child keeps its PATH injection *(added mid-flight; daemon manager + NATIVE-AGENTS)* — `7d40fca`
       verified: `cargo test -p fleet-daemon --lib` 783 pass including `a_resumed_delegated_child_keeps_the_daemon_sibling_on_its_path`, `cargo fmt --all -- --check` and `cargo clippy --workspace --all-targets --all-features -- -D warnings` clean.
-- [x] T05 — Verify the batch end to end and record what is still deferred *(SESSION_TODO + this tracker + doc reconciliation)* — `docs:` commit below
-      verified: `make lint` and `make test` green on the settled tree (see Notes for the exact result lines); the three doc seams checked and the divergences fixed; the live field check run against a **private** daemon rather than `make restart` (see Notes).
+- [x] T05 — Verify the batch end to end and record what is still deferred *(SESSION_TODO + this tracker + doc reconciliation)* — `35e1912`
+      verified: `make lint` exit 0 on the settled tree; `cargo test` green for `fleet-core`, `fleet-cli`, `fleet-proto`, `fleet-client` and `fleet-daemon --lib` (16 `test result: ok` lines, 0 failures) plus `cargo clippy --workspace --all-targets --all-features -- -D warnings` clean; **`make test` red in `fleet-app --test harness_headless` only, proved pre-existing by A/B against `703fe95`** (see Notes); the four doc seams checked and every divergence fixed; the live field check run against a **private** daemon rather than `make restart`, passing every assertion.
 
 ### Ownership at a glance
 
