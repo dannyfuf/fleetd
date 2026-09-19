@@ -7,6 +7,55 @@
 
 use super::*;
 
+#[tokio::test]
+async fn closed_threads_are_isolated_cleared_and_survive_a_manager_restart() {
+    let harness = Harness::start(full()).await;
+    let thread = harness.create(None).await.thread;
+
+    harness
+        .manager
+        .mark_closed_for("client-a".to_owned(), thread)
+        .await
+        .expect("mark thread closed for client A");
+    assert_eq!(
+        harness
+            .manager
+            .closed_threads("client-a".to_owned())
+            .await
+            .expect("read client A closed threads"),
+        vec![thread]
+    );
+    assert!(
+        harness
+            .manager
+            .closed_threads("client-b".to_owned())
+            .await
+            .expect("read client B closed threads")
+            .is_empty()
+    );
+
+    let restarted = harness.restart().await;
+    assert_eq!(
+        restarted
+            .closed_threads("client-a".to_owned())
+            .await
+            .expect("read closed threads after restart"),
+        vec![thread]
+    );
+
+    restarted
+        .clear_closed_for("client-a".to_owned(), thread)
+        .await
+        .expect("clear client A closed thread");
+    assert!(
+        restarted
+            .closed_threads("client-a".to_owned())
+            .await
+            .expect("read cleared closed threads")
+            .is_empty()
+    );
+}
+
 #[test]
 fn hydration_seed_preserves_a_delegated_child_parent() {
     let thread = ThreadId::new();

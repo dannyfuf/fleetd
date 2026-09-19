@@ -168,6 +168,7 @@ impl AppState {
                 self.agents.resync_installed();
             }
             BridgeEvent::AgentSeenCursors(cursors) => self.agents.seed_seen(&cursors),
+            BridgeEvent::AgentClosedThreads(threads) => self.agents.seed_closed(threads),
             BridgeEvent::Delegations(delegations) => self.agents.seed_delegations(delegations),
             BridgeEvent::ConnectFailed {
                 message,

@@ -206,6 +206,17 @@ impl Client {
         }
     }
 
+    /// Reads the stable installation's closed thread set after capability negotiation.
+    pub async fn agent_closed_threads(&self) -> Result<Vec<ThreadId>> {
+        if !self.supports_capability(fleet_proto::AGENT_CLOSED_CAPABILITY) {
+            return Ok(Vec::new());
+        }
+        match self.request(RequestBody::AgentClosedThreads).await? {
+            ResponseBody::AgentClosedThreads(threads) => Ok(threads),
+            response => Err(unexpected("agent_closed_threads", response)),
+        }
+    }
+
     /// Creates an ordered agent-event subscription with its own projection mirror.
     #[must_use]
     pub fn agent_events(&self) -> AgentEvents {
@@ -352,6 +363,15 @@ impl Client {
         expect_agent_ack(
             "agent_thread_close",
             self.request(RequestBody::AgentThreadClose { thread })
+                .await?,
+        )
+    }
+
+    /// Re-registers this installation's interest in a native-agent thread.
+    pub async fn agent_thread_reopen(&self, thread: ThreadId) -> Result<()> {
+        expect_agent_ack(
+            "agent_thread_reopen",
+            self.request(RequestBody::AgentThreadReopen { thread })
                 .await?,
         )
     }

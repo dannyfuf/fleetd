@@ -139,6 +139,16 @@ pub(super) async fn refresh_agent_seen(
     Ok(Some(cursors))
 }
 
+/// Reads the installation's closed set only from a daemon that advertised the wire family.
+pub(super) async fn refresh_agent_closed(
+    client: &Client,
+) -> Result<Option<Vec<ThreadId>>, ProtoError> {
+    if !client.supports_capability(fleet_proto::AGENT_CLOSED_CAPABILITY) {
+        return Ok(None);
+    }
+    client.agent_closed_threads().await.map(Some)
+}
+
 /// Reads the delegation census only from a daemon that advertised the wire family.
 pub(super) async fn refresh_delegations(
     client: &Client,
@@ -188,6 +198,31 @@ pub(super) async fn open(
             {
                 return Err(Failure {
                     message: "the app stopped receiving native-agent cursors".to_owned(),
+                    log_tail: Vec::new(),
+                    stale_socket: false,
+                    cause: FailureCause::Unavailable,
+                });
+            }
+        }
+        Ok(None) => {}
+        Err(error) => {
+            return Err(Failure {
+                message: error.message,
+                log_tail: log_tail(home).await,
+                stale_socket: false,
+                cause: FailureCause::Unavailable,
+            });
+        }
+    }
+    match refresh_agent_closed(&client).await {
+        Ok(Some(threads)) => {
+            if events
+                .send(BridgeEvent::AgentClosedThreads(threads))
+                .await
+                .is_err()
+            {
+                return Err(Failure {
+                    message: "the app stopped receiving closed native-agent threads".to_owned(),
                     log_tail: Vec::new(),
                     stale_socket: false,
                     cause: FailureCause::Unavailable,

@@ -251,6 +251,8 @@ pub enum ResponseBody {
     AgentThreads(Vec<AgentThreadSummary>),
     /// Persisted native-agent cursors belonging to the calling installation.
     AgentSeenCursors(Vec<AgentSeenCursor>),
+    /// Persisted closed native-agent threads belonging to the calling installation.
+    AgentClosedThreads(Vec<ThreadId>),
     /// Summary of a newly allocated native-agent thread.
     AgentThreadCreated(AgentThreadSummary),
     /// Materialized thread state and the ordered persisted tail after it.
@@ -528,6 +530,7 @@ mod tests {
             crate::agents::CheckpointId::from_parts(4, crate::agents::CheckpointScope::File, turn);
         for body in [
             ResponseBody::AgentThreads(vec![summary.clone()]),
+            ResponseBody::AgentClosedThreads(vec![ThreadId::new()]),
             ResponseBody::AgentThreadCreated(summary.clone()),
             ResponseBody::AgentThreadSnapshot {
                 projection,

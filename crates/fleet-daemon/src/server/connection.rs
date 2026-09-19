@@ -217,6 +217,9 @@ impl Connection {
                         RequestBody::AgentSeenCursors => {
                             Some(agent_seen_cursors(&self.services, &client).await)
                         }
+                        RequestBody::AgentClosedThreads => {
+                            Some(agent_closed_threads(&self.services, &client).await)
+                        }
                         body if terminal_request_is_serialized(&body) => {
                             let result = run_terminal_request(
                                 &self.services,
@@ -249,7 +252,7 @@ impl Connection {
                                 if let Some(gate) = dispatch_gate {
                                     gate.cancelled().await;
                                 }
-                                let result = match persist_seen_before_routing(
+                                let result = match persist_agent_preferences_before_routing(
                                     &services,
                                     &context.client,
                                     &body,
@@ -523,8 +526,8 @@ async fn detach_attached_terminals(
 /// A current app sends `client_id`. A proxy link predating that forwarding support still has a
 /// stable daemon UUID, which keeps separate installations isolated instead of collapsing them
 /// into one anonymous cursor during a mixed-version federation.
-fn agent_client_id(client: &HelloClient) -> Option<String> {
-    if !client.supports(fleet_proto::AGENT_SEEN_CAPABILITY) {
+fn agent_client_id(client: &HelloClient, capability: &str) -> Option<String> {
+    if !client.supports(capability) {
         return None;
     }
     client
@@ -543,7 +546,7 @@ async fn agent_seen_cursors(
     services: &Services,
     client: &HelloClient,
 ) -> DaemonResult<ResponseBody> {
-    let Some(client_id) = agent_client_id(client) else {
+    let Some(client_id) = agent_client_id(client, fleet_proto::AGENT_SEEN_CAPABILITY) else {
         return Ok(ResponseBody::AgentSeenCursors(Vec::new()));
     };
     services
@@ -554,22 +557,56 @@ async fn agent_seen_cursors(
         .map_err(crate::error::from_proto_error)
 }
 
-async fn persist_seen_before_routing(
+async fn agent_closed_threads(
+    services: &Services,
+    client: &HelloClient,
+) -> DaemonResult<ResponseBody> {
+    let Some(client_id) = agent_client_id(client, fleet_proto::AGENT_CLOSED_CAPABILITY) else {
+        return Ok(ResponseBody::AgentClosedThreads(Vec::new()));
+    };
+    services
+        .agents
+        .closed_threads(client_id)
+        .await
+        .map(ResponseBody::AgentClosedThreads)
+        .map_err(crate::error::from_proto_error)
+}
+
+async fn persist_agent_preferences_before_routing(
     services: &Services,
     client: &HelloClient,
     body: &RequestBody,
 ) -> DaemonResult<()> {
-    let (Some(client_id), RequestBody::AgentMarkSeen { thread, seq }) =
-        (agent_client_id(client), body)
-    else {
-        return Ok(());
-    };
-    services
-        .agents
-        .mark_seen_for(Some(client_id), *thread, *seq)
-        .await
-        .map(|_| ())
-        .map_err(crate::error::from_proto_error)
+    match body {
+        RequestBody::AgentMarkSeen { thread, seq } => {
+            let Some(client_id) = agent_client_id(client, fleet_proto::AGENT_SEEN_CAPABILITY)
+            else {
+                return Ok(());
+            };
+            services
+                .agents
+                .mark_seen_for(Some(client_id), *thread, *seq)
+                .await
+                .map(|_| ())
+                .map_err(crate::error::from_proto_error)
+        }
+        RequestBody::AgentThreadClose { thread } | RequestBody::AgentThreadReopen { thread } => {
+            let Some(client_id) = agent_client_id(client, fleet_proto::AGENT_CLOSED_CAPABILITY)
+            else {
+                return Ok(());
+            };
+            let persisted = if matches!(body, RequestBody::AgentThreadClose { .. }) {
+                services.agents.mark_closed_for(client_id, *thread).await
+            } else {
+                services.agents.clear_closed_for(client_id, *thread).await
+            };
+            if let Err(error) = persisted {
+                tracing::warn!(%error, %thread, "failed to persist native-agent closed state");
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
 }
 
 async fn personalize_agent_window(
@@ -577,7 +614,7 @@ async fn personalize_agent_window(
     client: &HelloClient,
     result: DaemonResult<ResponseBody>,
 ) -> DaemonResult<ResponseBody> {
-    let Some(client_id) = agent_client_id(client) else {
+    let Some(client_id) = agent_client_id(client, fleet_proto::AGENT_SEEN_CAPABILITY) else {
         return result;
     };
     let mut window = match result {
@@ -1018,6 +1055,7 @@ mod tests {
                 "agent.checkpoints",
                 "agent.codex",
                 "agent.seen",
+                "agent.closed",
                 "agent.account",
                 "agent.delegation"
             ])
@@ -1045,15 +1083,48 @@ mod tests {
             capabilities: vec![fleet_proto::AGENT_SEEN_CAPABILITY.to_owned()],
             ..HelloClient::default()
         };
-        assert_eq!(agent_client_id(&capable), Some(valid));
+        assert_eq!(
+            agent_client_id(&capable, fleet_proto::AGENT_SEEN_CAPABILITY),
+            Some(valid)
+        );
 
         let invalid = HelloClient {
             client_id: Some("shared".to_owned()),
             capabilities: vec![fleet_proto::AGENT_SEEN_CAPABILITY.to_owned()],
             ..HelloClient::default()
         };
-        assert_eq!(agent_client_id(&invalid), None);
-        assert_eq!(agent_client_id(&HelloClient::default()), None);
+        assert_eq!(
+            agent_client_id(&invalid, fleet_proto::AGENT_SEEN_CAPABILITY),
+            None
+        );
+        assert_eq!(
+            agent_client_id(&HelloClient::default(), fleet_proto::AGENT_SEEN_CAPABILITY),
+            None
+        );
+    }
+
+    #[test]
+    fn close_from_a_client_without_the_capability_has_no_persistence_identity() {
+        let valid = fleet_core::paths::new_client_id();
+        let seen_only = HelloClient {
+            client_id: Some(valid.clone()),
+            capabilities: vec![fleet_proto::AGENT_SEEN_CAPABILITY.to_owned()],
+            ..HelloClient::default()
+        };
+        assert_eq!(
+            agent_client_id(&seen_only, fleet_proto::AGENT_CLOSED_CAPABILITY),
+            None
+        );
+
+        let closed_capable = HelloClient {
+            client_id: Some(valid.clone()),
+            capabilities: vec![fleet_proto::AGENT_CLOSED_CAPABILITY.to_owned()],
+            ..HelloClient::default()
+        };
+        assert_eq!(
+            agent_client_id(&closed_capable, fleet_proto::AGENT_CLOSED_CAPABILITY),
+            Some(valid)
+        );
     }
 
     #[tokio::test]

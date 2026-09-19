@@ -92,6 +92,35 @@ fn every_new_link_bumps_the_generation_screens_re_attach_on() {
 }
 
 #[test]
+fn relaunch_seeds_closed_threads_before_the_first_snapshot() {
+    let now = Instant::now();
+    let worktree: fleet_core::ids::WorktreeId = "buk/payroll#feat"
+        .parse()
+        .unwrap_or_else(|error| panic!("test worktree must parse: {error}"));
+    let closed = ThreadProjection::new(ThreadId::new(), worktree.clone(), AgentKind::Claude);
+    let visible = ThreadProjection::new(ThreadId::new(), worktree.clone(), AgentKind::Codex);
+    let mut first = snapshot();
+    first.agent_threads = vec![
+        closed.summary(Seq::default()),
+        visible.summary(Seq::default()),
+    ];
+    let mut state = AppState::new("/tmp/fleet", now);
+
+    state.apply_bridge_event(BridgeEvent::AgentClosedThreads(vec![closed.thread]), now);
+    state.apply_bridge_event(BridgeEvent::Connected(Box::new(first)), now);
+
+    assert_eq!(
+        state
+            .agents
+            .of_worktree(&worktree)
+            .iter()
+            .map(|summary| summary.thread)
+            .collect::<Vec<_>>(),
+        vec![visible.thread]
+    );
+}
+
+#[test]
 fn every_replacement_connection_resyncs_installed_agent_projections_from_their_cursor() {
     for restarted in [true, false] {
         let now = Instant::now();
@@ -165,6 +194,38 @@ fn a_replacement_connection_does_not_resync_a_summary_only_thread() {
 
     assert!(state.agents.projection(thread).is_none());
     assert!(!state.agents.needs_resync(thread));
+}
+
+#[test]
+fn a_closed_thread_stays_hidden_across_an_incomplete_reconnect_snapshot() {
+    let now = Instant::now();
+    let mut state = AppState::new("/tmp/fleet", now);
+    let (_, closed) = installed_agent(7);
+    let (_, visible) = installed_agent(7);
+    let worktree = closed.worktree.clone();
+    let mut full = snapshot();
+    full.agent_threads = vec![closed.clone(), visible.clone()];
+    state.apply_snapshot(full.clone(), now);
+    assert!(state.agents.close(closed.thread));
+
+    state.apply_bridge_event(
+        BridgeEvent::Reconnected {
+            restarted: true,
+            snapshot: Box::new(snapshot()),
+        },
+        now,
+    );
+    state.apply_snapshot(full, now);
+
+    assert_eq!(
+        state
+            .agents
+            .of_worktree(&worktree)
+            .iter()
+            .map(|summary| summary.thread)
+            .collect::<Vec<_>>(),
+        vec![visible.thread]
+    );
 }
 
 #[test]

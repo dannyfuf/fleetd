@@ -442,6 +442,38 @@ impl SqliteAgentStore {
             .await
     }
 
+    /// Marks one native-agent thread closed for one installation.
+    pub(crate) async fn mark_closed(
+        &self,
+        client_id: String,
+        thread: ThreadId,
+        closed_at: i64,
+    ) -> anyhow::Result<()> {
+        self.inner
+            .writer
+            .mark_closed(client_id, thread, closed_at)
+            .await
+    }
+
+    /// Clears one installation's closed marker for a native-agent thread.
+    pub(crate) async fn clear_closed(
+        &self,
+        client_id: String,
+        thread: ThreadId,
+    ) -> anyhow::Result<()> {
+        self.inner.writer.clear_closed(client_id, thread).await
+    }
+
+    /// Reads the installation-wide closed-thread census used once after Hello.
+    pub(crate) async fn closed_threads(&self, client_id: String) -> anyhow::Result<Vec<ThreadId>> {
+        self.inner
+            .readers
+            .read("read native-agent closed threads", move |conn| {
+                read::closed_threads(conn, &client_id)
+            })
+            .await
+    }
+
     /// Reads one thread's durable metadata, or `None` when no listed thread has that id.
     pub(crate) async fn read_record(
         &self,
@@ -590,7 +622,7 @@ impl SqliteAgentStore {
     ///
     /// Retained for the same reason as [`SqliteAgentStore::read_index`]: hiding a thread by
     /// omission is the only delete semantics the store has, and the thread-delete verb §8 owes is
-    /// what will call it.
+    /// what will call it. That verb must also delete the thread's rows from `closed_threads`.
     #[allow(dead_code)]
     pub(crate) async fn write_index(&self, index: &AgentIndex) -> anyhow::Result<()> {
         self.inner.writer.write_index(index).await

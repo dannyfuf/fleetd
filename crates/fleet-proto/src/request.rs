@@ -138,6 +138,8 @@ pub enum RequestBody {
     AgentThreadList,
     /// Read the calling installation's persisted native-agent cursors.
     AgentSeenCursors,
+    /// Read the calling installation's persisted closed native-agent threads.
+    AgentClosedThreads,
     /// Create and start a native-agent thread in a published worktree.
     AgentThreadCreate {
         /// Owning published worktree; the daemon resolves its canonical path.
@@ -216,6 +218,11 @@ pub enum RequestBody {
     /// Release one client's interest in a native-agent thread.
     AgentThreadClose {
         /// Thread to close.
+        thread: ThreadId,
+    },
+    /// Re-register one installation's interest in a native-agent thread.
+    AgentThreadReopen {
+        /// Thread to reopen.
         thread: ThreadId,
     },
     /// Send or steer user input.

@@ -77,6 +77,13 @@ pub(super) const MIGRATIONS: &[Migration] = &[
         source: m004::SOURCE,
         sha256: "6b222436efc9f2cc8be1a0b50ec518923d04b1006f29289f121299ff202a03de",
     },
+    Migration {
+        id: 5,
+        name: "closed_threads",
+        run: m005::run,
+        source: schema::CLOSED_THREADS,
+        sha256: "c9c1a945245b02b513ba45ebc9cb38230b4870660adf4c3c1da6e9e07ec2e9ef",
+    },
 ];
 
 /// Slot 001 — create the log and every read model derived from it.
@@ -255,6 +262,20 @@ mod m004 {
         }
         drop(statement);
         transaction.execute_batch(SOURCE)
+    }
+}
+
+/// Slot 005 — remember which native-agent tabs each installation closed.
+///
+/// The marker is deliberately separate from `threads.archived_at` and `threads.deleted_at`:
+/// both of those are global thread state, while closing a tab is installation-local state.
+mod m005 {
+    use rusqlite::Transaction;
+
+    use super::schema;
+
+    pub(super) fn run(transaction: &Transaction<'_>) -> rusqlite::Result<()> {
+        transaction.execute_batch(schema::CLOSED_THREADS)
     }
 }
 
@@ -451,7 +472,7 @@ mod tests {
         run(&mut conn, None)?;
 
         assert_eq!(objects(&conn, "table")?, expected(REQUIRED_TABLES));
-        assert_eq!(applied_slots(&conn)?, vec![1, 2, 3, 4]);
+        assert_eq!(applied_slots(&conn)?, vec![1, 2, 3, 4, 5]);
         Ok(())
     }
 
@@ -589,7 +610,10 @@ mod tests {
         const SLOT_003_TABLES: &[&str] = &["delegation_outbox", "delegations"];
         REQUIRED_TABLES
             .iter()
-            .filter(|table| slot >= 3 || !SLOT_003_TABLES.contains(*table))
+            .filter(|table| {
+                (slot >= 3 || !SLOT_003_TABLES.contains(*table))
+                    && (slot >= 5 || **table != "closed_threads")
+            })
             .copied()
             .collect()
     }
@@ -662,6 +686,23 @@ mod tests {
 
         assert!(table_columns(&conn, "delegation_outbox")?.contains("submitted"));
         assert_eq!(applied_slots(&conn)?, vec![1, 2, 3, 4]);
+        Ok(())
+    }
+
+    #[test]
+    fn slot_005_adds_closed_threads_to_the_slot_004_schema() -> anyhow::Result<()> {
+        let mut conn = memory_database()?;
+        run(&mut conn, Some(4))?;
+        assert!(!objects(&conn, "table")?.contains("closed_threads"));
+
+        run(&mut conn, Some(5))?;
+
+        assert!(objects(&conn, "table")?.contains("closed_threads"));
+        assert_eq!(
+            table_columns(&conn, "closed_threads")?,
+            expected(&["client_id", "closed_at", "thread_id"])
+        );
+        assert_eq!(applied_slots(&conn)?, vec![1, 2, 3, 4, 5]);
         Ok(())
     }
 
@@ -750,7 +791,7 @@ mod tests {
 
         run(&mut conn, None)?;
 
-        assert_eq!(applied_slots(&conn)?, vec![1, 2, 3, 4]);
+        assert_eq!(applied_slots(&conn)?, vec![1, 2, 3, 4, 5]);
         Ok(())
     }
 

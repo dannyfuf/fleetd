@@ -48,6 +48,34 @@ pub(super) fn close_agent_tab(bridge: &Bridge, state: &Entity<AppState>, cx: &mu
     });
 }
 
+/// Selects a thread and mirrors a top-level reopen to the daemon.
+///
+/// Delegated children remain attached only in this window; their caller owns the durable tab.
+pub(crate) fn reopen_agent_tab(
+    state: &Entity<AppState>,
+    thread: ThreadId,
+    send: impl FnOnce(BridgeCommand),
+    cx: &mut App,
+) -> bool {
+    let app = state.read(cx);
+    let was_closed = app.agents.is_closed(thread);
+    let top_level = app
+        .agents
+        .summary(thread)
+        .is_some_and(|summary| summary.parent.is_none());
+    let selected = state.update(cx, |app, cx| {
+        let selected = app.select_agent_thread(thread);
+        if selected {
+            cx.notify();
+        }
+        selected
+    });
+    if selected && was_closed && top_level {
+        send(BridgeCommand::AgentThreadReopen { thread });
+    }
+    selected
+}
+
 /// Asks for a thread's newest window, or for everything after a cursor, and installs it (§8/§10).
 ///
 /// A first paint asks for a bounded window: an unbounded snapshot of a long transcript is not a
@@ -55,7 +83,7 @@ pub(super) fn close_agent_tab(bridge: &Bridge, state: &Entity<AppState>, cx: &mu
 /// after the cursor, which carries zero transcript bytes when nothing happened while the client
 /// was away. A gap in either reply is recorded rather than papered over.
 pub(super) fn open_thread(
-    bridge: &Bridge,
+    bridge: &impl super::AgentThreadRequester,
     state: &Entity<AppState>,
     thread: ThreadId,
     from_seq: Option<Seq>,
@@ -69,9 +97,12 @@ pub(super) fn open_thread(
     // One request is in flight from here: the flag comes back only if the reply is a gap.
     state.update(cx, |app, _| app.agents.clear_resync(thread));
     let bridge = bridge.clone();
-    let state = state.clone();
+    let state = state.downgrade();
     cx.spawn(async move |cx| {
         let answer = reply.recv().await;
+        let Some(state) = state.upgrade() else {
+            return;
+        };
         cx.update(|cx| match answer {
             Ok(Ok(ResponseBody::AgentThreadSnapshot {
                 projection,
@@ -131,9 +162,12 @@ pub(super) fn load_older_page(
             fleet_proto::agents::WINDOW_DEFAULT_TURNS,
         ),
     });
-    let state = state.clone();
+    let state = state.downgrade();
     cx.spawn(async move |cx| {
         let answer = reply.recv().await;
+        let Some(state) = state.upgrade() else {
+            return;
+        };
         cx.update(|cx| match answer {
             Ok(Ok(ResponseBody::AgentThreadWindow(window))) => {
                 state.update(cx, |app, cx| match app.agents.merge_older_page(&window) {
@@ -171,14 +205,15 @@ pub(super) fn refresh_checkpoints(
     cx: &mut App,
 ) {
     let reply = bridge.request_agent(BridgeCommand::AgentCheckpoints { thread });
-    let view = view.clone();
+    let view = view.downgrade();
     cx.spawn(async move |cx| {
         let answer = reply.recv().await;
         // `Unsupported` is the daemon saying it keeps none; every other failure leaves the
         // listing as it was, and the next settled turn asks again.
         cx.update(|cx| {
             if let Ok(Ok(ResponseBody::AgentCheckpoints(checkpoints))) = answer {
-                view.update(cx, |view, cx| view.install_checkpoints(&checkpoints, cx));
+                view.update(cx, |view, cx| view.install_checkpoints(&checkpoints, cx))
+                    .ok();
             }
         });
     })
@@ -231,9 +266,12 @@ pub(super) fn account_login(
     cx: &mut App,
 ) {
     let reply = bridge.request_agent(BridgeCommand::AgentAccountLogin { thread });
-    let state = state.clone();
+    let state = state.downgrade();
     cx.spawn(async move |cx| {
         let answer = reply.recv().await;
+        let Some(state) = state.upgrade() else {
+            return;
+        };
         cx.update(|cx| match answer {
             Ok(Ok(ResponseBody::AgentAccountLogin { auth_url })) => {
                 cx.open_url(&auth_url);

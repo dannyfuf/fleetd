@@ -25,6 +25,7 @@ pub fn classify(body: &RequestBody, resolver: &dyn Resolver) -> Target {
         | AgentThreadCreate { .. }
         | AgentThreadOpen { .. }
         | AgentThreadClose { .. }
+        | AgentThreadReopen { .. }
         | AgentSend { .. }
         | AgentInterrupt { .. }
         | AgentRespond { .. }
@@ -47,7 +48,7 @@ pub fn classify(body: &RequestBody, resolver: &dyn Resolver) -> Target {
         | DelegationCancel { .. }
         | DelegationWait { .. } => Target::Local,
 
-        AgentSeenCursors => Target::Local,
+        AgentSeenCursors | AgentClosedThreads => Target::Local,
 
         CreateWorktree {
             host: Some(host), ..
@@ -286,12 +287,14 @@ pub(crate) fn local_fanout_part(
         RequestBody::AgentItemBody { .. }
         | RequestBody::PruneWorktrees { ids: None, .. }
         | RequestBody::AgentThreadList
-        | RequestBody::AgentSeenCursors => Some(body.clone()),
+        | RequestBody::AgentSeenCursors
+        | RequestBody::AgentClosedThreads => Some(body.clone()),
         RequestBody::AgentThreadCreate { .. }
         | RequestBody::AgentThreadOpen { .. }
         | RequestBody::AgentCheckpoints { .. }
         | RequestBody::AgentRevert { .. }
         | RequestBody::AgentThreadClose { .. }
+        | RequestBody::AgentThreadReopen { .. }
         | RequestBody::AgentSend { .. }
         | RequestBody::AgentInterrupt { .. }
         | RequestBody::AgentRespond { .. }
