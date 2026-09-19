@@ -341,13 +341,14 @@ bridge.send_agent(BridgeCommand::AgentSend { thread, input });          // fire 
 let reply = bridge.request_agent(BridgeCommand::AgentThreadOpen { thread, from_seq });
 ```
 
-Connection bootstrap has one additional typed read that no screen issues: `AgentSeenCursors`.
-When `agent.seen` was negotiated, the bridge fetches that installation's cursor census after
-Hello and publishes it as `BridgeEvent::AgentSeenCursors` before the first snapshot. Because
-`fleet-client` can reconnect beneath the bridge, the two-second health pass refreshes the census
-once when the client's connection generation changes and republishes only when the census changed.
-`AgentThreads` is seeded before it re-reports any newer local
-overrides. Keeping this read out of shared summary broadcasts preserves O(1) event fan-out.
+Connection bootstrap has two additional typed reads that no screen issues: `AgentSeenCursors` and
+`AgentClosedThreads`. When `agent.seen` or `agent.closed` was negotiated, the bridge fetches that
+installation's cursor census or closed set after Hello and publishes it as
+`BridgeEvent::AgentSeenCursors` or `BridgeEvent::AgentClosedThreads` before the first snapshot.
+Because `fleet-client` can reconnect beneath the bridge, the two-second health pass refreshes both
+once when the client's connection generation changes. The seen census is republished only when it
+changed. `AgentThreads` is seeded before it re-reports any newer local overrides. Keeping these
+reads out of shared summary broadcasts preserves O(1) event fan-out.
 
 `AgentThreadView` sends nothing itself. Every mutation leaves it as an `AgentThreadEvent`
 (`Command(BridgeCommand)`, `OpenInEditor(String)`, `Notice(SharedString)`), and
@@ -454,7 +455,7 @@ is the single source of truth on the client. The parts a screen touches:
 | `filter` | query + whether the input still owns the keyboard |
 | `session_mru`, `terminal_mru` | `ctrl-s w` and `ctrl-s Tab` are `Mru::alternate()` |
 | `toasts`, `sticky_error` | §2.7 and §1.8; errors are sticky, never toasts |
-| `agents: AgentThreads` | the native-agent mirror: daemon summaries, opened `ThreadProjection`s, the last reducer `Applied` description per opened thread, the per-worktree selected tab, seen cursors and pending resyncs |
+| `agents: AgentThreads` | the native-agent mirror: daemon summaries, opened `ThreadProjection`s, the last reducer `Applied` description per opened thread, the per-worktree selected tab, seeded closed threads, seen cursors and pending resyncs |
 | `last_agent_activity` / `last_agent_attention` | PTY status-only glyph baseline and semantic hook-attention edge baseline; reconnect seeding is silent |
 | `watches: Watches` | the read-only subagent mirror and its per-session pane state |
 | `daemon: DaemonLink` | §3.12; `refuses_mutations()` and `drops_terminal_keys()` are the two questions a screen asks |
@@ -468,7 +469,8 @@ is a pure function so no two surfaces can disagree about a thread:
 
 | Question | Answer |
 | --- | --- |
-| Which tabs does this worktree have? | `agents.of_worktree(&worktree)`, in daemon snapshot order |
+| Which tabs does this worktree have? | `agents.of_worktree(&worktree)`, in daemon snapshot order, excluding top-level threads in the installation's closed set and child threads outside this window's attached set |
+| Which top-level tabs did this installation close? | `AgentClosedThreads` seeds `agents.closed` before the first snapshot; `^s x` adds locally and at the daemon, while picker or top-level navigation removes both |
 | What mark does a tab carry? | `agents.attention(thread)` → `tab_badge`: spinner (`Working`) · amber dot (`NeedsYou`) · gray dot (`Unread`) · `exited <code>` (`Failed`) · nothing |
 | What does the session header say? | the same attention → `header_word`: `working` · `needs you` · `failed` · `idle` |
 | What do the context-bar chips count? | `agents.counts()` → `AgentCounts { needs_you, working, failed }`, including the thread on the current tab, each chip zero-suppressed |

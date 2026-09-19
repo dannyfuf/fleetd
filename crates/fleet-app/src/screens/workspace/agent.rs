@@ -1,11 +1,12 @@
 use super::*;
 
-mod requests;
+pub(crate) mod requests;
 mod streaming;
 
 use requests::{
     account_login, close_agent_tab, load_older_page, mark_seen, open_in_editor,
-    open_terminal_fallback, open_thread, refresh_checkpoints, resend_seen_cursors, send_turn,
+    open_terminal_fallback, open_thread, refresh_checkpoints, reopen_agent_tab,
+    resend_seen_cursors, send_turn,
 };
 
 use crate::{
@@ -173,7 +174,7 @@ fn active_worktree(app: &AppState) -> Option<WorktreeId> {
     }
 }
 
-trait AgentThreadRequester {
+trait AgentThreadRequester: Clone + 'static {
     fn request_agent(
         &self,
         command: BridgeCommand,
@@ -241,9 +242,12 @@ fn create_thread(
         resume_cursor: None,
         title: None,
     });
-    let state = state.clone();
+    let state = state.downgrade();
     cx.spawn(async move |cx| {
         let answer = reply.recv().await;
+        let Some(state) = state.upgrade() else {
+            return;
+        };
         cx.update(|cx| match answer {
             Ok(Ok(ResponseBody::AgentThreadCreated(summary))) => {
                 let thread = summary.thread;
@@ -350,10 +354,13 @@ impl WorkspaceScreen {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
                 }
                 AgentThreadEvent::SelectThread(thread) => {
-                    relay_state.update(cx, |app, cx| {
-                        app.select_agent_thread(*thread);
-                        cx.notify();
-                    });
+                    let reopen_bridge = relay_bridge.clone();
+                    reopen_agent_tab(
+                        &relay_state,
+                        *thread,
+                        move |command| reopen_bridge.send_agent(command),
+                        cx,
+                    );
                 }
                 AgentThreadEvent::Notice(text) => {
                     let text = text.clone();

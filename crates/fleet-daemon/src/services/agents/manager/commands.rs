@@ -384,6 +384,17 @@ impl AgentSessionManager {
     /// reducer, and building a projection to answer an ack would be the O(whole thread) read this
     /// store exists to avoid.
     pub async fn close(&self, thread: ThreadId) -> Result<ResponseBody, ProtoError> {
+        self.ensure_thread_exists(thread).await?;
+        Ok(ResponseBody::AgentAck)
+    }
+
+    /// Handles `AgentThreadReopen` without hydrating the thread.
+    pub async fn reopen(&self, thread: ThreadId) -> Result<ResponseBody, ProtoError> {
+        self.ensure_thread_exists(thread).await?;
+        Ok(ResponseBody::AgentAck)
+    }
+
+    async fn ensure_thread_exists(&self, thread: ThreadId) -> Result<(), ProtoError> {
         if self.hydrated(thread).is_none()
             && self
                 .inner
@@ -396,7 +407,7 @@ impl AgentSessionManager {
         {
             return Err(not_found(format!("agent thread {thread}")));
         }
-        Ok(ResponseBody::AgentAck)
+        Ok(())
     }
 
     /// Handles `AgentSend`.
@@ -851,6 +862,46 @@ impl AgentSessionManager {
             .store()
             .map_err(storage_error)?
             .seen_cursors(client_id)
+            .await
+            .map_err(storage_error)
+    }
+
+    /// Persists one installation's closed marker after validating the thread exists.
+    pub async fn mark_closed_for(
+        &self,
+        client_id: String,
+        thread: ThreadId,
+    ) -> Result<(), ProtoError> {
+        self.ensure_thread_exists(thread).await?;
+        self.inner
+            .store()
+            .map_err(storage_error)?
+            .mark_closed(client_id, thread, Utc::now().timestamp_millis())
+            .await
+            .map_err(storage_error)
+    }
+
+    /// Clears one installation's closed marker after validating the thread exists.
+    pub async fn clear_closed_for(
+        &self,
+        client_id: String,
+        thread: ThreadId,
+    ) -> Result<(), ProtoError> {
+        self.ensure_thread_exists(thread).await?;
+        self.inner
+            .store()
+            .map_err(storage_error)?
+            .clear_closed(client_id, thread)
+            .await
+            .map_err(storage_error)
+    }
+
+    /// Reads the one-shot post-Hello closed-thread census for an installation.
+    pub async fn closed_threads(&self, client_id: String) -> Result<Vec<ThreadId>, ProtoError> {
+        self.inner
+            .store()
+            .map_err(storage_error)?
+            .closed_threads(client_id)
             .await
             .map_err(storage_error)
     }

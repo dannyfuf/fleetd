@@ -125,6 +125,9 @@ impl TestDaemon {
                             server: "test-daemon".into(),
                         }),
                         RequestBody::Subscribe { .. } => Some(ResponseBody::Ack),
+                        RequestBody::AgentClosedThreads => {
+                            Some(ResponseBody::AgentClosedThreads(Vec::new()))
+                        }
                         body => respond(body),
                     };
                     if let Some(result) = result {
@@ -151,9 +154,21 @@ impl TestDaemon {
                             if is_hello {
                                 envelope.insert(
                                     "capabilities".to_owned(),
-                                    serde_json::json!(["snapshot.revision"]),
+                                    serde_json::json!([
+                                        "snapshot.revision",
+                                        fleet_proto::AGENT_CLOSED_CAPABILITY
+                                    ]),
                                 );
                             }
+                        }
+                        if is_hello
+                            && snapshot_revision.is_none()
+                            && let Some(envelope) = response.as_object_mut()
+                        {
+                            envelope.insert(
+                                "capabilities".to_owned(),
+                                serde_json::json!([fleet_proto::AGENT_CLOSED_CAPABILITY]),
+                            );
                         }
                         let bytes = serde_json::to_vec(&response).unwrap();
                         if stream

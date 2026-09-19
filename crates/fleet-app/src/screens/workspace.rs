@@ -16,6 +16,7 @@ mod terminal;
 mod tests;
 
 use actions::*;
+pub(crate) use agent::requests::reopen_agent_tab;
 use agent::*;
 use chrome::*;
 use model::*;

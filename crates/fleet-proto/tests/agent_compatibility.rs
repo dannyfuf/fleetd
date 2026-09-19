@@ -405,6 +405,11 @@ fn a_delegation_run_written_before_the_fleet_path_hint_still_decodes() {
 }
 
 #[test]
+fn the_closed_threads_capability_string_is_pinned() {
+    assert_eq!(fleet_proto::AGENT_CLOSED_CAPABILITY, "agent.closed");
+}
+
+#[test]
 fn legacy_permission_gate_defaults_the_additive_item() {
     let gate: GateKind = serde_json::from_str(
         r#"{"type":"permission","data":{"tool":{"type":"edit"},"title":"Apply patch","payload":"README.md","rationale":null,"options":[]}}"#,
@@ -692,6 +697,13 @@ fn request_goldens() -> Vec<(Request, &'static str)> {
         ),
         (
             Request {
+                id: 71,
+                body: RequestBody::AgentThreadReopen { thread },
+            },
+            r#"{"id":71,"body":{"type":"agent_thread_reopen","thread":"11111111-2222-4333-8444-555555555555"}}"#,
+        ),
+        (
+            Request {
                 id: 8,
                 body: RequestBody::AgentSend {
                     thread,
@@ -786,6 +798,13 @@ fn request_goldens() -> Vec<(Request, &'static str)> {
                 body: RequestBody::AgentSeenCursors,
             },
             r#"{"id":17,"body":{"type":"agent_seen_cursors"}}"#,
+        ),
+        (
+            Request {
+                id: 171,
+                body: RequestBody::AgentClosedThreads,
+            },
+            r#"{"id":171,"body":{"type":"agent_closed_threads"}}"#,
         ),
         (
             Request {
@@ -1009,6 +1028,13 @@ fn response_goldens() -> Vec<(Response, &'static str)> {
                 }])),
             },
             r#"{"id":18,"result":{"Ok":{"type":"agent_seen_cursors","data":[{"thread":"11111111-2222-4333-8444-555555555555","seq":9}]}}}"#,
+        ),
+        (
+            Response {
+                id: 181,
+                result: Ok(ResponseBody::AgentClosedThreads(vec![thread()])),
+            },
+            r#"{"id":181,"result":{"Ok":{"type":"agent_closed_threads","data":["11111111-2222-4333-8444-555555555555"]}}}"#,
         ),
         (
             Response {

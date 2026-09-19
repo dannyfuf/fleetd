@@ -727,7 +727,8 @@ fn request_timeout(body: &RequestBody) -> Option<Duration> {
         // because a 10 s transport error on a revert that lands at 12 s invites the user to
         // press `[u]` again on a tree that is already half restored.
         | RequestBody::AgentRevert { .. } => Some(AGENT_HARNESS_TIMEOUT),
-        // `AgentThreadList` and `AgentSeenCursors` are bounded reads, `AgentMarkSeen` is one
+        // `AgentThreadList`, `AgentSeenCursors`, and `AgentClosedThreads` are bounded reads;
+        // `AgentMarkSeen` is one
         // upsert, and `AgentCheckpoints` is one `git for-each-ref` over a namespace bounded by
         // the thread's turn count; none touches a harness, so all four keep the default
         // deliberately.
@@ -1169,6 +1170,67 @@ mod tests {
 
     use super::*;
 
+    fn client_with_capabilities(capabilities: &[&str]) -> (Client, mpsc::Receiver<Command>) {
+        let (commands, command_rx) = mpsc::channel(4);
+        let events = broadcast::Sender::new(1);
+        let client = Client {
+            inner: Arc::new(ClientInner {
+                commands,
+                events,
+                next_id: AtomicU64::new(1),
+                metadata: Arc::new(RwLock::new(ConnectionMetadata {
+                    capabilities: capabilities
+                        .iter()
+                        .map(|capability| (*capability).to_owned())
+                        .collect(),
+                    daemon_identity: None,
+                    generation: 1,
+                })),
+            }),
+        };
+        (client, command_rx)
+    }
+
+    #[tokio::test]
+    async fn agent_closed_fetch_is_sent_only_after_capability_negotiation() {
+        let (legacy, mut legacy_commands) = client_with_capabilities(&[]);
+        assert!(
+            legacy
+                .agent_closed_threads()
+                .await
+                .expect("legacy fetch")
+                .is_empty()
+        );
+        assert!(
+            legacy_commands.try_recv().is_err(),
+            "a daemon without agent.closed is never asked for the new request"
+        );
+
+        let (capable, mut capable_commands) =
+            client_with_capabilities(&[fleet_proto::AGENT_CLOSED_CAPABILITY]);
+        let fetch = tokio::spawn(async move { capable.agent_closed_threads().await });
+        let command = capable_commands.recv().await.expect("closed-set request");
+        assert!(matches!(
+            command.request.body,
+            RequestBody::AgentClosedThreads
+        ));
+        command
+            .response
+            .expect("closed-set request has a response channel")
+            .send(Ok(Stamped {
+                body: ResponseBody::AgentClosedThreads(Vec::new()),
+                snapshot_revision: None,
+            }))
+            .expect("closed-set receiver remains alive");
+        assert!(
+            fetch
+                .await
+                .expect("fetch task")
+                .expect("closed-set response")
+                .is_empty()
+        );
+    }
+
     #[test]
     fn hello_carries_the_persisted_installation_identity() {
         let home = tempfile::tempdir().expect("temporary Fleet home");
@@ -1350,6 +1412,10 @@ mod tests {
         );
         assert_eq!(
             request_timeout(&RequestBody::AgentSeenCursors),
+            Some(REQUEST_TIMEOUT)
+        );
+        assert_eq!(
+            request_timeout(&RequestBody::AgentClosedThreads),
             Some(REQUEST_TIMEOUT)
         );
         assert_eq!(

@@ -39,6 +39,7 @@ fn request_bodies_round_trip() {
         },
         RequestBody::AgentThreadList,
         RequestBody::AgentSeenCursors,
+        RequestBody::AgentClosedThreads,
         RequestBody::AgentThreadCreate {
             worktree: WorktreeId::try_from("acme/api#native-agents")
                 .unwrap_or_else(|error| panic!("{error}")),
@@ -72,6 +73,7 @@ fn request_bodies_round_trip() {
             limit: 262_144,
         },
         RequestBody::AgentThreadClose { thread },
+        RequestBody::AgentThreadReopen { thread },
         RequestBody::AgentSend {
             thread,
             input: UserInput {
@@ -360,5 +362,16 @@ fn hello_carries_the_capabilities_a_client_can_decode() {
     assert_eq!(
         client.client_id.as_deref(),
         Some("11111111-2222-4333-8444-555555555555")
+    );
+}
+
+#[test]
+fn requests_from_a_client_without_agent_closed_decode_unchanged() {
+    let json = r#"[{"id":1,"body":{"type":"agent_thread_list"}},{"id":2,"body":{"type":"agent_thread_close","thread":"11111111-2222-4333-8444-555555555555"}}]"#;
+    let requests: Vec<Request> = serde_json::from_str(json).expect("legacy client requests");
+
+    assert_eq!(
+        serde_json::to_string(&requests).expect("serialize legacy client requests"),
+        json
     );
 }
