@@ -10,13 +10,20 @@
 - Definition of done is not met until every box is ticked and this tracker matches reality.
 
 ## Kickoff
-- [ ] I have read the plan end to end.
-- [ ] I have run the project-wide verification commands once on a clean tree to confirm a green baseline (`make lint && make test && make harness`).
-- [ ] I have read `docs/DESIGN-SYSTEM.md` §6.4 and §6.6 and `docs/KEYMAP.md` "Dialogs and text inputs" as they are today.
-- [ ] I am ready to start.
+- [x] I have read the plan end to end.
+- [x] I have run the project-wide verification commands once on a clean tree to confirm a green baseline (`make lint && make test && make harness`).
+  - verified 2026-09-19 on `ffa76fa`: `make lint` clean; `make test` 79 suites, 3246 passed, 0 failed;
+    `make harness` (virtual lane, nested Hyprland) passed 23 scenarios then stopped at
+    `agents/unread-mark.scenario` with a capture error ("the harness window is not in" the output)
+    while a concurrent cargo build held the lock; treated as an environment flake, re-run before P3-T04.
+- [x] I have read `docs/DESIGN-SYSTEM.md` §6.4 and §6.6 and `docs/KEYMAP.md` "Dialogs and text inputs" as they are today.
+- [x] I am ready to start.
 
 ## Tasks
-- [ ] P3-T01 — Build the single editing engine
+- [x] P3-T01 — Build the single editing engine
+  - verified: `cargo test -p fleet-ui-kit input` (76 passed: 37 engine tests, 16 of them ported
+    `MultilineBuffer` parity cases, plus the pre-existing input tests) and `make lint` passed.
+    `multiline_input/buffer.rs` is untouched until P3-T04.
 - [ ] P3-T02 — Build the live `TextInput` component
 - [ ] P3-T03 — Replace the editing rows in the keymap with one action family
 - [ ] P3-T04 — Re-base the agent composer on the shared component
@@ -43,6 +50,11 @@
   - Keymap: three editing families (`filter::`, `palette::`, `dialog::`); `ctrl-u` semantics differ per surface;
     `delete`, `home`, `end`, `alt-backspace`, `cmd-backspace`, `cmd-a`, `cmd-z`, paste unbound in text contexts;
     `ctrl-v` asserted never bound.
+- 2026-09-19 — P3-T01 landed as `components/input/{buffer,history,tests}.rs` exporting `InputBuffer`,
+  `InputMode`, `HISTORY_CAP` (100) and `TYPING_GROUP_WINDOW` (300 ms). Every user mutation takes an
+  injected `Instant`; the engine never reads a clock. Tabs: hard tab in multi-line, one space in
+  single-line. `ctrl-k` at a multi-line line end joins the next line. Explicit history groups
+  (`begin_history_group`/`end_history_group`) are for IME composition.
 - 2026-09-18 — Decisions fixed at planning time: one engine seeded from the composer buffer; inputs are live
   entities owned by the surface; bytes inside, UTF-16 at the IME boundary, graphemes for motion; word and line rules
   as written in the plan; key-ownership rule via a browsing/editing context word (board-filter precedent), not
@@ -50,6 +62,9 @@
 
 ## Follow-ups
 (Things discovered mid-flight that are out of scope for this plan. Each gets a one-line description.)
+
+- Engine grapheme-boundary lookups scan from the text start (linear per call); fine for dialog-sized
+  text, revisit with a boundary cache if a multi-kilobyte input ever feels slow.
 
 - Cursor blink for the focused input (timer-driven, off while typing).
 - Linux clipboard parity for text inputs without binding `ctrl-v` (shell-reserved).
