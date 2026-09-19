@@ -21,7 +21,8 @@ use fleet_proto::{
     event::{Event, EventKind, ToastLevel},
     request::{Request, RequestBody},
     response::{
-        DaemonIdentity, HelloResponse, PongResponse, Response, ResponseBody, StampedResponse,
+        BOARD_WORKTREE_CAPABILITY, DaemonIdentity, HelloResponse, PongResponse, Response,
+        ResponseBody, StampedResponse,
     },
 };
 use futures_util::{SinkExt, StreamExt, stream::SplitSink, stream::SplitStream};
@@ -463,6 +464,12 @@ where
     let Some(command) = command_for_dispatch(command) else {
         return DispatchOutcome::Sent;
     };
+    if required_capability(&command.request.body)
+        .is_some_and(|capability| !state.capabilities.contains(capability))
+    {
+        fail_command_with(command, worktree_board_capability_error());
+        return DispatchOutcome::Sent;
+    }
     let id = command.request.id;
     let effect = ConnectionEffect::from(&command.request.body);
     let write_deadline = socket_write_deadline();
@@ -1146,6 +1153,31 @@ fn command_for_dispatch(command: Command) -> Option<Command> {
     }
 }
 
+fn required_capability(body: &RequestBody) -> Option<&'static str> {
+    match body {
+        RequestBody::EnsureWorktreeBoard { .. } | RequestBody::CreateWorktreeBoard { .. } => {
+            Some(BOARD_WORKTREE_CAPABILITY)
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn worktree_board_capability_error() -> ProtoError {
+    ProtoError {
+        kind: ErrorKind::Validation,
+        message: "this daemon does not support worktree boards; run `fleet daemon restart`"
+            .to_owned(),
+    }
+}
+
+fn fail_command_with(command: Command, error: ProtoError) {
+    if let Some(sender) = command.response
+        && sender.send(Err(error)).is_err()
+    {
+        tracing::debug!("Fleet request caller dropped before capability refusal");
+    }
+}
+
 fn fail_command(command: Command, message: &str) {
     if let Some(sender) = command.response {
         let _ = sender.send(Err(transport_error(message)));
@@ -1605,6 +1637,64 @@ mod tests {
         );
         assert!(pending.contains_key(&1), "the request awaits its response");
         drop(peer);
+    }
+
+    #[tokio::test]
+    async fn worktree_board_request_is_rechecked_after_an_incapable_reconnect() {
+        let (client, peer) = UnixStream::pair().expect("socket pair");
+        let transport = protocol_transport(client);
+        let (mut writer, mut reader) = transport.split();
+        let mut peer = protocol_transport(peer);
+        let (response, receiver) = oneshot::channel();
+        let command = Command {
+            request: Request {
+                id: 7,
+                body: RequestBody::EnsureWorktreeBoard {
+                    worktree_id: "acme/api#feature"
+                        .parse()
+                        .unwrap_or_else(|error| panic!("{error}")),
+                },
+            },
+            response: Some(response),
+            expires_at: Some(Instant::now() + REQUEST_TIMEOUT),
+        };
+        let mut pending = HashMap::new();
+        let mut state = ConnectionState::default();
+        state
+            .capabilities
+            .insert(BOARD_WORKTREE_CAPABILITY.to_owned());
+        state.generation = 1;
+        // The typed API admitted the request against generation 1, then the connection actor
+        // queued it while reconnecting and negotiated generation 2 without the capability.
+        state.capabilities.clear();
+        state.generation = 2;
+        let events = broadcast::Sender::new(16);
+        let metadata = RwLock::new(ConnectionMetadata::default());
+
+        let outcome = send_command(
+            &mut writer,
+            &mut reader,
+            command,
+            &mut pending,
+            &mut state,
+            &events,
+            &metadata,
+        )
+        .await;
+
+        assert_eq!(outcome, DispatchOutcome::Sent);
+        assert!(pending.is_empty());
+        let error = receiver
+            .await
+            .expect("capability refusal reaches the request caller")
+            .expect_err("an incapable connection cannot dispatch the request");
+        assert_eq!(error, worktree_board_capability_error());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), peer.next())
+                .await
+                .is_err(),
+            "the unsupported request must not reach the reconnected daemon"
+        );
     }
 
     #[tokio::test(start_paused = true)]

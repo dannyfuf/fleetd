@@ -541,6 +541,8 @@ advertise the capability, and capabilities reset on disconnect.
 The original board request names introduced by version 6 remain unchanged. Worktree-scoped boards
 add `EnsureWorktreeBoard` and `CreateWorktreeBoard` under the `board.worktree` capability without
 bumping protocol version 8; consumers must not send those requests when the capability is absent.
+The client connection actor rechecks that capability at dispatch, after any reconnect, rather than
+trusting only the connection metadata observed when the typed request was enqueued.
 `Snapshot`'s `agent_threads` and `boards` are both `#[serde(default)]`, so an older snapshot payload
 still deserializes; new request names are rejected rather than misread. `PruneWorktrees.ids` also
 remains defaulted and omitted when `None`; `Some(ids)` is the exact reviewed allowlist, which

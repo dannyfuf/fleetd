@@ -1,5 +1,5 @@
 use super::{Result, expect_ack, unexpected};
-use crate::Client;
+use crate::{Client, connection::worktree_board_capability_error};
 use fleet_core::{
     board::{
         BackendDescriptor, BackendRef, BackendSchema, BoardPatch, BoardSummary, BoardView, Card,
@@ -9,7 +9,6 @@ use fleet_core::{
     model::Worktree,
 };
 use fleet_proto::{
-    error::{ErrorKind, ProtoError},
     request::RequestBody,
     response::{BOARD_WORKTREE_CAPABILITY, ResponseBody},
 };
@@ -103,11 +102,7 @@ impl Client {
         if self.supports_capability(BOARD_WORKTREE_CAPABILITY) {
             Ok(())
         } else {
-            Err(ProtoError {
-                kind: ErrorKind::Validation,
-                message: "this daemon does not support worktree boards; run `fleet daemon restart`"
-                    .to_owned(),
-            })
+            Err(worktree_board_capability_error())
         }
     }
 

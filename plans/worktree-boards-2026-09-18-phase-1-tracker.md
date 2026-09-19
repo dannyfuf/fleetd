@@ -88,6 +88,10 @@
   - verified: `cargo test -p fleet-daemon --test boards_service
     deleting_a_worktree_preserves_an_unverifiable_cross_scope_quarantine` passed (1 selected);
     `make lint` passed.
+- [x] P1-T25 — Recheck worktree-board capability against the dispatch connection
+  - verified: `cargo test -p fleet-client
+    worktree_board_request_is_rechecked_after_an_incapable_reconnect` passed (1 selected);
+    `make lint` passed.
 
 ## Notes / decisions log
 (Append-only. Date-stamp entries. Capture anything that surprised you or that future-you will want.)

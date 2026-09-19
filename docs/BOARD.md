@@ -661,8 +661,10 @@ pub async fn create_worktree_board(
     backend: Option<BackendRef>,
 ) -> Result<BoardView>;
 ```
-Both typed worktree methods check `board.worktree` before sending a request, so every consumer gets
-the same restart guidance against an older daemon.
+Both typed worktree methods check `board.worktree` before enqueueing a request, and the connection
+actor checks again against the currently negotiated connection immediately before writing it. A
+request queued across reconnect therefore cannot send a new variant to an older replacement
+daemon; every consumer gets the same restart guidance.
 
 CLI (`fleet board …`, JSON envelopes v1 with `--json`, human tables otherwise; board resolved from
 `--board <id>` else `--worktree[=<owner/name#slug>]` else `--context <id>` else the active context

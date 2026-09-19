@@ -33,7 +33,8 @@ protocol bump would force local and remote daemons to upgrade together for an op
   failure is warned and swallowed because the successful worktree move cannot be rolled back.
 - `EnsureWorktreeBoard` and `CreateWorktreeBoard` are additive requests advertised by the
   `board.worktree` capability. `PROTOCOL_VERSION` remains 8. The typed client checks the capability
-  before sending either request, so every consumer inherits the guard.
+  before enqueueing either request, and the connection actor checks the newly negotiated
+  connection again before dispatch, so every consumer inherits the guard across reconnects.
 - `fleet board --worktree[=<owner/name#slug>]` selects the scoped board. A bare flag resolves the
   current `FLEET_SESSION`; an explicit id requires `=` so it cannot consume a subcommand name.
   Commands without it keep selecting the context board as before.
