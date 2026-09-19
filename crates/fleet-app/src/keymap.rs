@@ -1021,7 +1021,13 @@ mod tests {
     ];
 
     /// Contexts that may remain in the live chain while a `FleetTextInput` owns editing.
+    ///
+    /// Every entry is an *ancestor* of a live editor, so a bare printable key here is a key the
+    /// user cannot type (`docs/APP-CONTRACTS.md` §3). `Fleet` wraps every surface there is;
+    /// `Workspace > Native` wraps the embedded pane whose prompt is an editor too.
     const TEXT_INPUT_HOST_CONTEXTS: &[&str] = &[
+        "Fleet",
+        "Workspace > Native",
         "Dialog",
         "Dialog > CardDetailEditing",
         "Dialog > BoardSettingsEditing",
@@ -1046,6 +1052,57 @@ mod tests {
         // never contains a space. Its `TextInput` filters `' '` out of typing and paste, so the
         // model and this binding agree.
         ("Dialog > CardPicker", "space"),
+    ];
+
+    /// Contexts that *would* wrap a live editor, but leave the chain before one takes over.
+    ///
+    /// The second half of the ownership rule: a container may keep bare printable keys only if
+    /// `AppState::context_chain` drops its whole word while an editor owns the keyboard. §3.12
+    /// C's banner is the one such container — it is appended innermost to a base chain, which
+    /// would otherwise put its `r` and `l` between the user and the agent composer — and
+    /// `state::navigation` and `state::agents` own the tests that keep that drop true.
+    const EDITOR_YIELDING_CONTEXTS: &[&str] = &["Daemon > Banner"];
+
+    /// Contexts that can never be an ancestor of a live `FleetTextInput`, so bare printable
+    /// keys are theirs to bind.
+    ///
+    /// Browsing words are here because their dialogs publish a distinct `*Editing` word the
+    /// moment a field owns typing; full-window surfaces are here because they draw no editor;
+    /// the `FleetTextInput` rows are the editor itself rather than a host around it.
+    const NO_LIVE_EDITOR_CONTEXTS: &[&str] = &[
+        "FleetTextInput",
+        "FleetTextInput && mode == multiline",
+        "FleetTextInput && mode == multiline && enter == newline",
+        "Hub",
+        "Hub > Repos",
+        "Hub > Worktrees",
+        "Hub > Prs",
+        "Hub > Board",
+        "Workspace > Terminal",
+        "Workspace > Prefix",
+        "Workspace > Scroll",
+        "Agent > Terminal",
+        "Agent > Prefix",
+        "Agent > Scroll",
+        "Agent > AgentDecision > AgentPermission",
+        "Agent > AgentDecision > AgentQuestion",
+        "Agent > AgentDecision > AgentPlan",
+        "Agent > AgentNativeScroll",
+        "Agent > AgentNativeScroll > AgentRow",
+        "Jobs",
+        "Jobs > Log",
+        "Dialog > CardDetail",
+        "Dialog > BoardSettings",
+        "Dialog > Settings",
+        "Dialog > Create",
+        "Dialog > Confirm",
+        "Dialog > Assign",
+        "Dialog > Help",
+        "Dialog > Quit",
+        "Dialog > QuitDaemon",
+        "Daemon > Down",
+        "Daemon > Doctor",
+        "FirstRun",
     ];
 
     fn is_bare_printable_owner_key(keys: &str) -> bool {
@@ -1733,6 +1790,33 @@ mod tests {
                     spec.context
                 );
             }
+        }
+    }
+
+    /// The list above is only as good as its coverage: the §3.12 C banner was missing from it,
+    /// and its bare `r` / `l` sat innermost on every base chain — including the agent
+    /// composer's. Forcing every context to be classified is what makes the next one land in
+    /// one of the three answers instead of in the silent default.
+    #[test]
+    fn every_key_context_is_classified_against_a_live_text_input() {
+        let mut contexts: Vec<&str> = table().into_iter().map(|spec| spec.context).collect();
+        contexts.sort_unstable();
+        contexts.dedup();
+        for context in contexts {
+            let answers = [
+                TEXT_INPUT_HOST_CONTEXTS,
+                EDITOR_YIELDING_CONTEXTS,
+                NO_LIVE_EDITOR_CONTEXTS,
+            ]
+            .into_iter()
+            .filter(|list| list.contains(&context))
+            .count();
+            assert_eq!(
+                answers, 1,
+                "`{context}` must say exactly once whether it can wrap a live `TextInput`: \
+                 a host binds no bare printable key, a yielding context leaves the chain while \
+                 an editor edits, and anything else declares that it never wraps one"
+            );
         }
     }
 }

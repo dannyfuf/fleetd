@@ -68,12 +68,27 @@
     `input/{handlers,pointer,geometry,chrome}.rs` (all under 900 lines); ADR 0019 written and
     indexed. Resting settings/board-settings text rows are `FactRow`s per DESIGN-SYSTEM §6.4.
 - [ ] P3-T08 — Drive typing, selection and undo in the harness
-- [ ] P3-T10 — Fix the phase-review findings (banner keys shadow inputs; mouse focus vs field marker; shared hub-filter predicate)
+- [x] P3-T10 — Fix the phase-review findings (banner keys shadow inputs; mouse focus vs field marker; shared hub-filter predicate)
   - added 2026-09-19 from the P3-T07 review: P0 `Daemon > Banner` binds bare `r`/`l` innermost on
     every chain so those letters cannot be typed while the banner is up; P1 clicking a second
     input in card create/context/hooks lets `reconcile_focus` yank the caret back because the
     dialog's field marker only follows keyboard focus; P2 `hub_filter_owns_keys` and the bar's
     mount predicate are two functions.
+  - verified: `cargo test -p fleet-app -p fleet-ui-kit` (1239 passed), `make lint`, `make harness`
+    59 of 59 (agent run `20260919-215322` and an independent run). Correction to the premise: the
+    chain returns early for every overlay and the board filter, so only the native-agent composer
+    was ever wrapped by the banner; `Daemon > Banner` now leaves the chain while a base-screen
+    editor owns keys, every key context must be classified against a live input in a keymap
+    test, `TextInputEvent::Focused` mirrors mouse focus into the dialog field markers, and the
+    Hub/board filter predicates live once on `AppState`.
+- [ ] P3-T11 — Kit review follow-ups from the late reviewer
+  - added 2026-09-19: `docs/research/agents-contracts.md` still lists the deleted
+    `multiline_input/{buffer,element,platform}.rs` and `MultilineBuffer` as the shipped API (docs
+    authoritative rule); `input/actions.rs` doc comments spell `shift-alt-`/`shift-cmd-` where the
+    bindings and KEYMAP say `alt-shift-`/`cmd-shift-`; `element.rs` prepaint clones every logical
+    line's `Arc` and `selection_quads` allocates per line per frame (slice to the viewport);
+    `Focused` is only observable after the first paint (document or emit on registration);
+    `gallery_input.rs` builds and discards palette sections in `cursor_len`.
 - [x] P3-T09 — Soft-wrap the multi-line mode of `TextInput`
   - verified: `cargo test -p fleet-ui-kit` (395 passed), `cargo build --example gallery_input`,
     `cargo fmt --check` and kit clippy `-D warnings` passed. Vertical motion and `home`/`end` stay
@@ -151,6 +166,10 @@
 
 ## Follow-ups
 (Things discovered mid-flight that are out of scope for this plan. Each gets a one-line description.)
+
+- The first harness scenario after a fresh build (`agent-approval`, or `unread-mark`/`prefix-inside-a-thread`
+  on a `shot`) misses the frame-settle deadline about one run in three and passes solo and on rerun;
+  consider a warm-up step in the runner before the first scenario.
 
 - From the P3-T07 review, not fixed in this phase: `keymap.rs` (1775 lines) and `shell/root/tests.rs`
   (1022) exceed the 900-line guideline; lazygit binds the kit's editor rows outside its `key_table!`

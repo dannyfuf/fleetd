@@ -478,6 +478,24 @@ fn pointer_drag_and_double_click_select_text(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
+fn a_click_on_a_blurred_input_emits_focused(cx: &mut gpui::TestAppContext) {
+    let (mut visual, input, events, _, parent_focus) =
+        hosted(cx, InputMode::SingleLine, "alpha beta", |_, _| {});
+    let caret = input.read_with(&visual, |input, _| point_for_offset(input, "alpha".len()));
+    visual.update(|window, cx| parent_focus.focus(window, cx));
+    visual.run_until_parked();
+    events.borrow_mut().clear();
+
+    visual.simulate_mouse_down(caret, MouseButton::Left, Modifiers::none());
+    visual.run_until_parked();
+
+    input.read_with(&visual, |input, _| {
+        assert_eq!(input.buffer().caret(), "alpha".len());
+    });
+    assert_eq!(events.borrow().as_slice(), &[TextInputEvent::Focused]);
+}
+
+#[gpui::test]
 fn losing_focus_emits_blurred(cx: &mut gpui::TestAppContext) {
     let (mut visual, input, events, _, _) = hosted(cx, InputMode::SingleLine, "value", |_, _| {});
     visual.update(|window, cx| {

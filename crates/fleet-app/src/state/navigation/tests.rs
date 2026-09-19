@@ -202,6 +202,85 @@ fn context_chain_follows_the_screen_the_overlay_and_the_daemon() {
     assert_eq!(state.context_chain(), vec!["Daemon", "Down"]);
 }
 
+/// Key ownership (`docs/APP-CONTRACTS.md` §3): the banner binds bare `r` and `l`, so it may
+/// never be an ancestor of a live editor — those two letters have to type.
+#[test]
+fn the_daemon_banner_leaves_the_chain_while_an_editor_owns_the_keyboard() {
+    let mut state = AppState::new("/tmp/fleet-banner-ownership", Instant::now());
+    state.daemon = DaemonLink::Lost {
+        attempt: 1,
+        dismissed: false,
+        reason: DaemonLossReason::ConnectionLost,
+    };
+    assert_eq!(
+        state.context_chain(),
+        vec!["Hub", "Worktrees", "Daemon", "Banner"],
+        "a browsing surface keeps the banner's r / l / Esc"
+    );
+
+    // §3.10 on the board: the filter input owns the keyboard, so nothing may shadow letters.
+    state.screen = Screen::Hub { tab: HubTab::Board };
+    state.board.filter_editing = true;
+    assert_eq!(state.context_chain(), vec!["Filter", "BoardFilter"]);
+    state.board.filter_editing = false;
+    assert_eq!(
+        state.context_chain(),
+        vec!["Hub", "Board", "Daemon", "Banner"],
+        "leaving the filter hands the banner's keys straight back"
+    );
+
+    // §3.10's Hub filter and every dialog or palette editor publish their own chain, which the
+    // banner is never appended to either.
+    state.screen = Screen::Hub {
+        tab: HubTab::Worktrees,
+    };
+    state.filter.editing = true;
+    state.open_overlay(Overlay::Filter);
+    assert!(state.hub_filter_owns_keys());
+    assert_eq!(state.context_chain(), vec!["Filter"]);
+    state.open_overlay(Overlay::Palette);
+    assert_eq!(state.context_chain(), vec!["Palette"]);
+    state.open_overlay(Overlay::Dialog(Dialogs::CardCreate));
+    assert_eq!(state.context_chain(), vec!["Dialog", "CardCreate"]);
+}
+
+/// §3.10's Hub filter editor is mounted by `screens::hub::composition` and focused by
+/// `shell::root::focus`; one predicate answers both, or the keyboard goes to an editor that is
+/// not on screen.
+#[test]
+fn the_hub_filter_owns_keys_only_where_its_editor_is_mounted() {
+    let mut state = AppState::new("/tmp/fleet-hub-filter-owner", Instant::now());
+    state.daemon = DaemonLink::Connected;
+    state.filter.editing = true;
+    state.open_overlay(Overlay::Filter);
+    for tab in [HubTab::Worktrees, HubTab::Prs] {
+        state.screen = Screen::Hub { tab };
+        assert!(state.hub_filter_owns_keys(), "{tab:?} mounts the editor");
+    }
+
+    // The board replaces the Hub's panes with its own body and its own filter (BOARD §8).
+    state.screen = Screen::Hub { tab: HubTab::Board };
+    assert!(!state.hub_filter_owns_keys());
+    state.screen = Screen::Hub {
+        tab: HubTab::Worktrees,
+    };
+
+    // §3.12's splash and doctor report, and §3.13's first-run card, each replace the body.
+    state.daemon = DaemonLink::Starting;
+    assert!(state.shows_daemon_splash());
+    assert!(!state.hub_filter_owns_keys());
+    state.daemon = DaemonLink::Connected;
+    assert!(state.hub_filter_owns_keys());
+
+    state.doctor = Some(Default::default());
+    assert!(!state.hub_filter_owns_keys());
+    state.doctor = None;
+
+    // Leaving the input, whichever stage of `Esc` did it, gives the keys back to the list.
+    state.filter.editing = false;
+    assert!(!state.hub_filter_owns_keys());
+}
+
 #[test]
 fn a_dialog_uses_only_the_derived_editing_word() {
     let mut state = AppState::new("/tmp/fleet-dialog-context", Instant::now());

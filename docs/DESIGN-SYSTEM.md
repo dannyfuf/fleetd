@@ -758,8 +758,12 @@ palette's 44 px query row), `set_read_only(bool, cx)`, `set_invalid(option, cx)`
 `submit(cx)`, plus `move_vertical(down, select, cx) -> bool` for owners that route a claimed
 vertical key back into the editor. `InputMode::{SingleLine, Multiline { min_rows, max_rows }}` selects behavior.
 The filter is `Option<fn(char) -> bool>` and applies only to user insertion and paste.
-**Events.** `TextInputEvent::{Changed, Submitted, Blurred}`. `Submitted` is emitted only when a
-single-line owner explicitly calls `submit`; the input does not consume `Enter` itself.
+**Events.** `TextInputEvent::{Changed, Submitted, Focused, Blurred}`. `Submitted` is emitted only
+when a single-line owner explicitly calls `submit`; the input does not consume `Enter` itself.
+`Focused` and `Blurred` report the editor's own focus handle, including the focus a click on the
+value takes for itself. A surface with more than one editor must mirror `Focused` into whatever
+marker it uses to remember which editor owns the keyboard, or a click and that marker disagree and
+the next focus reconciliation moves the caret back to the marked field.
 **Actions.** `text_input::{MoveLeft, MoveRight, MoveWordLeft, MoveWordRight, MoveToLineStart,
 MoveToLineEnd, MoveToRowStart, MoveToRowEnd, MoveUp, MoveDown, MoveToStart, MoveToEnd, SelectLeft, SelectRight,
 SelectWordLeft, SelectWordRight, SelectToLineStart, SelectToLineEnd, SelectToRowStart,

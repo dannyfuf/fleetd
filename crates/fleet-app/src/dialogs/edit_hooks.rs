@@ -99,15 +99,41 @@ fn watch_row(
     cx: &mut App,
 ) -> gpui::Subscription {
     let weak_state = state.downgrade();
-    cx.subscribe(input, move |_, event, cx| {
-        if !matches!(event, TextInputEvent::Changed) {
-            return;
-        }
+    cx.subscribe(input, move |input, event, cx| {
         let Some(state) = weak_state.upgrade() else {
             return;
         };
+        if matches!(event, TextInputEvent::Focused) {
+            claim_row(&state, &input, cx);
+            return;
+        }
+        if !matches!(event, TextInputEvent::Changed) {
+            return;
+        }
         append_blank_rows(&state, cx);
     })
+}
+
+/// Mirrors the row that just took focus into the marker the shell reconciles against.
+///
+/// `dialogs::focused_input` names the editor from `field`, and a click focuses a row without
+/// asking the dialog, so without this the next `AppState` notify would move the caret back.
+/// Rows are inserted as the list grows, so the index is resolved at event time.
+fn claim_row(state: &Entity<AppState>, input: &Entity<TextInput>, cx: &mut App) {
+    let Some(changed) = with_host(state, cx, |host| {
+        let index = host
+            .hook_inputs
+            .iter()
+            .position(|row| row.entity_id() == input.entity_id())?;
+        let changed = host.edit_hooks.field != index;
+        host.edit_hooks.field = index;
+        Some(changed)
+    }) else {
+        return;
+    };
+    if changed {
+        notify(state, cx);
+    }
 }
 
 /// Restores the "one trailing blank row per section" rule after an edit.

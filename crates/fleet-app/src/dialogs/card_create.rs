@@ -84,7 +84,14 @@ pub(crate) fn seed(state: &Entity<AppState>, cx: &mut App) {
     });
     let host = crate::dialogs::host::host_for(state, cx);
     let weak_host = host.downgrade();
+    let weak_state = state.downgrade();
     let title_subscription = cx.subscribe(&title, move |input, event, cx| {
+        if matches!(event, TextInputEvent::Focused) {
+            if let Some(state) = weak_state.upgrade() {
+                claim_field(&state, Field::Title, cx);
+            }
+            return;
+        }
         if !matches!(event, TextInputEvent::Changed) {
             return;
         }
@@ -101,7 +108,14 @@ pub(crate) fn seed(state: &Entity<AppState>, cx: &mut App) {
         }
     });
     let weak_host = host.downgrade();
+    let weak_state = state.downgrade();
     let description_subscription = cx.subscribe(&description, move |_, event, cx| {
+        if matches!(event, TextInputEvent::Focused) {
+            if let Some(state) = weak_state.upgrade() {
+                claim_field(&state, Field::Description, cx);
+            }
+            return;
+        }
         if matches!(event, TextInputEvent::Changed)
             && let Some(host) = weak_host.upgrade()
         {
@@ -130,7 +144,7 @@ pub(crate) fn render(
     bridge: &Bridge,
     focus: &FocusHandle,
     _host: &Entity<DialogHost>,
-    window: &mut Window,
+    _window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
     let gap = cx.theme().space.md;
@@ -144,11 +158,9 @@ pub(crate) fn render(
     let (Some(title), Some(description)) = (title, description) else {
         return root(focus).into_any_element();
     };
-    let field = if description.read(cx).focus_handle().is_focused(window) {
-        Field::Description
-    } else {
-        draft.field
-    };
+    // The marker mirrors focus (`claim_field`), so it is the one answer to "which field owns
+    // the keyboard" — the hint row and the shell's reconciliation read the same value.
+    let field = draft.field;
     let board_name = state
         .read(cx)
         .board()
@@ -226,6 +238,22 @@ pub(crate) fn render(
         })
         .child(card)
         .into_any_element()
+}
+
+/// Mirrors the editor that just took focus into the marker the shell reconciles against.
+///
+/// The field marker is what `dialogs::focused_input` names, and a click focuses an editor
+/// without asking this dialog, so without this the next `AppState` notify would move the caret
+/// back to the marked field.
+fn claim_field(state: &Entity<AppState>, field: Field, cx: &mut App) {
+    let changed = with_host(state, cx, |host| {
+        let changed = host.card_create.field != field;
+        host.card_create.field = field;
+        changed
+    });
+    if changed {
+        notify(state, cx);
+    }
 }
 
 /// `Tab` / `S-Tab`: two fields, so both keys do the same thing.

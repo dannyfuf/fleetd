@@ -332,7 +332,7 @@ impl Element for TextInputElement {
             );
         }
         self.input
-            .update(cx, |input, cx| input.ensure_blur_subscription(window, cx));
+            .update(cx, |input, cx| input.ensure_focus_subscriptions(window, cx));
 
         let line_height = window.line_height();
         let horizontal_scroll = prepaint.horizontal_scroll;

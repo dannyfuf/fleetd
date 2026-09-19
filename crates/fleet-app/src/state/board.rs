@@ -279,7 +279,7 @@ impl AppState {
 
     /// Whether the board's filter input, rather than the board itself, owns the keyboard.
     #[must_use]
-    pub(super) fn board_filter_owns_keys(&self) -> bool {
+    pub(crate) fn board_filter_owns_keys(&self) -> bool {
         self.overlay.is_none()
             && self.agent_popup.is_none()
             && matches!(self.screen, Screen::Hub { tab: HubTab::Board })

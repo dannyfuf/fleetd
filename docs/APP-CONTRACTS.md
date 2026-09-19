@@ -182,7 +182,7 @@ is always `Fleet`.
 | Filter / Palette / Jobs | `Fleet > Filter` (`> BoardFilter` on the board) \| `Palette` \| `Jobs`, then the focused editor's `FleetTextInput` context for the first two |
 | Dialog browsing | `Fleet > Dialog > CardDetail` \| `BoardSettings` \| `CardPicker` \| `Settings` \| `Create` (or the dialog's other stable name) |
 | Dialog text editing | `Fleet > Dialog > CardDetailEditing` \| `BoardSettingsEditing` \| `SettingsEditing` \| `CreateEditing`, then the focused component's `FleetTextInput` context |
-| Daemon banner showing (§3.12 C) | the base chain **plus** `Daemon > Banner`, innermost |
+| Daemon banner showing (§3.12 C) | the base chain **plus** `Daemon > Banner`, innermost — unless a live editor owns the keyboard on that base chain, when the word is absent |
 | fleetd will not start (§3.12 B) | `Fleet > Daemon > Down` |
 | First run (§3.13) | `Fleet > FirstRun` |
 
@@ -195,13 +195,22 @@ Two consequences worth knowing:
   focus reconciliation hands the keyboard to that editor, and the container keys the editor does
   not own (`ctrl-n` / `ctrl-p`, `Enter`) are listeners on the Hub body; `Esc` is the shell's,
   and it names `body_focus` explicitly because the editor is *inside* that handle's subtree.
+  "Is that editor mounted" and "does it own the keyboard" are the same question, so the Hub's
+  composition and the shell's focus reconciliation both call `AppState::hub_filter_owns_keys()`
+  rather than each testing their own fields; two predicates that drift apart mount an editor
+  nothing focuses, or focus one nothing mounted, and either way the keyboard dies.
 * **Except for the card picker, a browsing word never remains in the chain while that dialog is
   editing text.** Bare-letter and caret-collision rows live only on `CardDetail`, `BoardSettings`,
   `Settings` and `Create`; their `*Editing` partners carry only container actions such as confirm, cancel,
   field/list navigation, save and palette entry. `DialogHost` owns the real draft predicate and
   mirrors only its derived word into `AppState`, so `context_chain()` remains authoritative:
   card detail uses `edit.is_some()`, board settings uses whether its focused row has a text
-  buffer, settings uses `editing.is_some()`, and create-worktree uses `field == Branch`. A live
+  buffer, settings uses `editing.is_some()`, and create-worktree uses `field == Branch`. A
+  dialog with more than one editor also names the one that owns the keyboard — new card,
+  new/edit context, repository hooks — and that marker is a **mirror** of focus, not a second
+  opinion about it: each such dialog subscribes to `TextInputEvent::Focused` and writes the
+  field a click landed on, because a pointer focuses an editor without asking the dialog and the
+  next reconciliation would otherwise pull the caret back. A live
   input then appends `FleetTextInput`; its
   `mode` attribute is `single_line` or `multiline`, and only the latter satisfies
   `FleetTextInput && mode == multiline` for `Enter`. `CardPicker` is the documented exception: its
@@ -223,7 +232,12 @@ Two consequences worth knowing:
   duplicate, so the pane's colliding namespaces are `lg_confirm` and `lg_help`.
 * While the §3.12 C banner is undismissed it is the **innermost** context, so `r`, `l` and
   `Esc` belong to it, exactly as `KEYMAP.md` says. `Esc` dismisses the banner and hands those
-  keys straight back.
+  keys straight back. The banner is a container with two bare letters, so the ownership rule
+  above applies to it as it does to a dialog's browsing word: `context_chain()` does not append
+  `Daemon > Banner` while a live editor owns the keyboard on that base chain, which today means
+  §3.10's board filter and §12's agent composer — every other editor sits under an overlay that
+  publishes its own chain and never reaches the append. The whole word leaves, `Esc` with it;
+  the banner stays dismissible from every surface that is not typing.
 
 The floating agent is persistent state beside the ordinary `overlay` slot, not another member of
 that mutually-exclusive enum. When it is topmost, `Agent` owns focus and the Hub/Workspace remains

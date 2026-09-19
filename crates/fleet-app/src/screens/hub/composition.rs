@@ -158,13 +158,12 @@ impl HubScreen {
 
         let rail = repos_rail::render(
             RailProps {
-                header_override: (state.filter.editing && state.hub_pane == HubPane::Repos).then(
-                    || {
+                header_override: (state.hub_filter_owns_keys() && state.hub_pane == HubPane::Repos)
+                    .then(|| {
                         dialogs::filter::bar(state, self.filter_input.clone())
                             .harness_target("filter.input")
                             .into_any_element()
-                    },
-                ),
+                    }),
                 rows: model.rail.clone(),
                 cursor: state.cursors.repos,
                 focused: state.hub_pane == HubPane::Repos,
@@ -193,7 +192,8 @@ impl HubScreen {
                 tab: HubTab::Worktrees,
             } => worktrees_list::render(
                 ListProps {
-                    header_override: (state.filter.editing && state.hub_pane == HubPane::List)
+                    header_override: (state.hub_filter_owns_keys()
+                        && state.hub_pane == HubPane::List)
                         .then(|| {
                             dialogs::filter::bar(state, self.filter_input.clone())
                                 .harness_target("filter.input")
@@ -220,7 +220,8 @@ impl HubScreen {
                 let cache_matches_scope = hub.prs.matches(&cache_key);
                 prs_screen::render(
                     PrScreenProps {
-                        header_override: (state.filter.editing && state.hub_pane == HubPane::List)
+                        header_override: (state.hub_filter_owns_keys()
+                            && state.hub_pane == HubPane::List)
                             .then(|| {
                                 dialogs::filter::bar(state, self.filter_input.clone())
                                     .harness_target("filter.input")

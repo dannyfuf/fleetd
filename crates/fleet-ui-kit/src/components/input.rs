@@ -49,6 +49,12 @@ pub enum TextInputEvent {
     Changed,
     /// A single-line owner explicitly submitted the value through [`TextInput::submit`].
     Submitted,
+    /// The component's focus handle gained focus, including from a click on the value.
+    ///
+    /// A surface that remembers *which* of its editors owns the keyboard must mirror this
+    /// event into that marker, or a pointer-driven focus change and the marker disagree and
+    /// the next focus reconciliation moves the caret back.
+    Focused,
     /// The component's focus handle lost focus.
     Blurred,
 }
@@ -77,7 +83,7 @@ pub struct TextInput {
     drag_anchor: Option<usize>,
     vertical_goal_x: Option<gpui::Pixels>,
     composition_group_open: bool,
-    blur_subscription: Option<Subscription>,
+    focus_subscriptions: Option<[Subscription; 2]>,
     #[cfg(test)]
     last_selection_quad_count: usize,
 }
@@ -109,7 +115,7 @@ impl TextInput {
             drag_anchor: None,
             vertical_goal_x: None,
             composition_group_open: false,
-            blur_subscription: None,
+            focus_subscriptions: None,
             #[cfg(test)]
             last_selection_quad_count: 0,
         }
@@ -400,20 +406,34 @@ impl TextInput {
         y + self.line_height >= self.content_height()
     }
 
-    pub(super) fn ensure_blur_subscription(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.blur_subscription.is_none() {
-            let focus = self.focus_handle.clone();
-            self.blur_subscription = Some(cx.on_blur(&focus, window, |input, _window, cx| {
-                let was_composing = input.buffer.marked_range().is_some();
-                input.buffer.unmark();
-                input.finish_composition();
-                if was_composing {
-                    input.line_cache.clear();
-                    cx.notify();
-                }
-                cx.emit(TextInputEvent::Blurred);
-            }));
+    /// Registers the focus and blur listeners the entity reports [`TextInputEvent`] from.
+    ///
+    /// Both are registered from the painted element, because the handle only joins the focus
+    /// tree once the element exists. `on_focus` is what makes a click on the value visible to
+    /// the surface that remembers which of its editors owns the keyboard.
+    pub(super) fn ensure_focus_subscriptions(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.focus_subscriptions.is_some() {
+            return;
         }
+        let focus = self.focus_handle.clone();
+        let focused = cx.on_focus(&focus, window, |_input, _window, cx| {
+            cx.emit(TextInputEvent::Focused);
+        });
+        let blurred = cx.on_blur(&focus, window, |input, _window, cx| {
+            let was_composing = input.buffer.marked_range().is_some();
+            input.buffer.unmark();
+            input.finish_composition();
+            if was_composing {
+                input.line_cache.clear();
+                cx.notify();
+            }
+            cx.emit(TextInputEvent::Blurred);
+        });
+        self.focus_subscriptions = Some([focused, blurred]);
     }
 
     fn finish_composition(&mut self) {

@@ -182,12 +182,16 @@ pub(crate) fn seed(state: &Entity<AppState>, cx: &mut App, editing: bool) {
         {
             let weak_state = state.downgrade();
             cx.subscribe(&name, move |input, event, cx| {
-                if !matches!(event, TextInputEvent::Changed) {
-                    return;
-                }
                 let Some(state) = weak_state.upgrade() else {
                     return;
                 };
+                if matches!(event, TextInputEvent::Focused) {
+                    claim_field(&state, Field::Name, cx);
+                    return;
+                }
+                if !matches!(event, TextInputEvent::Changed) {
+                    return;
+                }
                 let typed = input.read(cx).text().to_owned();
                 with_host(&state, cx, |host| host.context.name = typed);
                 sync_name_status(&state, cx);
@@ -197,12 +201,16 @@ pub(crate) fn seed(state: &Entity<AppState>, cx: &mut App, editing: bool) {
         {
             let weak_state = state.downgrade();
             cx.subscribe(&owners, move |input, event, cx| {
-                if !matches!(event, TextInputEvent::Changed) {
-                    return;
-                }
                 let Some(state) = weak_state.upgrade() else {
                     return;
                 };
+                if matches!(event, TextInputEvent::Focused) {
+                    claim_field(&state, Field::Owners, cx);
+                    return;
+                }
+                if !matches!(event, TextInputEvent::Changed) {
+                    return;
+                }
                 let typed = input.read(cx).text().to_owned();
                 with_host(&state, cx, |host| host.context.owners = typed);
                 notify(&state, cx);
@@ -213,6 +221,21 @@ pub(crate) fn seed(state: &Entity<AppState>, cx: &mut App, editing: bool) {
         host.context_input_subscriptions = subscriptions
     });
     sync_name_status(state, cx);
+}
+
+/// Mirrors the editor that just took focus into the marker the shell reconciles against.
+///
+/// `dialogs::focused_input` names the editor from this marker, and a click focuses one without
+/// asking the dialog, so without this the next `AppState` notify would move the caret back.
+fn claim_field(state: &Entity<AppState>, field: Field, cx: &mut App) {
+    let changed = with_host(state, cx, |host| {
+        let changed = host.context.field != field;
+        host.context.field = field;
+        changed
+    });
+    if changed {
+        notify(state, cx);
+    }
 }
 
 /// Publishes §3.8.4's collision message, or the id the typed name would produce, on the name

@@ -493,6 +493,10 @@ fn root_input_fixture(cx: &mut gpui::TestAppContext, name: &str) -> RootInputFix
         shell
     });
     let mut visual = VisualTestContext::from_window(window.into(), cx);
+    // gpui derives its focus events from the *rendered* frame and reports an inactive window
+    // as having no focus path at all, so an unactivated test window emits neither `Focused`
+    // nor `Blurred`. A window a user is typing and clicking in is active.
+    visual.update(|window, _| window.activate_window());
     visual.update(|window, cx| window.draw(cx).clear(cx));
     visual.run_until_parked();
     let focus_owner_keys = focus_owner_keys.unwrap();
@@ -574,6 +578,116 @@ fn dialog_input_text(fixture: &mut RootInputFixture) -> String {
     fixture
         .visual
         .update(|_, cx| crate::dialogs::focused_input_text(&fixture.state, cx).unwrap())
+}
+
+/// Clicks the painted `dialog.field[index]`, the way a pointer reaches a field no key moved to.
+///
+/// `docs/TESTING-HARNESS.md` §3 is what names the rect, so this is the same address a scenario
+/// clicks rather than a guessed pixel.
+fn click_dialog_field(fixture: &mut RootInputFixture, index: usize) {
+    fleet_ui_kit::harness::set_recording(true);
+    fixture
+        .visual
+        .update(|window, cx| window.draw(cx).clear(cx));
+    let name = format!("dialog.field[{index}]");
+    let rect = fixture
+        .visual
+        .update(|window, _| fleet_ui_kit::harness::painted(window))
+        .into_iter()
+        .rev()
+        .find(|target| target.name == name)
+        .unwrap_or_else(|| panic!("{name} was not painted"))
+        .rect;
+    fleet_ui_kit::harness::set_recording(false);
+    let position = gpui::point(
+        gpui::px(rect.x + rect.w / 2.0),
+        gpui::px(rect.y + rect.h / 2.0),
+    );
+    fixture
+        .visual
+        .simulate_mouse_down(position, gpui::MouseButton::Left, gpui::Modifiers::none());
+    settle(fixture);
+}
+
+/// A state change the click had nothing to do with, which runs `reconcile_focus` again.
+fn notify_state(fixture: &mut RootInputFixture) {
+    let state = fixture.state.clone();
+    fixture
+        .visual
+        .update(|_, cx| state.update(cx, |_, cx| cx.notify()));
+    settle(fixture);
+}
+
+/// A dialog's field marker must be a *mirror* of focus, not a second opinion about it.
+///
+/// `dialogs::focused_input` names the editor the shell keeps focused from that marker, and a
+/// click focuses an editor without asking the dialog; before `TextInputEvent::Focused` existed
+/// the next `AppState` notify pulled the caret back to the field the keyboard had left.
+#[track_caller]
+fn assert_click_moves_the_field_marker(
+    fixture: &mut RootInputFixture,
+    index: usize,
+    typed: &str,
+    expected: &str,
+) {
+    let clicked = fixture
+        .visual
+        .update(|_, cx| crate::dialogs::focused_input(&fixture.state, cx));
+    click_dialog_field(fixture, index);
+    let after_click = fixture
+        .visual
+        .update(|_, cx| crate::dialogs::focused_input(&fixture.state, cx));
+    assert_ne!(
+        clicked, after_click,
+        "the click must move the marker to the field it landed on"
+    );
+
+    notify_state(fixture);
+    assert_dialog_input_focused(fixture);
+    fixture.visual.simulate_input(typed);
+    settle(fixture);
+    assert_eq!(dialog_input_text(fixture), expected);
+}
+
+#[gpui::test]
+fn real_shell_card_create_description_keeps_focus_after_a_click(cx: &mut gpui::TestAppContext) {
+    let mut fixture = root_input_fixture(cx, "card-create-click");
+
+    dispatch_root_key(&mut fixture, "c");
+    assert_dialog_input_focused(&mut fixture);
+    assert_click_moves_the_field_marker(&mut fixture, 1, "a description", "a description");
+}
+
+#[gpui::test]
+fn real_shell_context_owners_keep_focus_after_a_click(cx: &mut gpui::TestAppContext) {
+    let mut fixture = root_input_fixture(cx, "context-click");
+
+    dispatch_root_key(&mut fixture, "N");
+    assert_dialog_input_focused(&mut fixture);
+    assert_click_moves_the_field_marker(&mut fixture, 1, "bukhr", "bukhr");
+}
+
+#[gpui::test]
+fn real_shell_hook_row_keeps_focus_after_a_click(cx: &mut gpui::TestAppContext) {
+    let mut fixture = root_input_fixture(cx, "hooks-click");
+    let state = fixture.state.clone();
+    fixture.visual.update(|_, cx| {
+        state.update(cx, |app, cx| {
+            app.open_overlay(Overlay::Dialog(Dialogs::EditHooks));
+            cx.notify();
+        });
+    });
+    settle(&mut fixture);
+    assert_dialog_input_focused(&mut fixture);
+
+    // The editor opens with one blank prepare row and one blank post-create row.
+    assert_eq!(
+        fixture
+            .visual
+            .update(|_, cx| crate::dialogs::hook_row_count(&fixture.state, cx)),
+        2
+    );
+    assert_click_moves_the_field_marker(&mut fixture, 1, "cargo test", "cargo test");
 }
 
 #[gpui::test]

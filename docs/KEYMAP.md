@@ -581,6 +581,10 @@ The doctor report replaces the whole context chain, so it repeats the recovery k
 surface it was raised from — B, C, or Settings §3.8.6 About, where the daemon is healthy and
 `r` only closes the report.
 
+Case C's banner is a container, and `r` and `l` are bare letters, so it obeys the key-ownership
+rule above: `Daemon > Banner` leaves the chain entirely — `Esc` with it — while a live input owns
+the keyboard, and comes straight back when the keyboard returns to a surface that is not typing.
+
 Case A (cold start) binds nothing: fleetd is auto-spawned. While disconnected, read-only keys
 (`j` / `k`, `y`, `b`, `/`, `i`, `:`) keep working; mutating keys flash the banner. Keys typed
 into a veiled terminal grid are dropped, not buffered.
