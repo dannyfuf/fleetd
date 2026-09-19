@@ -52,6 +52,8 @@
   - verified: `cargo test -p fleet-core board` passed (118 selected); `make lint` passed.
 - [x] P1-T15 — Restore worktree boards with worktree trash entries
   - verified: `cargo test -p fleet-daemon --test boards_service` passed (61 tests, including delete/restore with cards); `make lint` passed.
+- [x] P1-T16 — Gate worktree-board requests in the typed client
+  - verified: `cargo test -p fleet-client` passed (33 library and 22 integration tests); `make lint` passed.
 
 ## Notes / decisions log
 (Append-only. Date-stamp entries. Capture anything that surprised you or that future-you will want.)
@@ -74,3 +76,5 @@
   `Native` after detaching the caller, and another run leaked an `AgentThreadView` handle on quit.
 - Stabilize `github_service::concurrent_misses_share_fetch`, which observed two fetches under the
   loaded workspace run but passed immediately when rerun alone.
+- Rename tracker-only commits `5f3e22c` and `d063119` from `tests:` to `docs:` if a later integration
+  step permits history rewriting; this fix stage explicitly forbids amend and rebase.

@@ -22,7 +22,6 @@ use fleet_core::{
 use fleet_proto::{
     error::{ErrorKind, ProtoError},
     job::{JobRecord, JobStatus},
-    response::BOARD_WORKTREE_CAPABILITY,
     snapshot::Snapshot,
 };
 use std::time::Duration;
@@ -149,7 +148,6 @@ async fn create(
     let backend = arguments.backend.map(|kind| BackendRef { kind, settings });
     let view = match worktree {
         Some(worktree) => {
-            require_worktree_capability(client)?;
             client
                 .create_worktree_board(
                     resolve_worktree(client, worktree).await?,
@@ -264,7 +262,6 @@ async fn resolve_board(
         return client.get_board(board).await;
     }
     if let Some(worktree) = worktree {
-        require_worktree_capability(client)?;
         return client
             .ensure_worktree_board(resolve_worktree(client, worktree).await?)
             .await;
@@ -272,16 +269,6 @@ async fn resolve_board(
     client
         .ensure_board(resolve_context(client, context).await?)
         .await
-}
-
-fn require_worktree_capability(client: &Client) -> Result<(), ProtoError> {
-    if client.supports_capability(BOARD_WORKTREE_CAPABILITY) {
-        Ok(())
-    } else {
-        Err(validation(
-            "this daemon does not support worktree boards; run `fleet daemon restart`",
-        ))
-    }
 }
 
 async fn resolve_worktree(

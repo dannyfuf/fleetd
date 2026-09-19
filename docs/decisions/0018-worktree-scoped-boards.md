@@ -32,8 +32,8 @@ protocol bump would force local and remote daemons to upgrade together for an op
   the worktree applies to its board too. The weak observer avoids an object-graph cycle; a cascade
   failure is warned and swallowed because the successful worktree move cannot be rolled back.
 - `EnsureWorktreeBoard` and `CreateWorktreeBoard` are additive requests advertised by the
-  `board.worktree` capability. `PROTOCOL_VERSION` remains 8. Consumers check the capability before
-  sending either request.
+  `board.worktree` capability. `PROTOCOL_VERSION` remains 8. The typed client checks the capability
+  before sending either request, so every consumer inherits the guard.
 - `fleet board --worktree [<owner/name#slug>]` selects the scoped board. A bare flag resolves the
   current `FLEET_SESSION`; commands without it keep selecting the context board as before.
 

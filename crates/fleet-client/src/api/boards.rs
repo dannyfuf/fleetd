@@ -8,7 +8,11 @@ use fleet_core::{
     ids::{BoardId, CardId, ContextId, HostId, JobId, RepoId, StatusId, WorktreeId},
     model::Worktree,
 };
-use fleet_proto::{request::RequestBody, response::ResponseBody};
+use fleet_proto::{
+    error::{ErrorKind, ProtoError},
+    request::RequestBody,
+    response::{BOARD_WORKTREE_CAPABILITY, ResponseBody},
+};
 
 impl Client {
     /// Lists the boards in one context, or in every context.
@@ -40,6 +44,7 @@ impl Client {
 
     /// Returns a worktree's board, creating it when the worktree has none.
     pub async fn ensure_worktree_board(&self, worktree_id: WorktreeId) -> Result<BoardView> {
+        self.require_worktree_board_capability()?;
         match self
             .request(RequestBody::EnsureWorktreeBoard { worktree_id })
             .await?
@@ -79,6 +84,7 @@ impl Client {
         prefix: Option<String>,
         backend: Option<BackendRef>,
     ) -> Result<BoardView> {
+        self.require_worktree_board_capability()?;
         match self
             .request(RequestBody::CreateWorktreeBoard {
                 worktree_id,
@@ -90,6 +96,18 @@ impl Client {
         {
             ResponseBody::Board(value) => Ok(value),
             response => Err(unexpected("create_worktree_board", response)),
+        }
+    }
+
+    fn require_worktree_board_capability(&self) -> Result<()> {
+        if self.supports_capability(BOARD_WORKTREE_CAPABILITY) {
+            Ok(())
+        } else {
+            Err(ProtoError {
+                kind: ErrorKind::Validation,
+                message: "this daemon does not support worktree boards; run `fleet daemon restart`"
+                    .to_owned(),
+            })
         }
     }
 
