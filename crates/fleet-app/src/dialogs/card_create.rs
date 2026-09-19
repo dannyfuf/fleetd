@@ -13,9 +13,7 @@ use gpui::{AnyElement, App, Entity, FocusHandle, Window, div};
 use crate::{
     actions::{board as board_actions, dialog},
     bridge::Bridge,
-    dialogs::{
-        DialogHost, Dialogs, host::complete_request, notify, read_host, root, typed_char, with_host,
-    },
+    dialogs::{DialogHost, Dialogs, host::complete_request, notify, read_host, root, with_host},
     screens::board,
     state::AppState,
 };
@@ -39,17 +37,8 @@ pub(crate) struct CardCreateState {
     pub(super) saving: bool,
     /// Destination board.
     pub(super) board_id: Option<BoardId>,
-    /// Pending card fields.
-    pub(super) draft: CardDraft,
     /// Which field owns the keyboard.
     pub(super) field: Field,
-    /// Caret in `draft.title`, as a character offset.
-    pub(super) title_caret: usize,
-    /// Persistent description editor, including caret and preferred column.
-    pub(super) description_area: TextAreaState,
-    /// Pixel scroll of the description box, which owns what `scroll_row` cannot: how tall the
-    /// box made the lines it wrapped.
-    pub(super) description_scroll: gpui::ScrollHandle,
     /// The exact message from a refused create.
     pub(super) error: Option<String>,
 }
@@ -67,51 +56,71 @@ impl CardCreateState {
 
     /// Whether `Enter` may create: a card is its title, so a blank one is not a card.
     #[must_use]
-    pub(super) fn can_submit(&self) -> bool {
-        !self.saving && self.board_id.is_some() && !self.draft.title.trim().is_empty()
-    }
-
-    /// Runs `edit` against the focused buffer, keeping its caret in range.
-    fn edit(&mut self, edit: impl FnOnce(&mut TextAreaState)) {
-        if self.saving {
-            return;
-        }
-        if self.field == Field::Description {
-            edit(&mut self.description_area);
-            self.description_area.reveal_cursor(6);
-            self.draft.description = self.description_area.text().to_owned();
-            return;
-        }
-        let mut area = TextAreaState::from_text(self.draft.title.clone());
-        area.set_cursor(self.title_byte_cursor());
-        edit(&mut area);
-        // A title is one line even when pasted text contains newlines.
-        self.draft.title = area.text().replace('\n', " ");
-        self.title_caret = self.draft.title[..area.cursor().min(self.draft.title.len())]
-            .chars()
-            .count();
-    }
-
-    /// The title caret as a byte offset, which is what [`TextAreaState`] counts in.
-    #[must_use]
-    fn title_byte_cursor(&self) -> usize {
-        self.draft
-            .title
-            .char_indices()
-            .nth(self.title_caret)
-            .map_or(self.draft.title.len(), |(index, _)| index)
+    pub(super) fn can_submit(&self, title: &str) -> bool {
+        !self.saving && self.board_id.is_some() && !title.trim().is_empty()
     }
 }
 
 /// Opens an empty draft against the current board.
 pub(crate) fn seed(state: &Entity<AppState>, cx: &mut App) {
     let board_id = state.read(cx).board().map(|view| view.board.id.clone());
-    with_host(state, cx, |host| {
+    let title = cx.new(|cx| {
+        let mut input = TextInput::new(InputMode::SingleLine, cx);
+        input.set_label(Some("Title".into()), cx);
+        input.set_placeholder("Fix the login redirect", cx);
+        input
+    });
+    let description = cx.new(|cx| {
+        let mut input = TextInput::new(
+            InputMode::Multiline {
+                min_rows: 6,
+                max_rows: 6,
+            },
+            cx,
+        );
+        input.set_label(Some("Description".into()), cx);
+        input.set_placeholder("Markdown. Optional.", cx);
+        input
+    });
+    let host = crate::dialogs::host::host_for(state, cx);
+    let weak_host = host.downgrade();
+    let title_subscription = cx.subscribe(&title, move |input, event, cx| {
+        if !matches!(event, TextInputEvent::Changed) {
+            return;
+        }
+        let input = input.clone();
+        // `Changed` is emitted from inside the editor's own update. Clear validation on the next
+        // update turn so the subscriber never attempts to update the entity already on the stack.
+        cx.defer(move |cx| input.update(cx, |input, cx| input.set_invalid(None, cx)));
+        if let Some(host) = weak_host.upgrade() {
+            host.update(cx, |host, cx| {
+                if host.card_create.error.take().is_some() {
+                    cx.notify();
+                }
+            });
+        }
+    });
+    let weak_host = host.downgrade();
+    let description_subscription = cx.subscribe(&description, move |_, event, cx| {
+        if matches!(event, TextInputEvent::Changed)
+            && let Some(host) = weak_host.upgrade()
+        {
+            host.update(cx, |host, cx| {
+                if host.card_create.error.take().is_some() {
+                    cx.notify();
+                }
+            });
+        }
+    });
+    host.update(cx, |host, _| {
         host.card_create = CardCreateState {
             generation: host.card_create.generation.wrapping_add(1),
             board_id,
             ..Default::default()
-        }
+        };
+        host.card_create_title = Some(title);
+        host.card_create_description = Some(description);
+        host.card_create_input_subscriptions = vec![title_subscription, description_subscription];
     });
 }
 
@@ -121,11 +130,25 @@ pub(crate) fn render(
     bridge: &Bridge,
     focus: &FocusHandle,
     _host: &Entity<DialogHost>,
-    _window: &mut Window,
+    window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
     let gap = cx.theme().space.md;
-    let draft = read_host(state, cx, |host, _| host.card_create.clone());
+    let (draft, title, description) = read_host(state, cx, |host, _| {
+        (
+            host.card_create.clone(),
+            host.card_create_title.clone(),
+            host.card_create_description.clone(),
+        )
+    });
+    let (Some(title), Some(description)) = (title, description) else {
+        return root(focus).into_any_element();
+    };
+    let field = if description.read(cx).focus_handle().is_focused(window) {
+        Field::Description
+    } else {
+        draft.field
+    };
     let board_name = state
         .read(cx)
         .board()
@@ -135,27 +158,10 @@ pub(crate) fn render(
         .flex()
         .flex_col()
         .gap(gap)
+        .child(title.clone().harness_target_indexed("dialog.field", 0))
         .child(
-            TextField::new(draft.draft.title.clone())
-                .label("Title")
-                .placeholder("Fix the login redirect")
-                .caret(draft.title_caret)
-                .focused(draft.field == Field::Title)
-                .harness_target_indexed("dialog.field", 0),
-        )
-        .child(
-            TextArea::new(draft.draft.description.clone())
-                .label("Description")
-                .placeholder("Markdown. Optional.")
-                .rows(6)
-                .max_rows(6)
-                .scroll_row(draft.description_area.scroll_row())
-                .scroll(
-                    "card-create-description-scroll",
-                    draft.description_scroll.clone(),
-                )
-                .cursor(draft.description_area.cursor())
-                .focused(draft.field == Field::Description)
+            description
+                .clone()
                 .harness_target_indexed("dialog.field", 1),
         );
 
@@ -167,17 +173,24 @@ pub(crate) fn render(
             KeyHintRow::new()
                 .key(
                     "\u{21e5}",
-                    if draft.field == Field::Description {
-                        "indent"
+                    if field == Field::Description {
+                        "title"
                     } else {
                         "description"
                     },
                 )
-                .key("\u{21e7}tab", "title")
+                .key(
+                    "\u{21e7}tab",
+                    if field == Field::Description {
+                        "title"
+                    } else {
+                        "description"
+                    },
+                )
                 .key("\u{2303}\u{23ce}", "create & open")
                 .key("esc", "cancel"),
         )
-        .primary(if draft.field == Field::Description {
+        .primary(if field == Field::Description {
             "\u{2303}\u{21b5} Create & open"
         } else {
             "\u{21b5} Create"
@@ -195,117 +208,16 @@ pub(crate) fn render(
     let open_bridge = bridge.clone();
 
     root(focus)
-        .on_key_down({
+        .on_action({
             let state = state.clone();
-            move |event, _window, cx| {
-                let Some(text) = typed_char(event) else {
-                    return;
-                };
-                with_host(&state, cx, |host| {
-                    host.card_create.error = None;
-                    host.card_create.edit(|area| area.insert(text));
-                });
-                notify(&state, cx);
-                cx.stop_propagation();
-            }
+            move |_: &dialog::NextField, window, cx| cycle_field(&state, window, cx)
         })
         .on_action({
             let state = state.clone();
-            move |_: &dialog::NextField, _window, cx| {
-                if read_host(&state, cx, |host, _| {
-                    host.card_create.field == Field::Description
-                }) {
-                    edit(&state, cx, TextAreaState::insert_tab);
-                } else {
-                    cycle_field(&state, cx);
-                }
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::PrevField, _window, cx| cycle_field(&state, cx)
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::CursorDown, _window, cx| {
-                edit(&state, cx, |area| {
-                    area.move_down();
-                });
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::CursorUp, _window, cx| {
-                edit(&state, cx, |area| {
-                    area.move_up();
-                });
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::CursorLeft, _window, cx| {
-                edit(&state, cx, |area| {
-                    area.move_left();
-                });
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::CursorRight, _window, cx| {
-                edit(&state, cx, |area| {
-                    area.move_right();
-                });
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::Backspace, _window, cx| {
-                edit(&state, cx, |area| {
-                    area.backspace();
-                });
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::DeleteWord, _window, cx| {
-                edit(&state, cx, |area| {
-                    area.delete_word_before();
-                });
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::ClearInput, _window, cx| {
-                // DESIGN-SYSTEM §TextArea: `ctrl-u` clears the line, not the whole draft.
-                edit(&state, cx, |area| {
-                    area.delete_to_line_start();
-                });
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::LineStart, _window, cx| {
-                edit(&state, cx, |area| {
-                    area.move_to_line_start();
-                });
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::LineEnd, _window, cx| {
-                edit(&state, cx, |area| {
-                    area.move_to_line_end();
-                });
-            }
+            move |_: &dialog::PrevField, window, cx| cycle_field(&state, window, cx)
         })
         .on_action(move |_: &dialog::Confirm, _window, cx| {
-            if read_host(&submit_state, cx, |host, _| {
-                host.card_create.field == Field::Description
-            }) {
-                edit(&submit_state, cx, TextAreaState::insert_newline);
-            } else {
-                submit(false, &submit_state, &submit_bridge, cx);
-            }
+            submit(false, &submit_state, &submit_bridge, cx);
             cx.stop_propagation();
         })
         .on_action(move |_: &board_actions::CreateAndOpen, _window, cx| {
@@ -317,19 +229,23 @@ pub(crate) fn render(
 }
 
 /// `Tab` / `S-Tab`: two fields, so both keys do the same thing.
-fn cycle_field(state: &Entity<AppState>, cx: &mut App) {
-    with_host(state, cx, |host| {
-        host.card_create.field = match host.card_create.field {
-            Field::Title => Field::Description,
-            Field::Description => Field::Title,
+fn cycle_field(state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
+    let title_focused = read_host(state, cx, |host, _| host.card_create_title.clone())
+        .is_some_and(|input| input.read(cx).focus_handle().is_focused(window));
+    let input = with_host(state, cx, |host| {
+        host.card_create.field = if title_focused {
+            Field::Description
+        } else {
+            Field::Title
         };
+        match host.card_create.field {
+            Field::Title => host.card_create_title.clone(),
+            Field::Description => host.card_create_description.clone(),
+        }
     });
-    notify(state, cx);
-}
-
-/// Runs a text edit against the focused field and repaints.
-fn edit(state: &Entity<AppState>, cx: &mut App, edit: impl FnOnce(&mut TextAreaState)) {
-    with_host(state, cx, |host| host.card_create.edit(edit));
+    if let Some(input) = input {
+        input.update(cx, |input, cx| input.focus(window, cx));
+    }
     notify(state, cx);
     cx.stop_propagation();
 }
@@ -337,24 +253,42 @@ fn edit(state: &Entity<AppState>, cx: &mut App, edit: impl FnOnce(&mut TextAreaS
 /// Creates the card; `open_after` also opens its detail once the daemon answers.
 fn submit(open_after: bool, state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
     let current_board = state.read(cx).board().map(|view| view.board.id.clone());
+    let (title_input, description_input) = read_host(state, cx, |host, _| {
+        (
+            host.card_create_title.clone(),
+            host.card_create_description.clone(),
+        )
+    });
+    let (Some(title_input), Some(description_input)) = (title_input, description_input) else {
+        return;
+    };
+    let title = title_input.read(cx).text().to_owned();
+    let description = description_input.read(cx).text().to_owned();
     let Some((board_id, draft, generation)) = with_host(state, cx, |host| {
         let draft = &mut host.card_create;
         if draft.saving || draft.board_id.is_none() || draft.board_id != current_board {
             return None;
         }
-        if !draft.can_submit() {
-            draft.error = Some("A card needs a title.".into());
+        if !draft.can_submit(&title) {
             return None;
         }
         draft.saving = true;
         draft.error = None;
-        let mut fields = draft.draft.clone();
-        fields.title = fields.title.trim().to_owned();
+        let fields = CardDraft {
+            title: title.trim().to_owned(),
+            description,
+            ..CardDraft::default()
+        };
         Some((draft.board_id.clone()?, fields, draft.generation))
     }) else {
+        title_input.update(cx, |input, cx| {
+            input.set_invalid(Some("A card needs a title.".into()), cx)
+        });
         notify(state, cx);
         return;
     };
+    title_input.update(cx, |input, cx| input.set_read_only(true, cx));
+    description_input.update(cx, |input, cx| input.set_read_only(true, cx));
     let reply = bridge.request(RequestBody::CreateCard {
         board_id: board_id.clone(),
         draft,
@@ -377,10 +311,24 @@ fn submit(open_after: bool, state: &Entity<AppState>, bridge: &Bridge, cx: &mut 
             {
                 return;
             }
-            let completed = with_host(&state, cx, |host| {
-                host.card_create
-                    .finish_save(generation, answer.as_ref().err().cloned())
+            let (current, completed) = with_host(&state, cx, |host| {
+                let current = host.card_create.generation == generation && host.card_create.saving;
+                let completed = host
+                    .card_create
+                    .finish_save(generation, answer.as_ref().err().cloned());
+                (current, completed)
             });
+            if current && !completed {
+                let inputs = read_host(&state, cx, |host, _| {
+                    (
+                        host.card_create_title.clone(),
+                        host.card_create_description.clone(),
+                    )
+                });
+                for input in [inputs.0, inputs.1].into_iter().flatten() {
+                    input.update(cx, |input, cx| input.set_read_only(false, cx));
+                }
+            }
             if completed && let Ok(card) = answer {
                 let id = card.id.clone();
                 state.update(cx, |app, cx| {
@@ -407,6 +355,34 @@ fn submit(open_after: bool, state: &Entity<AppState>, bridge: &Bridge, cx: &mut 
 mod tests {
     use super::*;
 
+    struct InputHarness {
+        inputs: Vec<Entity<TextInput>>,
+    }
+
+    impl gpui::Render for InputHarness {
+        fn render(
+            &mut self,
+            _: &mut Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            div().children(self.inputs.clone())
+        }
+    }
+
+    fn drive_input(
+        cx: &mut gpui::TestAppContext,
+        inputs: Vec<Entity<TextInput>>,
+    ) -> gpui::VisualTestContext {
+        let input = inputs
+            .first()
+            .cloned()
+            .unwrap_or_else(|| panic!("at least one input"));
+        let window = cx.add_window(|_, _| InputHarness { inputs });
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.update(|window, cx| input.update(cx, |input, cx| input.focus(window, cx)));
+        visual
+    }
+
     fn draft() -> CardCreateState {
         CardCreateState {
             board_id: Some("work".parse().unwrap_or_else(|error| panic!("{error}"))),
@@ -415,66 +391,56 @@ mod tests {
     }
 
     #[test]
-    fn description_retains_preferred_column_and_accepts_newlines_and_tabs() {
-        let mut draft = draft();
-        draft.field = Field::Description;
-        draft.edit(|area| area.insert("abcdef\nx\nabcdef"));
-        draft.edit(|area| area.set_cursor(5));
-        draft.edit(|area| {
-            area.move_down();
-        });
-        draft.edit(|area| {
-            area.move_down();
-        });
-        assert_eq!(draft.description_area.line_col(), (2, 5));
-        draft.edit(TextAreaState::insert_newline);
-        draft.edit(TextAreaState::insert_tab);
-        assert!(draft.draft.description.ends_with("abcde\n  f"));
-    }
-
-    #[test]
     fn a_card_needs_a_title_and_a_board() {
         let mut state = draft();
-        assert!(!state.can_submit());
-        state.draft.title = "   ".to_owned();
-        assert!(!state.can_submit(), "whitespace is not a title");
-        state.draft.title = "Fix login".to_owned();
-        assert!(state.can_submit());
+        assert!(!state.can_submit(""));
+        assert!(!state.can_submit("   "), "whitespace is not a title");
+        assert!(state.can_submit("Fix login"));
         state.board_id = None;
-        assert!(!state.can_submit());
+        assert!(!state.can_submit("Fix login"));
     }
 
-    #[test]
-    fn typing_lands_in_the_focused_field_only() {
-        let mut state = draft();
-        state.edit(|area| area.insert("Fix"));
-        assert_eq!(state.draft.title, "Fix");
-        assert_eq!(state.title_caret, 3);
-        assert!(state.draft.description.is_empty());
-        state.field = Field::Description;
-        state.edit(|area| area.insert("why"));
-        assert_eq!(state.draft.description, "why");
-        assert_eq!(state.draft.title, "Fix");
-    }
-
-    #[test]
-    fn the_title_never_becomes_two_lines() {
-        let mut state = draft();
-        state.edit(|area| area.insert("one"));
-        state.edit(TextAreaState::insert_newline);
-        state.edit(|area| area.insert("two"));
-        assert_eq!(state.draft.title, "one two");
-    }
-
-    #[test]
-    fn the_title_caret_counts_characters_not_bytes() {
-        let mut state = draft();
-        state.edit(|area| area.insert("ñand\u{fa}"));
-        assert_eq!(state.title_caret, 5);
-        state.edit(|area| {
-            area.backspace();
+    #[gpui::test]
+    fn live_card_create_inputs_own_word_selection_undo_and_multiline_edits(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            cx.set_global(fleet_ui_kit::Theme::dark());
+            crate::keymap::init(cx);
         });
-        assert_eq!(state.draft.title, "ñand");
-        assert_eq!(state.title_caret, 4);
+        let state = cx.new(|_| AppState::new("/tmp/card-create-input", std::time::Instant::now()));
+        cx.update(|cx| seed(&state, cx));
+        let (title, description) = cx.update(|cx| {
+            read_host(&state, cx, |host, _| {
+                (
+                    host.card_create_title
+                        .clone()
+                        .unwrap_or_else(|| panic!("title input")),
+                    host.card_create_description
+                        .clone()
+                        .unwrap_or_else(|| panic!("description input")),
+                )
+            })
+        });
+
+        let mut visual = drive_input(cx, vec![title.clone(), description.clone()]);
+        visual.simulate_input("alpha beta");
+        visual.simulate_keystrokes("alt-backspace");
+        title.read_with(&visual, |input, _| assert_eq!(input.text(), "alpha "));
+        visual.simulate_input("beta");
+        visual.simulate_keystrokes("shift-left shift-left");
+        visual.simulate_input("X");
+        title.read_with(&visual, |input, _| assert_eq!(input.text(), "alpha beX"));
+        visual.simulate_keystrokes("cmd-z");
+        title.read_with(&visual, |input, _| assert_eq!(input.text(), "alpha beta"));
+
+        visual.update(|window, cx| {
+            description.update(cx, |input, cx| input.focus(window, cx));
+        });
+        visual.simulate_input("first");
+        visual.simulate_keystrokes("enter");
+        visual.simulate_input("second");
+        visual.simulate_keystrokes("cmd-backspace");
+        description.read_with(&visual, |input, _| assert_eq!(input.text(), "first\n"));
     }
 }

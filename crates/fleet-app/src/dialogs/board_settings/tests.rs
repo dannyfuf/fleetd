@@ -1,4 +1,87 @@
 use super::*;
+
+#[gpui::test]
+fn j_types_on_a_text_row_and_moves_on_a_non_text_row(cx: &mut gpui::TestAppContext) {
+    struct SettingsInputHarness {
+        state: Entity<AppState>,
+        focus: FocusHandle,
+    }
+
+    impl gpui::Render for SettingsInputHarness {
+        fn render(
+            &mut self,
+            _: &mut Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            let input = read_host(&self.state, cx, |host, _| host.board_settings_input.clone());
+            let context = if input.is_some() {
+                "BoardSettingsEditing"
+            } else {
+                "BoardSettings"
+            };
+            let state = self.state.clone();
+            div().key_context("Dialog").child(
+                div()
+                    .key_context(context)
+                    .track_focus(&self.focus)
+                    .on_action(move |_: &settings_actions::MoveDown, _, cx| move_row(&state, 1, cx))
+                    .children(input),
+            )
+        }
+    }
+
+    cx.update(|cx| {
+        cx.set_global(fleet_ui_kit::Theme::dark());
+        crate::keymap::init(cx);
+    });
+    let state = cx.new(|_| AppState::new("/tmp/board-settings-input", std::time::Instant::now()));
+    cx.update(|cx| {
+        with_host(&state, cx, |host| host.board_settings = draft());
+        materialize_input(&state, None, None, cx);
+    });
+    let window = cx.add_window(|_, cx| SettingsInputHarness {
+        state: state.clone(),
+        focus: cx.focus_handle(),
+    });
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    let root = window.root(&mut visual).expect("settings input harness");
+    let root_focus = root.read_with(&visual, |view, _| view.focus.clone());
+    let input = visual.update(|_, cx| {
+        read_host(&state, cx, |host, _| {
+            host.board_settings_input
+                .clone()
+                .unwrap_or_else(|| panic!("name input"))
+        })
+    });
+    visual.update(|window, cx| input.update(cx, |input, cx| input.focus(window, cx)));
+    visual.simulate_keystrokes("j");
+    visual.update(|_, cx| {
+        read_host(&state, cx, |host, _| {
+            assert_eq!(host.board_settings.name, "Fleetj");
+            assert_eq!(host.board_settings.row, 0);
+        });
+    });
+
+    let non_text_row = FIXED_ROWS
+        .iter()
+        .position(|row| *row == SettingRow::DefaultRepo)
+        .unwrap_or_else(|| panic!("default repository row"));
+    visual.update(|window, cx| {
+        with_host(&state, cx, |host| {
+            host.board_settings.row = non_text_row;
+            host.board_settings_input = None;
+            host.board_settings_input_subscription = None;
+        });
+        window.focus(&root_focus, cx);
+        window.refresh();
+    });
+    visual.simulate_keystrokes("j");
+    visual.update(|_, cx| {
+        read_host(&state, cx, |host, _| {
+            assert_eq!(host.board_settings.row, non_text_row + 1)
+        });
+    });
+}
 use fleet_core::board::PropertySource;
 
 fn draft() -> BoardSettingsState {
@@ -205,8 +288,13 @@ fn an_untouched_row_is_written_back_unchanged_however_it_is_spelled() {
 /// *last* repository rather than clearing it.
 #[test]
 fn a_repository_the_context_no_longer_lists_is_off_the_cycler_s_grid() {
-    let repos: Vec<RepoId> = vec!["acme/api".parse().unwrap(), "acme/web".parse().unwrap()];
-    let gone: RepoId = "acme/gone".parse().unwrap();
+    let repos: Vec<RepoId> = vec![
+        "acme/api".parse().unwrap_or_else(|error| panic!("{error}")),
+        "acme/web".parse().unwrap_or_else(|error| panic!("{error}")),
+    ];
+    let gone: RepoId = "acme/gone"
+        .parse()
+        .unwrap_or_else(|error| panic!("{error}"));
     assert!(repo_listed(&repos, None));
     assert!(repo_listed(&repos, Some(&repos[1])));
     assert!(!repo_listed(&repos, Some(&gone)));
@@ -270,16 +358,16 @@ fn the_backend_rows_follow_the_fixed_ones() {
 }
 
 #[test]
-fn only_the_typing_rows_take_a_caret() {
+fn only_the_typing_rows_materialize_text() {
     let mut state = draft();
     state.select_backend("other", &schema());
-    assert!(state.input().is_some(), "name");
+    assert!(state.focused_text().is_some(), "name");
     state.row = 2;
-    assert!(state.input().is_none(), "the repo cycler");
+    assert!(state.focused_text().is_none(), "the repo cycler");
     state.row = FIXED_ROWS.len();
-    assert!(state.input().is_some(), "a text setting");
+    assert!(state.focused_text().is_some(), "a text setting");
     state.row = FIXED_ROWS.len() + 4;
-    assert!(state.input().is_none(), "a flag");
+    assert!(state.focused_text().is_none(), "a flag");
     assert!(state.rows[3].is_text(), "a number is typed into");
     assert!(!state.rows[4].is_text());
 }
@@ -289,9 +377,7 @@ fn a_backend_row_stores_what_is_typed_into_it() {
     let mut state = draft();
     state.select_backend("other", &schema());
     state.row = FIXED_ROWS.len();
-    let mut input = state.input().unwrap_or_else(|| panic!("a text row"));
-    input.insert("SP");
-    state.set_input(&input);
+    state.set_focused_text("SP");
     assert_eq!(state.rows[0].value, "SP");
     assert_eq!(state.settings_json(), serde_json::json!({"project": "SP"}));
 }
@@ -306,16 +392,14 @@ fn a_schema_that_arrives_late_fills_the_rows_without_moving_the_cursor() {
     state.rows = backend_rows(&[], &state.original_settings);
     assert!(state.rows.is_empty());
     state.row = 1;
-    state.caret = 2;
-    let (row, caret) = (state.row, state.caret);
+    let row = state.row;
     state.select_backend(&state.backend_kind.clone(), &schema());
     state.row = row;
-    state.caret = caret;
     assert_eq!(
         state.rows[0].value, "SP",
         "the board's own settings, not blanks"
     );
-    assert_eq!((state.row, state.caret), (1, 2));
+    assert_eq!(state.row, 1);
 }
 
 #[test]
@@ -332,7 +416,12 @@ fn non_ascii_prefix_reports_charset_before_length() {
         prefix: "界界界界".into(),
         ..Default::default()
     };
-    assert!(draft.validate().unwrap().contains("only"));
+    assert!(
+        draft
+            .validate()
+            .unwrap_or_else(|| panic!("invalid prefix should explain itself"))
+            .contains("only")
+    );
 }
 
 #[test]
@@ -357,12 +446,7 @@ fn the_prefix_rule_is_stated_exactly() {
 fn a_prefix_is_stored_the_way_it_is_shown() {
     let mut state = draft();
     state.row = 1;
-    let mut input = state
-        .input()
-        .unwrap_or_else(|| panic!("prefix is a text row"));
-    input.clear();
-    input.insert("pay");
-    state.set_input(&input);
+    state.set_focused_text("pay");
     assert_eq!(state.prefix, "PAY");
 }
 

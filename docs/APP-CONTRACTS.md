@@ -757,8 +757,10 @@ the detail panes. Placement and content decisions are in `UX-SPEC.md` § Board.
 returns `["Filter", "BoardFilter"]` (and `mode()` returns `Mode::Filter`) instead of
 `["Hub", "Board"]`, so the board's bare letters type instead of firing.
 `AppState::board_filter_escape()` is the §3.10 two-stage `Esc` for it; base Cancel
-calls its second stage. `Filter > BoardFilter` adds left/right and ctrl-b/ctrl-f
-column navigation to the inherited Filter editing bindings.
+calls its second stage. The focused board `TextInput` adds `FleetTextInput` beneath
+`Filter > BoardFilter`; its `Changed` event mirrors text into `BoardState.filter`.
+`Tab` / `Shift-Tab` move columns, while left/right and ctrl-b/ctrl-f belong to the deeper input
+context and move its caret.
 `clamp_board_focus` is `pub(crate)` and clamps against the **filtered** column, so the
 selection can never point at a hidden card. `BoardFocus` has `column: usize` and `row: usize`;
 `GroupBy` is `Priority | Assignee | Labels`. `AppState::board() -> Option<&BoardView>`
@@ -786,18 +788,18 @@ Escape. `DialogHost` owns these public fields:
 
 | Field | Type | Initial draft |
 | --- | --- | --- |
-| `card_detail` | `card_detail::CardDetailState` | `card_id`, `property_row`, `area: TextAreaState`, `edit: Option<CardEdit>`, `revision`, `saving: Option<u64>` and `error` |
-| `card_create` | `card_create::CardCreateState` | `board_id`, `draft: CardDraft`, plus `field`, `title_caret` (chars), `description_area: TextAreaState` and `error` |
-| `card_picker` | `card_picker::CardPickerState` | `kind`, `card_id`, `query`, `cursor`, plus `caret`, `selected: Vec<String>`, `then_worktree`, `then_detail` and `error` |
-| `board_settings` | `board_settings::BoardSettingsState` | `board_id`, `name`, `prefix`, `default_repo_id`, `start_on_worktree`, `push_new_cards`, `conflict_policy`, `backend_kind`, `original_kind`, `original_settings`, `rows: Vec<BackendRow>`, plus `row`, `caret` and `error` |
+| `card_detail` + `card_detail_input` | `card_detail::CardDetailState` + `Option<Entity<TextInput>>` | `card_id`, `property_row`, `edit: Option<CardEdit>`, revision, saving and error; one input is created at edit start and dropped at save/cancel |
+| `card_create` + `card_create_title` / `card_create_description` | `card_create::CardCreateState` + two `Option<Entity<TextInput>>` fields | board id, focused field, save generation and error; submit reads both live inputs |
+| `card_picker` + `card_picker_input` | `card_picker::CardPickerState` + `Option<Entity<TextInput>>` | kind, card id, row cursor, selected values, return flags and error; `Changed` prepares filtered rows |
+| `board_settings` + `board_settings_input` | `board_settings::BoardSettingsState` + `Option<Entity<TextInput>>` | serializable board values, backend rows, focused row and error; a text-row input is materialized on focus and mirrors through `Changed` |
 
 `DialogHost.behind_palette` names the dialog the open palette replaced — the palette does not
 stack on a dialog, and a `Card detail:` palette row reopens that dialog instead of reseeding it
 over the text the user already typed. `:` is therefore bound in `Dialog > CardDetail` as well as
 in `Hub`: without a way in from the detail, `Card detail: Close` and `Card detail: Save text edit`
 are rows no state could ever list and the whole `behind_palette` path is unreachable. The added fields are all local editing state; the BOARD §8
-fields keep their names and meanings. `CardDetailState` holds **one** buffer for the three text surfaces
-(title, description, comment), because at most one of them is ever open.
+fields keep their names and meanings. `DialogHost.card_detail_input` is the **one** live editor
+used by the three text surfaces (title, description, comment), because at most one is open.
 `Dialogs::CardDetail.width()` is 880 px — it is a two-pane surface, not a form — and
 the other three board dialogs are 560 px.
 
@@ -854,9 +856,10 @@ land on a different fleetd) but keeps the descriptors, so the header's label nev
   `backend_rows(schema, settings)` → `Vec<BackendRow>`, `rows_to_settings(base, rows)` →
   settings JSON (keeping keys the schema never names, removing the ones a row emptied, writing
   numbers as numbers), and `rows_error(rows)` for the required and numeric rules.
-  `PropertyKind` picks the control: `Bool` → `Toggle`, `Select` → `Cycler` over the schema's
-  options, `Number` → `NumberField` that takes digits only (so `h`/`l` keep stepping it),
-  everything else → `TextField`; `MultiSelect` is typed comma-separated. `PropertySchema` has
+  `PropertyKind` picks the browsing control: `Bool` → `Toggle`, `Select` → `Cycler` over the
+  schema's options, `Number` → `NumberField`, everything else → `TextField`. A focused free-text
+  or number row materializes a single-line `TextInput` (numbers filter to ASCII digits), and
+  `MultiSelect` is typed comma-separated. `PropertySchema` has
   no `required` flag, so a name ending in `fleet_core::board::REQUIRED_MARKER` (`(required)`,
   re-exported as `board_settings::REQUIRED_MARKER`) is the signal; the marker is stripped from
   the label and shown as `∗`. It lives in the core because the daemon reads it the same way: a
@@ -882,6 +885,7 @@ land on a different fleetd) but keeps the descriptors, so the header's label nev
 
 Detail text saves keep the editor until a matching successful reply. Revision guards prevent
 older replies from clearing newer drafts; failures retain text and display the daemon error.
-Both detail and CardCreate description editors retain `TextAreaState` across keystrokes.
-In CardCreate, Enter in the description inserts a newline, Tab indents, Shift-Tab returns
-to the title, and Ctrl-Enter creates and opens the card.
+`DialogHost` retains the detail editor and both CardCreate inputs across keystrokes; none of
+those dialogs owns a parallel string/caret buffer. In CardCreate, Enter in the description
+inserts a newline, Tab and Shift-Tab switch fields, and Ctrl-Enter creates and opens the card.
+In a detail description or comment, Tab inserts a hard tab through `TextInput::insert`.

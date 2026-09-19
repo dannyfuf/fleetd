@@ -9,28 +9,19 @@ pub(crate) fn render(
     _window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let draft = read_host(state, cx, |host, _| host.card_picker.clone());
+    let (draft, input) = read_host(state, cx, |host, _| {
+        (host.card_picker.clone(), host.card_picker_input.clone())
+    });
+    let Some(input) = input else {
+        return root(focus).into_any_element();
+    };
     // Composed from rows the draft already holds: `prepared` derives them again only when the
     // query, the kind or the board behind them moved, never once per frame.
     let rows = prepared(state, cx);
     let schema = property_kind(state.read(cx), &draft.kind);
-    let invalid = free_text_error(&draft.kind, draft.query.trim(), schema);
     let multi = draft.kind.is_multi_select(schema);
 
     let label = picker_label(state.read(cx), &draft.kind);
-    let mut field = TextField::new(draft.query.clone())
-        .label(label.clone())
-        .placeholder(if multi {
-            "filter values"
-        } else {
-            "type to filter or set"
-        })
-        .caret(draft.caret)
-        .focused(true);
-    if let Some(message) = invalid.clone() {
-        field = field.invalid(message);
-    }
-
     let selected = draft.selected.clone();
     let accent = Tone::Accent.color(cx.theme());
     let list = FuzzyList::new(rows.iter().map(|option| {
@@ -77,7 +68,7 @@ pub(crate) fn render(
         .icon(Icon::ArrowRightLeft)
         .width(Dialogs::CardPicker.width(cx))
         .subtitle(format!("\u{00b7} {label}"))
-        .body(div().flex().flex_col().child(field).child(list))
+        .body(div().flex().flex_col().child(input).child(list))
         .hint_row(hints)
         .primary("\u{23ce} Apply");
     if let Some(message) = draft.error.clone() {
@@ -88,25 +79,6 @@ pub(crate) fn render(
     let apply_bridge = bridge.clone();
 
     root(focus)
-        .on_key_down({
-            let state = state.clone();
-            move |event, _window, cx| {
-                let typed = with_host(&state, cx, |host| {
-                    let mut input = host.card_picker.input();
-                    if !type_into(&mut input, event) {
-                        return false;
-                    }
-                    host.card_picker.set_input(&input);
-                    host.card_picker.cursor = 0;
-                    host.card_picker.error = None;
-                    true
-                });
-                if typed {
-                    notify(&state, cx);
-                    cx.stop_propagation();
-                }
-            }
-        })
         .on_action({
             let state = state.clone();
             move |_: &dialog::CursorDown, _window, cx| move_cursor(&state, 1, cx)
@@ -125,62 +97,6 @@ pub(crate) fn render(
         .on_action({
             let state = state.clone();
             move |_: &dialog::PrevField, _window, cx| move_cursor(&state, -1, cx)
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::CursorLeft, _window, cx| {
-                edit_query(&state, cx, |input| {
-                    let _moved = input.move_left();
-                })
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::CursorRight, _window, cx| {
-                edit_query(&state, cx, |input| {
-                    let _moved = input.move_right();
-                })
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::Backspace, _window, cx| {
-                edit_query(&state, cx, |input| {
-                    input.backspace();
-                });
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::DeleteWord, _window, cx| {
-                edit_query(&state, cx, |input| {
-                    input.delete_word_before();
-                });
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::ClearInput, _window, cx| {
-                edit_query(&state, cx, |input| {
-                    input.clear();
-                });
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::LineStart, _window, cx| {
-                edit_query(&state, cx, |input| {
-                    let _moved = input.move_to_start();
-                })
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::LineEnd, _window, cx| {
-                edit_query(&state, cx, |input| {
-                    let _moved = input.move_to_end();
-                })
-            }
         })
         .on_action({
             let state = state.clone();

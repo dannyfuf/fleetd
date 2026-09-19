@@ -158,6 +158,21 @@ impl TextInput {
         }
     }
 
+    /// Insert user text at the caret, replacing a selection as one undoable edit.
+    ///
+    /// The configured character filter and the input mode's newline/tab normalization apply in
+    /// the same way as platform typing and paste.
+    pub fn insert(&mut self, text: &str, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
+        let text = self.filtered(text);
+        if text.is_empty() {
+            return;
+        }
+        self.edit(cx, |buffer, now| buffer.insert(&text, now));
+    }
+
     /// Select the whole value.
     pub fn select_all(&mut self, cx: &mut Context<Self>) {
         if self.buffer.select_all() {

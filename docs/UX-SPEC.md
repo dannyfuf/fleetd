@@ -1970,12 +1970,15 @@ wrap (§5.11), and the focused column and card are always scrolled into view. Ev
 1. **The selection follows the card, not the index.** After any mutation the reducer applies the
    `Card` the daemon returned and the focus moves to wherever that card now is — including the
    column it was just moved to by `[` / `]`.
-2. **`/` publishes the `Filter` key context.** The board's filter is not the Hub's `FilterState`
+2. **`/` publishes the `Filter` key context.** The board's filter is a live single-line
+   `TextInput`, not the Hub's `FilterState`
    (its rows are cards in columns, and `Overlay::Filter`'s `Enter` opens a worktree), so the board
-   owns `BoardState.filter`. While the input has the keyboard, `AppState::context_chain` returns
+   mirrors into `BoardState.filter` on `Changed`. While the input has the keyboard,
+   `AppState::context_chain` returns
    `["Filter", "BoardFilter"]` instead of `["Hub", "Board"]`: that is the only thing that makes `c`, `d`, `s` and
    `w` type instead of fire. `Esc` is the two-stage §3.10 one — leave the input keeping the filter,
-   then clear it — and never quits.
+   then clear it — and never quits. `Tab` / `Shift-Tab` move columns while left/right and
+   ctrl-b/ctrl-f move the filter caret.
 
 The filter is a case-insensitive substring over the six things a card is looked up by: title,
 display key, local key, label names, label ids and assignee. It is deliberately wider than
@@ -1994,10 +1997,10 @@ An 880 px dialog, two panes. It publishes browsing `Dialog > CardDetail`, then s
 migrated live editor adds `FleetTextInput` beneath that word.
 
 *Left* — the card as prose: key, priority glyph and title; the conflict banner when the card has
-one (`K` keep local / `R` take remote); the description as `MarkdownText`, or a `TextArea` while
-`d` is editing it; the comments, each with author and age; a `TextArea` for the comment `c` is
-writing; and the last ten activity entries, newest first. The left pane scrolls; the right does
-not.
+one (`K` keep local / `R` take remote); the description as `MarkdownText`, or the shared
+multi-line `TextInput` while `d` is editing it; the comments, each with author and age; that same
+input for the comment `c` is writing; and the last ten activity entries, newest first. The left
+pane scrolls; the right does not.
 
 *Right* — the card as facts: `Status, Priority, Assignee, Labels, Estimate, Due, Parent, Repo,
 Worktree`, then `Remote` / `URL` / `Synced` when the card is linked, then the board's custom
@@ -2012,11 +2015,12 @@ the secondary tone with a trailing lock glyph, and keeps its picker target: `Ent
 with the sentence `<field> is read-only on <backend label> boards` on the dialog's error line. A
 row that silently did nothing would be indistinguishable from a broken key.
 
-The three text surfaces — title, description, comment — share **one** buffer, because at most one
-of them is ever open: `i`, `d`, `c` start an edit, `ctrl-s` saves it, `Esc` throws it away and a
-second `Esc` closes the dialog. While an edit is open `CardDetail` is absent from the context
-chain, so its bare browsing letters cannot steal input; `CardDetailEditing` carries only the
-container commands.
+The three text surfaces — title, description, comment — share **one live `TextInput` entity**,
+created when `i`, `d` or `c` starts an edit and dropped when `ctrl-s` saves or `Esc` cancels it.
+Selection, paste, word/line deletion and undo/redo are available uniformly; Tab inserts a hard
+tab in the multi-line description/comment editor. A second `Esc` closes the dialog. While an edit
+is open `CardDetail` is absent from the context chain, so its bare browsing letters cannot steal
+input; `CardDetailEditing` carries only the container commands.
 
 Nothing on this surface is optimistic. Every save sends its request and waits; the reducer applies
 the `Card` that comes back, and a refusal becomes a sticky line inside the dialog rather than a

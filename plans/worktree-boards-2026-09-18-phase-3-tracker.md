@@ -37,8 +37,16 @@
     110 of them agent_thread), `make lint`, and `make harness` (59 of 59, every `agents/*`
     scenario) passed. `multiline_input/{buffer,element,platform}.rs` deleted; `FleetTextInput`
     rows are now 49 (`home`/`end` → row actions, `ctrl-shift-a/e`, `shift-enter`, owner-aware `enter`).
-- [ ] P3-T05 — Migrate the board dialogs
-- [ ] P3-T06 — Migrate the remaining dialogs, filters and the lazygit overlay
+- [x] P3-T05 — Migrate the board dialogs
+  - verified: `cargo test -p fleet-ui-kit` (383 passed), `cargo test -p fleet-app` (879 passed),
+    `make lint`, and `make harness` (59 of 59) passed. The first harness run caught a real
+    regression the unit tests missed: the board filter input lost gpui focus to the shell's
+    focus reconciliation, so typed text never reached it; fixed by a shell-level `wanted_input`
+    gate plus root-level regression tests that dispatch `/` and type through the real path.
+- [~] P3-T06 — Migrate the remaining dialogs, filters and the lazygit overlay
+  - split into two sequential runs: (a) Hub filter, palette, kit `FilterBar`/`Palette`, lazygit
+    overlay; (b) create worktree, clone, context, rename, hooks, settings, `NumberField`, delete
+    `dialogs/input.rs` and the old action families.
 - [ ] P3-T07 — Delete the old input families and record the decision
 - [ ] P3-T08 — Drive typing, selection and undo in the harness
 - [x] P3-T09 — Soft-wrap the multi-line mode of `TextInput`
@@ -103,6 +111,11 @@
   composer publishes `owner`, and `shift-enter` → `Newline` is bound for every multi-line input.
   The app never used `NoAction` shadowing for the composer: it binds owner keys in `Agent > *` and
   routes back into the composer, which the propagation rule preserves.
+- 2026-09-19 — P3-T05 decision: the board filter's column moves leave `left`/`right`/`ctrl-b`/`ctrl-f`
+  (which the migrated filter input now uses for caret motion, deeper in the chain) and move to
+  `tab`/`shift-tab` under `Filter > BoardFilter`. Card picker query gets a `' '` filter so `space`
+  stays the toggle. Card detail creates its input when an edit begins and drops it when it ends;
+  `tab` inserts a tab through a new `TextInput::insert`.
 - 2026-09-18 — Decisions fixed at planning time: one engine seeded from the composer buffer; inputs are live
   entities owned by the surface; bytes inside, UTF-16 at the IME boundary, graphemes for motion; word and line rules
   as written in the plan; key-ownership rule via a browsing/editing context word (board-filter precedent), not

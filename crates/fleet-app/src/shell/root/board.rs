@@ -199,46 +199,49 @@ impl Shell {
     pub(super) fn board_filter(
         &mut self,
         _: &board::Filter,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         crate::screens::board::filter(&self.state, &self.bridge, cx);
+        self.hub.focus_board_filter(window, cx);
     }
 
     pub(super) fn card_detail_close(
         &mut self,
         _: &card_detail::Close,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        crate::dialogs::card_detail::close(&self.state, &self.bridge, cx);
+        if crate::dialogs::card_detail::close(&self.state, &self.bridge, cx) {
+            window.focus(&self.overlay_focus, cx);
+        }
     }
 
     pub(super) fn card_detail_edit_title(
         &mut self,
         _: &card_detail::EditTitle,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        crate::dialogs::card_detail::edit_title(&self.state, &self.bridge, cx);
+        crate::dialogs::card_detail::edit_title(&self.state, &self.bridge, window, cx);
     }
 
     pub(super) fn card_detail_edit_description(
         &mut self,
         _: &card_detail::EditDescription,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        crate::dialogs::card_detail::edit_description(&self.state, &self.bridge, cx);
+        crate::dialogs::card_detail::edit_description(&self.state, &self.bridge, window, cx);
     }
 
     pub(super) fn card_detail_add_comment(
         &mut self,
         _: &card_detail::AddComment,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        crate::dialogs::card_detail::add_comment(&self.state, &self.bridge, cx);
+        crate::dialogs::card_detail::add_comment(&self.state, &self.bridge, window, cx);
     }
 
     pub(super) fn card_detail_next_property(

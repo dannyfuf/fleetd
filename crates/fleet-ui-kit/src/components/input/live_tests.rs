@@ -471,6 +471,18 @@ fn character_filter_drops_rejected_input(cx: &mut gpui::TestAppContext) {
     });
 }
 
+#[gpui::test]
+fn owner_insertion_filters_replaces_the_selection_and_undoes_once(cx: &mut gpui::TestAppContext) {
+    let (mut visual, input, _, _, _) = hosted(cx, InputMode::SingleLine, "1234", |input, cx| {
+        input.set_filter(Some(|character| character.is_ascii_digit()), cx);
+    });
+    visual.simulate_keystrokes("shift-left shift-left");
+    visual.update(|_, cx| input.update(cx, |input, cx| input.insert("x56y", cx)));
+    input.read_with(&visual, |input, _| assert_eq!(input.text(), "1256"));
+    visual.simulate_keystrokes("cmd-z");
+    input.read_with(&visual, |input, _| assert_eq!(input.text(), "1234"));
+}
+
 #[track_caller]
 fn point_for_offset(input: &TextInput, offset: usize) -> gpui::Point<gpui::Pixels> {
     let bounds = input.last_bounds.expect("input bounds");

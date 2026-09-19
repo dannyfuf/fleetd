@@ -16,7 +16,7 @@ use std::{cell::RefCell, rc::Rc, time::Instant};
 use crate::{
     actions::filter as filter_actions,
     bridge::Bridge,
-    dialogs::{self, ConfirmRequest, Dialogs, card_picker::PickerKind, typed_char},
+    dialogs::{self, ConfirmRequest, Dialogs, card_picker::PickerKind},
     state::{AppState, HubPane, HubTab, Overlay, Screen, StickyError},
     views::board_screen::{self, BoardClick, BoardModel, BoardProps, CardRow},
 };
@@ -30,7 +30,7 @@ use fleet_proto::{
     request::RequestBody,
     response::ResponseBody,
 };
-use fleet_ui_kit::{Icon, KanbanColumn};
+use fleet_ui_kit::{Icon, InputMode, KanbanColumn, TextInput, TextInputEvent};
 use gpui::{
     AnyElement, App, Entity, FocusHandle, ListState, ScrollHandle, Subscription, Window, prelude::*,
 };
@@ -52,7 +52,7 @@ pub(crate) use lifecycle::{
     Refusal, open_session, request_worktree_reporting, send_card_reporting,
 };
 use lifecycle::{ensure_current, fail, request_worktree, send_card, syncing};
-use navigation::{board_id, edit_filter, leave_filter_input, on_click, step_focus};
+use navigation::{board_id, leave_filter_input, on_click, step_focus};
 pub(crate) use navigation::{
     focus_card, jump_rows, move_rows, next_card, next_column, prev_card, prev_column, selected_card,
 };
@@ -74,12 +74,22 @@ pub(crate) struct BoardScreen {
     projection: RefCell<projection::ProjectionCache>,
     /// Keeps the load observation alive; dropping it stops the board refreshing itself.
     observation: Option<Subscription>,
+    /// One live filter editor for the lifetime of this board screen.
+    filter_input: Entity<TextInput>,
+    /// Mirrors the editor into `BoardState.filter` for projections and harness dumps.
+    filter_subscription: Option<Subscription>,
 }
 
 impl BoardScreen {
     /// Builds the screen using the frozen screen constructor.
     #[must_use]
-    pub(crate) fn new(_cx: &mut App) -> Self {
+    pub(crate) fn new(cx: &mut App) -> Self {
+        let filter_input = cx.new(|cx| {
+            let mut input = TextInput::new(InputMode::SingleLine, cx);
+            input.set_placeholder("filter cards", cx);
+            input.set_hide_status_line(true, cx);
+            input
+        });
         Self {
             board_scroll: ScrollHandle::new(),
             column_lists: Vec::new(),
@@ -88,6 +98,8 @@ impl BoardScreen {
             revealed_focus: None,
             projection: RefCell::default(),
             observation: None,
+            filter_input,
+            filter_subscription: None,
         }
     }
 
@@ -101,12 +113,48 @@ impl BoardScreen {
         if self.observation.is_some() {
             return;
         }
+        let weak_state = state.downgrade();
+        self.filter_subscription =
+            Some(cx.subscribe(&self.filter_input, move |input, event, cx| {
+                if !matches!(event, TextInputEvent::Changed) {
+                    return;
+                }
+                let Some(state) = weak_state.upgrade() else {
+                    return;
+                };
+                let query = input.read(cx).text().to_owned();
+                state.update(cx, |app, cx| {
+                    if app.board.filter == query {
+                        return;
+                    }
+                    app.board.filter = query;
+                    app.board.focus.row = 0;
+                    app.clamp_board_focus();
+                    cx.notify();
+                });
+            }));
         let observed = bridge.clone();
+        let filter_input = self.filter_input.clone();
         self.observation = Some(cx.observe(state, move |state, cx| {
             lifecycle::synchronize(&state, &observed, cx);
+            let query = state.read(cx).board.filter.clone();
+            if filter_input.read(cx).text() != query {
+                filter_input.update(cx, |input, cx| input.set_text(query, cx));
+            }
         }));
         let (deferred_state, deferred_bridge) = (state.clone(), bridge.clone());
         cx.defer(move |cx| lifecycle::synchronize(&deferred_state, &deferred_bridge, cx));
+    }
+
+    /// Focus the board's live filter from the action update path.
+    pub(crate) fn focus_filter(&self, window: &mut Window, cx: &mut App) {
+        self.filter_input
+            .update(cx, |input, cx| input.focus(window, cx));
+    }
+
+    /// The live filter handle used by the shell's focus reconciliation.
+    pub(crate) fn filter_focus_handle(&self, cx: &App) -> FocusHandle {
+        self.filter_input.read(cx).focus_handle()
     }
 
     /// Renders the board into the Hub's body.
@@ -140,6 +188,7 @@ impl BoardScreen {
             error: app.board.error.as_deref(),
             filter: &app.board.filter,
             filter_editing: app.board.filter_editing,
+            filter_input: self.filter_input.clone(),
             focus: (app.board.focus.column, app.board.focus.row),
             syncing: syncing(app),
         };
@@ -166,54 +215,6 @@ impl BoardScreen {
         );
 
         crate::dialogs::root(focus)
-            .on_key_down({
-                let state = state.clone();
-                move |event, _window, cx| {
-                    let Some(text) = typed_char(event) else {
-                        cx.propagate();
-                        return;
-                    };
-                    let typed = state.update(cx, |app, cx| {
-                        if !app.board.filter_editing {
-                            return false;
-                        }
-                        app.board.filter.push_str(text);
-                        app.board.focus.row = 0;
-                        app.clamp_board_focus();
-                        cx.notify();
-                        true
-                    });
-                    if typed {
-                        cx.stop_propagation();
-                    } else {
-                        // The board itself owns bare letters as commands; only the filter input
-                        // may swallow them as text.
-                        cx.propagate();
-                    }
-                }
-            })
-            .on_action({
-                let state = state.clone();
-                move |_: &filter_actions::Backspace, _window, cx| {
-                    edit_filter(&state, cx, |query| {
-                        query.pop();
-                    });
-                }
-            })
-            .on_action({
-                let state = state.clone();
-                move |_: &filter_actions::DeleteWord, _window, cx| {
-                    edit_filter(&state, cx, |query| {
-                        *query = crate::dialogs::filter::delete_word(query);
-                    });
-                }
-            })
-            .on_action({
-                let state = state.clone();
-                move |_: &filter_actions::Clear, _window, cx| {
-                    edit_filter(&state, cx, String::clear);
-                }
-            })
             .on_action({
                 let state = state.clone();
                 move |_: &filter_actions::CursorDown, _window, cx| step_focus(&state, 0, 1, cx)
@@ -232,7 +233,8 @@ impl BoardScreen {
             })
             .on_action({
                 let state = state.clone();
-                move |_: &filter_actions::Escape, _window, cx| {
+                let focus = focus.clone();
+                move |_: &filter_actions::Escape, window, cx| {
                     if state.update(cx, |app, cx| {
                         let handled = app.board_filter_escape();
                         if handled {
@@ -240,6 +242,7 @@ impl BoardScreen {
                         }
                         handled
                     }) {
+                        window.focus(&focus, cx);
                         cx.stop_propagation();
                     } else {
                         // Nothing to leave or clear: `Esc` belongs to whoever is behind the

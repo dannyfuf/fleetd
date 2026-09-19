@@ -16,12 +16,13 @@ use fleet_core::board::{
 };
 use fleet_core::ids::StatusId;
 use fleet_ui_kit::{
-    ActiveTheme, Badge, CardTile, Chip, EmptyState, FilterBar, HarnessTargetExt, Icon, IconSize,
-    KanbanBoard, KanbanColumn, Pane, PaneBorder, PaneHeader, PriorityLevel, SkeletonRows,
-    SpinnerWithLabel, Text, Theme, Tone,
+    ActiveTheme, Badge, CardTile, Chip, EmptyState, HarnessTargetExt, Icon, IconSize, KanbanBoard,
+    KanbanColumn, Pane, PaneBorder, PaneHeader, PriorityLevel, SkeletonRows, SpinnerWithLabel,
+    Text, Theme, Tone,
 };
 use gpui::{
-    AnyElement, App, Hsla, ListState, MouseButton, ScrollHandle, SharedString, div, prelude::*,
+    AnyElement, App, Entity, Hsla, ListState, MouseButton, ScrollHandle, SharedString, div,
+    prelude::*,
 };
 
 mod model;
@@ -53,6 +54,8 @@ pub(crate) struct BoardProps<'a> {
     pub filter: &'a str,
     /// Whether the filter input owns the keyboard.
     pub filter_editing: bool,
+    /// The board screen's live filter editor.
+    pub filter_input: Entity<fleet_ui_kit::TextInput>,
     /// The focused column and card.
     pub focus: (usize, usize),
     /// Whether a `board.sync` job is running for this board.
@@ -240,12 +243,7 @@ fn header(props: &BoardProps<'_>, model: &BoardModel, cx: &App) -> AnyElement {
         .total(total)
         .trailing(trailing);
     if props.filter_editing {
-        header = header.query_slot(
-            FilterBar::new(props.filter.to_owned(), shown, total)
-                .focused(true)
-                .query_slot()
-                .harness_target("board.filter"),
-        );
+        header = header.query_slot(props.filter_input.clone().harness_target("board.filter"));
     } else if !props.filter.is_empty() {
         header = header.filter_chip(props.filter.to_owned());
     }

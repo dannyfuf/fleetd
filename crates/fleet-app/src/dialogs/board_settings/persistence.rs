@@ -32,6 +32,7 @@ pub(crate) fn seed(state: &Entity<AppState>, cx: &mut App) {
             ..draft
         };
     });
+    materialize_input(state, None, None, cx);
 }
 
 /// `Enter`: send one `UpdateBoard` with everything the dialog changed.

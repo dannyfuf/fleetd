@@ -739,6 +739,7 @@ multi-line input has no status slot. Multi-line values and placeholders soft-wra
 width, and `min_rows` / `max_rows` count visual rows. Single-line mode never wraps and scrolls
 horizontally instead. Both use the border ladder danger → focus → rest.
 **API.** `TextInput::new(InputMode, cx)`, `text()`, `set_text(text, cx)`, `clear(cx)`,
+`insert(text, cx)` (filtered user-style insertion that replaces the selection in one undo step),
 `select_all(cx)`, `move_to_end(cx)`, `set_placeholder(value, cx)`, `set_label(option, cx)`,
 `set_icon(option, cx)`, `set_mono(bool, cx)`, `set_preview(option, cx)`,
 `set_hide_status_line(bool, cx)`, `set_read_only(bool, cx)`, `set_invalid(option, cx)`,

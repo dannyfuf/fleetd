@@ -9,7 +9,9 @@ pub(crate) fn render(
     _window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let mut draft = read_host(state, cx, |host, _| host.card_detail.clone());
+    let (mut draft, edit_input) = read_host(state, cx, |host, _| {
+        (host.card_detail.clone(), host.card_detail_input.clone())
+    });
     let Some((board, card)) = state.read(cx).board().and_then(|view| {
         card(state.read(cx), &draft).map(|card| (view.board.clone(), card.clone()))
     }) else {
@@ -29,16 +31,9 @@ pub(crate) fn render(
     });
 
     let description: AnyElement = if draft.edit == Some(CardEdit::Description) {
-        TextArea::new(draft.area.text().to_owned())
-            .label("Description")
-            .placeholder("Markdown.")
-            .rows(8)
-            .max_rows(8)
-            .scroll_row(draft.area.scroll_row())
-            .scroll("card-detail-description-scroll", draft.area_scroll.clone())
-            .cursor(draft.area.cursor())
-            .focused(true)
-            .into_any_element()
+        edit_input
+            .clone()
+            .map_or_else(|| div().into_any_element(), Entity::into_any_element)
     } else if card.description.trim().is_empty() {
         Text::ui("No description \u{2014} d writes one.")
             .faint()
@@ -48,30 +43,16 @@ pub(crate) fn render(
     };
 
     let title: AnyElement = if draft.edit == Some(CardEdit::Title) {
-        TextField::new(draft.area.text().to_owned())
-            .label("Title")
-            .caret(
-                draft.area.text()[..draft.area.cursor().min(draft.area.text().len())]
-                    .chars()
-                    .count(),
-            )
-            .focused(true)
-            .into_any_element()
+        edit_input
+            .clone()
+            .map_or_else(|| div().into_any_element(), Entity::into_any_element)
     } else {
         detail::title_line(board, card, cx)
     };
 
-    let comment_editor = (draft.edit == Some(CardEdit::Comment)).then(|| {
-        TextArea::new(draft.area.text().to_owned())
-            .label("New comment")
-            .placeholder("Markdown.")
-            .rows(4)
-            .max_rows(4)
-            .scroll_row(draft.area.scroll_row())
-            .scroll("card-detail-comment-scroll", draft.area_scroll.clone())
-            .cursor(draft.area.cursor())
-            .focused(true)
-    });
+    let comment_editor = (draft.edit == Some(CardEdit::Comment))
+        .then(|| edit_input.clone())
+        .flatten();
 
     let left = div()
         .id("card-detail-left")
@@ -150,148 +131,52 @@ pub(crate) fn render(
     let targets: Vec<detail::PropertyRow> = rows;
 
     root(focus)
-        .on_key_down({
-            let state = state.clone();
-            move |event, _window, cx| {
-                let Some(text) = typed_char(event) else {
-                    return;
-                };
-                if type_text(&state, text, cx) {
-                    cx.stop_propagation();
-                }
-            }
-        })
         .on_action({
             let state = state.clone();
             let title = card.title.clone();
-            move |_: &card_actions::EditTitle, _window, cx| {
-                if type_text(&state, "i", cx) {
-                    return;
-                }
-                begin(&state, CardEdit::Title, title.clone(), cx);
+            move |_: &card_actions::EditTitle, window, cx| {
+                begin(&state, CardEdit::Title, title.clone(), window, cx);
             }
         })
         .on_action({
             let state = state.clone();
             let description = card.description.clone();
-            move |_: &card_actions::EditDescription, _window, cx| {
-                if type_text(&state, "d", cx) {
-                    return;
-                }
-                begin(&state, CardEdit::Description, description.clone(), cx);
+            move |_: &card_actions::EditDescription, window, cx| {
+                begin(
+                    &state,
+                    CardEdit::Description,
+                    description.clone(),
+                    window,
+                    cx,
+                );
             }
         })
         .on_action({
             let state = state.clone();
-            move |_: &card_actions::AddComment, _window, cx| {
-                if type_text(&state, "c", cx) {
-                    return;
-                }
-                begin(&state, CardEdit::Comment, String::new(), cx);
+            move |_: &card_actions::AddComment, window, cx| {
+                begin(&state, CardEdit::Comment, String::new(), window, cx);
             }
         })
         .on_action({
             let state = state.clone();
-            move |_: &card_actions::NextProperty, _window, cx| {
-                if type_text(&state, "j", cx) {
-                    return;
-                }
-                move_row(&state, 1, rows_len, cx);
-            }
+            move |_: &card_actions::NextProperty, _window, cx| move_row(&state, 1, rows_len, cx)
         })
         .on_action({
             let state = state.clone();
-            move |_: &card_actions::PrevProperty, _window, cx| {
-                if type_text(&state, "k", cx) {
-                    return;
-                }
-                move_row(&state, -1, rows_len, cx);
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::CursorDown, _window, cx| {
-                if edit_buffer(&state, cx, |area| {
-                    area.move_down();
-                }) {
-                    return;
-                }
-                move_row(&state, 1, rows_len, cx);
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::CursorUp, _window, cx| {
-                if edit_buffer(&state, cx, |area| {
-                    area.move_up();
-                }) {
-                    return;
-                }
-                move_row(&state, -1, rows_len, cx);
-            }
+            move |_: &card_actions::PrevProperty, _window, cx| move_row(&state, -1, rows_len, cx)
         })
         .on_action({
             let state = state.clone();
             move |_: &dialog::NextField, _window, cx| {
-                edit_buffer(&state, cx, TextAreaState::insert_tab);
-                cx.stop_propagation();
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::CursorLeft, _window, cx| {
-                edit_buffer(&state, cx, |area| {
-                    area.move_left();
-                });
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::CursorRight, _window, cx| {
-                edit_buffer(&state, cx, |area| {
-                    area.move_right();
-                });
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::Backspace, _window, cx| {
-                edit_buffer(&state, cx, |area| {
-                    area.backspace();
-                });
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::DeleteWord, _window, cx| {
-                edit_buffer(&state, cx, |area| {
-                    area.delete_word_before();
-                });
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::ClearInput, _window, cx| {
-                // DESIGN-SYSTEM §TextArea: `ctrl-u` clears the line, not the whole draft.
-                edit_buffer(&state, cx, |area| {
-                    area.delete_to_line_start();
-                });
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::LineStart, _window, cx| {
-                edit_buffer(&state, cx, |area| {
-                    area.move_to_line_start();
-                });
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::LineEnd, _window, cx| {
-                edit_buffer(&state, cx, |area| {
-                    area.move_to_line_end();
-                });
+                let input = read_host(&state, cx, |host, _| host.card_detail_input.clone());
+                if let Some(input) = input
+                    && matches!(input.read(cx).mode(), InputMode::Multiline { .. })
+                {
+                    input.update(cx, |input, cx| input.insert("\t", cx));
+                    cx.stop_propagation();
+                } else {
+                    cx.propagate();
+                }
             }
         })
         .on_action({
@@ -309,25 +194,12 @@ pub(crate) fn render(
         .on_action({
             let state = state.clone();
             let bridge = bridge.clone();
-            move |_: &card_actions::CreateWorktree, _window, cx| {
-                if type_text(&state, "w", cx) {
-                    return;
-                }
-                start_worktree(&state, &bridge, cx);
-            }
+            move |_: &card_actions::CreateWorktree, _window, cx| start_worktree(&state, &bridge, cx)
         })
         .on_action({
             let state = state.clone();
             let bridge = bridge.clone();
             move |_: &card_actions::OpenRemote, _window, cx| {
-                // The guard belongs to the *key*, not to the command: this handler is what a
-                // literal `x` reaches while a text edit is open, and the palette dispatches
-                // the same action from a surface where nothing was typed. Held inside
-                // `open_remote` it turned the palette's "Open remote issue" row into an `x`
-                // inserted in the user's description, with no browser and no message.
-                if type_text(&state, "x", cx) {
-                    return;
-                }
                 open_remote(&state, &bridge, cx);
                 cx.stop_propagation();
             }
@@ -336,9 +208,6 @@ pub(crate) fn render(
             let state = state.clone();
             let bridge = bridge.clone();
             move |_: &card_actions::KeepLocal, _window, cx| {
-                if type_text(&state, "K", cx) {
-                    return;
-                }
                 resolve(&state, &bridge, ConflictResolution::KeepLocal, cx);
             }
         })
@@ -346,25 +215,28 @@ pub(crate) fn render(
             let state = state.clone();
             let bridge = bridge.clone();
             move |_: &card_actions::TakeRemote, _window, cx| {
-                if type_text(&state, "R", cx) {
-                    return;
-                }
                 resolve(&state, &bridge, ConflictResolution::TakeRemote, cx);
             }
         })
         .on_action({
             let state = state.clone();
             let bridge = bridge.clone();
-            move |_: &card_actions::Close, _window, cx| {
-                close(&state, &bridge, cx);
+            let focus = focus.clone();
+            move |_: &card_actions::Close, window, cx| {
+                if close(&state, &bridge, cx) {
+                    window.focus(&focus, cx);
+                }
                 cx.stop_propagation();
             }
         })
         .on_action({
             let state = state.clone();
             let bridge = bridge.clone();
-            move |_: &dialog::Cancel, _window, cx| {
-                close(&state, &bridge, cx);
+            let focus = focus.clone();
+            move |_: &dialog::Cancel, window, cx| {
+                if close(&state, &bridge, cx) {
+                    window.focus(&focus, cx);
+                }
                 cx.stop_propagation();
             }
         })

@@ -32,8 +32,22 @@ pub(crate) struct DialogHost {
     pub card_picker: card_picker::CardPickerState,
     /// New card draft (BOARD §8).
     pub card_create: card_create::CardCreateState,
+    /// Live title editor for the open new-card dialog.
+    pub(super) card_create_title: Option<Entity<TextInput>>,
+    /// Live description editor for the open new-card dialog.
+    pub(super) card_create_description: Option<Entity<TextInput>>,
+    pub(super) card_create_input_subscriptions: Vec<Subscription>,
     /// Card detail draft (BOARD §8).
     pub card_detail: card_detail::CardDetailState,
+    /// The one live editor shared by card-detail title, description and comment edits.
+    pub(super) card_detail_input: Option<Entity<TextInput>>,
+    pub(super) card_detail_input_subscription: Option<Subscription>,
+    /// The card-picker query editor, alive for the picker's whole lifetime.
+    pub(super) card_picker_input: Option<Entity<TextInput>>,
+    pub(super) card_picker_input_subscription: Option<Subscription>,
+    /// The input materialized for the focused board-settings text row.
+    pub(super) board_settings_input: Option<Entity<TextInput>>,
+    pub(super) board_settings_input_subscription: Option<Subscription>,
     /// Whether the palette's draft has been seeded for the currently open palette.
     pub palette_open: bool,
     pub create: create_worktree::CreateState,
@@ -339,6 +353,12 @@ fn watch(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
         }
         if matches!(
             state.read(cx).overlay,
+            Some(Overlay::Dialog(Dialogs::CardPicker))
+        ) {
+            card_picker::refresh(&state, cx);
+        }
+        if matches!(
+            state.read(cx).overlay,
             Some(Overlay::Dialog(Dialogs::Settings))
         ) && with_host(&state, cx, |host| {
             matches!(
@@ -358,13 +378,44 @@ fn watch(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
 fn dialog_key_context(dialog: &Dialogs, host: &DialogHost) -> &'static str {
     match dialog {
         Dialogs::CardDetail if host.card_detail.is_editing() => "CardDetailEditing",
-        Dialogs::BoardSettings if host.board_settings.input().is_some() => "BoardSettingsEditing",
+        Dialogs::BoardSettings if host.board_settings_input.is_some() => "BoardSettingsEditing",
         Dialogs::Settings if host.settings.editing.is_some() => "SettingsEditing",
         Dialogs::CreateWorktree if host.create.field == create_worktree::Field::Branch => {
             "CreateEditing"
         }
         _ => dialog.context_name(),
     }
+}
+
+fn focused_input_entity(state: &Entity<AppState>, cx: &mut App) -> Option<Entity<TextInput>> {
+    let dialog = match state.read(cx).overlay.as_ref() {
+        Some(Overlay::Dialog(dialog)) => dialog.clone(),
+        _ => return None,
+    };
+    read_host(state, cx, |host, _| {
+        let input = match dialog {
+            Dialogs::CardCreate => match host.card_create.field {
+                card_create::Field::Title => host.card_create_title.as_ref(),
+                card_create::Field::Description => host.card_create_description.as_ref(),
+            },
+            Dialogs::CardDetail => host.card_detail_input.as_ref(),
+            Dialogs::CardPicker => host.card_picker_input.as_ref(),
+            Dialogs::BoardSettings => host.board_settings_input.as_ref(),
+            _ => None,
+        }?;
+        Some(input.clone())
+    })
+}
+
+/// The live input that should receive focus for the current board dialog.
+pub(crate) fn focused_input(state: &Entity<AppState>, cx: &mut App) -> Option<FocusHandle> {
+    focused_input_entity(state, cx).map(|input| input.read(cx).focus_handle())
+}
+
+#[cfg(test)]
+/// The current migrated dialog input's text, for root-level focus regressions.
+pub(crate) fn focused_input_text(state: &Entity<AppState>, cx: &mut App) -> Option<String> {
+    focused_input_entity(state, cx).map(|input| input.read(cx).text().to_owned())
 }
 
 /// Mirrors only the derived word into `AppState`; the dialog draft remains the source of truth.
@@ -410,7 +461,7 @@ fn synchronize(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
                 // Read before closing: `close` is what makes the host forget which dialog the
                 // palette replaced, and the `Card detail:` rows are judged against it.
                 let behind = with_host(state, cx, |host| host.open.clone());
-                close(state, cx);
+                close_with(state, true, cx);
                 with_host(state, cx, |host| host.behind_palette = behind);
                 palette::seed(state, cx);
             }
@@ -423,6 +474,10 @@ fn synchronize(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
 }
 
 pub(crate) fn close(state: &Entity<AppState>, cx: &mut App) {
+    close_with(state, false, cx);
+}
+
+fn close_with(state: &Entity<AppState>, preserve_card_detail: bool, cx: &mut App) {
     with_host(state, cx, |host| {
         if host.open.is_none() && !host.palette_open {
             return;
@@ -452,6 +507,17 @@ pub(crate) fn close(state: &Entity<AppState>, cx: &mut App) {
         host.edit_hooks = Default::default();
         host.rename_terminal = Default::default();
         host.palette = Default::default();
+        host.card_create_title = None;
+        host.card_create_description = None;
+        host.card_create_input_subscriptions.clear();
+        host.card_picker_input = None;
+        host.card_picker_input_subscription = None;
+        host.board_settings_input = None;
+        host.board_settings_input_subscription = None;
+        if !preserve_card_detail {
+            host.card_detail_input = None;
+            host.card_detail_input_subscription = None;
+        }
     });
 }
 

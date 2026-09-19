@@ -35,8 +35,6 @@ pub(crate) struct BoardSettingsState {
     pub(super) rows: Vec<BackendRow>,
     /// Which row carries the cursor.
     pub(super) row: usize,
-    /// Caret in the focused text row, as a character offset.
-    pub(super) caret: usize,
     /// Scroll position of the row list.
     ///
     /// A backend with nine settings makes this form taller than the card ever gets, and a
@@ -80,15 +78,6 @@ impl BoardSettingsState {
             .unwrap_or(SettingRow::Name)
     }
 
-    /// The backend row under the cursor, when one is.
-    #[must_use]
-    pub(super) fn focused_backend_row(&self) -> Option<&BackendRow> {
-        match self.focused() {
-            SettingRow::BackendSetting(index) => self.rows.get(index),
-            _ => None,
-        }
-    }
-
     /// Whether the draft still points at the kind the board is stored with.
     #[must_use]
     pub(super) fn keeps_kind(&self) -> bool {
@@ -109,7 +98,6 @@ impl BoardSettingsState {
         };
         self.rows = backend_rows(schema, &base);
         self.row = self.row.min(self.rows().len().saturating_sub(1));
-        self.caret = 0;
         self.error = None;
     }
 
@@ -152,59 +140,48 @@ impl BoardSettingsState {
         rows_error(&self.rows)
     }
 
-    /// The text buffer of the focused row, when it has one.
+    /// The focused row's seed text, when that row owns a live input.
     #[must_use]
-    pub(crate) fn input(&self) -> Option<TextFieldState> {
-        let value = match self.focused() {
-            SettingRow::Name => self.name.clone(),
-            SettingRow::Prefix => self.prefix.clone(),
+    pub(super) fn focused_text(&self) -> Option<String> {
+        match self.focused() {
+            SettingRow::Name => Some(self.name.clone()),
+            SettingRow::Prefix => Some(self.prefix.clone()),
             SettingRow::BackendSetting(index) => {
                 let row = self.rows.get(index)?;
                 if !row.is_text() {
                     return None;
                 }
-                row.value.clone()
+                Some(row.value.clone())
             }
-            _ => return None,
-        };
-        let mut input = TextFieldState::from_text(value);
-        for _ in self.caret..input.caret_chars() {
-            input.move_left();
+            _ => None,
         }
-        Some(input)
     }
 
-    pub(super) fn set_input(&mut self, input: &TextFieldState) {
+    #[cfg(test)]
+    pub(super) fn focused_backend_row(&self) -> Option<&BackendRow> {
+        match self.focused() {
+            SettingRow::BackendSetting(index) => self.rows.get(index),
+            _ => None,
+        }
+    }
+
+    /// Mirror the focused entity after every `Changed` event; the entity remains the editing
+    /// source of truth and this copy is only the serializable board draft used by Save.
+    pub(super) fn set_focused_text(&mut self, text: &str) {
         if self.saving {
             return;
         }
         match self.focused() {
-            SettingRow::Name => self.name = input.text().to_owned(),
+            SettingRow::Name => self.name = text.to_owned(),
             // The contract stores prefixes uppercase, so the field shows what it will store.
-            SettingRow::Prefix => self.prefix = input.text().to_uppercase(),
+            SettingRow::Prefix => self.prefix = text.to_uppercase(),
             SettingRow::BackendSetting(index) => match self.rows.get_mut(index) {
-                Some(row) => row.value = input.text().to_owned(),
+                Some(row) => row.value = text.to_owned(),
                 None => return,
             },
             _ => return,
         }
-        self.caret = input.caret_chars();
         self.error = None;
-    }
-
-    /// The character count of the focused row's text, for a caret parked at its end.
-    #[must_use]
-    fn text_len(&self) -> usize {
-        match self.focused() {
-            SettingRow::Name => self.name.chars().count(),
-            SettingRow::Prefix => self.prefix.chars().count(),
-            SettingRow::BackendSetting(index) => self
-                .rows
-                .get(index)
-                .filter(|row| row.is_text())
-                .map_or(0, |row| row.value.chars().count()),
-            _ => 0,
-        }
     }
 }
 
@@ -225,52 +202,17 @@ pub(super) fn repo_listed(repos: &[RepoId], current: Option<&RepoId>) -> bool {
     current.is_none_or(|repo| repos.iter().any(|entry| entry == repo))
 }
 
-/// Types `text` into the focused row. Returns whether it landed anywhere.
-pub(super) fn insert(state: &Entity<AppState>, text: &str, cx: &mut App) -> bool {
-    let typed = with_host(state, cx, |host| {
-        // A number row refuses a letter, which is what leaves `h` and `l` their cycling
-        // meaning there instead of typing an `h` no backend can parse.
-        if host
-            .board_settings
-            .focused_backend_row()
-            .is_some_and(|row| !row.accepts(text))
-        {
-            return false;
-        }
-        let Some(mut input) = host.board_settings.input() else {
-            return false;
-        };
-        input.insert(text);
-        host.board_settings.set_input(&input);
-        true
-    });
-    if typed {
-        notify(state, cx);
-    }
-    typed
-}
-
-/// `j` / `k`: move the cursor — or type the letter, when a text row owns the keyboard.
-pub(super) fn move_row(state: &Entity<AppState>, delta: isize, literal: &str, cx: &mut App) {
-    if !literal.is_empty() && insert(state, literal, cx) {
-        cx.stop_propagation();
-        return;
-    }
+/// `j` / `k`: move the cursor while no text row owns the keyboard.
+pub(super) fn move_row(state: &Entity<AppState>, delta: isize, cx: &mut App) {
     with_host(state, cx, |host| {
         let len = host.board_settings.rows().len();
         host.board_settings.row = step(host.board_settings.row, delta, len);
-        host.board_settings.caret = host.board_settings.text_len();
     });
-    notify(state, cx);
     cx.stop_propagation();
 }
 
-/// `h` / `l`: cycle a closed choice — or type the letter, for the same reason.
-pub(super) fn cycle(state: &Entity<AppState>, delta: isize, literal: &str, cx: &mut App) {
-    if !literal.is_empty() && insert(state, literal, cx) {
-        cx.stop_propagation();
-        return;
-    }
+/// `h` / `l`: cycle a closed choice while no text row owns the keyboard.
+pub(super) fn cycle(state: &Entity<AppState>, delta: isize, cx: &mut App) {
     let app = state.read(cx);
     let repos = repo_choices(app);
     let selected = read_host(state, cx, |host, _| {
@@ -383,7 +325,7 @@ pub(super) fn cycle_backend_row(draft: &mut BoardSettingsState, index: usize, de
 
 /// `space`: toggle the focused flag row; anywhere else it is a space.
 pub(super) fn toggle(state: &Entity<AppState>, cx: &mut App) {
-    let toggled = with_host(state, cx, |host| {
+    let changed = with_host(state, cx, |host| {
         if host.board_settings.saving {
             return false;
         }
@@ -413,45 +355,97 @@ pub(super) fn toggle(state: &Entity<AppState>, cx: &mut App) {
             _ => false,
         }
     });
-    if !toggled {
-        insert(state, " ", cx);
+    if changed {
+        notify(state, cx);
     }
-    notify(state, cx);
     cx.stop_propagation();
 }
 
-/// Moves the caret of the focused text row. Returns whether there was one.
-pub(super) fn caret(
+/// Rebuild the one row-scoped entity after focus moves, dropping it on non-text rows.
+pub(super) fn materialize_input(
     state: &Entity<AppState>,
+    window: Option<&mut Window>,
+    dialog_focus: Option<&FocusHandle>,
     cx: &mut App,
-    move_to: fn(&mut TextFieldState) -> bool,
-) -> bool {
-    let moved = with_host(state, cx, |host| {
-        let Some(mut input) = host.board_settings.input() else {
-            return false;
+) {
+    let spec = read_host(state, cx, |host, _| {
+        let draft = &host.board_settings;
+        let row = draft.focused();
+        let text = draft.focused_text()?;
+        let (label, placeholder, mono, digits) = match row {
+            SettingRow::Name => (row.label().to_owned(), "Fleet", false, false),
+            SettingRow::Prefix => (row.label().to_owned(), "FLT", true, false),
+            SettingRow::BackendSetting(index) => {
+                let backend = draft.rows.get(index)?;
+                let label = if backend.required {
+                    format!("{} \u{2217}", backend.name)
+                } else {
+                    backend.name.clone()
+                };
+                (
+                    label,
+                    input_placeholder(backend),
+                    backend.kind == PropertyKind::Number,
+                    backend.kind == PropertyKind::Number,
+                )
+            }
+            _ => return None,
         };
-        let _moved = move_to(&mut input);
-        host.board_settings.caret = input.caret_chars();
-        true
+        Some((row, text, label, placeholder, mono, digits))
     });
-    if moved {
+    let Some((row, text, label, placeholder, mono, digits)) = spec else {
+        with_host(state, cx, |host| {
+            host.board_settings_input = None;
+            host.board_settings_input_subscription = None;
+        });
+        if let (Some(window), Some(focus)) = (window, dialog_focus) {
+            window.focus(focus, cx);
+        }
         notify(state, cx);
-    }
-    moved
-}
-
-/// Runs a text edit against the focused row.
-pub(super) fn edit(state: &Entity<AppState>, cx: &mut App, edit: impl FnOnce(&mut TextFieldState)) {
-    let edited = with_host(state, cx, |host| {
-        let Some(mut input) = host.board_settings.input() else {
-            return false;
+        return;
+    };
+    let input = cx.new(|cx| {
+        let mut input = TextInput::new(InputMode::SingleLine, cx);
+        input.set_text(text, cx);
+        input.set_label(Some(label.into()), cx);
+        input.set_placeholder(placeholder, cx);
+        input.set_mono(mono, cx);
+        if digits {
+            input.set_filter(Some(|character| character.is_ascii_digit()), cx);
+        }
+        input
+    });
+    let host = crate::dialogs::host::host_for(state, cx);
+    let weak_host = host.downgrade();
+    let subscription = cx.subscribe(&input, move |input, event, cx| {
+        if !matches!(event, TextInputEvent::Changed) {
+            return;
+        }
+        let Some(host) = weak_host.upgrade() else {
+            return;
         };
-        edit(&mut input);
-        host.board_settings.set_input(&input);
-        true
+        let raw = input.read(cx).text().to_owned();
+        let normalized = if row == SettingRow::Prefix {
+            raw.to_uppercase()
+        } else {
+            raw
+        };
+        // Mirror prefixes in their stored uppercase form, but leave the live editor untouched so
+        // selection and undo history remain user edits. Moving away and back materializes that
+        // normalized draft value.
+        host.update(cx, |host, cx| {
+            if host.board_settings.focused() == row {
+                host.board_settings.set_focused_text(&normalized);
+                cx.notify();
+            }
+        });
     });
-    if edited {
-        notify(state, cx);
-        cx.stop_propagation();
+    host.update(cx, |host, _| {
+        host.board_settings_input = Some(input.clone());
+        host.board_settings_input_subscription = Some(subscription);
+    });
+    if let Some(window) = window {
+        input.update(cx, |input, cx| input.focus(window, cx));
     }
+    notify(state, cx);
 }

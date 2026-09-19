@@ -850,10 +850,8 @@ key_table! {
     "ctrl-w",       "Filter" => filter::DeleteWord;
     "ctrl-u",       "Filter" => filter::Clear;
 
-    "left", "Filter > BoardFilter" => board::PrevColumn;
-    "ctrl-b", "Filter > BoardFilter" => board::PrevColumn;
-    "right", "Filter > BoardFilter" => board::NextColumn;
-    "ctrl-f", "Filter > BoardFilter" => board::NextColumn;
+    "shift-tab", "Filter > BoardFilter" => board::PrevColumn;
+    "tab", "Filter > BoardFilter" => board::NextColumn;
 
     "enter",        "Palette" => palette::Run;
     "escape",       "Palette" => palette::Close;

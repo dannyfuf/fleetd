@@ -364,6 +364,16 @@ impl HubScreen {
             pr_scroll: self.pr_scroll.clone(),
         }
     }
+
+    /// Focus the board filter after `/` changes the owning state.
+    pub(crate) fn focus_board_filter(&self, window: &mut Window, cx: &mut App) {
+        self.board.focus_filter(window, cx);
+    }
+
+    /// The board filter's live input handle, when the shell needs to preserve it.
+    pub(crate) fn board_filter_focus_handle(&self, cx: &App) -> FocusHandle {
+        self.board.filter_focus_handle(cx)
+    }
 }
 
 /// The cursor of the active PR tab; each tab remembers its own row (§1.5).

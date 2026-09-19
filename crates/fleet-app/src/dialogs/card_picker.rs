@@ -22,7 +22,7 @@ use gpui::{AnyElement, App, Entity, FocusHandle, Window, div};
 use crate::{
     actions::{dialog, settings as settings_actions},
     bridge::Bridge,
-    dialogs::{DialogHost, Dialogs, notify, read_host, root, step, type_into, with_host},
+    dialogs::{DialogHost, Dialogs, notify, read_host, root, step, with_host},
     screens::board,
     state::AppState,
 };
@@ -41,7 +41,7 @@ mod view;
 
 use draft::*;
 pub(crate) use draft::{CardPickerState, PickerKind};
-pub(crate) use lifecycle::seed;
 use lifecycle::*;
+pub(crate) use lifecycle::{refresh, seed};
 use schema::*;
 pub(crate) use view::render;

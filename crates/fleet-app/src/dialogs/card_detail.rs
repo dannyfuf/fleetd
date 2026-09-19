@@ -20,9 +20,7 @@ use gpui::{AnyElement, App, Entity, FocusHandle, Window, div, px};
 use crate::{
     actions::{card_detail as card_actions, dialog},
     bridge::Bridge,
-    dialogs::{
-        DialogHost, Dialogs, host::complete_request, notify, read_host, root, typed_char, with_host,
-    },
+    dialogs::{DialogHost, Dialogs, host::complete_request, notify, read_host, root, with_host},
     presentation::now_unix,
     screens::board,
     state::AppState,

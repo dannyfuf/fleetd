@@ -9,8 +9,8 @@ impl Drop for Dropped {
     }
 }
 
-#[test]
-fn editing_context_words_follow_the_existing_dialog_drafts() {
+#[gpui::test]
+fn editing_context_words_follow_the_existing_dialog_drafts(cx: &mut TestAppContext) {
     let mut host = DialogHost::default();
 
     assert_eq!(
@@ -30,6 +30,12 @@ fn editing_context_words_follow_the_existing_dialog_drafts() {
         "SettingsEditing"
     );
 
+    assert_eq!(
+        dialog_key_context(&Dialogs::BoardSettings, &host),
+        "BoardSettings"
+    );
+    host.board_settings_input =
+        Some(cx.new(|cx| TextInput::new(fleet_ui_kit::InputMode::SingleLine, cx)));
     assert_eq!(
         dialog_key_context(&Dialogs::BoardSettings, &host),
         "BoardSettingsEditing"

@@ -1,12 +1,17 @@
-use super::{first_run_import_allowed, focus::*};
+use super::{Shell, first_run_import_allowed, focus::*};
 use crate::{
     actions::{fleet::OpenJobs, native_agent, prefix},
     dialogs::Dialogs,
-    state::{AppState, DaemonLink, DaemonLossReason, Overlay, Screen, TerminalMode},
+    state::{AppState, DaemonLink, DaemonLossReason, HubTab, Overlay, Screen, TerminalMode},
 };
-use fleet_core::config::Agent;
-use gpui::{Action, KeyDownEvent, Keystroke};
-use std::time::Instant;
+use fleet_core::{
+    board::{BoardView, CardDraft, create_card, new_board},
+    config::Agent,
+    model::Context as FleetContext,
+};
+use fleet_proto::snapshot::{DaemonInfo, Snapshot};
+use gpui::{Action, Entity, FocusHandle, KeyDownEvent, Keystroke, VisualTestContext};
+use std::{cell::RefCell, rc::Rc, time::Instant};
 
 fn key_down(keys: &str) -> KeyDownEvent {
     KeyDownEvent {
@@ -341,4 +346,215 @@ fn import_is_rejected_for_a_stale_first_run_context_when_state_exists() {
     assert!(!first_run_import_allowed(true, true));
     assert!(!first_run_import_allowed(false, false));
     assert!(!first_run_import_allowed(false, true));
+}
+
+struct RootInputFixture {
+    state: Entity<AppState>,
+    body_focus: FocusHandle,
+    board_filter_focus: FocusHandle,
+    focus_owner_keys: Rc<RefCell<FocusOwnerKeys>>,
+    visual: VisualTestContext,
+}
+
+fn board_context() -> FleetContext {
+    FleetContext {
+        id: "work".parse().unwrap(),
+        name: "Fleet".to_owned(),
+        owners: Vec::new(),
+        created_at: "2026-09-19T12:00:00Z".to_owned(),
+    }
+}
+
+fn board_view(context: &FleetContext) -> BoardView {
+    let mut board = new_board(context, "2026-09-19T12:00:00Z");
+    let card = create_card(
+        &mut board,
+        &[],
+        "card-1".parse().unwrap(),
+        CardDraft {
+            title: "Fix login".to_owned(),
+            ..CardDraft::default()
+        },
+        "2026-09-19T12:00:00Z",
+    )
+    .unwrap();
+    BoardView {
+        board,
+        cards: vec![card],
+    }
+}
+
+fn board_snapshot(context: FleetContext) -> Snapshot {
+    Snapshot {
+        boards: Vec::new(),
+        generated_at: "2026-09-19T12:00:00Z".to_owned(),
+        revision: None,
+        contexts: vec![context.clone()],
+        repos: Vec::new(),
+        clones: Vec::new(),
+        worktrees: Vec::new(),
+        active_context: Some(context.id),
+        sessions: Vec::new(),
+        agent_threads: Vec::new(),
+        statuses: Vec::new(),
+        pools: Vec::new(),
+        hosts: Vec::new(),
+        jobs: Vec::new(),
+        daemon: DaemonInfo {
+            version: "test".to_owned(),
+            pid: 1,
+            started_at: "2026-09-19T12:00:00Z".to_owned(),
+            home: "/tmp/fleet-shell-input-focus".to_owned(),
+        },
+    }
+}
+
+fn root_input_fixture(cx: &mut gpui::TestAppContext, name: &str) -> RootInputFixture {
+    cx.update(|cx| {
+        cx.set_global(fleet_ui_kit::Theme::dark());
+        crate::keymap::init(cx);
+    });
+    let context = board_context();
+    let view = board_view(&context);
+    let snapshot = board_snapshot(context);
+    let mut state = None;
+    let mut body_focus = None;
+    let mut board_filter_focus = None;
+    let mut focus_owner_keys = None;
+    let home = format!("/tmp/fleet-shell-input-focus-{name}");
+    let window = cx.add_window(|window, cx| {
+        let mut shell = Shell::new(home.into(), cx);
+        shell.bridge.shutdown();
+        shell.state.update(cx, |app, _| {
+            app.apply_snapshot(snapshot, Instant::now());
+            app.apply_board_view(view);
+            app.daemon = DaemonLink::Connected;
+            app.screen = Screen::Hub { tab: HubTab::Board };
+            let selected_status = app.board().unwrap().cards[0].status_id.clone();
+            app.board.focus.column = app
+                .board()
+                .unwrap()
+                .board
+                .statuses
+                .iter()
+                .position(|status| status.id == selected_status)
+                .unwrap();
+        });
+        state = Some(shell.state.clone());
+        body_focus = Some(shell.body_focus.clone());
+        board_filter_focus = Some(shell.hub.board_filter_focus_handle(cx));
+        focus_owner_keys = Some(Rc::clone(&shell.focus_owner_keys));
+        shell.observe_window(window, cx);
+        shell
+    });
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    visual.run_until_parked();
+    let focus_owner_keys = focus_owner_keys.unwrap();
+    finish_test_render(&focus_owner_keys);
+    RootInputFixture {
+        state: state.unwrap(),
+        body_focus: body_focus.unwrap(),
+        board_filter_focus: board_filter_focus.unwrap(),
+        focus_owner_keys,
+        visual,
+    }
+}
+
+fn finish_test_render(keys: &Rc<RefCell<FocusOwnerKeys>>) {
+    let generation = keys.borrow().live_generation;
+    assert!(keys.borrow_mut().finish_render(generation).is_empty());
+}
+
+fn dispatch_root_key(fixture: &mut RootInputFixture, key: &str) {
+    let keystroke = Keystroke::parse(key).unwrap();
+    fixture.visual.update(|window, cx| {
+        window.dispatch_keystroke(keystroke, cx);
+    });
+    fixture.visual.run_until_parked();
+    fixture
+        .visual
+        .update(|window, cx| window.draw(cx).clear(cx));
+    fixture.visual.run_until_parked();
+    finish_test_render(&fixture.focus_owner_keys);
+}
+
+fn assert_dialog_input_focused(fixture: &mut RootInputFixture) {
+    fixture.visual.update(|window, cx| {
+        let input = crate::dialogs::focused_input(&fixture.state, cx).expect("dialog input");
+        assert!(input.is_focused(window));
+    });
+}
+
+fn dialog_input_text(fixture: &mut RootInputFixture) -> String {
+    fixture
+        .visual
+        .update(|_, cx| crate::dialogs::focused_input_text(&fixture.state, cx).unwrap())
+}
+
+#[gpui::test]
+fn real_shell_board_filter_keeps_input_focus_and_escape_returns_to_body(
+    cx: &mut gpui::TestAppContext,
+) {
+    let mut fixture = root_input_fixture(cx, "board-filter");
+
+    dispatch_root_key(&mut fixture, "/");
+    fixture.visual.update(|window, _| {
+        assert!(fixture.board_filter_focus.is_focused(window));
+    });
+    fixture.visual.simulate_input("acli");
+    assert_eq!(
+        fixture
+            .state
+            .read_with(&fixture.visual, |app, _| app.board.filter.clone()),
+        "acli"
+    );
+
+    dispatch_root_key(&mut fixture, "escape");
+    fixture.visual.update(|window, _| {
+        assert!(!fixture.board_filter_focus.is_focused(window));
+        assert!(fixture.body_focus.is_focused(window));
+    });
+}
+
+#[gpui::test]
+fn real_shell_card_create_title_accepts_platform_text(cx: &mut gpui::TestAppContext) {
+    let mut fixture = root_input_fixture(cx, "card-create");
+
+    dispatch_root_key(&mut fixture, "c");
+    assert_dialog_input_focused(&mut fixture);
+    fixture.visual.simulate_input("New card");
+    assert_eq!(dialog_input_text(&mut fixture), "New card");
+}
+
+#[gpui::test]
+fn real_shell_card_detail_title_accepts_platform_text(cx: &mut gpui::TestAppContext) {
+    let mut fixture = root_input_fixture(cx, "card-detail");
+
+    dispatch_root_key(&mut fixture, "enter");
+    dispatch_root_key(&mut fixture, "i");
+    assert_dialog_input_focused(&mut fixture);
+    fixture.visual.simulate_input(" revised");
+    assert_eq!(dialog_input_text(&mut fixture), "Fix login revised");
+}
+
+#[gpui::test]
+fn real_shell_card_picker_query_accepts_platform_text(cx: &mut gpui::TestAppContext) {
+    let mut fixture = root_input_fixture(cx, "card-picker");
+
+    dispatch_root_key(&mut fixture, "s");
+    assert_dialog_input_focused(&mut fixture);
+    fixture.visual.simulate_input("doing");
+    assert_eq!(dialog_input_text(&mut fixture), "doing");
+}
+
+#[gpui::test]
+fn real_shell_board_settings_text_row_accepts_platform_text(cx: &mut gpui::TestAppContext) {
+    let mut fixture = root_input_fixture(cx, "board-settings");
+
+    dispatch_root_key(&mut fixture, ",");
+    assert_dialog_input_focused(&mut fixture);
+    let before = dialog_input_text(&mut fixture);
+    fixture.visual.simulate_input(" revised");
+    assert_eq!(dialog_input_text(&mut fixture), format!("{before} revised"));
 }

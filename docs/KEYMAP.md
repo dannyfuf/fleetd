@@ -543,7 +543,7 @@ opens `config.json` in a new terminal tab. The two never coexist in one key cont
 
 | Key | Action |
 | --- | --- |
-| printable, `Backspace`, `ctrl-w`, `ctrl-u` | edit the legacy query until this surface migrates to the full `FleetTextInput` table above |
+| printable, `Backspace`, `ctrl-w`, `ctrl-u` | edit through the full `FleetTextInput` table above on the board; edit the legacy query in the Hub until P3-T06 |
 | `ctrl-n` / `↓`, `ctrl-p` / `↑` | move the **list** cursor while still typing |
 | `Enter` | open the highlighted row directly from inside the input [A24] |
 | `Esc` | first press leaves the input keeping the filter, second press clears it — **never quits** [A13] |
@@ -685,16 +685,16 @@ that cannot contain a space, and `space` toggles the highlighted card.
 | `space` | `Dialog > BoardSettings` | `settings::Toggle` — Toggle the row |
 | `enter` | `Dialog > BoardSettingsEditing` | `dialog::Confirm` — Save settings |
 
-Board filtering also keeps horizontal navigation:
+Board filtering keeps horizontal navigation on keys the input does not own. `left` / `right` and
+`ctrl-b` / `ctrl-f` now move the caret through `FleetTextInput`; column navigation therefore uses
+`Tab` / `Shift-Tab`:
 
 | Key | Context | Action |
 | --- | --- | --- |
-| `left` | `Filter > BoardFilter` | `board::PrevColumn` — Previous column |
-| `ctrl-b` | `Filter > BoardFilter` | `board::PrevColumn` — Previous column |
-| `right` | `Filter > BoardFilter` | `board::NextColumn` — Next column |
-| `ctrl-f` | `Filter > BoardFilter` | `board::NextColumn` — Next column |
+| `shift-tab` | `Filter > BoardFilter` | `board::PrevColumn` — Previous column |
+| `tab` | `Filter > BoardFilter` | `board::NextColumn` — Next column |
 
-In card text editors, Tab indents by two spaces. In CardCreate, Tab from the title enters
-its description; Shift-Tab returns to the title, Enter in the description inserts a newline,
+In card-detail multi-line editors, Tab inserts a hard tab. In CardCreate, Tab and Shift-Tab move
+between title and description; Enter in the description inserts a newline,
 and Ctrl-Enter creates and opens the card. Escape in the property picker returns to the
 card detail when opened there. Space toggles both labels and custom multi-select options.

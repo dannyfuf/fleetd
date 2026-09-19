@@ -1,7 +1,6 @@
 use super::*;
 
-/// `Enter`: a newline inside a multi-line edit, a save inside the title, otherwise the picker
-/// or worktree the selected property row points at.
+/// `Enter`: a save inside the title, otherwise the picker or worktree the selected row points at.
 pub(super) fn enter(
     state: &Entity<AppState>,
     bridge: &Bridge,
@@ -13,10 +12,7 @@ pub(super) fn enter(
             commit_edit(state, bridge, cx);
             return;
         }
-        Some(CardEdit::Description | CardEdit::Comment) => {
-            edit_buffer(state, cx, TextAreaState::insert_newline);
-            return;
-        }
+        Some(CardEdit::Description | CardEdit::Comment) => return,
         None => {}
     }
     let row = read_host(state, cx, |host, _| host.card_detail.property_row);
@@ -112,52 +108,70 @@ pub(super) fn start_worktree(state: &Entity<AppState>, bridge: &Bridge, cx: &mut
 }
 
 /// `esc` — discard an open edit, else close the dialog.
-pub(crate) fn close(state: &Entity<AppState>, _bridge: &Bridge, cx: &mut App) {
+pub(crate) fn close(state: &Entity<AppState>, _bridge: &Bridge, cx: &mut App) -> bool {
     let editing = with_host(state, cx, |host| {
         let editing = host.card_detail.is_editing();
         if editing {
             host.card_detail.cancel();
+            host.card_detail_input = None;
+            host.card_detail_input_subscription = None;
         }
         editing
     });
     if editing {
         notify(state, cx);
-        return;
+        return true;
     }
     state.update(cx, |state, cx| {
         state.close_overlay();
         cx.notify();
     });
+    false
 }
 
 /// `i` — edit the title.
-pub(crate) fn edit_title(state: &Entity<AppState>, _bridge: &Bridge, cx: &mut App) {
+pub(crate) fn edit_title(
+    state: &Entity<AppState>,
+    _bridge: &Bridge,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let draft = read_host(state, cx, |host, _| host.card_detail.clone());
     let Some(title) = card(state.read(cx), &draft).map(|card| card.title.clone()) else {
         return;
     };
-    begin(state, CardEdit::Title, title, cx);
+    begin(state, CardEdit::Title, title, window, cx);
 }
 
 /// `d` — edit the description.
-pub(crate) fn edit_description(state: &Entity<AppState>, _bridge: &Bridge, cx: &mut App) {
+pub(crate) fn edit_description(
+    state: &Entity<AppState>,
+    _bridge: &Bridge,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let draft = read_host(state, cx, |host, _| host.card_detail.clone());
     let Some(description) = card(state.read(cx), &draft).map(|card| card.description.clone())
     else {
         return;
     };
-    begin(state, CardEdit::Description, description, cx);
+    begin(state, CardEdit::Description, description, window, cx);
 }
 
 /// `c` — write a comment.
-pub(crate) fn add_comment(state: &Entity<AppState>, _bridge: &Bridge, cx: &mut App) {
+pub(crate) fn add_comment(
+    state: &Entity<AppState>,
+    _bridge: &Bridge,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let draft = read_host(state, cx, |host, _| host.card_detail.clone());
     if card(state.read(cx), &draft).is_none() {
         // The dialog is rendering `missing()`; an edit opened over it takes the keyboard and
         // the first `Esc` only cancels a buffer nothing is showing.
         return;
     }
-    begin(state, CardEdit::Comment, String::new(), cx);
+    begin(state, CardEdit::Comment, String::new(), window, cx);
 }
 
 /// `j` — next property row.

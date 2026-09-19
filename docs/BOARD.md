@@ -782,7 +782,8 @@ Property rows in the card detail reuse `KeyValueList`/`FactRow`; pickers reuse
 - **Bridge**: board requests use `Bridge::request` reply receivers, with no new `BridgeEvent`
   variants. Responses land in `AppState` reducers (`apply_board_view`, `apply_card`); board loads
   use context/generation guards.
-- **Dialogs** (`Dialogs` variants; state in `DialogHost`): `CardDetail` (`dialogs/card_detail.rs`,
+- **Dialogs** (`Dialogs` variants; serializable drafts and live `Entity<TextInput>` owners in
+  `DialogHost`): `CardDetail` (`dialogs/card_detail.rs`,
   `CardDetailState`), `CardCreate` (`dialogs/card_create.rs`), `CardPicker`
   (`dialogs/card_picker.rs`, `PickerKind { Status, Priority, Assignee, Labels, Estimate, DueDate,
   Repo, Property(key) }`), `BoardSettings` (`dialogs/board_settings.rs`: name, prefix, default
@@ -790,8 +791,9 @@ Property rows in the card detail reuse `KeyValueList`/`FactRow`; pickers reuse
   `ListBoardBackends` plus one generic row per `settings_schema` entry; see `docs/BOARD-JIRA.md`
   §6).
 - **Card detail layout** (UX-SPEC §board): two panes. Left: key + title (editable, `i`),
-  description (`MarkdownText`; `d` toggles `TextArea` edit; `ctrl-s`/`esc` saves/cancels),
-  comments (list + `c` to add via a `TextArea`), activity (last 10). Right: property list —
+  description (`MarkdownText`; `d` opens the shared multi-line `TextInput`;
+  `ctrl-s`/`esc` saves/cancels), comments (list + `c` to add through that input), activity
+  (last 10). Right: property list —
   Status, Priority, Assignee, Labels, Estimate, Due, Parent, Repo, Worktree (enter = open its
   session), Remote (key/url/synced/dirty), then custom properties from `board.properties`; `j/k`
   select row, `enter` opens the matching picker. Conflict banner with `K` keep-local / `R`

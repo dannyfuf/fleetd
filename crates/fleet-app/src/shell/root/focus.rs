@@ -5,9 +5,10 @@ use crate::{
 };
 use fleet_ui_kit::Icon;
 use gpui::{
-    Action, AnyElement, Context, DispatchPhase, Div, Entity, IntoElement, KeyDownEvent, Keystroke,
-    MouseDownEvent, MouseEvent, MouseExitEvent, MouseMoveEvent, MousePressureEvent, MouseUpEvent,
-    PinchEvent, PlatformInput, ScrollWheelEvent, Window, canvas, deferred, div, prelude::*,
+    Action, AnyElement, App, Context, DispatchPhase, Div, Entity, FocusHandle, IntoElement,
+    KeyDownEvent, Keystroke, MouseDownEvent, MouseEvent, MouseExitEvent, MouseMoveEvent,
+    MousePressureEvent, MouseUpEvent, PinchEvent, PlatformInput, ScrollWheelEvent, Window, canvas,
+    deferred, div, prelude::*,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -499,6 +500,12 @@ impl Shell {
             FocusTarget::Native if !self.workspace.pane_owns_keyboard() => FocusTarget::Body,
             target => target,
         };
+        if let Some(input) = self.wanted_input(cx) {
+            if !input.is_focused(window) {
+                window.focus(&input, cx);
+            }
+            return;
+        }
         focus_surface(
             target,
             &self.body_focus,
@@ -507,6 +514,28 @@ impl Shell {
             window,
             cx,
         );
+    }
+
+    /// The live editor that currently owns keyboard input, independent of its coarse surface.
+    fn wanted_input(&self, cx: &mut App) -> Option<FocusHandle> {
+        if let Some(input) = crate::dialogs::focused_input(&self.state, cx) {
+            return Some(input);
+        }
+        let state = self.state.read(cx);
+        if state.overlay.is_none()
+            && state.agent_popup.is_none()
+            && matches!(
+                state.screen,
+                Screen::Hub {
+                    tab: crate::state::HubTab::Board
+                }
+            )
+            && state.board.filter_editing
+        {
+            return Some(self.hub.board_filter_focus_handle(cx));
+        }
+        // Future migrated Hub filters, palette editors, and dialog inputs join this ownership gate.
+        None
     }
 }
 
@@ -567,7 +596,7 @@ fn focus_surface(
         // Native panes and agent tabs restore their own descendant focus on activation.
         FocusTarget::Native | FocusTarget::AgentThread => return,
     };
-    if !wanted.is_focused(window) {
+    if !wanted.contains_focused(window, cx) {
         window.focus(wanted, cx);
     }
 }
