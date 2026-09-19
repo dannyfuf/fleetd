@@ -997,6 +997,10 @@ fn every_subagent_verb_parses_its_flags_and_defaults() {
             "high",
             "--title",
             "worker",
+            "--env",
+            "CARGO_TARGET_DIR=/tmp/one",
+            "--env",
+            "RUST_LOG=debug",
             "--eager",
             "--caller",
             CALLER,
@@ -1011,6 +1015,12 @@ fn every_subagent_verb_parses_its_flags_and_defaults() {
             model: Some("opus".to_owned()),
             effort: Some("high".to_owned()),
             title: Some("worker".to_owned()),
+            // Repeatable, and clap keeps the order typed; the CLI sorts them into the map it
+            // sends, so the wire order is the map's, not the command line's.
+            env: vec![
+                "CARGO_TARGET_DIR=/tmp/one".to_owned(),
+                "RUST_LOG=debug".to_owned(),
+            ],
             eager: true,
             caller: Some(CALLER.parse().unwrap()),
             json: true,
@@ -1029,6 +1039,7 @@ fn every_subagent_verb_parses_its_flags_and_defaults() {
             model: None,
             effort: None,
             title: None,
+            env: Vec::new(),
             eager: false,
             caller: None,
             json: false,
@@ -1069,6 +1080,7 @@ fn every_subagent_verb_parses_its_flags_and_defaults() {
         SubagentCommand::Wait(SubagentWaitArgs {
             id: DELEGATION.parse().unwrap(),
             timeout: 540,
+            caller: None,
             json: false,
         })
     );
@@ -1077,7 +1089,19 @@ fn every_subagent_verb_parses_its_flags_and_defaults() {
         SubagentCommand::Wait(SubagentWaitArgs {
             id: DELEGATION.parse().unwrap(),
             timeout: 30,
+            caller: None,
             json: true,
+        })
+    );
+    // `wait` takes the same caller flag `run` does, so a shell with no FLEET_SESSION can still
+    // say which thread the result is being read for and have it consumed.
+    assert_eq!(
+        parse_subagent(&["wait", DELEGATION, "--caller", CALLER]),
+        SubagentCommand::Wait(SubagentWaitArgs {
+            id: DELEGATION.parse().unwrap(),
+            timeout: 540,
+            caller: Some(CALLER.parse().unwrap()),
+            json: false,
         })
     );
     // 540 is a default, not a ceiling. A caller whose own tool timeout is longer than Claude
@@ -1088,6 +1112,7 @@ fn every_subagent_verb_parses_its_flags_and_defaults() {
         SubagentCommand::Wait(SubagentWaitArgs {
             id: DELEGATION.parse().unwrap(),
             timeout: 3_600,
+            caller: None,
             json: false,
         })
     );
@@ -1097,6 +1122,7 @@ fn every_subagent_verb_parses_its_flags_and_defaults() {
         SubagentCommand::Wait(SubagentWaitArgs {
             id: DELEGATION.parse().unwrap(),
             timeout: 0,
+            caller: None,
             json: false,
         })
     );
@@ -1326,7 +1352,14 @@ async fn subagent_verbs_use_typed_requests_and_render_human_and_json_output() {
                 }),
                 title: Some("parser worker".to_owned()),
                 fleet_path: Some(fleet_path),
-                env: std::collections::BTreeMap::new(),
+                // Sorted by key on the wire whatever order the flags were typed in, and carrying
+                // no FLEET_* or PATH entry — those are refused before a request is framed.
+                env: [
+                    ("CARGO_TARGET_DIR".to_owned(), "/tmp/child".to_owned()),
+                    ("RUST_LOG".to_owned(), "debug".to_owned()),
+                ]
+                .into_iter()
+                .collect(),
                 eager: true,
             }
         );
@@ -1368,12 +1401,15 @@ async fn subagent_verbs_use_typed_requests_and_render_human_and_json_output() {
 
         for (timeout_ms, terminal) in [(1_000, false), (2_000, true)] {
             let request = next_request(&mut transport).await;
+            // The wait carries the thread it is issued for, resolved from FLEET_SESSION exactly
+            // as `run` resolves its caller. That is what lets the daemon mark the result read
+            // rather than injecting it into that thread a second time.
             assert_eq!(
                 request.body,
                 RequestBody::DelegationWait {
                     delegation: expected.id,
                     timeout_ms,
-                    caller: None,
+                    caller: Some(expected.child),
                 }
             );
             let mut answer = expected.clone();
@@ -1450,6 +1486,10 @@ async fn subagent_verbs_use_typed_requests_and_render_human_and_json_output() {
             model: Some("gpt-5".to_owned()),
             effort: Some("high".to_owned()),
             title: Some("parser worker".to_owned()),
+            env: vec![
+                "RUST_LOG=debug".to_owned(),
+                "CARGO_TARGET_DIR=/tmp/child".to_owned(),
+            ],
             eager: true,
             // The environment below is the child's (its session, delegation and token), so the
             // caller is named explicitly, exactly as a shell without FLEET_SESSION would.
@@ -1495,6 +1535,7 @@ async fn subagent_verbs_use_typed_requests_and_render_human_and_json_output() {
         SubagentCommand::Wait(SubagentWaitArgs {
             id: delegation.id,
             timeout: 1,
+            caller: None,
             json: false,
         }),
         &environment,
@@ -1531,6 +1572,7 @@ async fn subagent_verbs_use_typed_requests_and_render_human_and_json_output() {
         SubagentCommand::Wait(SubagentWaitArgs {
             id: delegation.id,
             timeout: 2,
+            caller: None,
             json: false,
         }),
         &environment,
@@ -1552,11 +1594,23 @@ async fn subagent_verbs_use_typed_requests_and_render_human_and_json_output() {
     )
     .await
     .unwrap();
+    // `status` is the verb that answers everything: the fixed-field line, the brief whole, and
+    // the child's report rendered exactly as `wait` renders it. No usage line, because this
+    // record carries none and a missing spend prints nothing rather than zeros.
     assert_eq!(
         status.text,
         format!(
-            "{}\tsucceeded\tcodex\t{}\t14m 02s\tpending",
-            delegation.id, delegation.child
+            "{id}\tsucceeded\tcodex\t{child}\t14m 02s\t-\t-\tpending\n\
+             \n\
+             brief:\n\
+             inspect the parser\n\
+             \n\
+             [fleet subagent {id} finished: succeeded]\n\
+             provider: codex, thread: {child}, duration: 14m 02s, files changed: 2\n\
+             \n\
+             verified",
+            id = delegation.id,
+            child = delegation.child
         )
     );
 
@@ -1570,6 +1624,8 @@ async fn subagent_verbs_use_typed_requests_and_render_human_and_json_output() {
     )
     .await
     .unwrap();
+    // A brief under the preview length is carried whole, and `briefElided` is then absent
+    // rather than `false`: the caller really did get all of it.
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&listed.text).unwrap(),
         serde_json::json!({"protocol": 1, "delegations": [delegation]})
@@ -1607,6 +1663,8 @@ async fn subagent_wait_json_bytes_are_unchanged_for_a_live_delegation() {
             RequestBody::DelegationWait {
                 delegation: expected.id,
                 timeout_ms: 1_000,
+                // No flag and no FLEET_SESSION: this wait names nobody and consumes nothing,
+                // which is exactly what a wait from a plain shell did before the field existed.
                 caller: None,
             }
         );
@@ -1628,6 +1686,7 @@ async fn subagent_wait_json_bytes_are_unchanged_for_a_live_delegation() {
         SubagentCommand::Wait(SubagentWaitArgs {
             id: delegation.id,
             timeout: 1,
+            caller: None,
             json: true,
         }),
         &subagents::Environment::default(),
@@ -1713,6 +1772,7 @@ async fn subagent_run_sends_an_effort_without_a_model_as_the_default_model_senti
             model: None,
             effort: Some("high".to_owned()),
             title: None,
+            env: Vec::new(),
             eager: false,
             caller: Some(delegation.caller),
             json: false,
@@ -1722,6 +1782,397 @@ async fn subagent_run_sends_an_effort_without_a_model_as_the_default_model_senti
     .await
     .unwrap();
     server.await.unwrap();
+}
+
+/// The reported pain, fixed: a report whose `wait` was missed is reachable from `status`.
+///
+/// Before this, `fleet subagent status` printed six tab-separated fields and no body at all, so
+/// an orchestrator that lost its wait went and read the child's report file out of a temporary
+/// directory. The body `status` prints is now [`human::delivered_message`] verbatim — the same
+/// bytes `wait` printed — so whichever verb a caller greps, it greps the same text.
+#[tokio::test]
+async fn a_status_prints_the_report_body_a_wait_prints_and_adds_the_childs_spend() {
+    use crate::args::{SubagentCommand, SubagentIdArgs, SubagentListArgs, SubagentWaitArgs};
+
+    let home = TempDir::new().unwrap();
+    let listener = bind(home.path()).await;
+    let mut delegation = sample_delegation();
+    delegation.usage = Some(fleet_core::agents::DelegationUsage {
+        usage: fleet_core::agents::Usage {
+            input_tokens: 1_200,
+            output_tokens: 340,
+            cache_read_tokens: 9_000,
+            cache_write_tokens: 500,
+            total_tokens: 11_040,
+            ..Default::default()
+        },
+        cost_usd: Some(0.4237),
+        context_pct: 12.6,
+    });
+    let expected = delegation.clone();
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut transport = Framed::new(socket, FleetCodec::new());
+        authenticate(&mut transport).await;
+        for _ in 0..3 {
+            let request = next_request(&mut transport).await;
+            let body = match request.body {
+                RequestBody::DelegationWait { .. } | RequestBody::DelegationGet { .. } => {
+                    ResponseBody::Delegation(expected.clone())
+                }
+                RequestBody::DelegationList { .. } => {
+                    ResponseBody::Delegations(vec![expected.clone()])
+                }
+                other => panic!("unexpected request {other:?}"),
+            };
+            send_result(&mut transport, request.id, Ok(body)).await;
+        }
+    });
+
+    let client = Client::connect(home.path()).await.unwrap();
+    let environment = subagents::Environment::default();
+    let waited = subagents::execute(
+        &client,
+        SubagentCommand::Wait(SubagentWaitArgs {
+            id: delegation.id,
+            timeout: 1,
+            caller: None,
+            json: false,
+        }),
+        &environment,
+    )
+    .await
+    .unwrap();
+    let status = subagents::execute(
+        &client,
+        SubagentCommand::Status(SubagentIdArgs {
+            id: delegation.id,
+            json: false,
+        }),
+        &environment,
+    )
+    .await
+    .unwrap();
+    let listed = subagents::execute(
+        &client,
+        SubagentCommand::List(SubagentListArgs {
+            caller: None,
+            json: false,
+        }),
+        &environment,
+    )
+    .await
+    .unwrap();
+
+    // Byte for byte, not merely "contains the report text": the whole delivered block is the
+    // tail of what `status` prints, header line included.
+    assert!(
+        status.text.ends_with(&waited.text),
+        "status must end with exactly what wait printed\nwait:\n{}\nstatus:\n{}",
+        waited.text,
+        status.text
+    );
+    assert!(waited.text.contains("finished: succeeded"));
+
+    // The brief whole, then the spend, in the order §15.4 fixes. 12.6% rounds to 13: the
+    // percentage is a display figure and a fractional point of a context window is not a fact
+    // worth a decimal place.
+    assert!(
+        status.text.contains(concat!(
+            "brief:\ninspect the parser\n\n",
+            "usage: 11040 tokens, 1200 in, 340 out, 9000 cache read, 500 cache write, ",
+            "context 13%, $0.42\n\n"
+        )),
+        "{}",
+        status.text
+    );
+
+    // `list` summarises the same spend into two fields and prints no body at all: it is the
+    // verb an orchestrator polls, and a report in every row is what made it unreadable.
+    assert_eq!(
+        listed.text,
+        format!(
+            "{}\tsucceeded\tcodex\t{}\t14m 02s\t11040\t$0.42\tpending",
+            delegation.id, delegation.child
+        )
+    );
+    assert!(!listed.text.contains("verified"), "{}", listed.text);
+    server.await.unwrap();
+}
+
+/// A delegation with no reported usage prints `-` in both spend fields, never `0`.
+#[test]
+fn an_unknown_spend_prints_a_dash_rather_than_a_zero() {
+    use std::time::SystemTime;
+
+    let mut delegation = sample_delegation();
+    assert_eq!(delegation.usage, None);
+    let line = human::subagents(std::slice::from_ref(&delegation), SystemTime::now());
+    assert!(line.ends_with("\t14m 02s\t-\t-\tpending"), "{line}");
+
+    // A provider that reports tokens but no cost keeps the count and dashes only the money.
+    delegation.usage = Some(fleet_core::agents::DelegationUsage {
+        usage: fleet_core::agents::Usage {
+            total_tokens: 7,
+            ..Default::default()
+        },
+        cost_usd: None,
+        context_pct: 0.0,
+    });
+    let line = human::subagents(std::slice::from_ref(&delegation), SystemTime::now());
+    assert!(line.ends_with("\t14m 02s\t7\t-\tpending"), "{line}");
+    // …and its `status` still prints a usage line, with no `$` tail, because a provider that
+    // reports no cost is not a provider that reported a cost of zero.
+    let status = human::subagent_status(&delegation, SystemTime::now());
+    assert!(
+        status.contains("usage: 7 tokens, 0 in, 0 out, 0 cache read, 0 cache write, context 0%"),
+        "{status}"
+    );
+    assert!(!status.contains('$'), "{status}");
+}
+
+/// `run`, `wait` and `list` echo a preview of the brief; `status` and `cancel` answer it whole.
+///
+/// The caller wrote the brief, so echoing it back costs it context for nothing — but the record
+/// on the wire is untouched, and one verb still returns all of it.
+#[tokio::test]
+async fn run_wait_and_list_elide_the_brief_that_status_and_cancel_keep_whole() {
+    use crate::args::{
+        AgentChoice, SubagentCommand, SubagentIdArgs, SubagentListArgs, SubagentRunArgs,
+        SubagentWaitArgs,
+    };
+
+    const PREVIEW_CHARS: usize = 200;
+
+    let home = TempDir::new().unwrap();
+    let listener = bind(home.path()).await;
+    let brief_file = home.path().join("brief.md");
+    let brief = "b".repeat(PREVIEW_CHARS + 50);
+    std::fs::write(&brief_file, &brief).unwrap();
+
+    let mut delegation = sample_delegation();
+    delegation.brief.clone_from(&brief);
+    let expected = delegation.clone();
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut transport = Framed::new(socket, FleetCodec::new());
+        authenticate(&mut transport).await;
+        for _ in 0..5 {
+            let request = next_request(&mut transport).await;
+            let body = match request.body {
+                RequestBody::DelegationRun { brief, .. } => {
+                    // The wire is untouched: the daemon receives every byte the caller wrote.
+                    assert_eq!(brief.len(), PREVIEW_CHARS + 50);
+                    ResponseBody::DelegationStarted {
+                        delegation: expected.clone(),
+                        warning: None,
+                    }
+                }
+                RequestBody::DelegationWait { .. }
+                | RequestBody::DelegationGet { .. }
+                | RequestBody::DelegationCancel { .. } => {
+                    ResponseBody::Delegation(expected.clone())
+                }
+                // Two rows, both with a long brief. A `list` that stopped cutting at the first
+                // one would still report `briefElided: true` while echoing the rest whole.
+                RequestBody::DelegationList { .. } => {
+                    ResponseBody::Delegations(vec![expected.clone(), expected.clone()])
+                }
+                other => panic!("unexpected request {other:?}"),
+            };
+            send_result(&mut transport, request.id, Ok(body)).await;
+        }
+    });
+
+    let client = Client::connect(home.path()).await.unwrap();
+    let environment = subagents::Environment::default();
+    let json = |output: CommandOutput| {
+        serde_json::from_str::<serde_json::Value>(&output.text).expect("the envelope is JSON")
+    };
+
+    let started = json(
+        subagents::execute(
+            &client,
+            SubagentCommand::Run(SubagentRunArgs {
+                provider: AgentChoice::Codex,
+                brief_file: Some(brief_file),
+                expectation: "tests pass".to_owned(),
+                worktree: None,
+                mode: None,
+                model: None,
+                effort: None,
+                title: None,
+                env: Vec::new(),
+                eager: false,
+                caller: Some(delegation.caller),
+                json: true,
+            }),
+            &environment,
+        )
+        .await
+        .unwrap(),
+    );
+    let waited = json(
+        subagents::execute(
+            &client,
+            SubagentCommand::Wait(SubagentWaitArgs {
+                id: delegation.id,
+                timeout: 1,
+                caller: None,
+                json: true,
+            }),
+            &environment,
+        )
+        .await
+        .unwrap(),
+    );
+    let listed = json(
+        subagents::execute(
+            &client,
+            SubagentCommand::List(SubagentListArgs {
+                caller: None,
+                json: true,
+            }),
+            &environment,
+        )
+        .await
+        .unwrap(),
+    );
+    let status = json(
+        subagents::execute(
+            &client,
+            SubagentCommand::Status(SubagentIdArgs {
+                id: delegation.id,
+                json: true,
+            }),
+            &environment,
+        )
+        .await
+        .unwrap(),
+    );
+    let cancelled = json(
+        subagents::execute(
+            &client,
+            SubagentCommand::Cancel(SubagentIdArgs {
+                id: delegation.id,
+                json: true,
+            }),
+            &environment,
+        )
+        .await
+        .unwrap(),
+    );
+
+    for (verb, envelope) in [("run", &started), ("wait", &waited)] {
+        assert_eq!(envelope["briefElided"], serde_json::json!(true), "{verb}");
+        assert_eq!(
+            envelope["delegation"]["brief"],
+            serde_json::json!("b".repeat(PREVIEW_CHARS)),
+            "{verb}"
+        );
+    }
+    assert_eq!(listed["briefElided"], serde_json::json!(true));
+    for row in 0..2 {
+        assert_eq!(
+            listed["delegations"][row]["brief"],
+            serde_json::json!("b".repeat(PREVIEW_CHARS)),
+            "row {row}"
+        );
+    }
+
+    for (verb, envelope) in [("status", &status), ("cancel", &cancelled)] {
+        assert_eq!(
+            envelope["delegation"]["brief"],
+            serde_json::json!(brief),
+            "{verb}"
+        );
+        assert_eq!(
+            envelope.get("briefElided"),
+            None,
+            "{verb} elides nothing, so the key is absent rather than false"
+        );
+    }
+    server.await.unwrap();
+}
+
+/// A refused `--env` entry never reaches the daemon.
+#[tokio::test]
+async fn subagent_run_refuses_a_reserved_env_entry_before_sending_anything() {
+    use crate::args::{AgentChoice, SubagentCommand, SubagentRunArgs};
+
+    let home = TempDir::new().unwrap();
+    let listener = bind(home.path()).await;
+    let brief_file = home.path().join("brief.md");
+    std::fs::write(&brief_file, "inspect the parser").unwrap();
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut transport = Framed::new(socket, FleetCodec::new());
+        authenticate(&mut transport).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(350), transport.next())
+                .await
+                .is_err(),
+            "a refused environment must not be framed into a delegation"
+        );
+    });
+
+    let client = Client::connect(home.path()).await.unwrap();
+    let delegation = sample_delegation();
+    let error = subagents::execute(
+        &client,
+        SubagentCommand::Run(SubagentRunArgs {
+            provider: AgentChoice::Codex,
+            brief_file: Some(brief_file),
+            expectation: "tests pass".to_owned(),
+            worktree: None,
+            mode: None,
+            model: None,
+            effort: None,
+            title: None,
+            env: vec!["FLEET_DELEGATION_TOKEN=forged".to_owned()],
+            eager: false,
+            caller: Some(delegation.caller),
+            json: false,
+        }),
+        &subagents::Environment::default(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Validation);
+    assert!(
+        error.message.contains("FLEET_DELEGATION_TOKEN"),
+        "{}",
+        error.message
+    );
+    server.await.unwrap();
+}
+
+/// A `wait` whose FLEET_SESSION is unusable is refused rather than quietly consuming nothing.
+#[test]
+fn subagent_wait_accepts_a_missing_session_and_refuses_a_malformed_one() {
+    use crate::args::{SubagentCommand, SubagentWaitArgs};
+
+    let command = SubagentCommand::Wait(SubagentWaitArgs {
+        id: "00000000-0000-4000-8000-000000000003".parse().unwrap(),
+        timeout: 540,
+        caller: None,
+        json: false,
+    });
+    // A wait from a plain shell keeps working; it simply marks nothing read.
+    subagents::validate_context(&command, &subagents::Environment::default()).unwrap();
+
+    let environment = subagents::Environment {
+        session: Some("not-a-thread".to_owned()),
+        delegation: None,
+        token: None,
+    };
+    let error = subagents::validate_context(&command, &environment).unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Validation);
+    assert!(
+        error.message.starts_with("invalid FLEET_SESSION:"),
+        "{}",
+        error.message
+    );
 }
 
 fn sample_delegation() -> fleet_core::agents::Delegation {

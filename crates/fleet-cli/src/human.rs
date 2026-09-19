@@ -1,7 +1,7 @@
 //! Human-readable command output formatting.
 
 use fleet_core::{
-    agents::{Delegation, DelegationStatus},
+    agents::{Delegation, DelegationStatus, DelegationUsage},
     inspection::WorktreeInspection,
     model::{Repo, Worktree},
     sessions::{SessionState, WorktreeStatus},
@@ -191,23 +191,90 @@ pub fn doctor(checks: &[DoctorCheck]) -> String {
 }
 
 /// Formats one fixed-field line per delegation.
+///
+/// Eight tab-separated fields: id, status, provider, child thread, duration, total tokens, cost,
+/// delivery. The two spend fields print `-` rather than `0` when the daemon has no usage for the
+/// child — a delegation that has not reported a number yet and one that genuinely spent nothing
+/// are different facts, and a zero would claim the second.
 #[must_use]
 pub fn subagents(delegations: &[Delegation], now: SystemTime) -> String {
     delegations
         .iter()
         .map(|delegation| {
             format!(
-                "{}\t{}\t{}\t{}\t{}\t{}",
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                 delegation.id,
                 delegation_status_word(delegation.status),
                 delegation.provider.executable(),
                 delegation.child,
                 duration(elapsed_seconds(delegation, now)),
+                total_tokens_field(delegation),
+                cost_field(delegation),
                 delegation.delivery.word()
             )
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Formats the whole of `fleet subagent status` for one delegation.
+///
+/// The order is `NATIVE-AGENTS.md` §15.4's: the fixed-field line `list` prints, the brief whole,
+/// the child's spend when there is one, and — once the delegation is terminal —
+/// [`delivered_message`] verbatim. That last block is the point of this renderer: it is the same
+/// text `fleet subagent wait` prints for the same record, so an orchestrator that greps one can
+/// grep the other, and a report whose `wait` was missed is still reachable without going and
+/// reading files out of a temporary directory.
+#[must_use]
+pub fn subagent_status(delegation: &Delegation, now: SystemTime) -> String {
+    let mut sections = vec![
+        subagents(std::slice::from_ref(delegation), now),
+        format!("brief:\n{}", crate::envelope::safe_block(&delegation.brief)),
+    ];
+    // A child that has reported nothing prints no line at all: a row of zeros would claim it
+    // spent nothing, which is a different fact from not knowing yet.
+    if let Some(usage) = &delegation.usage {
+        sections.push(usage_line(usage));
+    }
+    if delegation.status.is_terminal() {
+        sections.push(delivered_message(delegation, now));
+    }
+    sections.join("\n\n")
+}
+
+/// The child's spend on one line: totals, the breakdown, context, and a cost when one is known.
+fn usage_line(usage: &DelegationUsage) -> String {
+    let tokens = &usage.usage;
+    let mut line = format!(
+        "usage: {} tokens, {} in, {} out, {} cache read, {} cache write, context {:.0}%",
+        tokens.total_tokens,
+        tokens.input_tokens,
+        tokens.output_tokens,
+        tokens.cache_read_tokens,
+        tokens.cache_write_tokens,
+        usage.context_pct,
+    );
+    if let Some(cost) = usage.cost_usd {
+        line.push_str(&format!(", ${cost:.2}"));
+    }
+    line
+}
+
+/// The list line's total-token field, or `-` when the daemon reported no usage.
+fn total_tokens_field(delegation: &Delegation) -> String {
+    delegation.usage.as_ref().map_or_else(
+        || "-".to_owned(),
+        |usage| usage.usage.total_tokens.to_string(),
+    )
+}
+
+/// The list line's cost field, or `-` when there is no usage or the provider reported no cost.
+fn cost_field(delegation: &Delegation) -> String {
+    delegation
+        .usage
+        .as_ref()
+        .and_then(|usage| usage.cost_usd)
+        .map_or_else(|| "-".to_owned(), |cost| format!("${cost:.2}"))
 }
 
 /// Formats the message a caller receives when a delegation finishes.

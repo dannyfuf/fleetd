@@ -357,6 +357,10 @@ pub enum AgentCommand {
     /// Stop the provider while retaining its transcript.
     Stop(AgentThreadArgs),
     /// Print sequenced events until the provider exits.
+    ///
+    /// The raw event stream of one thread. To read what a delegated child *reported*, use
+    /// `fleet subagent status <delegation>`, which prints the report body whole; tailing a
+    /// child thread to reconstruct it from events is neither necessary nor reliable.
     Tail(AgentTailArgs),
     /// Open the legacy PTY agent session for this repository (the §10 fallback).
     Terminal(AgentTerminalArgs),
@@ -374,6 +378,10 @@ pub struct SubagentArgs {
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum SubagentCommand {
     /// Start a delegated child thread.
+    ///
+    /// `--json` answers an envelope whose `delegation.brief` is cut to a preview and which then
+    /// carries `briefElided: true`; the caller wrote the brief, so echoing it back whole only
+    /// costs it context. `fleet subagent status --json` still returns it whole.
     Run(SubagentRunArgs),
     /// Report the current delegated child's result.
     Complete(SubagentCompleteArgs),
@@ -381,11 +389,27 @@ pub enum SubagentCommand {
     ///
     /// On success the child's own report body is printed: in human output under the delivered
     /// message, and in `--json` as the envelope's `delegation.result.text`. There is no second
-    /// verb to run for it.
+    /// verb to run for it, and `fleet subagent status` prints the same body again afterwards.
+    ///
+    /// A wait issued by the delegation's own caller — `--caller`, else FLEET_SESSION — also
+    /// consumes the result, so the same report is not injected into the caller's transcript a
+    /// second time. A wait from anywhere else reads without consuming.
+    ///
+    /// Like `run`, `--json` elides the brief and sets `briefElided`.
     Wait(SubagentWaitArgs),
-    /// Show one delegation.
+    /// Show one delegation, its brief, its usage, and the child's report.
+    ///
+    /// The whole record, in order: the fixed-field line, the brief in full, the child's spend
+    /// when the daemon knows it, and — once the delegation is terminal — the child's own report
+    /// rendered exactly as `fleet subagent wait` renders it, byte for byte. Unlike `run`, `wait`
+    /// and `list`, the `--json` envelope keeps the brief whole. Reading a report never consumes
+    /// it.
     Status(SubagentIdArgs),
     /// List delegations, optionally for one caller.
+    ///
+    /// One fixed-field line each: id, status, provider, child thread, duration, total tokens,
+    /// cost, delivery. An unknown token count or cost prints `-`. `--json` elides the brief and
+    /// sets `briefElided`.
     List(SubagentListArgs),
     /// Cancel one live delegation.
     Cancel(SubagentIdArgs),
@@ -423,6 +447,19 @@ pub struct SubagentRunArgs {
     /// Child-thread title override.
     #[arg(long)]
     pub title: Option<String>,
+    /// Environment variable for the child, repeatable: `--env KEY=VALUE`.
+    ///
+    /// Each entry is a whole-value override in the child's process environment, so it is for a
+    /// variable the child would otherwise inherit nothing for — `--env CARGO_TARGET_DIR=…` to
+    /// keep two concurrent children off one build directory is the case this exists for.
+    ///
+    /// Five refusals, all validation errors naming what they rejected: an entry with no `=`, an
+    /// empty key, the same key twice, any `FLEET_*` name — the delegation's own identity, which
+    /// a caller must not be able to forge — and `PATH`, because an entry here replaces the value
+    /// outright rather than extending the login shell's, and Fleet already prepends the
+    /// directory holding this `fleet` so the child can run `fleet subagent complete`.
+    #[arg(long = "env", value_name = "KEY=VALUE")]
+    pub env: Vec<String>,
     /// Deliver the result as soon as it is ready.
     #[arg(long)]
     pub eager: bool,
@@ -467,6 +504,14 @@ pub struct SubagentWaitArgs {
     /// exits 0 and returns the child's report.
     #[arg(long, default_value_t = 540)]
     pub timeout: u64,
+    /// Thread this wait is issued for; defaults to FLEET_SESSION.
+    ///
+    /// Naming the delegation's own caller is what marks the result read, so the report this wait
+    /// returns is not also injected into that thread's transcript. Optional on purpose: a wait
+    /// from a plain shell with no FLEET_SESSION works exactly as before and simply consumes
+    /// nothing. A malformed value is still refused rather than silently ignored.
+    #[arg(long)]
+    pub caller: Option<fleet_core::agents::ThreadId>,
     /// Emit a protocol-versioned JSON envelope.
     #[arg(long)]
     pub json: bool,
