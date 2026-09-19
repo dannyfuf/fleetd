@@ -1726,6 +1726,29 @@ consequence is that a child recovered after a provider exit can still run the
 `fleet subagent complete` the recovery nudge asks it for, even though the directory it gets may
 differ from the one it was first started with.
 
+**The caller may hand the child environment variables.** `fleet subagent run --env KEY=VALUE` is
+repeatable, reaches the daemon as `RequestBody::DelegationRun.env`, and is merged into the child's
+environment **before** Fleet's own identity variables, so `FLEET_DELEGATION` and
+`FLEET_DELEGATION_TOKEN` always win. The daemon enforces that order itself rather than trusting the
+CLI to have done it: any peer can send the field. The CLI refuses five things, each with a
+validation error naming what it rejected: a value with no `=`, an empty key, a key given twice —
+silently keeping the last would hide a typo — any key beginning `FLEET_`, and `PATH`. `PATH` is refused because both adapters
+treat an `env` entry as a **whole-value override**, so one here would discard the login shell's own
+rather than extend it; extending is what the `path_prepend` above is for. The motivating case is
+several children sharing one worktree: giving each its own `CARGO_TARGET_DIR` is what stops them
+serialising on a single cargo build lock. Fleet suggests nothing of the sort on its own — the
+delegation footer stays generic and cargo advice belongs in the orchestrator's brief.
+
+**A resumed child keeps its environment too.** The map is persisted beside the delegation
+(`delegations.env_json`, migration slot 6) and restored on resume ahead of the freshly rotated
+identity variables, with the same precedence and for the same reason. Without that, a child
+recovered after a provider exit would silently lose its `CARGO_TARGET_DIR` and rejoin the build-lock
+fight in the one situation where nobody is watching. A delegation row written before slot 6 reads as
+an empty environment. The map is deliberately **not** a field on `Delegation`: it is never put on
+the wire, never rendered by the CLI, never echoed in a `--json` envelope and never logged, because a
+user variable may hold a secret and because echoing it back would be exactly the context bloat the
+elided brief exists to stop. It lives in the same database as the delegation token hash.
+
 ### 15.1 State and completion
 
 The lifecycle is:
@@ -1820,21 +1843,58 @@ is committed, `project_event` sets `delivery = Delivered { seq, turn }` and mark
 outbox row done in the same transaction. This caller-item rule is the exactly-once boundary: the
 message's durable identity, not a successful function return, proves delivery.
 
+**A caller that already took the result consumes the delivery.** `fleet subagent wait` names the
+waiting thread on the wire as `DelegationWait.caller`. When the wait resolves a **terminal** record
+whose `caller` is exactly that thread, the same write sets `delivery = Consumed`, marks the open
+`Deliver` row done, and publishes the changed record so the app repaints; the wait then returns the
+record it just changed, so the very response that consumed the delivery already reads
+`"delivery": "consumed"`. The worker afterwards still terminally patches the caller's delegation
+transcript item — the row has to stop saying "working" — and still closes its outbox row, but it
+sends **no** user message, and logs the skip once at `info` naming the delegation and the caller.
+
+`caller` is advisory *identity*, never authorisation: it decides whether a delivery is consumed,
+never whether the wait is answered. A `wait` that carries no caller — an older `fleet`, or one typed
+in a shell with no `FLEET_SESSION` — consumes nothing, and neither does a `wait` from any thread
+other than the delegation's own caller; both are answered in full and both still get the ordinary
+delivered user message. Consuming is best effort and idempotent: a record already `Delivered`,
+`Undeliverable` or `Consumed` is left exactly as it is and the wait answers anyway, so a `wait` that
+races the delivery worker and loses simply sees `delivered`, which is correct rather than an error.
+The guarantee is unchanged in strength and only sharper in wording: **a result reaches its caller at
+most once, by whichever of `wait` and the delivery worker gets there first.** The motivating failure
+was an orchestrator that waited on eight children and then, when its turn settled, received all
+eight results a second time as user messages.
+
 ### 15.3 Limits and bearer token
 
 - Delegation depth is at most 3; a caller at depth 3 cannot spawn another child.
 - One caller may have at most 4 live children, and one daemon at most 8 live delegations.
 - A child receives at most 2 missing-result nudges.
 - `SETTLE_GRACE` is 30 seconds; the retry tick is 60 seconds.
-- Results are capped at `ITEM_BODY_MAX_CHUNK_BYTES` (256 KiB). Truncation sets `elided` and is
-  named in both CLI stderr and the delivered message.
+- Results are capped at `ITEM_BODY_MAX_CHUNK_BYTES` (256 KiB). The cap applies **at ingest**: the
+  tail above it is discarded when `complete` stores the report and nothing anywhere keeps it.
+  Truncation sets `elided` and is named in CLI stderr, in the delivered message and wherever the
+  report is rendered afterwards. Below the cap the stored report is the whole report, and both
+  `fleet subagent wait` and `fleet subagent status` return it in full — on the wire and in their
+  human output. There is no second verb, no `--full` flag and no separate fetch: a caller that
+  wants the body reads it from either of those two, never from a file the child happened to leave
+  behind.
 - `fleet subagent wait` defaults to 540 seconds, chosen to sit under the Claude Code shell-tool
   ceiling, and imposes **no upper bound of its own**: a larger `--timeout` is accepted, though the
   caller's own tool timeout may still kill the wait. A wait that reaches its timeout exits 2 and
   prints a distinct non-terminal line naming the delegation, its current status and the elapsed
   wait; it never claims a running child finished. A terminal record exits 0, and the child's
   report body is returned on success in both human output and the JSON envelope's `result.text`.
-  `--json` output is identical either way.
+  `--json` output is identical either way. `wait` also names the waiting thread — `--caller`, else
+  `FLEET_SESSION` — so a caller waiting on its own child consumes the delivery (§15.2); the flag is
+  never required, and a wait with no caller behaves exactly as it always did.
+- `fleet subagent status` and `fleet subagent list` report the child's token usage, its dollar cost
+  when the provider reported one, and its context percentage. The numbers are the child's **own
+  thread only, descendants excluded** — a delegation tree is never summed — and they are its settled
+  turns plus the in-flight turn's latest report, which is the same definition the app's turn footer
+  uses, computed from the same recorded values. They are computed on read, so they are never
+  persisted on the delegation record and never carried by `DelegationChanged`; a child that has
+  reported no usage at all renders `-` rather than a zero. `fleet agent list` is unchanged: showing
+  usage there needs a `threads`-table migration and a projector change, and that is deferred.
 - `fleet agent tail <THREAD>` follows a child's event stream. `--no-follow` prints the retained
   snapshot and exits 0 without entering the follow loop, and `--last <N>` trims that snapshot to
   the last N events; both imply `--replay`, because a tail that printed nothing is the bug they
@@ -1922,6 +1982,27 @@ It is deliberately not the delivered message's shape: the bracketed prefix match
 can scan for it, but there is no `finished:` and no body, because there is nothing to report yet.
 Its status word is the delegation-status name (`starting`, `running`, `blocked`, …) rather than
 the transcript row vocabulary, for the same reason the delivered line's is.
+
+`fleet subagent list` prints one fixed-field tab-separated line per delegation, now **eight** fields
+rather than six — id, status, provider, child, duration, total tokens, cost, delivery — with `-` in
+the tokens and cost fields when the child has reported no usage. Nothing else about the line moved;
+the two new fields sit after `duration` and before `delivery`.
+
+`fleet subagent status` is no longer that same row. It prints, in order: the fixed-field line, the
+brief, the child's usage, and — for a terminal delegation — the report, rendered through the exact
+delivered-message template above, elision suffix included. Rendering it through that one template is
+the point: a caller that greps `wait`'s output and a caller that greps `status`'s are reading the
+same bytes for the same record. The usage line names total tokens, input and output, cache reads and
+writes, `context N%`, and `$X.XX` when a cost was reported; a child with no usage prints no line at
+all rather than a row of zeros. `fleet subagent cancel` is untouched — its human output remains the
+single word `cancelled`, with no brief, no usage and no report body.
+
+`run`, `wait` and `list` **elide the brief from their `--json` envelopes**, replacing it with its
+first 200 characters on a character boundary and setting `briefElided: true` beside it. A brief is
+written by the orchestrator, so echoing a 250-line one back costs it 250 lines of its own context to
+learn nothing. The elision is a rendering rule in the CLI: the wire still carries the whole brief,
+and `status` (with `cancel`, which shares its envelope) still prints it whole, which is where a
+caller goes when it genuinely wants to read a brief back. Human output is unchanged everywhere.
 
 ### 15.5 UI: rows, attachment and attention
 

@@ -122,6 +122,25 @@ result remains pending until the caller is deliberately reopened. If the
 caller no longer exists or cannot be resumed, the delegation becomes
 `Undeliverable` with a readable reason rather than silently losing the result.
 
+*Amended 2026-09-19:* end-of-turn injection remains the default, but a caller
+that has **already taken the result through its own `fleet subagent wait`**
+consumes the delivery instead of receiving it twice. The reason injection
+exists is that the caller has not seen the result; a caller that waited has.
+`DelegationWait` therefore carries an optional `caller`, and a wait whose
+caller equals the delegation's caller marks the delivery `Consumed` in the same
+write that answers it. The delivery worker still patches the caller's
+transcript item terminally and still closes its outbox row — the record must
+stop saying "working" — and only the user message is skipped. The wire field is
+advisory identity, not authorisation: it decides whether a delivery is
+consumed, never whether a wait is answered, so an older client, a wait from a
+shell with no `FLEET_SESSION`, and a wait from a third party all consume
+nothing and keep today's behaviour exactly. The exactly-once boundary is not
+weakened by this, it is restated: a result reaches its caller at most once, by
+whichever of `wait` and the worker reaches it first. What forced the amendment
+was an orchestrator that waited on eight children and then received all eight
+results again as user messages when its own turn settled — eight duplicate
+briefs' worth of context spent to learn nothing new.
+
 ## Three product defaults are deliberate
 
 - **The caller's worktree is the default.** It makes the common delegation
