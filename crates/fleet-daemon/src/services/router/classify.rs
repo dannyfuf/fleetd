@@ -522,6 +522,7 @@ mod tests {
                 mode: None,
                 model: None,
                 title: None,
+                fleet_path: None,
                 eager: false,
             },
             RequestBody::DelegationComplete {

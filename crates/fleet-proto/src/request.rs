@@ -333,6 +333,22 @@ pub enum RequestBody {
         /// Optional child-thread title.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
+        /// Absolute path to the `fleet` executable that issued this request, on the **caller's**
+        /// host.
+        ///
+        /// A hint, not an instruction. It exists so the daemon can put a wire-compatible `fleet`
+        /// on a delegated child's `PATH`, which is what lets the child run a bare
+        /// `fleet subagent complete` instead of needing an absolute path spelled out in its
+        /// brief. The daemon must treat it as advisory and tolerate all three ways it can be
+        /// useless: absent, because the caller could not resolve its own executable or is an
+        /// older peer; stale, because the binary moved or was rebuilt elsewhere since; or
+        /// meaningless here, because the caller is on another host and this path names nothing
+        /// on the daemon's filesystem. In every one of those cases the daemon falls back to what
+        /// it did before this field existed — it never refuses a delegation over it.
+        ///
+        /// The file name is whatever the caller was invoked as; consumers want the directory.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fleet_path: Option<String>,
         /// Deliver completion as soon as possible.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         eager: bool,

@@ -114,6 +114,7 @@ async fn run(
             mode,
             model,
             title: arguments.title,
+            fleet_path: caller_fleet_path(),
             eager: arguments.eager,
         })
         .await?;
@@ -133,6 +134,33 @@ async fn run(
         text.push_str(&warning);
     }
     Ok(CommandOutput::success(text))
+}
+
+/// The absolute path of the `fleet` this process is, for the daemon to hand a child.
+///
+/// Sent as a hint so a delegated child can run a bare `fleet subagent complete`; the daemon
+/// prepends the *directory* this names to the child's `PATH`. Whatever file name the
+/// orchestrator invoked us as is sent verbatim — by definition it is a `fleet` that speaks this
+/// protocol version, which is the only property the daemon needs of it.
+///
+/// Both steps are fallible and neither is worth failing a delegation over: without the hint the
+/// daemon falls back to its own resolution and the child behaves exactly as it did before the
+/// field existed. So every failure — no `/proc`-equivalent answer, a deleted binary, a path that
+/// is not UTF-8 and therefore has no wire representation — degrades to `None`. The CLI has no
+/// `tracing` subscriber and its stdout is a machine-readable envelope, so there is nowhere to
+/// report this that a caller would benefit from reading.
+fn caller_fleet_path() -> Option<String> {
+    let executable = match std::env::current_exe() {
+        Ok(executable) => executable,
+        Err(_) => return None,
+    };
+    // Canonicalising resolves a symlinked launcher to the real binary, so the directory the
+    // daemon derives is the one that actually holds it.
+    let resolved = match executable.canonicalize() {
+        Ok(resolved) => resolved,
+        Err(_) => return None,
+    };
+    resolved.to_str().map(str::to_owned)
 }
 
 async fn complete(

@@ -1330,6 +1330,7 @@ mod tests {
                 mode: None,
                 model: None,
                 title: None,
+                fleet_path: None,
                 eager: false,
             }),
             Some(AGENT_HARNESS_TIMEOUT)

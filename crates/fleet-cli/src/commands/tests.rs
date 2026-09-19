@@ -1133,6 +1133,20 @@ async fn subagent_verbs_use_typed_requests_and_render_human_and_json_output() {
         authenticate(&mut transport).await;
 
         let request = next_request(&mut transport).await;
+        // The hint is this test binary's own path, so it cannot be spelled out as a literal.
+        // Pull it out, check it is the shape the daemon can use — present and absolute, because
+        // a relative directory prepended to a child's `PATH` would resolve against whatever
+        // working directory the child happened to get — and then pin the rest of the request.
+        let RequestBody::DelegationRun { fleet_path, .. } = &request.body else {
+            panic!("expected a delegation run request, got {:?}", request.body);
+        };
+        let fleet_path = fleet_path
+            .clone()
+            .expect("current_exe resolves for a test binary, so the CLI has a path to send");
+        assert!(
+            Path::new(&fleet_path).is_absolute(),
+            "the daemon prepends the parent of this path to a child's PATH: {fleet_path}"
+        );
         assert_eq!(
             request.body,
             RequestBody::DelegationRun {
@@ -1148,6 +1162,7 @@ async fn subagent_verbs_use_typed_requests_and_render_human_and_json_output() {
                     provider: None,
                 }),
                 title: Some("parser worker".to_owned()),
+                fleet_path: Some(fleet_path),
                 eager: true,
             }
         );

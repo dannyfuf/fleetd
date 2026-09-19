@@ -72,6 +72,14 @@ pub struct DelegationRunRequest {
     pub model: Option<ModelSelection>,
     /// Optional child-thread title.
     pub title: Option<String>,
+    /// Absolute path to the caller's own `fleet` executable, if it could resolve one.
+    ///
+    /// Advisory: see [`RequestBody::DelegationRun`]'s field of the same name for what the daemon
+    /// may and may not assume about it. A `String` rather than a `PathBuf` because that is the
+    /// wire shape, and converting at one end only keeps a non-UTF-8 path from being silently
+    /// mangled somewhere in the middle — the caller decides what to do about one, and sends
+    /// `None` if it cannot express it.
+    pub fleet_path: Option<String>,
     /// Deliver completion as soon as possible.
     pub eager: bool,
 }
@@ -111,6 +119,7 @@ impl Client {
                 mode: request.mode,
                 model: request.model,
                 title: request.title,
+                fleet_path: request.fleet_path,
                 eager: request.eager,
             })
             .await?

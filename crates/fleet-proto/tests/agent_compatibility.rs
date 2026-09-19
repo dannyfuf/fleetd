@@ -384,6 +384,26 @@ fn the_delegation_capability_string_is_pinned() {
     assert_eq!(fleet_proto::AGENT_DELEGATION_CAPABILITY, "agent.delegation");
 }
 
+/// `fleet_path` is advisory, and the only thing that makes an advisory field safe to add is that
+/// its absence is indistinguishable from the payload a peer sent before it existed. The golden
+/// pair pins the encode side of that; this pins the decode side, which is the half a daemon
+/// facing an un-upgraded `fleet` actually runs.
+#[test]
+fn a_delegation_run_written_before_the_fleet_path_hint_still_decodes() {
+    let request: Request = serde_json::from_str(
+        r#"{"id":26,"body":{"type":"delegation_run","caller":"11111111-2222-4333-8444-555555555555","provider":"claude","brief":"summarize the diff","expectation":"one paragraph"}}"#,
+    )
+    .unwrap_or_else(|error| panic!("pre-fleet-path delegation run: {error}"));
+
+    assert!(matches!(
+        request.body,
+        RequestBody::DelegationRun {
+            fleet_path: None,
+            ..
+        }
+    ));
+}
+
 #[test]
 fn legacy_permission_gate_defaults_the_additive_item() {
     let gate: GateKind = serde_json::from_str(
@@ -793,10 +813,11 @@ fn request_goldens() -> Vec<(Request, &'static str)> {
                     mode: Some(PermissionMode::FullAccess),
                     model: Some(model()),
                     title: Some("Golden writer".to_owned()),
+                    fleet_path: Some("/opt/fleet/bin/fleet".to_owned()),
                     eager: true,
                 },
             },
-            r#"{"id":20,"body":{"type":"delegation_run","caller":"11111111-2222-4333-8444-555555555555","provider":"codex","brief":"write protocol goldens","expectation":"all wire bytes are pinned","worktree":"acme/api#native-agents","mode":"full_access","model":{"model":"gpt-5-codex","effort":"high"},"title":"Golden writer","eager":true}}"#,
+            r#"{"id":20,"body":{"type":"delegation_run","caller":"11111111-2222-4333-8444-555555555555","provider":"codex","brief":"write protocol goldens","expectation":"all wire bytes are pinned","worktree":"acme/api#native-agents","mode":"full_access","model":{"model":"gpt-5-codex","effort":"high"},"title":"Golden writer","fleet_path":"/opt/fleet/bin/fleet","eager":true}}"#,
         ),
         (
             Request {
@@ -863,9 +884,13 @@ fn request_goldens() -> Vec<(Request, &'static str)> {
                     mode: None,
                     model: None,
                     title: None,
+                    fleet_path: None,
                     eager: false,
                 },
             },
+            // Byte-identical to what a version-7 peer sent before `fleet_path` existed: the
+            // literal is deliberately unchanged, and that is the whole proof the field is
+            // optional rather than merely defaulted.
             r#"{"id":26,"body":{"type":"delegation_run","caller":"11111111-2222-4333-8444-555555555555","provider":"claude","brief":"summarize the diff","expectation":"one paragraph"}}"#,
         ),
         (
