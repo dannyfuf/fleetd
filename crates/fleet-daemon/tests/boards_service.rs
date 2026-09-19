@@ -2900,10 +2900,14 @@ async fn a_damaged_document_is_reported_instead_of_replaced_by_an_empty_board() 
         Err(DaemonError::Conflict(_))
     ));
     assert!(f.boards.summaries().await.is_empty());
-    // Deleting the context takes the remains with it, so a new one is not refused forever.
+    // A lifecycle cascade cannot recover the persisted scope from a quarantine, so it preserves
+    // the remains rather than claiming them from the filename alone.
     f.boards.delete_for_context(&context).await.unwrap();
-    assert!(f.store.quarantined(&board.id).unwrap().is_empty());
-    assert_eq!(f.boards.ensure(&context).await.unwrap().cards.len(), 0);
+    assert_eq!(f.store.quarantined(&board.id).unwrap().len(), 1);
+    assert!(matches!(
+        f.boards.ensure(&context).await,
+        Err(DaemonError::Conflict(_))
+    ));
 }
 
 #[tokio::test]

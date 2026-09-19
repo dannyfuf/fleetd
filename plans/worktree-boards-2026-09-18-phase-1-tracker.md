@@ -92,6 +92,10 @@
   - verified: `cargo test -p fleet-client
     worktree_board_request_is_rechecked_after_an_incapable_reconnect` passed (1 selected);
     `make lint` passed.
+- [x] P1-T26 — Align damaged-board regression with scope-safe quarantine preservation
+  - verified: `cargo test -p fleet-daemon --test boards_service
+    a_damaged_document_is_reported_instead_of_replaced_by_an_empty_board` passed (1 selected);
+    `make lint` passed.
 
 ## Notes / decisions log
 (Append-only. Date-stamp entries. Capture anything that surprised you or that future-you will want.)
