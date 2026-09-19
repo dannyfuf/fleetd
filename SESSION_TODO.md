@@ -48,25 +48,38 @@ another orchestrator run.
   platform, or a real macOS implementation. `docs/TESTING-HARNESS.md` is **frozen** — read it
   before changing a command, a target name, the grammar or that message.
 
-- [ ] **`make test` is red on this machine, for two reasons, neither of them the subagent batch.**
-  Proved by A/B against `703fe95`, not inferred.
-  1. **`$TMPDIR` breaks every harness scenario before it starts.** The macOS per-user temp
-     directory pushes the run directory's socket past the 104-byte `sockaddr_un` limit:
-     `filesystem operation failed for /var/folders/…/home/fleetd.sock: path must be shorter than
-     SUN_LEN`. `TMPDIR=/tmp/ht make test` gets past it. Worth fixing in the harness — a short
-     fixed run-directory root, or an explicit failure that names `$TMPDIR` — because right now it
-     reads as "fleetd did not become ready within 20s", which sends you looking in the wrong
-     place. `docs/TESTING-HARNESS.md` is **frozen**; read it before changing a message.
-  2. **The delegation fixtures fail even with a short `$TMPDIR`.**
-     `agents/subagent-runs-end-to-end` times out on
-     `agents.delegations[0].status is missing from the snapshot`, in isolation, at HEAD **and**
-     identically at `703fe95`. Same for `subagent-attach-from-picker`. Fifteen scenarios fail
-     this way — precisely the ones that drive a scripted agent turn; the five that do not
-     (`daemon/link-recovers`, the three `hub/*`, `subagent-reopen-closed-caller`) pass.
-     `agents/claude-mode-menu` passes alone and fails in the batch, so some of the 15 are load or
-     sequencing rather than logic.
-  3. The suite also warns that the headless subset now costs `make test` 500s against a 60s
-     budget and should move back to `make harness-headless`.
+- [ ] **`make test` is red on this machine unless `$TMPDIR` is both short *and* canonical.**
+  The delegation-fixture half of this item is **fixed**: `e4d6f66` clears the six variables an
+  outer `fleetd` exports (`FLEET_DELEGATION`, `FLEET_DELEGATION_TOKEN`, `FLEET_SESSION`,
+  `FLEET_TERMINAL`, `FLEET_TERMINAL_ID`, `FLEET_STATUS_PATH`) in `HarnessEnv::apply`. The
+  scripted `claude`/`codex` shims branch on `FLEET_DELEGATION` to tell caller from child, so a
+  harness run launched from inside a delegation made every scripted *caller* play
+  `subagent-child-blocked.json`; its permission gate went unanswered and the turn died. A/B'd at
+  `d51bbae` and at HEAD, inherited and clean: identical both ways, so it was never a regression
+  and never the batch's doing. See `/tmp/fleet-briefs/report-AB.md`. What is left:
+  1. **`$TMPDIR` must be short.** The macOS per-user temp directory pushes the harness run
+     directory's socket past the 104-byte `sockaddr_un` limit: `filesystem operation failed for
+     /var/folders/…/home/fleetd.sock: path must be shorter than SUN_LEN`. It reads as "fleetd did
+     not become ready within 20s", which sends you looking in the wrong place. Worth fixing in
+     the harness — a short fixed run-directory root, or an explicit failure naming `$TMPDIR`.
+     `docs/TESTING-HARNESS.md` is **frozen**; read it before changing a message.
+  2. **`$TMPDIR` must also be canonical — use `/private/tmp/ht`, not `/tmp/ht`.** On macOS
+     `/tmp` is a symlink to `private/tmp`, and `platform_root_alias`
+     (`crates/fleet-daemon/src/adapters/files.rs:863`) rewrites `/var` to `/private/var` but has
+     **no `/tmp` entry**. Under `TMPDIR=/tmp/ht` the lexical path stays `/tmp/…` while
+     `resolve_root`'s `canonicalize` returns `/private/tmp/…`, the removable-root containment
+     check disagrees with itself, and three `adapters::files::tests::conditional_remove_*` tests
+     fail with `Not a directory (os error 20)`. Verified 2026-09-19: they fail under `/tmp/ht`
+     and under a fresh `/tmp/ht2`, and pass under both the default `$TMPDIR` and
+     `/private/tmp/ht` — the same directory as `/tmp/ht`, spelled canonically. `files.rs` is
+     byte-identical at `d51bbae` and at HEAD, so this is pre-existing and unrelated to this
+     branch. The real fix is a `/tmp` arm in `platform_root_alias` beside the `/var` one.
+  3. The headless subset still overruns its budget. Measured 2026-09-19 on the merge:
+     `headless subset: 21 scenario(s) in 95.1s, 39 skipped`, and the suite warns "the headless
+     subset now costs make test 95s, over its 60s budget; move scenarios back to
+     `make harness-headless`". The earlier ~500s figure predates `e4d6f66` and was inflated by
+     scenarios timing out on unanswered permission gates; 95s is the real cost. It is a warning,
+     not a failure, so `make test` is green regardless.
 
 ## Verify after the first batch lands
 
@@ -76,15 +89,17 @@ the batch. It is a release build from `~/.swarm/repos/dannyfuf/fleetd`, on a com
 this branch in some respects and older in all of these. Nothing below can be observed until it
 is replaced. In order:
 
-- [ ] **Rebase this branch onto `main` first — `make restart` will otherwise break the daemon.**
-  The running `fleetd` is
-  `/Users/danny/.swarm/repos/dannyfuf/fleetd/target/release/fleetd`, built from a commit *newer*
-  than this branch, and it has already applied agent-database migration slot 5
-  (`closed_threads`) to `~/.fleet/agents/state.sqlite`. This branch knows migrations 1-4 only, so
-  a `fleetd` built from it refuses to open that database — verified: "the agent database records
-  migration slot 5 (closed_threads), which this build does not know: it was written by a newer
-  fleetd. Refusing to open it". Every native-agent verb then fails. Rebase, rebuild, and only
-  then restart.
+- [x] **`main` is merged in — `make restart` from this worktree is now safe.** `06a56d2`
+  (`build: merge origin/main into fix/native-subagents`) merges `origin/main` at `6257fad`,
+  which carries agent-database migration slot 5 (`closed_threads`, `a774140`). That slot was the
+  blocker: the running release `fleetd` had already applied it to `~/.fleet/agents/state.sqlite`,
+  and a build from this branch knew slots 1-4 only, so it refused to open that database — "the
+  agent database records migration slot 5 (closed_threads), which this build does not know: it
+  was written by a newer fleetd. Refusing to open it" — and every native-agent verb failed. The
+  merged tree registers slot 5 (`crates/fleet-daemon/src/services/agents/store/migrations.rs`),
+  so a `fleetd` built here opens it. On the merge `make lint` is green and `make test` is green
+  with `TMPDIR=/private/tmp/ht` (see the `$TMPDIR` item above). Rebuild and restart; no rebase is
+  needed, and this repo integrates with merge commits anyway.
 - [ ] **`make restart`.** This is the step. Until it runs, `fleet subagent run` goes on producing
   children with no `fleet` on their `PATH`, the old same-worktree warning and the old footer,
   however new the `fleet` binary in your shell is — all three behaviours live in the daemon.
