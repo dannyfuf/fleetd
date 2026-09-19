@@ -379,9 +379,10 @@ pub struct SubagentArgs {
 pub enum SubagentCommand {
     /// Start a delegated child thread.
     ///
-    /// `--json` answers an envelope whose `delegation.brief` is cut to a preview and which then
-    /// carries `briefElided: true`; the caller wrote the brief, so echoing it back whole only
-    /// costs it context. `fleet subagent status --json` still returns it whole.
+    /// `--json` answers an envelope whose `delegation.brief` is cut to a 200-character preview,
+    /// and which then carries `briefElided: true`; the caller wrote the brief, so echoing it back
+    /// whole only costs it context. A brief already that short is carried whole and the key is
+    /// absent. `fleet subagent status --json` always returns it whole.
     Run(SubagentRunArgs),
     /// Report the current delegated child's result.
     Complete(SubagentCompleteArgs),
@@ -395,7 +396,7 @@ pub enum SubagentCommand {
     /// consumes the result, so the same report is not injected into the caller's transcript a
     /// second time. A wait from anywhere else reads without consuming.
     ///
-    /// Like `run`, `--json` elides the brief and sets `briefElided`.
+    /// Like `run`, `--json` cuts a brief over 200 characters and then sets `briefElided: true`.
     Wait(SubagentWaitArgs),
     /// Show one delegation, its brief, its usage, and the child's report.
     ///
@@ -408,8 +409,8 @@ pub enum SubagentCommand {
     /// List delegations, optionally for one caller.
     ///
     /// One fixed-field line each: id, status, provider, child thread, duration, total tokens,
-    /// cost, delivery. An unknown token count or cost prints `-`. `--json` elides the brief and
-    /// sets `briefElided`.
+    /// cost, delivery. An unknown token count or cost prints `-`. `--json` cuts every brief over
+    /// 200 characters and then sets `briefElided: true`.
     List(SubagentListArgs),
     /// Cancel one live delegation.
     Cancel(SubagentIdArgs),
