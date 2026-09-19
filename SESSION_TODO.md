@@ -46,6 +46,22 @@ shared daemon:
 
 ## Found during the batch, not fixed by it
 
+- [ ] **The harness leaks a private `fleetd` for three subagent scenarios on every run.** After
+  each `make test` / `harness_headless` run on 2026-09-19, one `target-*/debug/fleetd --home
+  <run>/…/home` process survived for exactly `subagent-attach-from-row`,
+  `subagent-detach-and-reattach` and `subagent-up-to-caller` (nine orphans from three runs, plus
+  three from batch 1's runs, all killed by hand at the end of the session). The other 18 headless
+  scenarios tear their daemon down. Those three detach or reattach a caller tab, so the run's
+  shutdown path presumably loses the daemon handle on that path. `docs/TESTING-HARNESS.md` is
+  frozen; read it before changing the teardown contract.
+- [ ] **A delegation can sit in `settling` for over an hour after its child finished.** Observed
+  on `8d9e2d31` (D-T07): the child ran `fleet subagent complete` with its full report, its last
+  turn ended at 19:34 UTC, `fleet agent list` kept showing the thread as `ready / working`, and
+  the delegation was still `settling` with delivery `pending` at 20:00 UTC. The child had used a
+  Claude Code background task (a `Monitor` on its `make test`) earlier in the same turn. Whether
+  the provider never reported the turn as settled or the daemon's settle rule needs a timeout is
+  the question; the result text was already readable through `status` the whole time.
+
 - [x] **`retry_tick_sends_and_counts_the_nudge` was flaky under the whole-crate daemon run —
   fixed in `d88b473`.** `crates/fleet-daemon/src/services/agents/delegation/tests/worker.rs`
   busy-waited 200 `yield_now()` iterations for the worker's startup pass to close its `Recover`
