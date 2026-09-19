@@ -24,7 +24,8 @@ protocol bump would force local and remote daemons to upgrade together for an op
   worktree.
 - The default id is `wt-<owner>-<repository>-<slug>`, slugified and capped at the board-id limit.
   It is only a fast path. Lookup verifies the persisted `worktree_id` and falls back to scanning
-  documents; creation appends `-2`, `-3`, and so on when another board occupies the derived id.
+  documents. Creation of either scope appends `-2` through `-99` when another board occupies its
+  default id, so a worktree-derived id cannot permanently exclude a context with the same id.
 - Worktree deletion owns the lifetime boundary. `Worktrees` exposes a late-bound
   `WorktreeCascade`, installed weakly after `Boards` is composed, and invokes it after the
   worktree has moved to trash. The weak observer avoids an object-graph cycle; a cascade failure

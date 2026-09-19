@@ -578,7 +578,9 @@ board document is quarantined rather than creating an empty board over it; `dele
 takes the quarantined remains with it. `context_board` accepts only a board with the requested
 `context_id` and no `worktree_id`, on both its derived-id fast path and its fallback scan;
 `worktree_board` similarly treats the derived id only as a fast path and falls back to the
-persisted `worktree_id`. `summaries` reparses a board document only when its `stamp` changed or
+persisted `worktree_id`. Creating either scope appends `-2` through `-99` when another scope
+already occupies its default id, and refuses creation if all candidates are occupied. `summaries`
+reparses a board document only when its `stamp` changed or
 this daemon rewrote it. Boards whose context no longer exists are skipped by `list`/`summaries`;
 a worktree board whose worktree no longer exists is skipped as well. Deleting a context deletes
 its boards in the same cascade (`delete_for_context`) so a later context deriving the same id

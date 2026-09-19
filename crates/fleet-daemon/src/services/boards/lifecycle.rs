@@ -81,10 +81,7 @@ impl Boards {
         if let Some(id) = self.context_board(context)? {
             return self.get(&id).await;
         }
-        self.refuse_over_quarantine(&board.id)?;
-        if self.store.load(&board.id)?.is_some() {
-            return Err(BoardError::Duplicate(context.to_string()).into());
-        }
+        board.id = self.available_board_id(&board.id)?;
         let backend = self.backends.get(&board.backend.kind)?;
         backend.validate(&board.backend.settings).await?;
         board.backend.settings = backend.normalize(&board.backend.settings).await?;
@@ -114,7 +111,7 @@ impl Boards {
             return self.get(&id).await;
         }
         let mut board = new_worktree_board(&context, &worktree_record, &self.now());
-        board.id = self.available_worktree_board_id(&base)?;
+        board.id = self.available_board_id(&base)?;
         let backend = self.backends.get(&board.backend.kind)?;
         backend.validate(&board.backend.settings).await?;
         board.backend.settings = backend.normalize(&board.backend.settings).await?;
@@ -227,10 +224,7 @@ impl Boards {
         if self.context_board(context)?.is_some() {
             return Err(BoardError::Duplicate(context.to_string()).into());
         }
-        self.refuse_over_quarantine(&board.id)?;
-        if self.store.load(&board.id)?.is_some() {
-            return Err(BoardError::Duplicate(context.to_string()).into());
-        }
+        board.id = self.available_board_id(&board.id)?;
         apply_board_patch(
             &mut board,
             BoardPatch {
@@ -270,7 +264,7 @@ impl Boards {
         if self.worktree_board(worktree)?.is_some() {
             return Err(BoardError::Duplicate(worktree.to_string()).into());
         }
-        board.id = self.available_worktree_board_id(&base)?;
+        board.id = self.available_board_id(&base)?;
         apply_board_patch(
             &mut board,
             BoardPatch {
@@ -293,7 +287,7 @@ impl Boards {
         self.get(&doc.board.id).await
     }
 
-    fn available_worktree_board_id(&self, base: &BoardId) -> DaemonResult<BoardId> {
+    fn available_board_id(&self, base: &BoardId) -> DaemonResult<BoardId> {
         if self.board_id_is_available(base)? {
             return Ok(base.clone());
         }

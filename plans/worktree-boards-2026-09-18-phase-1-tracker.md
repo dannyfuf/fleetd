@@ -46,6 +46,8 @@
   - verified: `cargo test -p fleet-daemon --test boards_service composed_board_and_worktree_services_do_not_retain_each_other` passed; `make lint` passed.
 - [x] P1-T12 — Reject worktree-scoped board listing and correct CLI help
   - verified: `cargo test -p fleet-cli` passed (119 library and 9 integration tests); `make lint` passed.
+- [x] P1-T13 — Allocate context board ids safely across worktree-board collisions
+  - verified: `cargo test -p fleet-daemon --test boards_service context_board_creation_suffixes` passed (2 selected); `make lint` passed.
 
 ## Notes / decisions log
 (Append-only. Date-stamp entries. Capture anything that surprised you or that future-you will want.)

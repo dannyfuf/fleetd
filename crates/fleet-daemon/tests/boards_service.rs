@@ -515,6 +515,77 @@ async fn worktree_board_creation_suffixes_an_id_owned_by_another_board() {
 }
 
 #[tokio::test]
+async fn context_board_creation_suffixes_an_id_owned_by_a_worktree_board() {
+    let f = Fixture::new(pull_caps()).await;
+    let worktree = f.publish_worktree("acme/api#feature").await;
+    let worktree_board = f
+        .boards
+        .ensure_for_worktree(&worktree.id)
+        .await
+        .unwrap()
+        .board;
+    let context_id = fleet_core::ids::ContextId::try_from(worktree_board.id.as_str()).unwrap();
+    f.state
+        .transaction({
+            let context_id = context_id.clone();
+            move |state| {
+                state.contexts.push(Context {
+                    id: context_id,
+                    name: "Collision".into(),
+                    owners: vec![],
+                    created_at: "2026-09-06T12:00:00Z".into(),
+                });
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+
+    let ensured = f.boards.ensure(&context_id).await.unwrap();
+    assert_eq!(ensured.board.id.as_str(), "wt-acme-api-feature-2");
+    assert_eq!(ensured.board.context_id, context_id);
+    assert!(ensured.board.worktree_id.is_none());
+    assert_eq!(f.boards.ensure(&context_id).await.unwrap(), ensured);
+}
+
+#[tokio::test]
+async fn explicit_context_board_creation_suffixes_an_id_owned_by_a_worktree_board() {
+    let f = Fixture::new(pull_caps()).await;
+    let worktree = f.publish_worktree("acme/api#feature").await;
+    let worktree_board = f
+        .boards
+        .ensure_for_worktree(&worktree.id)
+        .await
+        .unwrap()
+        .board;
+    let context_id = fleet_core::ids::ContextId::try_from(worktree_board.id.as_str()).unwrap();
+    f.state
+        .transaction({
+            let context_id = context_id.clone();
+            move |state| {
+                state.contexts.push(Context {
+                    id: context_id,
+                    name: "Collision".into(),
+                    owners: vec![],
+                    created_at: "2026-09-06T12:00:00Z".into(),
+                });
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+
+    let created = f
+        .boards
+        .create(&context_id, Some("Context plan".into()), None, None)
+        .await
+        .unwrap();
+    assert_eq!(created.board.id.as_str(), "wt-acme-api-feature-2");
+    assert_eq!(created.board.name, "Context plan");
+    assert!(created.board.worktree_id.is_none());
+}
+
+#[tokio::test]
 async fn delete_worktrees_dispatch_cascades_only_the_worktree_board() {
     let mut f = Fixture::new(pull_caps()).await;
     let context_board = f.local().await.board;
