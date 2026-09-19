@@ -120,6 +120,7 @@ fn delegation(caller: ThreadId, created_offset: i64) -> Delegation {
         created: stamp(created_offset),
         finished: None,
         headline: None,
+        usage: None,
     }
 }
 

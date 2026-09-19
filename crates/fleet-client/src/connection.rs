@@ -1393,6 +1393,7 @@ mod tests {
                 model: None,
                 title: None,
                 fleet_path: None,
+                env: std::collections::BTreeMap::new(),
                 eager: false,
             }),
             Some(AGENT_HARNESS_TIMEOUT)

@@ -8,6 +8,8 @@ pub use events::AgentEvents;
 pub use mirror::{AgentMirror, MirrorOutcome, PageOutcome, WindowState};
 pub use window::{AgentWindowRequest, applied_seq, projection_from_window};
 
+use std::collections::BTreeMap;
+
 use super::{Result, unexpected};
 use crate::Client;
 use fleet_core::{
@@ -80,6 +82,12 @@ pub struct DelegationRunRequest {
     /// mangled somewhere in the middle — the caller decides what to do about one, and sends
     /// `None` if it cannot express it.
     pub fleet_path: Option<String>,
+    /// Extra environment variables for the child's provider process.
+    ///
+    /// Merged under the daemon's own `FLEET_DELEGATION` and `FLEET_DELEGATION_TOKEN`: see
+    /// [`RequestBody::DelegationRun`]'s field of the same name for what the daemon guarantees.
+    /// Empty is the shape every caller sent before this field existed.
+    pub env: BTreeMap<String, String>,
     /// Deliver completion as soon as possible.
     pub eager: bool,
 }
@@ -120,6 +128,7 @@ impl Client {
                 model: request.model,
                 title: request.title,
                 fleet_path: request.fleet_path,
+                env: request.env,
                 eager: request.eager,
             })
             .await?

@@ -1,6 +1,6 @@
 //! Client-to-daemon request messages.
 
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
 
 use fleet_core::{
     agents::{
@@ -356,6 +356,19 @@ pub enum RequestBody {
         /// The file name is whatever the caller was invoked as; consumers want the directory.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         fleet_path: Option<String>,
+        /// Extra environment variables for the child's provider process.
+        ///
+        /// The caller's variables, not the daemon's: this is how four children sharing one
+        /// worktree get four `CARGO_TARGET_DIR`s instead of serialising on one build lock. The
+        /// daemon merges them **under** its own `FLEET_DELEGATION` and `FLEET_DELEGATION_TOKEN`,
+        /// which always win, because a peer that sets those either by accident or on purpose must
+        /// not be able to make a child report against another delegation. Everything else is
+        /// passed through verbatim and unvalidated — a variable that means nothing on this host is
+        /// the caller's mistake to make, not a reason to refuse the delegation.
+        ///
+        /// A `BTreeMap` so the wire bytes are ordered and a golden can pin them.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        env: BTreeMap<String, String>,
         /// Deliver completion as soon as possible.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         eager: bool,

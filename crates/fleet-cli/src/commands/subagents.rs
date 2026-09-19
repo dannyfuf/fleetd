@@ -115,6 +115,7 @@ async fn run(
             model,
             title: arguments.title,
             fleet_path: caller_fleet_path(),
+            env: std::collections::BTreeMap::new(),
             eager: arguments.eager,
         })
         .await?;

@@ -1,4 +1,4 @@
-use std::{os::unix::fs::PermissionsExt as _, sync::Arc};
+use std::{collections::BTreeMap, os::unix::fs::PermissionsExt as _, sync::Arc};
 
 use chrono::Utc;
 use fleet_core::{
@@ -435,6 +435,7 @@ impl Harness {
             created: Utc::now(),
             finished: None,
             headline: None,
+            usage: None,
         };
         self.store
             .delegation_write("seed run-test delegation", move |tx| {
@@ -469,7 +470,7 @@ fn provider_script(environment_log: &std::path::Path, input_log: &std::path::Pat
 case " $* " in
   *" --version "*) printf '%s\n' '2.1.266 (Claude Code)'; exit 0 ;;
 esac
-printf '%s|%s|%s|%s\n' "$FLEET_SESSION" "$FLEET_DELEGATION" "$FLEET_DELEGATION_TOKEN" "$PATH" >> '{}'
+printf '%s|%s|%s|%s|%s\n' "$FLEET_SESSION" "$FLEET_DELEGATION" "$FLEET_DELEGATION_TOKEN" "$PATH" "$FLEET_ENV_PROBE" >> '{}'
 printf '%s\n' '{{"type":"system","subtype":"init","session_id":"run-cursor","model":"test","tools":[],"slash_commands":[],"capabilities":["interrupt_receipt_v1","interrupt_cancel_queued_v1","msg_lifecycle_v1"]}}'
 count=0
 while IFS= read -r line; do
@@ -508,6 +509,7 @@ pub(crate) fn request(caller: ThreadId) -> RunRequest {
         model: None,
         title: None,
         fleet_path: None,
+        env: BTreeMap::new(),
         eager: false,
     }
 }
@@ -842,6 +844,80 @@ async fn the_child_path_begins_with_the_resolved_fleet_directory() {
     assert!(
         std::env::split_paths(child_path).count() > 1,
         "{child_path}"
+    );
+}
+
+/// The reason `env` exists: four children in one worktree need four `CARGO_TARGET_DIR`s. The
+/// probe variable stands in for one, and the forged `FLEET_DELEGATION` proves the merge order —
+/// caller variables go in first, Fleet's identity second, so a peer cannot make a child report
+/// against a delegation it was not started for.
+#[tokio::test(start_paused = true)]
+async fn the_child_environment_carries_caller_variables_and_fleet_identity_still_wins() {
+    let harness = Harness::start().await;
+    let (caller, _) = harness.running_caller().await;
+
+    let mut with_env = request(caller);
+    with_env.env = BTreeMap::from([
+        ("FLEET_ENV_PROBE".to_owned(), "child-a".to_owned()),
+        (
+            "FLEET_DELEGATION".to_owned(),
+            "forged-delegation".to_owned(),
+        ),
+        (
+            "FLEET_DELEGATION_TOKEN".to_owned(),
+            "forged-token".to_owned(),
+        ),
+    ]);
+    let (delegation, _) = started(harness.run(with_env).await.expect("start delegation"));
+
+    let environment = harness
+        .wait_for_log(&harness.environment_log, &delegation.id.to_string())
+        .await;
+    let child_environment = environment
+        .lines()
+        .find(|line| line.starts_with(&delegation.child.to_string()))
+        .expect("child environment was logged");
+    let fields: Vec<&str> = child_environment.split('|').collect();
+
+    assert_eq!(
+        fields.get(1).copied(),
+        Some(delegation.id.to_string().as_str()),
+        "the caller must not be able to forge the child's delegation: {child_environment}"
+    );
+    let token = fields.get(2).copied().expect("the child carries a token");
+    assert_ne!(token, "forged-token");
+    assert_eq!(token.len(), 64);
+    assert_eq!(
+        fields.get(4).copied(),
+        Some("child-a"),
+        "an ordinary caller variable reaches the child verbatim: {child_environment}"
+    );
+}
+
+/// A caller that sends nothing gets exactly the environment it got before `env` existed.
+#[tokio::test(start_paused = true)]
+async fn a_child_started_without_caller_variables_sees_none() {
+    let harness = Harness::start().await;
+    let (caller, _) = harness.running_caller().await;
+
+    let (delegation, _) = started(
+        harness
+            .run(request(caller))
+            .await
+            .expect("start delegation"),
+    );
+
+    let environment = harness
+        .wait_for_log(&harness.environment_log, &delegation.id.to_string())
+        .await;
+    let child_environment = environment
+        .lines()
+        .find(|line| line.starts_with(&delegation.child.to_string()))
+        .expect("child environment was logged");
+    assert_eq!(
+        child_environment.split('|').nth(4),
+        Some(""),
+        "{child_environment}"
     );
 }
 

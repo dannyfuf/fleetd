@@ -33,7 +33,10 @@ mod tests;
 pub(crate) mod transition;
 mod worker;
 
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashSet},
+    sync::Arc,
+};
 
 use fleet_core::{
     agents::{AgentKind, Delegation, DelegationId, ModelSelection, PermissionMode, ThreadId},
@@ -141,6 +144,9 @@ pub(crate) struct RunRequest {
     /// Advisory: it describes the caller's host, so it may be absent, stale, or name a path this
     /// daemon does not have. `run` treats it as a hint and falls back rather than refusing.
     pub fleet_path: Option<String>,
+    /// Caller-supplied environment for the child's provider process, merged **under** Fleet's own
+    /// `FLEET_DELEGATION` and `FLEET_DELEGATION_TOKEN`. Unvalidated: any peer can send it.
+    pub env: BTreeMap<String, String>,
     pub eager: bool,
 }
 

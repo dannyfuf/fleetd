@@ -66,6 +66,7 @@ fn delegation(caller: ThreadId, child: ThreadId, status: DelegationStatus) -> De
         created: chrono::DateTime::UNIX_EPOCH,
         finished: None,
         headline: None,
+        usage: None,
     }
 }
 

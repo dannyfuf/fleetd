@@ -21,17 +21,19 @@ mod support;
 #[path = "agent_compatibility/legacy.rs"]
 mod legacy;
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use fleet_core::{
     agents::{
         AbortReason, AccountInfo, AccountKind, AccountStatus, AgentEvent, AgentKind,
         AgentThreadSummary, Attention, AttentionKind, CheckpointKind, Delegation, DelegationId,
-        DelegationResult, DelegationStatus, DeliveryState, FileDelta, GateAnswer, GateId, GateKind,
-        GateResolver, Item, ItemId, ItemKind, ItemPatch, ItemPayloadPatch, ItemStatus,
-        MessageOrigin, ModelDescriptor, ModelSelection, PermissionChoice, PermissionMode,
-        PlanAnswer, ProviderOptionId, Question, QuestionOption, ReasoningEffortDescriptor,
-        ResultSource, Seq, SeqEvent, SessionState, StreamKind, ThreadId, ThreadProjection,
-        ToolCall, ToolKind, TurnId, TurnOutcome, TurnState, Usage, UserInput,
+        DelegationResult, DelegationStatus, DelegationUsage, DeliveryState, FileDelta, GateAnswer,
+        GateId, GateKind, GateResolver, Item, ItemId, ItemKind, ItemPatch, ItemPayloadPatch,
+        ItemStatus, MessageOrigin, ModelDescriptor, ModelSelection, PermissionChoice,
+        PermissionMode, PlanAnswer, ProviderOptionId, Question, QuestionOption,
+        ReasoningEffortDescriptor, ResultSource, Seq, SeqEvent, SessionState, StreamKind, ThreadId,
+        ThreadProjection, ToolCall, ToolKind, TurnId, TurnOutcome, TurnState, Usage, UserInput,
     },
     ids::WorktreeId,
 };
@@ -322,6 +324,7 @@ fn delegation_value_types_have_one_wire_golden_per_variant() {
         },
         r#"{"type":"delivered","data":{"seq":42,"turn":"aaaaaaaa-2222-4333-8444-555555555555"}}"#,
     );
+    assert_frame(DeliveryState::Consumed, r#"{"type":"consumed"}"#);
     assert_frame(
         DeliveryState::Undeliverable {
             reason: "the caller thread was deleted".to_owned(),
@@ -351,6 +354,24 @@ fn delegation_value_types_have_one_wire_golden_per_variant() {
     assert_frame(
         starting_delegation(),
         r#"{"id":"dddddddd-2222-4333-8444-555555555555","caller":"11111111-2222-4333-8444-555555555555","callerTurn":"aaaaaaaa-2222-4333-8444-555555555555","callerItem":"bbbbbbbb-2222-4333-8444-555555555555","child":"22222222-3333-4444-8555-666666666666","provider":"codex","depth":1,"brief":"write protocol goldens","expectation":"all wire bytes are pinned","status":"starting","nudges":0,"recoveries":0,"delivery":{"type":"pending"},"created":"2026-09-07T12:00:00Z"}"#,
+    );
+
+    // The child's own spend, which only the three daemon read verbs ever attach. `Usage` is
+    // reused rather than restated, so this golden also pins that the CLI and the GUI fold the
+    // same eight counters.
+    assert_frame(
+        delegation_usage(),
+        r#"{"usage":{"inputTokens":1200,"outputTokens":340,"reasoningTokens":0,"cacheReadTokens":9000,"cacheWriteTokens":0,"totalTokens":10540,"webSearchRequests":0,"toolUses":7},"costUsd":0.42,"contextPct":12.5}"#,
+    );
+
+    // And its position on `Delegation`: last, after `headline`, so a record that carries it is a
+    // superset of the bytes every persisted golden above pins.
+    assert_frame(
+        Delegation {
+            usage: Some(delegation_usage()),
+            ..starting_delegation()
+        },
+        r#"{"id":"dddddddd-2222-4333-8444-555555555555","caller":"11111111-2222-4333-8444-555555555555","callerTurn":"aaaaaaaa-2222-4333-8444-555555555555","callerItem":"bbbbbbbb-2222-4333-8444-555555555555","child":"22222222-3333-4444-8555-666666666666","provider":"codex","depth":1,"brief":"write protocol goldens","expectation":"all wire bytes are pinned","status":"starting","nudges":0,"recoveries":0,"delivery":{"type":"pending"},"created":"2026-09-07T12:00:00Z","usage":{"usage":{"inputTokens":1200,"outputTokens":340,"reasoningTokens":0,"cacheReadTokens":9000,"cacheWriteTokens":0,"totalTokens":10540,"webSearchRequests":0,"toolUses":7},"costUsd":0.42,"contextPct":12.5}}"#,
     );
 }
 
@@ -402,6 +423,22 @@ fn a_delegation_run_written_before_the_fleet_path_hint_still_decodes() {
             ..
         }
     ));
+}
+
+/// `env` is the second advisory field on `delegation_run`, and it carries the same promise: a
+/// caller that never sets one sends the bytes a version-7 peer sent. The golden pair above pins
+/// the encode side; this pins the decode side a daemon facing an un-upgraded `fleet` runs.
+#[test]
+fn a_delegation_run_written_before_the_child_environment_still_decodes() {
+    let request: Request = serde_json::from_str(
+        r#"{"id":26,"body":{"type":"delegation_run","caller":"11111111-2222-4333-8444-555555555555","provider":"claude","brief":"summarize the diff","expectation":"one paragraph","fleet_path":"/opt/fleet/bin/fleet"}}"#,
+    )
+    .unwrap_or_else(|error| panic!("pre-env delegation run: {error}"));
+
+    let RequestBody::DelegationRun { env, .. } = request.body else {
+        panic!("expected a delegation run");
+    };
+    assert!(env.is_empty(), "{env:?}");
 }
 
 #[test]
@@ -532,6 +569,9 @@ fn delegation() -> Delegation {
         created: at(),
         finished: Some(at()),
         headline: Some("Pinned delegation wire shapes".to_owned()),
+        // `usage` is computed on read and never persisted, so the record every golden below
+        // pins — the one the store decodes and `publish_changed` broadcasts — carries `None`.
+        usage: None,
     }
 }
 
@@ -549,6 +589,33 @@ fn starting_delegation() -> Delegation {
         headline: None,
         ..delegation()
     }
+}
+
+/// A child's own spend, as the three daemon read verbs attach it.
+fn delegation_usage() -> DelegationUsage {
+    DelegationUsage {
+        usage: Usage {
+            input_tokens: 1_200,
+            output_tokens: 340,
+            cache_read_tokens: 9_000,
+            total_tokens: 10_540,
+            tool_uses: 7,
+            ..Usage::default()
+        },
+        cost_usd: Some(0.42),
+        context_pct: 12.5,
+    }
+}
+
+/// The reason `env` exists: two children in one worktree that must not share a build lock.
+fn child_env() -> BTreeMap<String, String> {
+    BTreeMap::from([
+        (
+            "CARGO_TARGET_DIR".to_owned(),
+            "/work/target-child".to_owned(),
+        ),
+        ("RUSTFLAGS".to_owned(), "-D warnings".to_owned()),
+    ])
 }
 
 fn summary() -> AgentThreadSummary {
@@ -833,10 +900,11 @@ fn request_goldens() -> Vec<(Request, &'static str)> {
                     model: Some(model()),
                     title: Some("Golden writer".to_owned()),
                     fleet_path: Some("/opt/fleet/bin/fleet".to_owned()),
+                    env: child_env(),
                     eager: true,
                 },
             },
-            r#"{"id":20,"body":{"type":"delegation_run","caller":"11111111-2222-4333-8444-555555555555","provider":"codex","brief":"write protocol goldens","expectation":"all wire bytes are pinned","worktree":"acme/api#native-agents","mode":"full_access","model":{"model":"gpt-5-codex","effort":"high"},"title":"Golden writer","fleet_path":"/opt/fleet/bin/fleet","eager":true}}"#,
+            r#"{"id":20,"body":{"type":"delegation_run","caller":"11111111-2222-4333-8444-555555555555","provider":"codex","brief":"write protocol goldens","expectation":"all wire bytes are pinned","worktree":"acme/api#native-agents","mode":"full_access","model":{"model":"gpt-5-codex","effort":"high"},"title":"Golden writer","fleet_path":"/opt/fleet/bin/fleet","env":{"CARGO_TARGET_DIR":"/work/target-child","RUSTFLAGS":"-D warnings"},"eager":true}}"#,
         ),
         (
             Request {
@@ -904,11 +972,12 @@ fn request_goldens() -> Vec<(Request, &'static str)> {
                     model: None,
                     title: None,
                     fleet_path: None,
+                    env: BTreeMap::new(),
                     eager: false,
                 },
             },
-            // Byte-identical to what a version-7 peer sent before `fleet_path` existed: the
-            // literal is deliberately unchanged, and that is the whole proof the field is
+            // Byte-identical to what a version-7 peer sent before `fleet_path` and `env` existed:
+            // the literal is deliberately unchanged, and that is the whole proof both fields are
             // optional rather than merely defaulted.
             r#"{"id":26,"body":{"type":"delegation_run","caller":"11111111-2222-4333-8444-555555555555","provider":"claude","brief":"summarize the diff","expectation":"one paragraph"}}"#,
         ),

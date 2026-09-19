@@ -475,6 +475,7 @@ fn finished_delegation(
         created: now,
         finished: Some(now),
         headline: None,
+        usage: None,
     }
 }
 

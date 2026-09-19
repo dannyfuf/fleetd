@@ -1,9 +1,6 @@
 //! `DelegationRun`: validate, mint the token, create the child, seed the transcript.
 
-use std::{
-    collections::BTreeMap,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use fleet_core::agents::{
@@ -29,6 +26,15 @@ use super::{
     footer::{BARE_FLEET, SAME_WORKTREE_WARNING, child_title, first_message},
     limits::{MAX_DEPTH, MAX_LIVE_CHILDREN_PER_CALLER, MAX_LIVE_DELEGATIONS},
 };
+
+/// The child-environment keys Fleet mints itself and a caller may never set.
+///
+/// They are the child's delegation identity: whatever a request carries under these names is
+/// dropped, because a child that reports against a delegation it was not started for would be
+/// completing someone else's work. `pub(in crate::services::agents)` so the resume path can
+/// enforce the same rule on the environment it replays.
+pub(in crate::services::agents) const FLEET_OWNED_CHILD_ENV: [&str; 2] =
+    ["FLEET_DELEGATION", "FLEET_DELEGATION_TOKEN"];
 
 /// Where a `fleet` the child can execute lives, and which rule found it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -195,10 +201,25 @@ impl DelegationService {
             .title
             .clone()
             .unwrap_or_else(|| child_title(request.provider, &request.brief));
-        let extra_env = BTreeMap::from([
-            ("FLEET_DELEGATION".to_owned(), delegation_id.to_string()),
-            ("FLEET_DELEGATION_TOKEN".to_owned(), token),
-        ]);
+        // Caller variables first, Fleet identity second: `insert` overwrites, so a request that
+        // carries `FLEET_DELEGATION` or `FLEET_DELEGATION_TOKEN` — by accident or to impersonate
+        // another delegation — loses to the values this run just minted. The CLI rejects those
+        // keys too, but the daemon must not depend on one client to enforce it.
+        let mut extra_env = request.env.clone();
+        let overridden: Vec<&str> = FLEET_OWNED_CHILD_ENV
+            .iter()
+            .copied()
+            .filter(|key| extra_env.contains_key(*key))
+            .collect();
+        if !overridden.is_empty() {
+            tracing::warn!(
+                delegation = %delegation_id,
+                keys = ?overridden,
+                "ignoring caller-supplied Fleet identity variables for the delegated child"
+            );
+        }
+        extra_env.insert("FLEET_DELEGATION".to_owned(), delegation_id.to_string());
+        extra_env.insert("FLEET_DELEGATION_TOKEN".to_owned(), token);
         let daemon_exe = std::env::current_exe()
             .inspect_err(
                 |error| tracing::debug!(%error, "the daemon cannot locate its own executable"),
@@ -247,6 +268,7 @@ impl DelegationService {
             created: Utc::now(),
             finished: None,
             headline: None,
+            usage: None,
         };
 
         let stored = delegation.clone();

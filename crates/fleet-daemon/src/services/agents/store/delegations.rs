@@ -568,6 +568,39 @@ pub(crate) fn mark_done_for(
     })
 }
 
+/// Marks a terminal delegation's result as read by its caller, so it is never injected.
+///
+/// Only a `Pending` delivery on a terminal record moves: `Delivered` already reached the caller's
+/// transcript, `Undeliverable` is a durable failure, and `Consumed` means a previous `wait`
+/// already did this. In every one of those cases this answers `None` and changes nothing, which
+/// is what makes a `wait` that races the delivery worker and loses correct rather than an error.
+///
+/// Closing the `Deliver` outbox row in the same transaction is the half that stops the duplicate:
+/// a row left open would be drained by the worker after the transaction commits.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the `wait` path that calls this lands in the next commit of this batch"
+    )
+)]
+pub(crate) fn consume(
+    tx: &Transaction<'_>,
+    id: DelegationId,
+    now: DateTime<Utc>,
+) -> anyhow::Result<Option<Delegation>> {
+    let Some(mut delegation) = get(tx, id)? else {
+        return Ok(None);
+    };
+    if !delegation.status.is_terminal() || !delegation.delivery.is_pending() {
+        return Ok(None);
+    }
+    delegation.delivery = DeliveryState::Consumed;
+    update(tx, &delegation)?;
+    mark_done_for(tx, id, OutboxAction::Deliver, now)?;
+    Ok(Some(delegation))
+}
+
 /// Whether a caller thread is still listed, which is what refuses a run against a deleted thread.
 pub(crate) fn caller_exists(conn: &Connection, caller: ThreadId) -> anyhow::Result<bool> {
     conn.query_row(
@@ -751,6 +784,7 @@ impl EncodedDelegation {
                 Some(turn.to_string()),
                 None,
             ),
+            DeliveryState::Consumed => (None, None, None),
             DeliveryState::Undeliverable { reason } => (None, None, Some(reason.clone())),
         };
         Ok(Self {
@@ -867,6 +901,7 @@ impl RawDelegation {
                     turn: parse_id(turn, "delivered turn")?,
                 }
             }
+            "consumed" => DeliveryState::Consumed,
             "undeliverable" => DeliveryState::Undeliverable {
                 reason: self
                     .delivery_reason
@@ -901,6 +936,8 @@ impl RawDelegation {
                 .map(|value| parse_timestamp(value, "finish time"))
                 .transpose()?,
             headline: self.headline,
+            // Computed on read by the delegation service, never stored: see `Delegation::usage`.
+            usage: None,
         })
     }
 }

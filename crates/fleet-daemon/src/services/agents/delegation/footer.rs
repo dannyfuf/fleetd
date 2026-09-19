@@ -151,6 +151,7 @@ mod tests {
             created,
             finished: Some(created + Duration::seconds(842)),
             headline: None,
+            usage: None,
         }
     }
 

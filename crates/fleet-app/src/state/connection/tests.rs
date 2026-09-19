@@ -318,6 +318,7 @@ fn the_delegation_census_is_seeded_behind_its_capability_and_patched_by_the_even
         created: chrono::DateTime::UNIX_EPOCH,
         finished: None,
         headline: None,
+        usage: None,
     };
 
     state.apply_bridge_event(

@@ -476,6 +476,7 @@ fn native_children_and_delegations_are_additive_snapshot_fields() {
         created: chrono::DateTime::UNIX_EPOCH,
         finished: None,
         headline: Some("reading state transitions".to_owned()),
+        usage: None,
     };
     state.agents.seed_delegations(vec![record.clone()]);
 

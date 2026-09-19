@@ -698,6 +698,7 @@ fn delegation(child: ThreadId) -> Delegation {
         created: stamp(70),
         finished: Some(stamp(71)),
         headline: Some("checking transactions".to_owned()),
+        usage: None,
     }
 }
 
@@ -722,6 +723,7 @@ fn live_delegation(child: ThreadId, caller: ThreadId, status: DelegationStatus) 
         created: stamp(1),
         finished: None,
         headline: None,
+        usage: None,
     }
 }
 
@@ -1621,6 +1623,118 @@ async fn delegation_rows_round_trip_every_column_and_update_mutable_state() -> a
 
     assert_eq!(store.delegation(id).await?, Some(expected));
     assert!(store.live_delegations(None).await?.is_empty());
+    Ok(())
+}
+
+/// `consumed` is the fourth word `delegations.delivery` can hold, and the column has no `CHECK`,
+/// so nothing but this round trip proves the encode and decode sides agree on it.
+#[tokio::test]
+async fn a_consumed_delivery_round_trips_through_the_delivery_column() -> anyhow::Result<()> {
+    let (_directory, store) = store()?;
+    let stored = delegation(ThreadId::new());
+    let id = stored.id;
+    insert_test_delegation(&store, &stored).await?;
+
+    let mut consumed = stored.clone();
+    consumed.delivery = DeliveryState::Consumed;
+    let expected = consumed.clone();
+    store
+        .delegation_write("consume test delegation", move |tx| {
+            delegations::update(tx, &consumed)?;
+            Ok(((), false))
+        })
+        .await?;
+
+    assert_eq!(store.delegation(id).await?, Some(expected));
+    let word: String = probe(&store)?.query_row(
+        "SELECT delivery FROM delegations WHERE id = ?1",
+        [id.to_string()],
+        |row| row.get(0),
+    )?;
+    assert_eq!(word, "consumed");
+    Ok(())
+}
+
+/// The caller read the result itself, so `consume` closes the delivery work in the same
+/// transaction: a `Deliver` row left open is the duplicate message this whole state prevents.
+#[tokio::test]
+async fn consume_marks_a_terminal_pending_delivery_and_closes_its_delivery_work()
+-> anyhow::Result<()> {
+    let (_directory, store) = store()?;
+    let caller = ThreadId::new();
+    let delegation = live_delegation(ThreadId::new(), caller, DelegationStatus::Succeeded);
+    let id = delegation.id;
+    insert_test_delegation(&store, &delegation).await?;
+    store
+        .delegation_write("seed delivery work", move |tx| {
+            delegations::enqueue(tx, id, OutboxAction::Deliver, stamp(1))?;
+            Ok(((), false))
+        })
+        .await?;
+    assert_eq!(store.delegation_outbox().await?.len(), 1);
+
+    let consumed = store
+        .delegation_write("consume the delivery", move |tx| {
+            let consumed = delegations::consume(tx, id, stamp(2))?;
+            Ok((consumed, false))
+        })
+        .await?
+        .context("a terminal pending delegation is consumable")?;
+
+    assert_eq!(consumed.delivery, DeliveryState::Consumed);
+    assert_eq!(store.delegation(id).await?, Some(consumed));
+    assert!(
+        store.delegation_outbox().await?.is_empty(),
+        "consuming closes the open Deliver row"
+    );
+    Ok(())
+}
+
+/// Idempotent and narrow: a second `wait`, a live child, and a delivery that already reached the
+/// caller all answer `None` and change nothing, which is what lets `wait` race the worker safely.
+#[tokio::test]
+async fn consume_refuses_anything_but_a_terminal_pending_delivery() -> anyhow::Result<()> {
+    let (_directory, store) = store()?;
+    let caller = ThreadId::new();
+
+    let live = live_delegation(ThreadId::new(), caller, DelegationStatus::Running);
+    let live_id = live.id;
+    insert_test_delegation(&store, &live).await?;
+
+    // `delegation()` is terminal-free but already `Delivered`.
+    let delivered = delegation(ThreadId::new());
+    let delivered_id = delivered.id;
+    let mut delivered = delivered;
+    delivered.status = DelegationStatus::Succeeded;
+    let delivered_expected = delivered.clone();
+    insert_test_delegation(&store, &delivered).await?;
+
+    let terminal = live_delegation(ThreadId::new(), caller, DelegationStatus::Failed);
+    let terminal_id = terminal.id;
+    insert_test_delegation(&store, &terminal).await?;
+
+    let outcomes = store
+        .delegation_write("consume the wrong rows", move |tx| {
+            let live = delegations::consume(tx, live_id, stamp(2))?;
+            let delivered = delegations::consume(tx, delivered_id, stamp(2))?;
+            let first = delegations::consume(tx, terminal_id, stamp(2))?;
+            let second = delegations::consume(tx, terminal_id, stamp(3))?;
+            Ok(((live, delivered, first, second), false))
+        })
+        .await?;
+
+    assert!(outcomes.0.is_none(), "a live child has nothing to consume");
+    assert!(outcomes.1.is_none(), "a delivered result is already read");
+    assert!(outcomes.2.is_some());
+    assert!(outcomes.3.is_none(), "consuming twice changes nothing");
+    assert_eq!(
+        store.delegation(live_id).await?.map(|row| row.delivery),
+        Some(DeliveryState::Pending)
+    );
+    assert_eq!(
+        store.delegation(delivered_id).await?,
+        Some(delivered_expected)
+    );
     Ok(())
 }
 

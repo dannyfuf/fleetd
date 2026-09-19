@@ -30,7 +30,7 @@ pub(crate) struct DelegationFacts {
 }
 
 /// The new delegation row and transactional follow-up actions for one child event.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Transition {
     pub next: Delegation,
     pub actions: Vec<OutboxAction>,
@@ -342,6 +342,7 @@ mod tests {
             created: now() - chrono::Duration::seconds(842),
             finished: None,
             headline: None,
+            usage: None,
         }
     }
 

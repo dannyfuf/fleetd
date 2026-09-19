@@ -255,6 +255,7 @@ fn delegation(status: DelegationStatus) -> Delegation {
         created: stamp(1),
         finished: status.is_terminal().then(|| stamp(2)),
         headline: None,
+        usage: None,
     }
 }
 

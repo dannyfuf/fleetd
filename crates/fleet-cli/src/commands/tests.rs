@@ -1326,6 +1326,7 @@ async fn subagent_verbs_use_typed_requests_and_render_human_and_json_output() {
                 }),
                 title: Some("parser worker".to_owned()),
                 fleet_path: Some(fleet_path),
+                env: std::collections::BTreeMap::new(),
                 eager: true,
             }
         );

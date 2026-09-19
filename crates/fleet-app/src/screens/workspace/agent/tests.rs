@@ -227,6 +227,7 @@ fn delegation_fixture(caller: ThreadId, child: ThreadId) -> fleet_core::agents::
         created: chrono::Utc::now(),
         finished: None,
         headline: None,
+        usage: None,
     }
 }
 

@@ -526,6 +526,7 @@ mod tests {
                 model: None,
                 title: None,
                 fleet_path: None,
+                env: std::collections::BTreeMap::new(),
                 eager: false,
             },
             RequestBody::DelegationComplete {

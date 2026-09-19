@@ -668,6 +668,7 @@ impl Services {
                 model,
                 title,
                 fleet_path,
+                env,
                 eager,
             } => {
                 let request = agents::delegation::RunRequest {
@@ -680,6 +681,7 @@ impl Services {
                     model,
                     title,
                     fleet_path,
+                    env,
                     eager,
                 };
                 let answer = self.delegation_service()?.run(request).await;
