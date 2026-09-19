@@ -27,7 +27,8 @@ this file; where the two disagree, this file wins.
 | Agent scroll | `Agent > Scroll` | `ctrl-s [` inside the popup | `Esc`, `q`, `i` |
 | Filter | `Filter` | `/` in a list | `Esc` (first keeps filter, second clears), `Enter` |
 | Palette | `Palette` | `:` | `Esc`, `Enter` |
-| Dialog | `Dialog > <name>` | action | `Esc`, `Enter` |
+| Dialog | `Dialog > <name>` while browsing; `Dialog > <name>Editing` where the focused field owns typing | action | `Esc`, `Enter` |
+| Text input | `FleetTextInput` (`mode = single_line` \| `multiline`) | focusing a live `TextInput` | its container moves focus or closes |
 | Jobs | `Jobs` / `Jobs > Log` (overlay) | `J` anywhere in Normal, `ctrl-s J` in a terminal | `Esc`, `J`, `q` |
 | Daemon | `Daemon > Down` / `Daemon > Banner` / `Daemon > Doctor` | fleetd will not start (§3.12 B), fleetd died while attached (§3.12 C), doctor runs | daemon comes back, `Esc` (banner/doctor), `ctrl-q` |
 | FirstRun | `FirstRun` | no contexts and no repos exist | any key that creates or imports something |
@@ -423,19 +424,109 @@ collapses the sheet back to 440 px (a second `Esc` closes the panel).
 
 ## Dialogs and text inputs
 
-Text inputs accept printable keys, `Backspace`, `ctrl-w` (delete word), `ctrl-u` (clear),
-`ctrl-a` / `ctrl-e` (home / end), `←` / `→`. Lists under a text input use `ctrl-n` / `ctrl-p`
-or `↓` / `↑` (never `j` / `k`, because the text field owns them). `Tab` / `S-Tab` move between
-fields. `Enter` confirms; `Esc` cancels.
+Every live `TextInput` entity publishes `FleetTextInput`; this is the one application table that
+defines its editing. Printable text and IME input are delivered by the component itself. `Tab`, `S-Tab`,
+`ctrl-n`, `ctrl-p`, and `Esc` remain container keys. `Enter` also remains a container key in a
+single-line input and inserts a newline only under `FleetTextInput && mode == multiline`.
+
+### Motion
+
+| Key | Action |
+| --- | --- |
+| `left` | move left one grapheme |
+| `right` | move right one grapheme |
+| `alt-left` | move to the previous word boundary |
+| `alt-right` | move to the next word boundary |
+| `home` | move to the logical line start |
+| `end` | move to the logical line end |
+| `cmd-left` | move to the logical line start |
+| `cmd-right` | move to the logical line end |
+| `up` | move one logical line up |
+| `down` | move one logical line down |
+| `cmd-up` | move to the document start |
+| `cmd-down` | move to the document end |
+| `ctrl-a` | move to the logical line start |
+| `ctrl-e` | move to the logical line end |
+| `ctrl-b` | move left one grapheme |
+| `ctrl-f` | move right one grapheme |
+
+### Selection
+
+| Key | Action |
+| --- | --- |
+| `shift-left` | extend left one grapheme |
+| `shift-right` | extend right one grapheme |
+| `alt-shift-left` | extend to the previous word boundary |
+| `alt-shift-right` | extend to the next word boundary |
+| `shift-home` | extend to the logical line start |
+| `shift-end` | extend to the logical line end |
+| `cmd-shift-left` | extend to the logical line start |
+| `cmd-shift-right` | extend to the logical line end |
+| `shift-up` | extend one logical line up |
+| `shift-down` | extend one logical line down |
+| `cmd-shift-up` | extend to the document start |
+| `cmd-shift-down` | extend to the document end |
+| `cmd-a` | select all |
+
+### Deletion
+
+| Key | Action |
+| --- | --- |
+| `backspace` | delete the previous grapheme or selection |
+| `delete` | delete the next grapheme or selection |
+| `alt-backspace` | delete the previous word run |
+| `alt-delete` | delete the next word run |
+| `cmd-backspace` | delete to the logical line start |
+| `cmd-delete` | delete to the logical line end |
+| `ctrl-w` | delete the previous word run |
+| `ctrl-u` | delete to the logical line start |
+| `ctrl-k` | delete to the logical line end |
+| `ctrl-h` | delete the previous grapheme or selection |
+| `ctrl-d` | delete the next grapheme or selection |
+
+### Clipboard
+
+| Key | Action |
+| --- | --- |
+| `cmd-c` | copy the selection |
+| `cmd-x` | cut the selection |
+| `cmd-v` | paste clipboard text |
+
+`ctrl-v` is deliberately unbound: it remains available to shells and terminal applications.
+
+### History
+
+| Key | Action |
+| --- | --- |
+| `cmd-z` | undo |
+| `cmd-shift-z` | redo |
+
+### Newline
+
+| Key | Action |
+| --- | --- |
+| `enter` | insert a logical newline under `FleetTextInput && mode == multiline` only |
+
+**Key ownership.** A surface with bare-letter or caret-collision commands publishes its existing
+word while browsing and a distinct `*Editing` word while a field owns typing. The browsing words
+are `CardDetail`, `BoardSettings`, `Settings`, and `Create`; their editing partners are
+`CardDetailEditing`, `BoardSettingsEditing`, `SettingsEditing`, and `CreateEditing`. Editing words
+contain only container commands, so a migrated surface's deeper `FleetTextInput` rows own editing
+and no dialog action can steal an accepted character; until migration,
+the generic `Dialog` legacy editor rows preserve the same dialog behavior. Lists under an input use
+`ctrl-n` / `ctrl-p` or `down` / `up`; `Tab` / `S-Tab` move fields, `Enter` confirms where the
+single-line container says so, and `Esc` cancels. `CardPicker` is the documented exception: its
+query is a filter that never contains a space, so it always publishes `Dialog > CardPicker` and
+`space` toggles the highlighted card.
 
 | Dialog | Keys beyond the shared frame |
 | --- | --- |
-| Create worktree | `←` / `→` cycle the host · `Enter` create & open · `⌥Enter` create **without** opening [A8] |
+| Create worktree | under browsing `Dialog > Create`, `←` / `→` cycle the host; branch focus publishes `Dialog > CreateEditing` · `Enter` create & open · `⌥Enter` create **without** opening [A8] |
 | Clone repo | type to search · `ctrl-n` / `ctrl-p` or `↓` / `↑` · `Enter` clone · `Esc` cancels only the search request, never a started clone |
 | Confirm (delete / prune / kill / close terminal) | `y` / `Enter` confirm · `Y` **required instead of `y`** when any decisive safety fact is unknown or the inspection errored, and for repo / context delete [A12] · `n` / `Esc` / `q` cancel · `I` re-check (delete) · `s` toggle the KEEP list (prune). Nothing else is bound. |
 | New / Edit context | `ctrl-d` delete this context (routes to the expanded `Y` confirm) |
 | Assign repo to context (`m`) | this dialog has **no** text field, so `j` / `k` move the selection as well as `↓` / `↑` and `ctrl-n` / `ctrl-p` |
-| Settings (`,`) | `Space` toggles · `h` / `l` or `←` / `→` cycle a choice · `j` / `k` move (surrendered while a text input has focus) · `Enter` saves · `Esc` discards · `E` open `config.json` in a new terminal tab · `D` run doctor |
+| Settings (`,`) | browsing is `Dialog > Settings`: `Space` toggles · `h` / `l` or `←` / `→` cycle a choice · `j` / `k` move · `E` opens `config.json` · `D` runs doctor. A materialized row input publishes `Dialog > SettingsEditing`; `Enter` saves and `Esc` discards in either word. |
 | Help (`?`) | `Esc` / `?` close |
 | Quit (`ctrl-q`) | `y` quit · `n` / `Esc` cancel · `J` open the jobs panel · `W` never warn again (writes `jobs.warnBeforeQuit=false`) and quit [A23] |
 | Quit and stop daemon (`ctrl-shift-q`) | `Y` stop and quit · `n` / `Esc` cancel |
@@ -447,7 +538,7 @@ opens `config.json` in a new terminal tab. The two never coexist in one key cont
 
 | Key | Action |
 | --- | --- |
-| printable, `Backspace`, `ctrl-w`, `ctrl-u` | edit the query |
+| printable, `Backspace`, `ctrl-w`, `ctrl-u` | edit the legacy query until this surface migrates to the full `FleetTextInput` table above |
 | `ctrl-n` / `↓`, `ctrl-p` / `↑` | move the **list** cursor while still typing |
 | `Enter` | open the highlighted row directly from inside the input [A24] |
 | `Esc` | first press leaves the input keeping the filter, second press clears it — **never quits** [A13] |
@@ -456,7 +547,7 @@ opens `config.json` in a new terminal tab. The two never coexist in one key cont
 
 | Key | Action |
 | --- | --- |
-| printable, `Backspace`, `ctrl-w`, `ctrl-u` | edit the query |
+| printable, `Backspace`, `ctrl-w`, `ctrl-u` | edit the legacy query until this surface migrates to the full `FleetTextInput` table above |
 | `ctrl-n` / `↓`, `ctrl-p` / `↑` | move between `GO` / `DO` / `CONTEXT` rows |
 | `Enter` | run the highlighted row (destructive commands still route through their confirm) |
 | `Esc` | close (`q` remains a printable query character) |
@@ -528,10 +619,12 @@ and while its input has the keyboard the screen publishes the `Filter` key conte
 instead of `Hub > Board`. Every row below is therefore shadowed while you are typing
 a filter, and the `Filter` rows above apply instead — including their two-stage `Esc`.
 
-The board dialog rows below are **in addition to** everything the generic Dialog
-context binds: enter, tab, ctrl-n / ctrl-p, backspace, ctrl-w, ctrl-u, ctrl-a,
-ctrl-e, left and right. A bare letter bound in the board settings dialog types
-itself when a text row owns the keyboard, exactly as in §3.8.6.
+The board dialog rows below are **in addition to** the generic `Dialog` container rows. Browsing
+uses the existing dialog word; a text owner replaces it with the matching `*Editing` word, and a
+migrated field appends `FleetTextInput` beneath that. Thus `CardDetail` /
+`CardDetailEditing` and `BoardSettings` / `BoardSettingsEditing` never expose their bare browsing
+keys while text is being edited. The card picker keeps `Dialog > CardPicker`: its query is a filter
+that cannot contain a space, and `space` toggles the highlighted card.
 
 | Key | Context | Action |
 | --- | --- | --- |
@@ -575,6 +668,9 @@ itself when a text row owns the keyboard, exactly as in §3.8.6.
 | `R` | `Dialog > CardDetail` | `card_detail::TakeRemote` — Resolve conflict: take remote |
 | `ctrl-s` | `Dialog > CardDetail` | `card_detail::Save` — Save text edit |
 | `:` | `Dialog > CardDetail` | `OpenPalette` — Command palette over the open card detail |
+| `escape` | `Dialog > CardDetailEditing` | `card_detail::Close` — Cancel text edit |
+| `enter` | `Dialog > CardDetailEditing` | `card_detail::EditProperty` — Submit title or insert a legacy multiline newline |
+| `ctrl-s` | `Dialog > CardDetailEditing` | `card_detail::Save` — Save text edit |
 | `ctrl-enter` | `Dialog > CardCreate` | `board::CreateAndOpen` — Create and open |
 | `space` | `Dialog > CardPicker` | `settings::Toggle` — Toggle the highlighted label |
 | `j` | `Dialog > BoardSettings` | `settings::MoveDown` — Next row |
@@ -582,6 +678,7 @@ itself when a text row owns the keyboard, exactly as in §3.8.6.
 | `h` | `Dialog > BoardSettings` | `settings::CyclePrev` — Previous choice |
 | `l` | `Dialog > BoardSettings` | `settings::CycleNext` — Next choice |
 | `space` | `Dialog > BoardSettings` | `settings::Toggle` — Toggle the row |
+| `enter` | `Dialog > BoardSettingsEditing` | `dialog::Confirm` — Save settings |
 
 Board filtering also keeps horizontal navigation:
 

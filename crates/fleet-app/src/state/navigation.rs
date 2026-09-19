@@ -298,6 +298,22 @@ pub const fn filter_escape(editing: bool) -> FilterEscape {
 }
 
 impl AppState {
+    /// Mirrors the context word derived from the open dialog's own draft.
+    ///
+    /// Returns whether the authoritative key chain changed.
+    pub(crate) fn set_dialog_key_context(
+        &mut self,
+        dialog: Option<Dialogs>,
+        context: Option<&'static str>,
+    ) -> bool {
+        let next = dialog.zip(context);
+        if self.dialog_key_context == next {
+            return false;
+        }
+        self.dialog_key_context = next;
+        true
+    }
+
     /// The nested key contexts of the focused element, outermost first.
     ///
     /// [`crate::keymap`] predicates are written against exactly this chain, which is why the
@@ -308,7 +324,16 @@ impl AppState {
     pub fn context_chain(&self) -> Vec<&'static str> {
         // Overlays also own keys above first-run and daemon-failure surfaces.
         if let Some(overlay) = &self.overlay {
-            return overlay.context_chain();
+            return match overlay {
+                Overlay::Dialog(dialog) => vec![
+                    "Dialog",
+                    self.dialog_key_context
+                        .as_ref()
+                        .filter(|(owner, _)| owner == dialog)
+                        .map_or_else(|| dialog.context_name(), |(_, context)| *context),
+                ],
+                _ => overlay.context_chain(),
+            };
         }
         // §3.12 B replaces the whole window, so its keys outrank every base surface's.
         if matches!(self.daemon, DaemonLink::Failed { .. }) {

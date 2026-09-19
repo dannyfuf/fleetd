@@ -254,7 +254,7 @@ stacked; oldest evicted first.
 | Scroll | `SCROLL` | `Workspace > Scroll` |
 | Filter | `FILTER` | `Filter` |
 | Palette | `PALETTE` | `Palette` |
-| Dialog | `DIALOG` | `Dialog > <name>` |
+| Dialog | `DIALOG` | browsing `Dialog > <name>`; text ownership `Dialog > <name>Editing > FleetTextInput` |
 | Jobs overlay | `JOBS` | `Jobs` |
 
 The word is 84 px wide, centered in the status bar, present on **every** screen including the
@@ -1989,7 +1989,9 @@ column without moving the card selection.
 
 ### Card detail
 
-An 880 px dialog, two panes, `Dialog > CardDetail`.
+An 880 px dialog, two panes. It publishes browsing `Dialog > CardDetail`, then switches to
+`Dialog > CardDetailEditing` while the title, description or comment owns the keyboard; the
+migrated live editor adds `FleetTextInput` beneath that word.
 
 *Left* — the card as prose: key, priority glyph and title; the conflict banner when the card has
 one (`K` keep local / `R` take remote); the description as `MarkdownText`, or a `TextArea` while
@@ -2012,8 +2014,9 @@ row that silently did nothing would be indistinguishable from a broken key.
 
 The three text surfaces — title, description, comment — share **one** buffer, because at most one
 of them is ever open: `i`, `d`, `c` start an edit, `ctrl-s` saves it, `Esc` throws it away and a
-second `Esc` closes the dialog. While an edit is open the bare letters type, exactly as §3.8.6's
-text rows do.
+second `Esc` closes the dialog. While an edit is open `CardDetail` is absent from the context
+chain, so its bare browsing letters cannot steal input; `CardDetailEditing` carries only the
+container commands.
 
 Nothing on this surface is optimistic. Every save sends its request and waits; the reducer applies
 the `Card` that comes back, and a refusal becomes a sticky line inside the dialog rather than a

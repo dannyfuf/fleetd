@@ -589,11 +589,17 @@ pub(super) fn begin_editing(state: &Entity<AppState>, cx: &mut App) -> bool {
             return false;
         }
     };
-    with_host(state, cx, |host| {
+    let began = with_host(state, cx, |host| {
         if host.settings.editing.is_none() {
             host.settings.editing = Some(TextFieldState::from_text(seed));
+            true
+        } else {
+            false
         }
     });
+    if began {
+        notify(state, cx);
+    }
     true
 }
 

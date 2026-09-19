@@ -203,6 +203,18 @@ fn context_chain_follows_the_screen_the_overlay_and_the_daemon() {
 }
 
 #[test]
+fn a_dialog_uses_only_the_derived_editing_word() {
+    let mut state = AppState::new("/tmp/fleet-dialog-context", Instant::now());
+    state.open_overlay(Overlay::Dialog(Dialogs::CardDetail));
+    assert!(state.set_dialog_key_context(Some(Dialogs::CardDetail), Some("CardDetailEditing")));
+    assert_eq!(state.context_chain(), vec!["Dialog", "CardDetailEditing"]);
+    assert!(
+        !state.context_chain().contains(&"CardDetail"),
+        "the browsing word must be absent while text owns the keyboard"
+    );
+}
+
+#[test]
 fn agent_popup_open_switch_hide_preserves_the_underlying_focus_state() {
     let now = Instant::now();
     let mut state = AppState::new("/tmp/fleet", now);

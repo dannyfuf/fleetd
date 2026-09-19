@@ -9,6 +9,61 @@ impl Drop for Dropped {
     }
 }
 
+#[test]
+fn editing_context_words_follow_the_existing_dialog_drafts() {
+    let mut host = DialogHost::default();
+
+    assert_eq!(
+        dialog_key_context(&Dialogs::CreateWorktree, &host),
+        "CreateEditing"
+    );
+    host.create.field = create_worktree::Field::Host;
+    assert_eq!(
+        dialog_key_context(&Dialogs::CreateWorktree, &host),
+        "Create"
+    );
+
+    assert_eq!(dialog_key_context(&Dialogs::Settings, &host), "Settings");
+    host.settings.editing = Some(TextFieldState::from_text("claude"));
+    assert_eq!(
+        dialog_key_context(&Dialogs::Settings, &host),
+        "SettingsEditing"
+    );
+
+    assert_eq!(
+        dialog_key_context(&Dialogs::BoardSettings, &host),
+        "BoardSettingsEditing"
+    );
+    assert_eq!(
+        dialog_key_context(&Dialogs::CardPicker, &host),
+        "CardPicker"
+    );
+    assert_eq!(
+        dialog_key_context(&Dialogs::CardDetail, &host),
+        "CardDetail"
+    );
+}
+
+#[gpui::test]
+fn derived_dialog_word_is_mirrored_into_the_app_context_chain(cx: &mut TestAppContext) {
+    let state = cx.new(|_| {
+        let mut state = AppState::new("/tmp/dialog-context", Instant::now());
+        state.open_overlay(Overlay::Dialog(Dialogs::Settings));
+        state
+    });
+    cx.update(|cx| {
+        let host = host_for(&state, cx);
+        host.update(cx, |host, _| {
+            host.settings.editing = Some(TextFieldState::from_text("claude"));
+        });
+        sync_dialog_key_context(&state, &host, cx);
+        assert_eq!(
+            state.read(cx).context_chain(),
+            vec!["Dialog", "SettingsEditing"]
+        );
+    });
+}
+
 #[gpui::test]
 fn drafts_are_isolated_and_released_with_their_window_model(cx: &mut TestAppContext) {
     let first = cx.new(|_| AppState::new("/tmp/first", Instant::now()));

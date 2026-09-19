@@ -348,8 +348,39 @@ fn watch(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
         }) {
             settings::refresh_rows(&state, cx);
         }
+        let host = host_for(&state, cx);
+        sync_dialog_key_context(&state, &host, cx);
     });
     with_host(state, cx, |host| host.subscription = Some(subscription));
+}
+
+/// The context word selected by the dialog's existing keyboard-owner state.
+fn dialog_key_context(dialog: &Dialogs, host: &DialogHost) -> &'static str {
+    match dialog {
+        Dialogs::CardDetail if host.card_detail.is_editing() => "CardDetailEditing",
+        Dialogs::BoardSettings if host.board_settings.input().is_some() => "BoardSettingsEditing",
+        Dialogs::Settings if host.settings.editing.is_some() => "SettingsEditing",
+        Dialogs::CreateWorktree if host.create.field == create_worktree::Field::Branch => {
+            "CreateEditing"
+        }
+        _ => dialog.context_name(),
+    }
+}
+
+/// Mirrors only the derived word into `AppState`; the dialog draft remains the source of truth.
+fn sync_dialog_key_context(state: &Entity<AppState>, host: &Entity<DialogHost>, cx: &mut App) {
+    let dialog = match state.read(cx).overlay.as_ref() {
+        Some(Overlay::Dialog(dialog)) => Some(dialog.clone()),
+        _ => None,
+    };
+    let context = dialog
+        .as_ref()
+        .map(|dialog| dialog_key_context(dialog, host.read(cx)));
+    state.update(cx, |state, cx| {
+        if state.set_dialog_key_context(dialog, context) {
+            cx.notify();
+        }
+    });
 }
 
 fn synchronize(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
@@ -446,9 +477,13 @@ impl ActiveDialog {
         let host = host_for(&state, cx);
         watch(&state, &bridge, cx);
         synchronize(&state, &bridge, cx);
+        sync_dialog_key_context(&state, &host, cx);
         let subscriptions = vec![
             cx.on_release(|this, cx| close(&this.state, cx)),
-            cx.observe(&host, |_, _, cx| cx.notify()),
+            cx.observe(&host, |this, _, cx| {
+                sync_dialog_key_context(&this.state, &this.host, cx);
+                cx.notify();
+            }),
             cx.observe(&state, |_, _, cx| cx.notify()),
         ];
         Self {

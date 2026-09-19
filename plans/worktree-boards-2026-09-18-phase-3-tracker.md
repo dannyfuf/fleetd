@@ -28,7 +28,10 @@
   - verified: `cargo test -p fleet-ui-kit` (392 passed, including 13 gpui interaction tests in
     `input/live_tests.rs`), `cargo test -p fleet-lazygit` (135 passed), `cargo build --example
     gallery_input`, `make lint` passed. The old live input is exported as `LegacyTextInput` until P3-T07.
-- [ ] P3-T03 — Replace the editing rows in the keymap with one action family
+- [x] P3-T03 — Replace the editing rows in the keymap with one action family
+  - verified: `cargo test -p fleet-app` (876 passed), `make lint`, and `make harness` (59 of 59
+    scenarios, virtual lane) passed. 46 `FleetTextInput` rows; the old `filter::`/`palette::`/
+    `dialog::` families stay until their surfaces migrate (see the 2026-09-19 scope note).
 - [ ] P3-T04 — Re-base the agent composer on the shared component
 - [ ] P3-T05 — Migrate the board dialogs
 - [ ] P3-T06 — Migrate the remaining dialogs, filters and the lazygit overlay
@@ -78,6 +81,15 @@
   T03 adds the `FleetTextInput` rows, the browsing/editing context-word split and the docs; each
   old family goes with its last consumer (T05 for the board dialogs, T06 for the rest) and T07
   asserts none remain. Intermediate commits therefore keep every dialog typable.
+- 2026-09-19 — P3-T03 key-ownership words: browsing `CardDetail`/`BoardSettings`/`Settings`/`Create`
+  and editing `CardDetailEditing`/`BoardSettingsEditing`/`SettingsEditing`/`CreateEditing`, derived
+  in `dialogs/host.rs::dialog_key_context` from existing draft state and mirrored into `AppState`
+  so `context_chain` stays authoritative. Review caught two rule violations: `:` had been kept under
+  `CardDetailEditing` (a typed colon would open the palette) and the card picker had been made
+  permanently editing, which unbound its `space` toggle. Fixed: the ownership test now rejects any
+  single printable key or `shift-` variant in a host context, and `Dialog > CardPicker` keeps
+  `space` as the one documented exception (its query is a filter that never contains a space;
+  the migrated input will filter `' '`). The chord resolver strips `&& …` predicates for depth.
 - 2026-09-18 — Decisions fixed at planning time: one engine seeded from the composer buffer; inputs are live
   entities owned by the surface; bytes inside, UTF-16 at the IME boundary, graphemes for motion; word and line rules
   as written in the plan; key-ownership rule via a browsing/editing context word (board-filter precedent), not

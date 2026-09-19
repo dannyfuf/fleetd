@@ -154,7 +154,7 @@ impl BoardSettingsState {
 
     /// The text buffer of the focused row, when it has one.
     #[must_use]
-    pub(super) fn input(&self) -> Option<TextFieldState> {
+    pub(crate) fn input(&self) -> Option<TextFieldState> {
         let value = match self.focused() {
             SettingRow::Name => self.name.clone(),
             SettingRow::Prefix => self.prefix.clone(),

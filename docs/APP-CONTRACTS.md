@@ -179,8 +179,9 @@ is always `Fleet`.
 | Workspace, `fleet://` tab | `Fleet > Workspace > Native`, then the embedded view's own chain (`> Lazygit > Panels > Files`, …) |
 | Workspace, native agent tab | `Fleet > Agent > AgentIdle` \| `AgentWorking` \| `AgentNativeScroll`, or `Fleet > Agent > AgentDecision > AgentPermission` \| `AgentQuestion` \| `AgentPlan` while a gate is open |
 | Floating agent terminal | `Fleet > Agent > Terminal` \| `Prefix` \| `Scroll` |
-| Filter / Palette / Jobs | `Fleet > Filter` \| `Palette` \| `Jobs` |
-| Any dialog | `Fleet > Dialog > <name>` |
+| Filter / Palette / Jobs | `Fleet > Filter` (`> BoardFilter` on the board) \| `Palette` \| `Jobs` |
+| Dialog browsing | `Fleet > Dialog > CardDetail` \| `BoardSettings` \| `CardPicker` \| `Settings` \| `Create` (or the dialog's other stable name) |
+| Dialog text editing | `Fleet > Dialog > CardDetailEditing` \| `BoardSettingsEditing` \| `SettingsEditing` \| `CreateEditing`, then the focused component's `FleetTextInput` context |
 | Daemon banner showing (§3.12 C) | the base chain **plus** `Daemon > Banner`, innermost |
 | fleetd will not start (§3.12 B) | `Fleet > Daemon > Down` |
 | First run (§3.13) | `Fleet > FirstRun` |
@@ -188,6 +189,18 @@ is always `Fleet`.
 Two consequences worth knowing:
 
 * A deeper context wins, so `Hub > Prs`'s `l` (next PR tab) beats `Hub`'s `l` (next pane).
+* **Except for the card picker, a browsing word never remains in the chain while that dialog is
+  editing text.** Bare-letter and caret-collision rows live only on `CardDetail`, `BoardSettings`,
+  `Settings` and `Create`; their `*Editing` partners carry only container actions such as confirm, cancel,
+  field/list navigation, save and palette entry. `DialogHost` owns the real draft predicate and
+  mirrors only its derived word into `AppState`, so `context_chain()` remains authoritative:
+  card detail uses `edit.is_some()`, board settings uses whether its focused row has a text
+  buffer, settings uses `editing.is_some()`, and create-worktree uses `field == Branch`. A live
+  input then appends `FleetTextInput`; its
+  `mode` attribute is `single_line` or `multiline`, and only the latter satisfies
+  `FleetTextInput && mode == multiline` for `Enter`. `CardPicker` is the documented exception: its
+  query is a filter that never contains a space, so it keeps the browsing word and `space` toggles
+  the highlighted card.
 * Inside a native agent tab, `^s` never reaches gpui's two-key matcher. The shell's keystroke
   interceptor consumes it, resolves the second key against the *live* chain through
   `keymap::chord_action_for_chain`, and consumes that key too — running its row, or toasting
@@ -808,11 +821,11 @@ Three additions outside the skeleton's list:
 * `actions::board::CreateAndOpen` (`ctrl-enter` in `Dialog > CardCreate`) creates the
   card and opens its detail. It has no palette command: it only means anything inside
   that dialog.
-* `Dialog > CardPicker` binds `space` to `settings::Toggle` (multi-select) and
-  `Dialog > BoardSettings` binds `j`/`k`/`h`/`l`/`space` to the `settings::*` actions,
-  reusing §3.8.6's row model — including its rule that a bare letter types when a text
-  row owns the keyboard. Everything else these dialogs answer is inherited from the
-  generic `Dialog` context.
+* `Dialog > CardPicker` always binds `space` to `settings::Toggle` (multi-select); its
+  always-focused query is a filter that intentionally never contains a space. Browsing
+  `Dialog > BoardSettings` binds `j`/`k`/`h`/`l`/`space` to the `settings::*` actions, and a
+  focused text or number row publishes `Dialog > BoardSettingsEditing`. Everything else these
+  dialogs answer is inherited from the generic `Dialog` context.
 * `ConfirmRequest::DeleteCard { card, key, title }` routes `d` on the board through
   §3.8.3, like every other destructive key. A card with a `remote` link never reaches the
   dialog: the daemon refuses that deletion (the sync would file the issue again as a new

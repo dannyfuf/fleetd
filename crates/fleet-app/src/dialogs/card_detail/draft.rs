@@ -50,7 +50,7 @@ pub(crate) struct CardDetailState {
 impl CardDetailState {
     /// Whether a text surface currently owns the keyboard.
     #[must_use]
-    pub(super) const fn is_editing(&self) -> bool {
+    pub(crate) const fn is_editing(&self) -> bool {
         self.edit.is_some()
     }
 
