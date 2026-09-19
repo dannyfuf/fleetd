@@ -489,7 +489,11 @@ impl Boards {
     }
 
     /// Deletes every board scoped to `worktree` after that worktree is removed.
-    pub async fn delete_for_worktree(&self, worktree: &WorktreeId) -> DaemonResult<()> {
+    pub async fn delete_for_worktree(
+        &self,
+        worktree: &WorktreeId,
+        trash: &std::path::Path,
+    ) -> DaemonResult<()> {
         let base = worktree_board_id(worktree);
         for id in self.store.list()? {
             let owned = match self.store.peek(&id) {
@@ -508,7 +512,7 @@ impl Boards {
                 // Not `delete`: an unreadable board must not block deletion of a worktree that
                 // has already left state and disk.
                 let _guard = self.gate(&id).await;
-                self.store.delete(&id)?;
+                self.store.delete_with_worktree(&id, trash)?;
                 self.summaries.write().await.remove(&id);
                 self.index.write().await.retain(|_, board| *board != id);
                 self.changed(&id, BoardChangeReason::Deleted);
@@ -519,8 +523,35 @@ impl Boards {
         for id in worktree_board_id_candidates(&base) {
             if !self.store.quarantined(&id)?.is_empty() {
                 let _guard = self.gate(&id).await;
-                self.store.delete(&id)?;
+                self.store.delete_with_worktree(&id, trash)?;
             }
+        }
+        Ok(())
+    }
+
+    /// Restores a worktree board bundled into the restored worktree directory.
+    pub async fn restore_for_worktree(
+        &self,
+        worktree: &WorktreeId,
+        destination: &std::path::Path,
+    ) -> DaemonResult<()> {
+        for id in self.store.restore_with_worktree(destination)? {
+            let Some(doc) = self.store.load(&id)? else {
+                // A quarantined-only board has no readable scope to validate, but restoring its
+                // remains is still lossless and keeps later creation from overwriting it.
+                continue;
+            };
+            if doc.board.worktree_id.as_ref() != Some(worktree) {
+                return Err(DaemonError::Conflict(format!(
+                    "restored board {id} does not belong to worktree {worktree}"
+                )));
+            }
+            self.summaries.write().await.remove(&id);
+            self.index
+                .write()
+                .await
+                .extend(doc.cards.iter().map(|card| (card.id.clone(), id.clone())));
+            self.changed(&id, BoardChangeReason::Created);
         }
         Ok(())
     }
@@ -528,8 +559,20 @@ impl Boards {
 
 #[async_trait::async_trait]
 impl WorktreeCascade for Boards {
-    async fn delete_for_worktree(&self, worktree: &WorktreeId) -> DaemonResult<()> {
-        Boards::delete_for_worktree(self, worktree).await
+    async fn delete_for_worktree(
+        &self,
+        worktree: &WorktreeId,
+        trash: &std::path::Path,
+    ) -> DaemonResult<()> {
+        Boards::delete_for_worktree(self, worktree, trash).await
+    }
+
+    async fn restore_for_worktree(
+        &self,
+        worktree: &WorktreeId,
+        destination: &std::path::Path,
+    ) -> DaemonResult<()> {
+        Boards::restore_for_worktree(self, worktree, destination).await
     }
 }
 

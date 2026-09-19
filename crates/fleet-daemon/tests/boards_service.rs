@@ -619,6 +619,41 @@ async fn delete_worktrees_dispatch_cascades_only_the_worktree_board() {
 }
 
 #[tokio::test]
+async fn restoring_worktree_trash_restores_its_board_and_cards() {
+    let f = Fixture::new(pull_caps()).await;
+    let worktree = f.publish_worktree("acme/api#feature").await;
+    let board = f
+        .boards
+        .ensure_for_worktree(&worktree.id)
+        .await
+        .unwrap()
+        .board;
+    let card = f.card(&board.id, "Keep this plan").await;
+
+    let response = f
+        .services
+        .dispatch(RequestBody::DeleteWorktrees {
+            ids: vec![worktree.id.clone()],
+        })
+        .await
+        .unwrap();
+    let ResponseBody::WorktreesDeleted(results) = response else {
+        panic!("expected worktree deletion response");
+    };
+    let entry = results[0]
+        .trash_entry
+        .clone()
+        .expect("successful deletion returns its trash entry");
+    assert!(f.store.load(&board.id).unwrap().is_none());
+
+    f.services.worktrees.restore_trash(entry).await.unwrap();
+
+    let restored = f.boards.ensure_for_worktree(&worktree.id).await.unwrap();
+    assert_eq!(restored.board.id, board.id);
+    assert_eq!(restored.cards, vec![card]);
+}
+
+#[tokio::test]
 async fn deleting_a_worktree_sweeps_its_quarantined_suffixed_board_id() {
     let f = Fixture::new(pull_caps()).await;
     let worktree = f.publish_worktree("acme/api#feature").await;

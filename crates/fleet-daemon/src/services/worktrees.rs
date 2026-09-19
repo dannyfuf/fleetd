@@ -61,7 +61,13 @@ const TRASH_MARKER_FILE: &str = "fleet-trash.json";
 #[async_trait::async_trait]
 pub(super) trait WorktreeCascade: Send + Sync {
     /// Deletes records whose lifetime is bounded by `worktree`.
-    async fn delete_for_worktree(&self, worktree: &WorktreeId) -> DaemonResult<()>;
+    async fn delete_for_worktree(&self, worktree: &WorktreeId, trash: &Path) -> DaemonResult<()>;
+    /// Restores records bundled into a worktree's restored directory.
+    async fn restore_for_worktree(
+        &self,
+        worktree: &WorktreeId,
+        destination: &Path,
+    ) -> DaemonResult<()>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -28,8 +28,9 @@ protocol bump would force local and remote daemons to upgrade together for an op
   default id, so a worktree-derived id cannot permanently exclude a context with the same id.
 - Worktree deletion owns the lifetime boundary. `Worktrees` exposes a late-bound
   `WorktreeCascade`, installed weakly after `Boards` is composed, and invokes it after the
-  worktree has moved to trash. The weak observer avoids an object-graph cycle; a cascade failure
-  is warned and swallowed because the successful worktree move cannot be rolled back.
+  worktree has moved to trash. The board is bundled into that trash entry so restoring or expiring
+  the worktree applies to its board too. The weak observer avoids an object-graph cycle; a cascade
+  failure is warned and swallowed because the successful worktree move cannot be rolled back.
 - `EnsureWorktreeBoard` and `CreateWorktreeBoard` are additive requests advertised by the
   `board.worktree` capability. `PROTOCOL_VERSION` remains 8. Consumers check the capability before
   sending either request.
@@ -57,7 +58,8 @@ protocol bump would force local and remote daemons to upgrade together for an op
 
 Old board documents and snapshots continue to decode with no worktree scope, and context-board
 lookup must explicitly reject scoped boards. Listings skip a scoped board after its worktree is
-gone, while the deletion cascade removes the document so a repeated worktree id cannot inherit it.
+gone, while the deletion cascade removes the live document so a repeated worktree id cannot
+inherit it. The recoverable copy stays inside the worktree trash entry and returns on restore.
 The CLI and phase 2 app surface must capability-gate the new requests.
 
 Phase 2 deliberately keeps a single scope-aware `BoardState`: the Hub context board and a

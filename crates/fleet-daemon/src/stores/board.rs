@@ -6,7 +6,9 @@ use fleet_core::{
     ids::BoardId,
     paths::FleetHome,
 };
-use std::sync::Arc;
+use std::{collections::BTreeSet, path::Path, sync::Arc};
+
+const WORKTREE_BOARD_TRASH_DIR: &str = ".fleet-boards";
 
 /// One versioned JSON document per board.
 #[derive(Clone)]
@@ -143,6 +145,57 @@ impl BoardStore {
         }
         self.trash(&path, id)
     }
+    /// Moves a worktree-owned board into that worktree's trash entry so undo restores both.
+    pub fn delete_with_worktree(&self, id: &BoardId, worktree_trash: &Path) -> DaemonResult<()> {
+        let mut paths = self.quarantined(id)?;
+        let live = self.home.board_path(id);
+        if self.files.exists(&live) {
+            paths.push(live);
+        }
+        if paths.is_empty() {
+            return Ok(());
+        }
+        let bundle = worktree_trash.join(WORKTREE_BOARD_TRASH_DIR);
+        self.files.create_dir_all(&bundle)?;
+        for path in paths {
+            let name = path
+                .file_name()
+                .ok_or_else(|| DaemonError::Validation("board trash filename is missing".into()))?;
+            self.files.rename(&path, &bundle.join(name))?;
+        }
+        Ok(())
+    }
+    /// Restores boards bundled into a restored worktree directory and returns their ids.
+    pub fn restore_with_worktree(&self, worktree_path: &Path) -> DaemonResult<Vec<BoardId>> {
+        let bundle = worktree_path.join(WORKTREE_BOARD_TRASH_DIR);
+        if !self.files.exists(&bundle) {
+            return Ok(Vec::new());
+        }
+        let archived = self.files.list(&bundle)?;
+        let mut ids = BTreeSet::new();
+        for path in &archived {
+            let id = archived_board_id(path)?;
+            let destination = self.home.boards_dir().join(path.file_name().ok_or_else(|| {
+                DaemonError::Validation("board trash filename is missing".into())
+            })?);
+            if self.files.exists(&destination) {
+                return Err(DaemonError::Conflict(format!(
+                    "cannot restore board {id}: {} already exists",
+                    destination.display()
+                )));
+            }
+            ids.insert(id);
+        }
+        self.files.create_dir_all(&self.home.boards_dir())?;
+        for path in archived {
+            let destination = self.home.boards_dir().join(path.file_name().ok_or_else(|| {
+                DaemonError::Validation("board trash filename is missing".into())
+            })?);
+            self.files.rename(&path, &destination)?;
+        }
+        self.files.remove_detached(&bundle)?;
+        Ok(ids.into_iter().collect())
+    }
     fn trash(&self, path: &std::path::Path, id: &BoardId) -> DaemonResult<()> {
         self.files.create_dir_all(&self.home.trash_dir())?;
         let destination = self
@@ -151,6 +204,22 @@ impl BoardStore {
             .join(format!("board-{id}-{}.json", uuid::Uuid::new_v4()));
         self.files.rename(path, &destination)
     }
+}
+
+fn archived_board_id(path: &Path) -> DaemonResult<BoardId> {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| DaemonError::Validation("board trash filename is not UTF-8".into()))?;
+    let (id, suffix) = name
+        .split_once(".json")
+        .ok_or_else(|| DaemonError::Validation(format!("invalid board trash file {name}")))?;
+    if !suffix.is_empty() && !suffix.starts_with(".broken-") {
+        return Err(DaemonError::Validation(format!(
+            "invalid board trash file {name}"
+        )));
+    }
+    BoardId::try_from(id).map_err(|error| DaemonError::Validation(error.to_string()))
 }
 
 /// Just enough of the document to read its version before trusting the rest of the shape.

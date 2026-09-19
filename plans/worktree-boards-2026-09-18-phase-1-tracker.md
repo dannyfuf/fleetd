@@ -50,6 +50,8 @@
   - verified: `cargo test -p fleet-daemon --test boards_service context_board_creation_suffixes` passed (2 selected); `make lint` passed.
 - [x] P1-T14 — Make core board documentation scope-neutral
   - verified: `cargo test -p fleet-core board` passed (118 selected); `make lint` passed.
+- [x] P1-T15 — Restore worktree boards with worktree trash entries
+  - verified: `cargo test -p fleet-daemon --test boards_service` passed (61 tests, including delete/restore with cards); `make lint` passed.
 
 ## Notes / decisions log
 (Append-only. Date-stamp entries. Capture anything that surprised you or that future-you will want.)

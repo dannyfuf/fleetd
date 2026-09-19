@@ -526,8 +526,10 @@ impl Boards {
     /// A document this build cannot read goes to trash with its context rather than blocking it:
     /// the cascade has already deleted the context's repositories by then.
     pub async fn delete_for_context(&self, context: &ContextId) -> DaemonResult<()>;
-    /// Deletes the board scoped to a worktree after the worktree has moved to trash.
-    pub async fn delete_for_worktree(&self, worktree: &WorktreeId) -> DaemonResult<()>;
+    /// Bundles the scoped board into the worktree's trash entry after the worktree moves there.
+    pub async fn delete_for_worktree(&self, worktree: &WorktreeId, trash: &Path) -> DaemonResult<()>;
+    /// Restores a scoped board bundled inside a restored worktree directory.
+    pub async fn restore_for_worktree(&self, worktree: &WorktreeId, destination: &Path) -> DaemonResult<()>;
     pub async fn create_card(&self, board: &BoardId, draft: CardDraft) -> DaemonResult<Card>;
     /// A patch that changes `status_id` appends the card to its new column, as `move_card` would —
     /// including its refusals: an archived card cannot be moved through the patch path either.
@@ -563,7 +565,8 @@ two services does not keep either allocation alive:
 ```rust
 #[async_trait::async_trait]
 pub(super) trait WorktreeCascade: Send + Sync {
-    async fn delete_for_worktree(&self, worktree: &WorktreeId) -> DaemonResult<()>;
+    async fn delete_for_worktree(&self, worktree: &WorktreeId, trash: &Path) -> DaemonResult<()>;
+    async fn restore_for_worktree(&self, worktree: &WorktreeId, destination: &Path) -> DaemonResult<()>;
 }
 impl Worktrees {
     pub(super) fn set_cascade(&self, cascade: Arc<dyn WorktreeCascade>);
@@ -585,9 +588,11 @@ this daemon rewrote it. Boards whose context no longer exists are skipped by `li
 a worktree board whose worktree no longer exists is skipped as well. Deleting a context deletes
 its boards in the same cascade (`delete_for_context`) so a later context deriving the same id
 cannot adopt one. After any worktree deletion moves the worktree to trash, the late-bound
-`WorktreeCascade` invokes `delete_for_worktree`; a cascade failure is warned and swallowed because
-the worktree is already gone. Board locks are per board: no board's clone, sync or hook run blocks
-another board's requests, and `ensure` reads an existing board without taking one.
+`WorktreeCascade` bundles the board document inside that same trash entry. Restoring the worktree
+restores its board and cards; expiry removes both together. A cascade failure is warned and
+swallowed because the worktree is already gone. Board locks are per board: no board's clone, sync
+or hook run blocks another board's requests, and `ensure` reads an existing board without taking
+one.
 
 ## 5. Protocol (`fleet-proto`, version 8)
 
