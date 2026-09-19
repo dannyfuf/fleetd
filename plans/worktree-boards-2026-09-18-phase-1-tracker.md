@@ -49,3 +49,5 @@
 - Expose `DeleteBoard` as `fleet board delete` so an optional worktree board can be detached without deleting the worktree.
 - Fix the reproducible `AgentThreadView` handle leak when the headless
   `agents/subagent-reopen-closed-caller.scenario` quits after reopening its caller.
+- Stabilize `github_service::concurrent_misses_share_fetch`, which observed two fetches under the
+  loaded workspace run but passed immediately when rerun alone.
