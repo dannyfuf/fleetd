@@ -127,7 +127,9 @@ pub fn to_remote(
         | ListBoards { .. }
         | GetBoard { .. }
         | EnsureBoard { .. }
+        | EnsureWorktreeBoard { .. }
         | CreateBoard { .. }
+        | CreateWorktreeBoard { .. }
         | UpdateBoard { .. }
         | DeleteBoard { .. }
         | CreateCard { .. }
@@ -625,7 +627,9 @@ pub(crate) fn unavailable_fanout_response(
         | RequestBody::ListBoards { .. }
         | RequestBody::GetBoard { .. }
         | RequestBody::EnsureBoard { .. }
+        | RequestBody::EnsureWorktreeBoard { .. }
         | RequestBody::CreateBoard { .. }
+        | RequestBody::CreateWorktreeBoard { .. }
         | RequestBody::UpdateBoard { .. }
         | RequestBody::DeleteBoard { .. }
         | RequestBody::CreateCard { .. }

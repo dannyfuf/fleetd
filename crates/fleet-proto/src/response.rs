@@ -52,6 +52,12 @@ pub struct StampedResponse {
 /// Capability name for revision-correlated response and snapshot envelopes.
 pub const SNAPSHOT_REVISION_CAPABILITY: &str = "snapshot.revision";
 
+/// Capability advertised by daemons that implement additive worktree-board requests.
+///
+/// Gating the optional requests avoids a protocol version bump that would force every local and
+/// remote daemon to upgrade in lockstep.
+pub const BOARD_WORKTREE_CAPABILITY: &str = "board.worktree";
+
 /// Capability name for committing only the worktree IDs reviewed by a prune dry run.
 pub const PRUNE_REVIEWED_IDS_CAPABILITY: &str = "prune.reviewed_ids";
 

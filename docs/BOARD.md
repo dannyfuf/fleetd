@@ -569,14 +569,20 @@ cannot adopt one. After any worktree deletion moves the worktree to trash, the l
 the worktree is already gone. Board locks are per board: no board's clone, sync or hook run blocks
 another board's requests, and `ensure` reads an existing board without taking one.
 
-## 5. Protocol (`fleet-proto`, version 6)
+## 5. Protocol (`fleet-proto`, version 8)
+
+Worktree-board requests are an additive protocol-8 extension advertised through the
+`board.worktree` capability. The capability lets clients avoid sending variants an older daemon
+cannot decode without forcing every local and remote daemon to upgrade in lockstep.
 
 ```rust
 // RequestBody discriminants and fields use snake_case, like their siblings; domain payloads use camelCase.
 ListBoards { context_id: Option<ContextId> }                       → ResponseBody::Boards(Vec<BoardSummary>)
 GetBoard { board_id: BoardId }                                      → Board(BoardView)
 EnsureBoard { context_id: ContextId }                               → Board(BoardView)
+EnsureWorktreeBoard { worktree_id: WorktreeId }                    → Board(BoardView)
 CreateBoard { context_id, name: Option<String>, prefix: Option<String>, backend: Option<BackendRef> } → Board
+CreateWorktreeBoard { worktree_id, name: Option<String>, prefix: Option<String>, backend: Option<BackendRef> } → Board
 UpdateBoard { board_id, patch: BoardPatch }                         → Board
 DeleteBoard { board_id }                                            → Ack
 CreateCard { board_id, draft: CardDraft }                           → Card(Card)

@@ -19,8 +19,8 @@ use fleet_proto::{
     event::{Event, EventKind},
     request::{HelloClient, Request, RequestBody, agent_request_is_serialized},
     response::{
-        DaemonIdentity, HelloResponse, PRUNE_REVIEWED_IDS_CAPABILITY, PongResponse, Response,
-        ResponseBody, SNAPSHOT_REVISION_CAPABILITY, StampedResponse,
+        BOARD_WORKTREE_CAPABILITY, DaemonIdentity, HelloResponse, PRUNE_REVIEWED_IDS_CAPABILITY,
+        PongResponse, Response, ResponseBody, SNAPSHOT_REVISION_CAPABILITY, StampedResponse,
     },
 };
 use futures_util::{SinkExt, StreamExt, stream::FuturesUnordered};
@@ -886,6 +886,7 @@ async fn write_response(
             // hand-maintained subset that can drift from what dispatch answers.
             capabilities: std::iter::once(PRUNE_REVIEWED_IDS_CAPABILITY.to_owned())
                 .chain(std::iter::once(SNAPSHOT_REVISION_CAPABILITY.to_owned()))
+                .chain(std::iter::once(BOARD_WORKTREE_CAPABILITY.to_owned()))
                 .chain(std::iter::once(
                     fleet_proto::REMOTE_MACHINES_CAPABILITY.to_owned(),
                 ))
@@ -990,6 +991,7 @@ mod tests {
             snapshot_revision: Some(3),
             capabilities: std::iter::once(PRUNE_REVIEWED_IDS_CAPABILITY.to_owned())
                 .chain(std::iter::once(SNAPSHOT_REVISION_CAPABILITY.to_owned()))
+                .chain(std::iter::once(BOARD_WORKTREE_CAPABILITY.to_owned()))
                 .chain(std::iter::once(
                     fleet_proto::REMOTE_MACHINES_CAPABILITY.to_owned(),
                 ))
@@ -1010,6 +1012,7 @@ mod tests {
             serde_json::json!([
                 "prune.reviewed_ids",
                 "snapshot.revision",
+                "board.worktree",
                 "remote-machines",
                 "agent.window",
                 "agent.sync_marker",

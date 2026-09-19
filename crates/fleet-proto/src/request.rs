@@ -389,10 +389,26 @@ pub enum RequestBody {
         /// Context id.
         context_id: ContextId,
     },
+    /// Ensure the board scoped to one worktree.
+    EnsureWorktreeBoard {
+        /// Worktree id.
+        worktree_id: WorktreeId,
+    },
     /// Create board.
     CreateBoard {
         /// Context id.
         context_id: ContextId,
+        /// Name.
+        name: Option<String>,
+        /// Prefix.
+        prefix: Option<String>,
+        /// Backend.
+        backend: Option<BackendRef>,
+    },
+    /// Create the board scoped to one worktree.
+    CreateWorktreeBoard {
+        /// Worktree id.
+        worktree_id: WorktreeId,
         /// Name.
         name: Option<String>,
         /// Prefix.

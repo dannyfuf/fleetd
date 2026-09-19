@@ -684,6 +684,7 @@ fn request_timeout(body: &RequestBody) -> Option<Duration> {
         // install hint, the throttling notice, the JQL Jira refused — with a transport
         // error, while the daemon keeps running the call the client stopped waiting for.
         | RequestBody::CreateBoard { .. }
+        | RequestBody::CreateWorktreeBoard { .. }
         | RequestBody::UpdateBoard { .. }
         | RequestBody::DescribeBoardBackend { .. }
         // Creating a thread probes and starts a harness: a login-shell environment slurp, a

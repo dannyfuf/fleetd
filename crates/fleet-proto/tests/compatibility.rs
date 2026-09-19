@@ -2,7 +2,7 @@ mod support;
 
 use fleet_core::{
     agents::AttentionKind,
-    board::{BoardSummary, BoardView, CardDraft},
+    board::{Board, BoardSummary, BoardView, CardDraft},
     ids::{TerminalId, WorktreeId},
     model::RepoHooks,
     sessions::AgentActivity,
@@ -118,6 +118,27 @@ fn request_wire_goldens() {
             },
         },
         r#"{"id":7,"body":{"type":"ensure_board","context_id":"work"}}"#,
+    );
+    assert_frame(
+        Request {
+            id: 71,
+            body: RequestBody::EnsureWorktreeBoard {
+                worktree_id: WorktreeId::try_from("acme/api#feature").unwrap(),
+            },
+        },
+        r#"{"id":71,"body":{"type":"ensure_worktree_board","worktree_id":"acme/api#feature"}}"#,
+    );
+    assert_frame(
+        Request {
+            id: 72,
+            body: RequestBody::CreateWorktreeBoard {
+                worktree_id: WorktreeId::try_from("acme/api#feature").unwrap(),
+                name: Some("Feature board".to_owned()),
+                prefix: Some("FEA".to_owned()),
+                backend: None,
+            },
+        },
+        r#"{"id":72,"body":{"type":"create_worktree_board","worktree_id":"acme/api#feature","name":"Feature board","prefix":"FEA","backend":null}}"#,
     );
     assert_frame(
         Request {
@@ -268,11 +289,11 @@ fn stamped_hello_and_pong_wire_goldens() {
                 }),
             },
             snapshot_revision: Some(42),
-            capabilities: vec!["snapshot.revision".to_owned()],
+            capabilities: vec!["snapshot.revision".to_owned(), "board.worktree".to_owned()],
             daemon_id: "daemon-test".to_owned(),
             build_commit: None,
         },
-        r#"{"id":9,"result":{"Ok":{"type":"hello","data":{"protocol":8,"server":"fleet-test"}}},"snapshotRevision":42,"capabilities":["snapshot.revision"],"daemonId":"daemon-test"}"#,
+        r#"{"id":9,"result":{"Ok":{"type":"hello","data":{"protocol":8,"server":"fleet-test"}}},"snapshotRevision":42,"capabilities":["snapshot.revision","board.worktree"],"daemonId":"daemon-test"}"#,
     );
     assert_frame(
         PongResponse {
@@ -345,6 +366,38 @@ fn board_view() -> BoardView {
         }]
     }))
     .expect("board view fixture")
+}
+
+#[test]
+fn legacy_board_shapes_without_worktree_id_decode_as_unscoped() {
+    let board: Board = serde_json::from_value(serde_json::json!({
+        "id": "work",
+        "contextId": "work",
+        "name": "Fleet",
+        "prefix": "FLT",
+        "nextNumber": 1,
+        "statuses": [{"id": "todo", "name": "To do", "category": "unstarted"}],
+        "createdAt": "2026-09-06T12:00:00Z",
+        "updatedAt": "2026-09-06T12:00:00Z"
+    }))
+    .expect("legacy board fixture");
+    assert!(board.worktree_id.is_none());
+
+    let summary: BoardSummary = serde_json::from_value(serde_json::json!({
+        "id": "work",
+        "contextId": "work",
+        "name": "Fleet",
+        "prefix": "FLT",
+        "backendKind": "local",
+        "cardCount": 0,
+        "openCount": 0,
+        "dirtyCount": 0,
+        "conflictCount": 0,
+        "lastSyncedAt": null,
+        "lastError": null
+    }))
+    .expect("legacy board summary fixture");
+    assert!(summary.worktree_id.is_none());
 }
 
 #[test]
