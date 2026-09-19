@@ -54,13 +54,15 @@ shared daemon:
   scenarios tear their daemon down. Those three detach or reattach a caller tab, so the run's
   shutdown path presumably loses the daemon handle on that path. `docs/TESTING-HARNESS.md` is
   frozen; read it before changing the teardown contract.
-- [ ] **A delegation can sit in `settling` for over an hour after its child finished.** Observed
-  on `8d9e2d31` (D-T07): the child ran `fleet subagent complete` with its full report, its last
-  turn ended at 19:34 UTC, `fleet agent list` kept showing the thread as `ready / working`, and
-  the delegation was still `settling` with delivery `pending` at 20:00 UTC. The child had used a
-  Claude Code background task (a `Monitor` on its `make test`) earlier in the same turn. Whether
-  the provider never reported the turn as settled or the daemon's settle rule needs a timeout is
-  the question; the result text was already readable through `status` the whole time.
+- [ ] **A delegation can sit in `settling` for about an hour after its child finished.** Observed
+  on `8d9e2d31` (D-T07): the child ran `fleet subagent complete` with its full report and its last
+  turn ended at 19:34 UTC, yet `fleet agent list` kept showing the thread as `ready / working` and
+  the delegation stayed `settling` with delivery `pending` until roughly 20:45 UTC, when it flipped
+  to `succeeded` and delivered (total 71m 27s against ~50 minutes of actual work). The child had
+  used a Claude Code background task (a `Monitor` on its `make test`) in the same turn, so the
+  provider likely kept the turn open until that task's own timeout. The result text was readable
+  through `status` the whole time; the question is whether the settle rule should stop waiting on
+  a provider that has already reported completion.
 
 - [x] **`retry_tick_sends_and_counts_the_nudge` was flaky under the whole-crate daemon run —
   fixed in `d88b473`.** `crates/fleet-daemon/src/services/agents/delegation/tests/worker.rs`
