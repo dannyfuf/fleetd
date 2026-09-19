@@ -100,6 +100,7 @@ impl Services {
             Arc::new(worktrees.clone()),
             events.clone(),
         ));
+        worktrees.set_cascade(boards.clone());
         let pool = Pool::new(
             Arc::clone(&config),
             Arc::clone(&state),

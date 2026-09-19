@@ -521,6 +521,8 @@ impl Boards {
     /// A document this build cannot read goes to trash with its context rather than blocking it:
     /// the cascade has already deleted the context's repositories by then.
     pub async fn delete_for_context(&self, context: &ContextId) -> DaemonResult<()>;
+    /// Deletes the board scoped to a worktree after the worktree has moved to trash.
+    pub async fn delete_for_worktree(&self, worktree: &WorktreeId) -> DaemonResult<()>;
     pub async fn create_card(&self, board: &BoardId, draft: CardDraft) -> DaemonResult<Card>;
     /// A patch that changes `status_id` appends the card to its new column, as `move_card` would —
     /// including its refusals: an archived card cannot be moved through the patch path either.
@@ -562,8 +564,10 @@ persisted `worktree_id`. `summaries` reparses a board document only when its `st
 this daemon rewrote it. Boards whose context no longer exists are skipped by `list`/`summaries`;
 a worktree board whose worktree no longer exists is skipped as well. Deleting a context deletes
 its boards in the same cascade (`delete_for_context`) so a later context deriving the same id
-cannot adopt one. Board locks are per board: no board's clone, sync or hook run blocks another
-board's requests, and `ensure` reads an existing board without taking one.
+cannot adopt one. After any worktree deletion moves the worktree to trash, the late-bound
+`WorktreeCascade` invokes `delete_for_worktree`; a cascade failure is warned and swallowed because
+the worktree is already gone. Board locks are per board: no board's clone, sync or hook run blocks
+another board's requests, and `ensure` reads an existing board without taking one.
 
 ## 5. Protocol (`fleet-proto`, version 6)
 

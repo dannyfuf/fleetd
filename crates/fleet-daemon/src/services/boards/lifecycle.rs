@@ -491,6 +491,42 @@ impl Boards {
         }
         Ok(())
     }
+
+    /// Deletes every board scoped to `worktree` after that worktree is removed.
+    pub async fn delete_for_worktree(&self, worktree: &WorktreeId) -> DaemonResult<()> {
+        let base = worktree_board_id(worktree);
+        for id in self.store.list()? {
+            let owned = match self.store.peek(&id) {
+                Ok(Some(doc)) => doc.board.worktree_id.as_ref() == Some(worktree),
+                Ok(None) => false,
+                // An unreadable document can only be associated by its derived filename.
+                Err(error) => {
+                    let candidate = id == base || is_suffixed_worktree_board_id(&id, &base);
+                    if candidate {
+                        tracing::warn!(%id, %error, "deleting unreadable board with its worktree");
+                    }
+                    candidate
+                }
+            };
+            if owned {
+                // Not `delete`: an unreadable board must not block deletion of a worktree that
+                // has already left state and disk.
+                let _guard = self.gate(&id).await;
+                self.store.delete(&id)?;
+                self.summaries.write().await.remove(&id);
+                self.index.write().await.retain(|_, board| *board != id);
+                self.changed(&id, BoardChangeReason::Deleted);
+            }
+        }
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl WorktreeCascade for Boards {
+    async fn delete_for_worktree(&self, worktree: &WorktreeId) -> DaemonResult<()> {
+        Boards::delete_for_worktree(self, worktree).await
+    }
 }
 
 fn worktree_context(state: &State, id: &WorktreeId) -> DaemonResult<(Worktree, Context)> {
@@ -522,4 +558,11 @@ fn suffixed_board_id(base: &BoardId, suffix: u32) -> BoardId {
     let mut stem = base.as_str()[..keep].trim_end_matches('-').to_owned();
     stem.push_str(&suffix);
     BoardId::try_from(stem).expect("a suffixed worktree board id is always a valid board slug")
+}
+
+fn is_suffixed_worktree_board_id(id: &BoardId, base: &BoardId) -> bool {
+    id.as_str()
+        .rsplit_once('-')
+        .and_then(|(_, suffix)| suffix.parse::<u32>().ok())
+        .is_some_and(|suffix| suffix >= 2 && suffixed_board_id(base, suffix) == *id)
 }

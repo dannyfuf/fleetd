@@ -22,13 +22,15 @@ use fleet_daemon::{
     },
     jobs::JobManager,
     server::BroadcastBus,
-    services::{boards::Boards, sessions::Sessions, worktrees::Worktrees},
+    services::{Services, boards::Boards, prune::WorktreeDeleter, worktrees::Worktrees},
     stores::{board::BoardStore, config::ConfigStore, state::StateStore},
     testing::fakes::{FakeBackend, FakeBackendCall, FakeGit, FakeShell, FakeShellCall, FixedClock},
 };
 use fleet_proto::{
     event::{BoardChangeReason, Event},
     job::{JobKind, JobStatus},
+    request::RequestBody,
+    response::ResponseBody,
 };
 use tokio::sync::broadcast;
 
@@ -45,6 +47,7 @@ struct Fixture {
     events: BroadcastBus,
     receiver: broadcast::Receiver<Event>,
     boards: Boards,
+    services: Arc<Services>,
 }
 
 impl Fixture {
@@ -116,8 +119,9 @@ impl Fixture {
             },
         );
         let real_shell: Arc<dyn Shell> = shell.clone();
+        let backend = Arc::new(FakeBackend::new("fake", caps));
         let adapters = Adapters {
-            board_backends: BoardBackends::system(Arc::clone(&real_shell), clock.clone()),
+            board_backends: BoardBackends::new(vec![Arc::new(LocalBackend), backend.clone()]),
             git: Arc::new(FakeGit::new(shell.clone())),
             github: Arc::new(GhCli::new(Arc::clone(&real_shell))),
             process: Arc::new(RealProcess::new(Arc::clone(&real_shell))),
@@ -125,27 +129,19 @@ impl Fixture {
             shell: real_shell,
             clock: clock.clone(),
         };
-        let sessions = Sessions::new(Arc::clone(&config), Arc::clone(&state));
-        let worktrees = Arc::new(Worktrees::new(
+        let store = Arc::new(BoardStore::new(home.clone(), files));
+        let events = BroadcastBus::default();
+        let receiver = events.subscribe();
+        let services = Services::new_with_events(
+            temp.path().join("fleet"),
             config,
             state.clone(),
             jobs.clone(),
-            &adapters,
-            sessions,
-        ));
-        let store = Arc::new(BoardStore::new(home.clone(), files));
-        let backend = Arc::new(FakeBackend::new("fake", caps));
-        let events = BroadcastBus::default();
-        let receiver = events.subscribe();
-        let boards = Boards::new(
-            store.clone(),
-            state.clone(),
-            BoardBackends::new(vec![Arc::new(LocalBackend), backend.clone()]),
-            clock.clone(),
-            jobs.clone(),
-            worktrees.clone(),
+            adapters,
             events.clone(),
         );
+        let worktrees = Arc::new(services.worktrees.clone());
+        let boards = services.boards.as_ref().clone();
         Self {
             _temp: temp,
             home,
@@ -159,6 +155,7 @@ impl Fixture {
             events,
             receiver,
             boards,
+            services,
         }
     }
 
@@ -180,19 +177,20 @@ impl Fixture {
 
     async fn publish_worktree(&self, id: &str) -> Worktree {
         let id: WorktreeId = id.parse().unwrap();
+        let path = self.home.worktrees_dir().join(id.repo()).join(id.slug());
+        std::fs::create_dir_all(&path).unwrap();
+        let repo_name = id.repo().split_once('/').unwrap().1.to_owned();
         let worktree = Worktree {
             repo_id: id.repo().parse().unwrap(),
             slug: id.slug().into(),
             id,
             branch: "feature".into(),
             base_ref: "origin/main".into(),
-            path: self
-                .home
-                .worktrees_dir()
-                .join("acme/api/feature")
-                .display()
-                .to_string(),
-            session: "api/feature".into(),
+            path: path.display().to_string(),
+            session: format!(
+                "{repo_name}/{}",
+                path.file_name().unwrap().to_string_lossy()
+            ),
             host: None,
             created_at: "2026-09-06T12:00:00Z".into(),
             last_opened_at: None,
@@ -265,13 +263,20 @@ impl Fixture {
     }
 
     fn reasons(&mut self) -> Vec<BoardChangeReason> {
-        let mut reasons = Vec::new();
+        self.board_events()
+            .into_iter()
+            .map(|(_, reason)| reason)
+            .collect()
+    }
+
+    fn board_events(&mut self) -> Vec<(BoardId, BoardChangeReason)> {
+        let mut events = Vec::new();
         while let Ok(event) = self.receiver.try_recv() {
-            if let Event::BoardChanged { reason, .. } = event {
-                reasons.push(reason);
+            if let Event::BoardChanged { board_id, reason } = event {
+                events.push((board_id, reason));
             }
         }
-        reasons
+        events
     }
 }
 
@@ -497,6 +502,67 @@ async fn worktree_board_creation_suffixes_an_id_owned_by_another_board() {
         created
     );
     assert_eq!(f.store.list().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn delete_worktrees_dispatch_cascades_only_the_worktree_board() {
+    let mut f = Fixture::new(pull_caps()).await;
+    let context_board = f.local().await.board;
+    let worktree = f.publish_worktree("acme/api#feature").await;
+    let worktree_board = f
+        .boards
+        .ensure_for_worktree(&worktree.id)
+        .await
+        .unwrap()
+        .board;
+    f.reasons();
+
+    let response = f
+        .services
+        .dispatch(RequestBody::DeleteWorktrees {
+            ids: vec![worktree.id.clone()],
+        })
+        .await
+        .unwrap();
+    let ResponseBody::WorktreesDeleted(results) = response else {
+        panic!("expected worktree deletion response");
+    };
+    assert_eq!(results.len(), 1);
+    assert!(results[0].ok);
+    assert!(f.store.load(&worktree_board.id).unwrap().is_none());
+    assert!(f.store.load(&context_board.id).unwrap().is_some());
+    assert_eq!(
+        f.board_events(),
+        vec![(worktree_board.id, BoardChangeReason::Deleted)]
+    );
+}
+
+#[tokio::test]
+async fn prune_deleter_cascades_a_board_and_a_missing_board_is_a_noop() {
+    let mut f = Fixture::new(pull_caps()).await;
+    let worktree = f.publish_worktree("acme/api#feature").await;
+    let board = f
+        .boards
+        .ensure_for_worktree(&worktree.id)
+        .await
+        .unwrap()
+        .board;
+    f.reasons();
+
+    <Worktrees as WorktreeDeleter>::delete(&f.services.worktrees, worktree.id.clone(), None)
+        .await
+        .unwrap();
+    assert!(f.store.load(&board.id).unwrap().is_none());
+    assert_eq!(
+        f.board_events(),
+        vec![(board.id, BoardChangeReason::Deleted)]
+    );
+
+    let without_board = f.publish_worktree("acme/api#without-board").await;
+    <Worktrees as WorktreeDeleter>::delete(&f.services.worktrees, without_board.id, None)
+        .await
+        .unwrap();
+    assert!(f.board_events().is_empty());
 }
 
 #[tokio::test]

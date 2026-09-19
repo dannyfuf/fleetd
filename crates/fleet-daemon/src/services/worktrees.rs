@@ -4,7 +4,7 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -57,6 +57,13 @@ mod trash;
 
 const TRASH_MARKER_FILE: &str = "fleet-trash.json";
 
+/// Late-bound cleanup invoked after a worktree has been moved to trash.
+#[async_trait::async_trait]
+pub trait WorktreeCascade: Send + Sync {
+    /// Deletes records whose lifetime is bounded by `worktree`.
+    async fn delete_for_worktree(&self, worktree: &WorktreeId) -> DaemonResult<()>;
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PostCreateIntent {
@@ -84,6 +91,7 @@ pub struct Worktrees {
     trash_jobs: Arc<Mutex<HashMap<String, JobId>>>,
     startup_ready: Arc<AtomicBool>,
     startup_notify: Arc<tokio::sync::Notify>,
+    cascade: Arc<OnceLock<Arc<dyn WorktreeCascade>>>,
 }
 
 impl Worktrees {
@@ -117,9 +125,17 @@ impl Worktrees {
             trash_jobs: Arc::new(Mutex::new(HashMap::new())),
             startup_ready: Arc::new(AtomicBool::new(false)),
             startup_notify: Arc::new(tokio::sync::Notify::new()),
+            cascade: Arc::new(OnceLock::new()),
         };
         service.schedule_startup_recovery();
         service
+    }
+
+    /// Installs the one cascade observer after dependent services have been composed.
+    pub fn set_cascade(&self, cascade: Arc<dyn WorktreeCascade>) {
+        if self.cascade.set(cascade).is_err() {
+            tracing::warn!("worktree cascade observer was already installed");
+        }
     }
 
     /// Hard-kills the session associated with a worktree.
@@ -474,6 +490,7 @@ mod tests {
             trash_jobs: Arc::new(Mutex::new(HashMap::new())),
             startup_ready: Arc::new(AtomicBool::new(true)),
             startup_notify: Arc::new(tokio::sync::Notify::new()),
+            cascade: Arc::new(OnceLock::new()),
         };
         Fixture {
             _temp: temp,
