@@ -11,7 +11,7 @@
 
 ## Kickoff
 - [x] I have read the plan end to end.
-- [~] Baseline: `cargo build --workspace` running on the clean tree (no target/ existed); lint/test baseline is taken from main's merged CI state, see log.
+- [x] Baseline: the tree had no target/; the first full build ran during wave 1. main's CI state served as the green baseline.
 - [x] I am ready to start.
 
 ## Tasks
@@ -25,8 +25,8 @@
 - [~] T08 — Add the harness regression scenario
 - [ ] T09 — Move the docs with the code
 - [x] T11 — Mirror every top-level reopen (`^s u`, caller segment, cross-worktree open) to the daemon, not only the picker's
-- [ ] T12 — In-flight agent reply futures hold `AppState` weakly (leak at `quit` during a picker reopen)
-- [~] T10 — Quality gate and PR
+- [x] T12 — In-flight agent reply futures hold `AppState` weakly (leak at `quit` during a picker reopen)
+- [x] T10 — Quality gate and PR (PR #38 open; pixel-lane `make harness` could not run from this session, see log)
 
 ## Notes / decisions log
 (Append-only. Date-stamp entries. Capture anything that surprised you or that future-you will want.)
@@ -116,6 +116,17 @@
   a detached reply future, so a quit 150 ms after a picker reopen leaks. Added T12 rather than
   masking with an `await idle`. `make test` also warns the headless subset now costs 127 s against
   a 60 s budget (pre-existing drift; the new scenario adds ~65 s because of the reconnect wait).
+- 2026-09-19 — T12 verified: `open_thread`, `load_older_page`, `refresh_checkpoints`,
+  `account_login` and `create_thread` hold `AppState` (or the view) weakly across the reply;
+  new test `an_in_flight_open_thread_does_not_retain_app_state`. Both picker-reopen scenarios
+  green twice each headless. `make test` then fully green (867 app lib tests, headless lane ok).
+- 2026-09-19 — T10 done: `make lint` green, `make test` green, commits a774140 (`proto:` the
+  whole change, matching how `agent.seen` landed in cc37ce7) and 04f37c6 (plan + tracker),
+  PR #38 open. Pixel-lane `make harness` NOT verified: without compositor variables it falls back
+  to headless and every `shot` scenario fails by design; pointed at the live compositor the
+  isolated output existed but the window never painted (locked session), so the suite aborted on
+  `agent-approval` before any scenario of ours ran. Recorded on the PR; the user runs it from an
+  unlocked desktop. `make restart` also left to the user (see above).
 
 ## Follow-ups
 (Things discovered mid-flight that are out of scope for this plan. Each gets a one-line description.)
