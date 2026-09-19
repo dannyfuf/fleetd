@@ -71,7 +71,12 @@ impl Harness {
         let stored = delegation.clone();
         self.store
             .delegation_write("insert query-test delegation", move |tx| {
-                delegations::insert(tx, &stored, "test-token")?;
+                delegations::insert(
+                    tx,
+                    &stored,
+                    "test-token",
+                    &std::collections::BTreeMap::new(),
+                )?;
                 Ok(((), false))
             })
             .await

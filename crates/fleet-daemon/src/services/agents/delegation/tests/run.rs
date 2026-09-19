@@ -443,6 +443,7 @@ impl Harness {
                     tx,
                     &delegation,
                     "test-token-hash",
+                    &BTreeMap::new(),
                 )?;
                 Ok(((), false))
             })

@@ -272,6 +272,8 @@ impl DelegationService {
         };
 
         let stored = delegation.clone();
+        // Kept so a resume replays it; `reserve` drops the Fleet identity keys on the way in.
+        let stored_env = extra_env.clone();
         let refused = self
             .inner
             .store
@@ -280,6 +282,7 @@ impl DelegationService {
                     tx,
                     &stored,
                     &token_sha256,
+                    &stored_env,
                     MAX_LIVE_CHILDREN_PER_CALLER,
                     MAX_LIVE_DELEGATIONS,
                 )?;

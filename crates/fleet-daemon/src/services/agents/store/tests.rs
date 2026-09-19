@@ -4,7 +4,10 @@
 //! a reader taking a consistent snapshot while the writer commits, and a batch of appends landing
 //! in FIFO order — are driven by a multi-threaded runtime and joined, never timed.
 
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+};
 
 use anyhow::Context;
 use chrono::{DateTime, Utc};
@@ -754,7 +757,7 @@ async fn insert_test_delegation(
     let delegation = delegation.clone();
     store
         .delegation_write("insert transition test delegation", move |tx| {
-            delegations::insert(tx, &delegation, "transition-test-token")?;
+            delegations::insert(tx, &delegation, "transition-test-token", &BTreeMap::new())?;
             Ok(((), false))
         })
         .await
@@ -1566,6 +1569,110 @@ async fn thread_delegation_metadata_round_trips_and_parent_reaches_the_summary()
     Ok(())
 }
 
+/// A child's user environment survives the round trip; Fleet's own identity keys never do.
+///
+/// The identity pair is minted per run and rotated on every resume, so a persisted copy could
+/// only be a stale secret — `insert` drops it rather than trusting its caller to have done so.
+#[tokio::test]
+async fn a_child_environment_round_trips_without_fleet_identity() -> anyhow::Result<()> {
+    let (_directory, store) = store()?;
+    let stored = delegation(ThreadId::new());
+    let id = stored.id;
+    let env = BTreeMap::from([
+        (
+            "CARGO_TARGET_DIR".to_owned(),
+            "/tmp/child-target".to_owned(),
+        ),
+        ("RUSTFLAGS".to_owned(), "-D warnings".to_owned()),
+        (
+            "FLEET_DELEGATION".to_owned(),
+            "a-forged-delegation".to_owned(),
+        ),
+        ("FLEET_DELEGATION_TOKEN".to_owned(), "0f".repeat(32)),
+    ]);
+
+    store
+        .delegation_write("insert a delegation with an environment", move |tx| {
+            delegations::insert(tx, &stored, "token-hash", &env)?;
+            Ok(((), false))
+        })
+        .await?;
+
+    assert_eq!(
+        read_child_env(&store, id).await?,
+        BTreeMap::from([
+            (
+                "CARGO_TARGET_DIR".to_owned(),
+                "/tmp/child-target".to_owned()
+            ),
+            ("RUSTFLAGS".to_owned(), "-D warnings".to_owned()),
+        ])
+    );
+    Ok(())
+}
+
+/// A child given no variables reads back the same empty map a pre-slot-006 row does.
+#[tokio::test]
+async fn a_delegation_without_an_environment_reads_an_empty_map() -> anyhow::Result<()> {
+    let (_directory, store) = store()?;
+    let stored = delegation(ThreadId::new());
+    let id = stored.id;
+
+    store
+        .delegation_write("insert a delegation with no environment", move |tx| {
+            delegations::insert(tx, &stored, "token-hash", &BTreeMap::new())?;
+            Ok(((), false))
+        })
+        .await?;
+
+    assert!(read_child_env(&store, id).await?.is_empty());
+    // A delegation this store has never recorded answers the same way rather than failing.
+    assert!(
+        read_child_env(&store, DelegationId::new())
+            .await?
+            .is_empty()
+    );
+    Ok(())
+}
+
+/// The production write path — `reserve` — carries the environment through to the row.
+#[tokio::test]
+async fn reserve_keeps_the_child_environment_it_was_given() -> anyhow::Result<()> {
+    let (_directory, store) = store()?;
+    let stored = live_delegation(ThreadId::new(), ThreadId::new(), DelegationStatus::Starting);
+    let id = stored.id;
+    let env = BTreeMap::from([("TMPDIR".to_owned(), "/private/tmp/child".to_owned())]);
+
+    let refusal = store
+        .delegation_write("reserve a delegation with an environment", move |tx| {
+            let refusal = delegations::reserve(tx, &stored, "token-hash", &env, 4, 8)?;
+            Ok((refusal, false))
+        })
+        .await?;
+
+    assert_eq!(refusal, None);
+    assert_eq!(
+        read_child_env(&store, id).await?,
+        BTreeMap::from([("TMPDIR".to_owned(), "/private/tmp/child".to_owned())])
+    );
+    Ok(())
+}
+
+/// Reads `env_json` the way the resume path does: inside a delegation transaction.
+///
+/// There is no reader-pool seam for it on purpose — the environment must not become a value any
+/// query path can return by accident (`docs/NATIVE-AGENTS.md` §15).
+async fn read_child_env(
+    store: &SqliteAgentStore,
+    id: DelegationId,
+) -> anyhow::Result<BTreeMap<String, String>> {
+    store
+        .delegation_write("read a child environment", move |tx| {
+            Ok((delegations::env(tx, id)?, false))
+        })
+        .await
+}
+
 #[tokio::test]
 async fn delegation_rows_round_trip_every_column_and_update_mutable_state() -> anyhow::Result<()> {
     let (_directory, store) = store()?;
@@ -1577,7 +1684,7 @@ async fn delegation_rows_round_trip_every_column_and_update_mutable_state() -> a
 
     store
         .delegation_write("insert test delegation", move |tx| {
-            delegations::insert(tx, &stored, "token-hash")?;
+            delegations::insert(tx, &stored, "token-hash", &BTreeMap::new())?;
             Ok(((), false))
         })
         .await?;
@@ -1745,7 +1852,7 @@ async fn delegation_report_and_its_idempotence_metadata_round_trip() -> anyhow::
     let id = stored.id;
     store
         .delegation_write("insert report test delegation", move |tx| {
-            delegations::insert(tx, &stored, "report-token")?;
+            delegations::insert(tx, &stored, "report-token", &BTreeMap::new())?;
             Ok(((), false))
         })
         .await?;
@@ -1786,14 +1893,14 @@ async fn one_child_cannot_belong_to_two_delegations() -> anyhow::Result<()> {
     let second = delegation(child);
     store
         .delegation_write("insert first child delegation", move |tx| {
-            delegations::insert(tx, &first, "first-token")?;
+            delegations::insert(tx, &first, "first-token", &BTreeMap::new())?;
             Ok(((), false))
         })
         .await?;
 
     let duplicate = store
         .delegation_write("insert duplicate child delegation", move |tx| {
-            delegations::insert(tx, &second, "second-token")?;
+            delegations::insert(tx, &second, "second-token", &BTreeMap::new())?;
             Ok(((), false))
         })
         .await;

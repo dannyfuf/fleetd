@@ -3,7 +3,7 @@
 //! These are the only production statements that touch `delegations` or
 //! `delegation_outbox`. Keeping them together makes the phase-3 transition path able to compose
 //! one state change and one outbox action in the writer's existing transaction.
-use std::{fmt::Display, str::FromStr};
+use std::{collections::BTreeMap, fmt::Display, str::FromStr};
 
 use anyhow::{Context, anyhow, bail};
 use chrono::{DateTime, Utc};
@@ -15,7 +15,10 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::de::DeserializeOwned;
 
 use super::project::discriminant;
-use crate::services::agents::delegation::transition::{DelegationFacts, child_transition};
+use crate::services::agents::delegation::{
+    run::FLEET_OWNED_CHILD_ENV,
+    transition::{DelegationFacts, child_transition},
+};
 
 /// Rows per delegation read. Every read in this store carries an explicit `LIMIT`; a daemon that
 /// somehow held more than this many delegations is one whose ceilings already failed.
@@ -238,19 +241,24 @@ pub(crate) fn caller_has_open_deliver(
 }
 
 /// Inserts the immutable identity and the initial mutable state of a delegation.
+///
+/// `env` is the child's user environment, kept so a resume can replay it (`env_json`, slot 006).
+/// The two keys in [`FLEET_OWNED_CHILD_ENV`] are dropped rather than stored: they are minted per
+/// run and rotated on every resume, so a persisted copy could only ever be a stale secret.
 pub(crate) fn insert(
     tx: &Transaction<'_>,
     delegation: &Delegation,
     token_sha256: &str,
+    env: &BTreeMap<String, String>,
 ) -> anyhow::Result<()> {
     let encoded = EncodedDelegation::from_delegation(delegation)?;
     tx.execute(
         "INSERT INTO delegations (id, token_sha256, caller_thread, caller_turn, caller_item, \
          child_thread, provider, depth, brief, expectation, eager, status, status_payload, \
          result, result_source, result_files, result_elided, nudges, recoveries, delivery, \
-         delivered_seq, delivered_turn, delivery_reason, headline, created, finished) \
+         delivered_seq, delivered_turn, delivery_reason, headline, created, finished, env_json) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, \
-                 ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
+                 ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)",
         params![
             delegation.id.to_string(),
             token_sha256,
@@ -278,10 +286,52 @@ pub(crate) fn insert(
             delegation.headline,
             timestamp(delegation.created),
             delegation.finished.map(timestamp),
+            encode_env(env)?,
         ],
     )
     .with_context(|| format!("insert delegation {}", delegation.id))?;
     Ok(())
+}
+
+/// Encodes a child environment for `env_json`, or `None` when there is nothing to keep.
+///
+/// A child with no user variables leaves the column NULL, so a row this build wrote and a row
+/// written before slot 006 are indistinguishable to [`env`] — there is one representation of
+/// "no environment", not two.
+fn encode_env(env: &BTreeMap<String, String>) -> anyhow::Result<Option<String>> {
+    let kept: BTreeMap<&str, &str> = env
+        .iter()
+        .filter(|(key, _)| !FLEET_OWNED_CHILD_ENV.contains(&key.as_str()))
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
+    if kept.is_empty() {
+        return Ok(None);
+    }
+    serde_json::to_string(&kept)
+        .context("encode a delegated child's environment")
+        .map(Some)
+}
+
+/// The user environment a delegated child was started with, empty when it was given none.
+///
+/// A targeted read rather than a column on [`Delegation`]: the environment must not reach the
+/// wire, the `--json` envelope or a log line, and the resume path in
+/// `services::agents::manager` is its only production caller. A delegation this daemon has never
+/// recorded answers with an empty map, as a row written before slot 006 does.
+pub(crate) fn env(conn: &Connection, id: DelegationId) -> anyhow::Result<BTreeMap<String, String>> {
+    let stored: Option<Option<String>> = conn
+        .query_row(
+            "SELECT env_json FROM delegations WHERE id = ?1",
+            [id.to_string()],
+            |row| row.get(0),
+        )
+        .optional()
+        .with_context(|| format!("read the child environment of delegation {id}"))?;
+    let Some(Some(json)) = stored else {
+        return Ok(BTreeMap::new());
+    };
+    serde_json::from_str(&json)
+        .with_context(|| format!("decode the child environment of delegation {id}"))
 }
 
 /// Atomically reserves one live-delegation slot and inserts its starting row.
@@ -292,6 +342,7 @@ pub(crate) fn reserve(
     tx: &Transaction<'_>,
     delegation: &Delegation,
     token_sha256: &str,
+    env: &BTreeMap<String, String>,
     max_children: usize,
     max_total: usize,
 ) -> anyhow::Result<Option<String>> {
@@ -318,7 +369,7 @@ pub(crate) fn reserve(
             "daemon-live-limit rule: this daemon already has {total} live delegations (maximum {max_total})"
         )));
     }
-    insert(tx, delegation, token_sha256)?;
+    insert(tx, delegation, token_sha256, env)?;
     Ok(None)
 }
 

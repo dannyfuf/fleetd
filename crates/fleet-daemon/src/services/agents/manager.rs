@@ -432,19 +432,28 @@ impl AgentSessionManager {
             );
             let token_sha256 = format!("{:x}", Sha256::digest(token.as_bytes()));
             let child = record.thread;
-            self.inner
+            // The rotation and the read of what the child was started with are one transaction:
+            // the resumed process must never see one run's token beside another run's variables.
+            let mut env = self
+                .inner
                 .store()
                 .map_err(storage_error)?
                 .delegation_write("rotate resumed delegation token", move |tx| {
                     store::delegations::rotate_token(tx, delegation, child, &token_sha256)?;
-                    Ok(((), false))
+                    let env = store::delegations::env(tx, delegation)?;
+                    Ok((env, false))
                 })
                 .await
                 .map_err(storage_error)?;
-            BTreeMap::from([
-                ("FLEET_DELEGATION".to_owned(), delegation.to_string()),
-                ("FLEET_DELEGATION_TOKEN".to_owned(), token),
-            ])
+            // Persisted user variables first, the freshly rotated identity second — the same
+            // precedence `delegation::run` applies to a first start, and for the same reason
+            // (`docs/NATIVE-AGENTS.md` §15): a child that lost its `CARGO_TARGET_DIR` on resume
+            // would start fighting its siblings over a build lock with nobody watching. The store
+            // never persists a `FLEET_OWNED_CHILD_ENV` key, and these two `insert`s would
+            // overwrite one anyway.
+            env.insert("FLEET_DELEGATION".to_owned(), delegation.to_string());
+            env.insert("FLEET_DELEGATION_TOKEN".to_owned(), token);
+            env
         } else {
             BTreeMap::new()
         };

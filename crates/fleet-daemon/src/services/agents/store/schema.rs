@@ -364,7 +364,10 @@ pub(super) const REQUIRED_TABLES: &[&str] = &[
     "turns",
 ];
 
-/// Every column migration slot 003 adds to the durable delegation record.
+/// Every column the durable delegation record carries at head.
+///
+/// Slot 003 created all of them but `env_json`, which slot 006 adds. The set is asserted by name
+/// so a column added without a slot fails loudly.
 #[cfg(test)]
 pub(super) const REQUIRED_DELEGATION_COLUMNS: &[&str] = &[
     "brief",
@@ -379,6 +382,7 @@ pub(super) const REQUIRED_DELEGATION_COLUMNS: &[&str] = &[
     "delivery_reason",
     "depth",
     "eager",
+    "env_json",
     "expectation",
     "finished",
     "headline",

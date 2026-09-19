@@ -318,7 +318,12 @@ impl Harness {
         let stored = delegation.clone();
         self.store
             .delegation_write("insert worker-test delegation", move |tx| {
-                delegations::insert(tx, &stored, "test-token")?;
+                delegations::insert(
+                    tx,
+                    &stored,
+                    "test-token",
+                    &std::collections::BTreeMap::new(),
+                )?;
                 delegations::enqueue(tx, stored.id, action, Utc::now())?;
                 Ok(((), false))
             })
