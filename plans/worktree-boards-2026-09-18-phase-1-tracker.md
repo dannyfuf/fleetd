@@ -78,6 +78,10 @@
   - verified: `cargo test -p fleet-daemon
     differently_based_boards_reserve_colliding_suffixes_through_save` passed (1 selected);
     `make lint` passed.
+- [x] P1-T23 — Rehome worktree boards when their repository changes context
+  - verified: `cargo test -p fleet-daemon --test boards_service
+    moving_a_repo_rehomes_its_worktree_board_before_old_context_deletion` passed (1 selected);
+    `make lint` passed.
 
 ## Notes / decisions log
 (Append-only. Date-stamp entries. Capture anything that surprised you or that future-you will want.)

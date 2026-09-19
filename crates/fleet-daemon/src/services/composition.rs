@@ -101,6 +101,7 @@ impl Services {
             events.clone(),
         ));
         worktrees.set_cascade(boards.clone());
+        repos.set_context_mover(boards.clone());
         let pool = Pool::new(
             Arc::clone(&config),
             Arc::clone(&state),

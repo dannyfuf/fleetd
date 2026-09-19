@@ -7,7 +7,7 @@ use super::{
 
 use std::{
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock, Weak},
     time::Duration,
 };
 
@@ -37,6 +37,12 @@ use crate::{
     stores::{config::ConfigStore, state::StateStore},
 };
 
+/// Late-bound coordinator that keeps repository-scoped documents aligned with state moves.
+#[async_trait::async_trait]
+pub(super) trait RepoContextMover: Send + Sync {
+    async fn move_repo_to_context(&self, repo: RepoId, context: ContextId) -> DaemonResult<Repo>;
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ClonePublishIntent {
@@ -54,6 +60,7 @@ pub struct Repos {
     files: Arc<dyn Files>,
     process: Arc<dyn Process>,
     context_lifecycle: Arc<tokio::sync::Mutex<()>>,
+    context_mover: Arc<OnceLock<Weak<dyn RepoContextMover>>>,
 }
 
 impl Repos {
@@ -77,11 +84,19 @@ impl Repos {
             files,
             process,
             context_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
+            context_mover: Arc::new(OnceLock::new()),
         }
     }
 
     pub(super) fn context_lifecycle(&self) -> Arc<tokio::sync::Mutex<()>> {
         Arc::clone(&self.context_lifecycle)
+    }
+
+    /// Installs the cross-store coordinator after board composition.
+    pub(super) fn set_context_mover(&self, mover: Arc<dyn RepoContextMover>) {
+        if self.context_mover.set(Arc::downgrade(&mover)).is_err() {
+            tracing::warn!("repository context mover was already installed");
+        }
     }
 
     /// Resumes reconciliation for detached clones recorded before a daemon restart.
@@ -349,6 +364,15 @@ impl Repos {
     /// Moves a repository to an existing context in one state transaction.
     pub async fn move_to_context(&self, repo: RepoId, context: ContextId) -> DaemonResult<Repo> {
         let _context_lifecycle = self.context_lifecycle.lock().await;
+        if let Some(mover) = self.context_mover.get() {
+            return mover
+                .upgrade()
+                .ok_or_else(|| {
+                    DaemonError::Conflict("repository context mover is unavailable".to_owned())
+                })?
+                .move_repo_to_context(repo, context)
+                .await;
+        }
         self.state
             .transaction(move |state| {
                 if !state.contexts.iter().any(|item| item.id == context) {

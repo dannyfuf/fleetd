@@ -17,7 +17,9 @@ changes in the same pass. Where the code and this file disagree, the code is the
 A Linear-style kanban **board of cards**, one board per **context** (`fleet_core::Context`) and,
 optionally, one additional board per **worktree**. A worktree board remains associated with the
 worktree's context and repository while keeping that worktree's cards separate from the context
-board. Cards are the unit of project tracking: identifier (`FLT-12`), title, markdown description,
+board. Moving the repository to another context rehomes every one of its worktree boards before
+the state move is published, so deleting the old context cannot remove their cards. Cards are the
+unit of project tracking: identifier (`FLT-12`), title, markdown description,
 status column, priority, labels, assignee, estimate, due date, parent, custom properties, comments,
 activity. A card can **spawn a worktree** (the existing prepared-copy pipeline) and remembers it.
 
@@ -600,7 +602,9 @@ missing worktree board also takes that worktree's lifecycle claim through its sa
 restore cannot pass its missing-board read. Board creation additionally holds one short allocator
 claim from suffix selection through the document save, preventing distinct base ids from reserving
 the same suffix; backend validation stays outside that claim. Reads of existing boards remain
-lock-free.
+lock-free. Repository moves use the context lifecycle gate and every affected worktree lifecycle
+claim while rewriting the scoped board documents and repository state; a failed state publication
+rolls those documents back to their prior context.
 
 ## 5. Protocol (`fleet-proto`, version 8)
 

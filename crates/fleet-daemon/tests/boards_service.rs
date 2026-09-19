@@ -480,6 +480,45 @@ async fn worktree_board_ensure_is_idempotent_and_create_refuses_a_second_board()
 }
 
 #[tokio::test]
+async fn moving_a_repo_rehomes_its_worktree_board_before_old_context_deletion() {
+    let f = Fixture::new(pull_caps()).await;
+    let worktree = f.publish_worktree("acme/api#feature").await;
+    let view = f.boards.ensure_for_worktree(&worktree.id).await.unwrap();
+    let card = f.card(&view.board.id, "Keep me").await;
+    f.state
+        .transaction(|state| {
+            state.contexts.push(Context {
+                id: "next".parse().unwrap(),
+                name: "Next".into(),
+                owners: vec!["acme".into()],
+                created_at: "2026-09-06T12:00:00Z".into(),
+            });
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    f.services
+        .dispatch(RequestBody::MoveRepoToContext {
+            repo: worktree.repo_id.clone(),
+            context: "next".parse().unwrap(),
+        })
+        .await
+        .unwrap();
+    f.services
+        .dispatch(RequestBody::DeleteContext {
+            id: "work".parse().unwrap(),
+        })
+        .await
+        .unwrap();
+
+    let preserved = f.boards.get(&view.board.id).await.unwrap();
+    assert_eq!(preserved.board.context_id.as_str(), "next");
+    assert_eq!(preserved.cards.len(), 1);
+    assert_eq!(preserved.cards[0].id, card.id);
+}
+
+#[tokio::test]
 async fn worktree_board_creation_suffixes_an_id_owned_by_another_board() {
     let f = Fixture::new(pull_caps()).await;
     let worktree = f.publish_worktree("acme/api#feature").await;

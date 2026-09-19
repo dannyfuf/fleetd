@@ -321,6 +321,111 @@ impl Boards {
         Ok(self.store.load(id)?.is_none())
     }
 
+    /// Moves every board scoped through `repo` before publishing its new context in state.
+    async fn move_repo_to_context(
+        &self,
+        repo: RepoId,
+        context: ContextId,
+    ) -> DaemonResult<fleet_core::model::Repo> {
+        let initial = self.state_store.load().await?;
+        if !initial.contexts.iter().any(|item| item.id == context) {
+            return Err(DaemonError::NotFound(format!("context {context}")));
+        }
+        initial
+            .repos
+            .iter()
+            .find(|item| item.id == repo)
+            .ok_or_else(|| DaemonError::NotFound(format!("repository {repo}")))?;
+
+        // Worktree-board creation uses the same claims. Re-read until every worktree published
+        // for this repository is covered, then no scoped board can appear during the move.
+        let mut claimed_ids = Vec::<WorktreeId>::new();
+        let mut lifecycle_claims = Vec::new();
+        loop {
+            let state = self.state_store.load().await?;
+            let mut unclaimed = state
+                .worktrees
+                .iter()
+                .filter(|worktree| worktree.repo_id == repo && !claimed_ids.contains(&worktree.id))
+                .map(|worktree| worktree.id.clone())
+                .collect::<Vec<_>>();
+            unclaimed.sort();
+            if unclaimed.is_empty() {
+                break;
+            }
+            for worktree in unclaimed {
+                lifecycle_claims.push(self.worktrees.claim_lifecycle(worktree.clone()).await);
+                claimed_ids.push(worktree);
+            }
+        }
+
+        let ids = self.store.list()?;
+        let mut gates = Vec::with_capacity(ids.len());
+        for id in &ids {
+            gates.push(self.gate(id).await);
+        }
+        let mut originals = Vec::new();
+        for id in ids {
+            let Some(mut doc) = self.store.peek(&id)? else {
+                continue;
+            };
+            if doc
+                .board
+                .worktree_id
+                .as_ref()
+                .is_some_and(|worktree| claimed_ids.contains(worktree))
+            {
+                originals.push(doc.clone());
+                doc.board.context_id = context.clone();
+                doc.board.updated_at = self.now();
+                if let Err(error) = self.save(&doc, BoardChangeReason::Updated).await {
+                    self.rollback_context_moves(&originals).await?;
+                    return Err(error);
+                }
+            }
+        }
+
+        let repo_for_transaction = repo.clone();
+        let context_for_transaction = context.clone();
+        let moved = self
+            .state_store
+            .transaction(move |state| {
+                if !state
+                    .contexts
+                    .iter()
+                    .any(|item| item.id == context_for_transaction)
+                {
+                    return Err(DaemonError::NotFound(format!(
+                        "context {context_for_transaction}"
+                    )));
+                }
+                let item = state
+                    .repos
+                    .iter_mut()
+                    .find(|item| item.id == repo_for_transaction)
+                    .ok_or_else(|| {
+                        DaemonError::NotFound(format!("repository {repo_for_transaction}"))
+                    })?;
+                item.context_id = context_for_transaction;
+                Ok(item.clone())
+            })
+            .await;
+        match moved {
+            Ok(repo) => Ok(repo),
+            Err(error) => {
+                self.rollback_context_moves(&originals).await?;
+                Err(error)
+            }
+        }
+    }
+
+    async fn rollback_context_moves(&self, originals: &[BoardDocument]) -> DaemonResult<()> {
+        for doc in originals.iter().rev() {
+            self.save(doc, BoardChangeReason::Updated).await?;
+        }
+        Ok(())
+    }
+
     /// Updates board configuration, rejecting removal of referenced statuses or labels.
     ///
     /// A patch that changes the backend **kind** takes its settings from the patch alone: the
@@ -593,6 +698,17 @@ impl WorktreeCascade for Boards {
         destination: &std::path::Path,
     ) -> DaemonResult<()> {
         Boards::restore_for_worktree(self, worktree, destination).await
+    }
+}
+
+#[async_trait::async_trait]
+impl RepoContextMover for Boards {
+    async fn move_repo_to_context(
+        &self,
+        repo: RepoId,
+        context: ContextId,
+    ) -> DaemonResult<fleet_core::model::Repo> {
+        Boards::move_repo_to_context(self, repo, context).await
     }
 }
 

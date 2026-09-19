@@ -1,6 +1,9 @@
 //! Board persistence, backend synchronization jobs, and card worktree orchestration.
 
-use super::worktrees::{WorktreeCascade, Worktrees};
+use super::{
+    repos::RepoContextMover,
+    worktrees::{WorktreeCascade, Worktrees},
+};
 use crate::{
     DaemonError, DaemonResult,
     adapters::{board::BoardBackends, clock::Clock},
