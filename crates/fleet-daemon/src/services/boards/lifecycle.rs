@@ -536,10 +536,15 @@ impl Boards {
         destination: &std::path::Path,
     ) -> DaemonResult<()> {
         for id in self.store.restore_with_worktree(destination)? {
-            let Some(doc) = self.store.load(&id)? else {
-                // A quarantined-only board has no readable scope to validate, but restoring its
-                // remains is still lossless and keeps later creation from overwriting it.
-                continue;
+            let doc = match self.store.peek(&id) {
+                Ok(Some(doc)) => doc,
+                Ok(None) => continue,
+                Err(error) => {
+                    // Recovery is a read: preserve an unreadable document in place for a build
+                    // that can read it or for manual repair instead of quarantining it again.
+                    tracing::warn!(%worktree, %id, %error, "restored unreadable board without validating its scope");
+                    continue;
+                }
             };
             if doc.board.worktree_id.as_ref() != Some(worktree) {
                 return Err(DaemonError::Conflict(format!(

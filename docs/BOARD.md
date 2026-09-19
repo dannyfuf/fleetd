@@ -590,9 +590,10 @@ its boards in the same cascade (`delete_for_context`) so a later context derivin
 cannot adopt one. After any worktree deletion moves the worktree to trash, the late-bound
 `WorktreeCascade` bundles the board document inside that same trash entry. Restoring the worktree
 restores its board and cards; expiry removes both together. A cascade failure is warned and
-swallowed because the worktree is already gone. Board locks are per board: no board's clone, sync
-or hook run blocks another board's requests, and `ensure` reads an existing board without taking
-one.
+swallowed because the lifecycle move has already committed. An unreadable restored board stays in
+place without being quarantined again, so a newer build or manual repair can recover it. Board
+locks are per board: no board's clone, sync or hook run blocks another board's requests, and
+`ensure` reads an existing board without taking one.
 
 ## 5. Protocol (`fleet-proto`, version 8)
 

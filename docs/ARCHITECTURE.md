@@ -654,7 +654,8 @@ as a fast path and falls back to the persisted `worktree_id`, so collisions and 
 changes remain safe. After any worktree deletion moves it to trash, the late-bound
 `WorktreeCascade` bundles its board into the same trash entry; restore and trash expiry therefore
 apply to the worktree and board together. A failure is warned but cannot roll back the worktree
-move.
+move. Restore validation is non-mutating: an unreadable bundled board stays restored in place for
+a newer build or manual repair instead of being quarantined again.
 
 `BoardBackends` resolves the `BoardBackend` adapter by `BackendRef.kind`. Each adapter
 validates its own settings, describes statuses and properties, and maps pull/push

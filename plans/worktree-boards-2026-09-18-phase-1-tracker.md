@@ -54,6 +54,10 @@
   - verified: `cargo test -p fleet-daemon --test boards_service` passed (61 tests, including delete/restore with cards); `make lint` passed.
 - [x] P1-T16 — Gate worktree-board requests in the typed client
   - verified: `cargo test -p fleet-client` passed (33 library and 22 integration tests); `make lint` passed.
+- [x] P1-T17 — Finish worktree restore after board-cascade failures
+  - verified: `cargo test -p fleet-daemon --test boards_service restore` passed (3 selected) and
+    `cargo test -p fleet-daemon --test boards_service restoring_an_unreadable_board_preserves_it_without_quarantine`
+    passed (1 selected); `make lint` passed.
 
 ## Notes / decisions log
 (Append-only. Date-stamp entries. Capture anything that surprised you or that future-you will want.)

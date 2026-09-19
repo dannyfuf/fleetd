@@ -1,6 +1,6 @@
 //! Board service persistence, worktree, synchronization, and event contracts.
 
-use std::{sync::Arc, time::Duration};
+use std::{path::Path, sync::Arc, time::Duration};
 
 use chrono::{TimeZone, Utc};
 use fleet_core::{
@@ -651,6 +651,95 @@ async fn restoring_worktree_trash_restores_its_board_and_cards() {
     let restored = f.boards.ensure_for_worktree(&worktree.id).await.unwrap();
     assert_eq!(restored.board.id, board.id);
     assert_eq!(restored.cards, vec![card]);
+}
+
+#[tokio::test]
+async fn a_board_restore_conflict_does_not_fail_the_restored_worktree() {
+    let f = Fixture::new(pull_caps()).await;
+    let original = f.publish_worktree("acme/api#feature.one").await;
+    let original_board = f
+        .boards
+        .ensure_for_worktree(&original.id)
+        .await
+        .unwrap()
+        .board;
+    let response = f
+        .services
+        .dispatch(RequestBody::DeleteWorktrees {
+            ids: vec![original.id.clone()],
+        })
+        .await
+        .unwrap();
+    let ResponseBody::WorktreesDeleted(results) = response else {
+        panic!("expected worktree deletion response");
+    };
+    let entry = results[0]
+        .trash_entry
+        .clone()
+        .expect("successful deletion returns its trash entry");
+
+    let replacement = f.publish_worktree("acme/api#feature-one").await;
+    let replacement_board = f
+        .boards
+        .ensure_for_worktree(&replacement.id)
+        .await
+        .unwrap()
+        .board;
+    assert_eq!(replacement_board.id, original_board.id);
+
+    f.services.worktrees.restore_trash(entry).await.unwrap();
+
+    let state = f.state.load().await.unwrap();
+    assert!(state.worktrees.iter().any(|item| item.id == original.id));
+    assert!(
+        !Path::new(&original.path)
+            .join(".git/fleet-trash.json")
+            .exists()
+    );
+    assert!(Path::new(&original.path).join(".fleet-boards").exists());
+}
+
+#[tokio::test]
+async fn restoring_an_unreadable_board_preserves_it_without_quarantine() {
+    let f = Fixture::new(pull_caps()).await;
+    let worktree = f.publish_worktree("acme/api#feature").await;
+    let board = f
+        .boards
+        .ensure_for_worktree(&worktree.id)
+        .await
+        .unwrap()
+        .board;
+    let response = f
+        .services
+        .dispatch(RequestBody::DeleteWorktrees {
+            ids: vec![worktree.id.clone()],
+        })
+        .await
+        .unwrap();
+    let ResponseBody::WorktreesDeleted(results) = response else {
+        panic!("expected worktree deletion response");
+    };
+    let entry = results[0]
+        .trash_entry
+        .clone()
+        .expect("successful deletion returns its trash entry");
+    let bundled = f
+        .home
+        .trash_dir()
+        .join(&entry)
+        .join(".fleet-boards")
+        .join(format!("{}.json", board.id));
+    std::fs::write(&bundled, "not json").unwrap();
+
+    f.services.worktrees.restore_trash(entry).await.unwrap();
+
+    assert!(f.home.board_path(&board.id).exists());
+    assert!(f.store.quarantined(&board.id).unwrap().is_empty());
+    assert!(
+        !Path::new(&worktree.path)
+            .join(".git/fleet-trash.json")
+            .exists()
+    );
 }
 
 #[tokio::test]

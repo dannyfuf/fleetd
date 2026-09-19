@@ -108,10 +108,13 @@ impl Worktrees {
             return Err(error);
         }
 
-        if let Some(cascade) = self.cascade.get().and_then(std::sync::Weak::upgrade) {
-            cascade
+        if let Some(cascade) = self.cascade.get().and_then(std::sync::Weak::upgrade)
+            && let Err(error) = cascade
                 .restore_for_worktree(&marker.worktree.id, &destination)
-                .await?;
+                .await
+        {
+            // The worktree is already restored, so its successful move cannot be rolled back.
+            tracing::warn!(worktree = %marker.worktree.id, %error, "worktree restored but its cascade failed");
         }
 
         if let Err(error) = self.files.remove_file(&trash_marker_path(&destination)) {
