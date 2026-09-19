@@ -796,11 +796,15 @@ output otherwise follows the exact copy in `NATIVE-AGENTS.md` §15.
   [--model M] [--effort E] [--title T] [--eager] [--caller <thread>]` reads the brief from the
   file or stdin. Caller selection is `--caller`, then `FLEET_SESSION`; neither being present is a
   validation error. `--effort` is free text, never a clap enum — the legal ladder is per provider
-  and per model and is published by the harness — and it **requires `--model`**: a reasoning
-  effort reaches both adapters as a qualifier on the model they were launched with
-  (`ModelSelection.model` is a required `String`, Claude emits `--effort` only inside its
-  `--model` branch), so there is no value for the model that means "the daemon's default".
-  `--effort` without `--model` is a validation error rather than a silently dropped flag.
+  and per model and is published by the harness — and it **stands alone**: passed without
+  `--model`, the child runs the model configured as that provider's default at the requested
+  effort. The CLI sends that as a `ModelSelection` whose `model` is the empty string, which is
+  that field's documented "keep the configured default" sentinel; `create_with` fills it from
+  `config.nativeAgents.<provider>.model`, and an adapter still handed an empty one names no
+  model and spends the effort alone (Claude's `--effort` is a session flag in its own right,
+  Codex's `model_reasoning_effort` a separate config key). A *blank* `--model ""` is still a
+  validation error: the caller typed the flag, so reading it as "the default" would hide a
+  quoting mistake.
 - `complete [<id>] [--result-file F] [--blocked] [--json-result]` reads the result from the file
   or stdin. Its id is the argument or `FLEET_DELEGATION`; its child is `FLEET_SESSION`; its bearer
   token is `FLEET_DELEGATION_TOKEN`. All three are required after fallback. `--json-result`

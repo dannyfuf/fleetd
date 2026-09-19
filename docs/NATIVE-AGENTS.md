@@ -1672,9 +1672,15 @@ an `ItemKind::Delegation` under that turn, then sends the first message. The def
 the caller's. An omitted mode resolves through the configured default for the selected harness
 (which is `full_access` when unset); `--mode` accepts `ask`, `accept-edits`, `plan`, `auto`,
 `dont-ask`, and `full-access`. `--model` and `--effort` are independent: `--effort` may be passed
-without `--model`, in which case the child keeps the provider's default model and gets the
-requested effort. Fleet never validates the effort string — the legal ladder is per provider and
-per model (§7.1), so a bad value is the provider's error to report. The default child title is
+without `--model`, in which case the child keeps the provider's configured default model
+(`config.nativeAgents.<provider>.model`) and gets the requested effort. That pairing travels as a
+`ModelSelection` whose `model` is **the empty string** — the sentinel documented on the field for
+"keep the configured default" — which `create_with` fills from the defaults; when the provider has
+no configured model either, the selection reaches the adapter still empty and the adapter names no
+model at all while still spending the effort. A blank `--model ""` remains a validation error: the
+flag was typed, so reading it as the default would hide a quoting mistake. Fleet never validates
+the effort string — the legal ladder is per provider and per model (§7.1), so a bad value is the
+provider's error to report. The default child title is
 `↳ <provider> — <first line of the brief, cut at 48 characters>`. A caller on a remote mirror is
 refused: phase 3 runs children only on the daemon that owns the caller.
 

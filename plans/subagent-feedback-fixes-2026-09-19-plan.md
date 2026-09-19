@@ -70,10 +70,14 @@ they are rather than one-per-reported-item.
   there is no install target to change; if one is added later it must keep the two binaries
   together.
 - **`--effort` without `--model` is allowed.** The child keeps the provider's default model and
-  gets the requested effort. `create_with` in
-  `crates/fleet-daemon/src/services/agents/manager/commands.rs` already fills `effort` from the
-  per-provider defaults only when the selection carries none, so an explicit effort survives. T03
-  documents this explicitly rather than leaving it to be discovered.
+  gets the requested effort. **Corrected 2026-09-19:** the reasoning below was wrong about
+  `create_with` — it substitutes `defaults.model` only when the **whole** `ModelSelection` is
+  absent, so at the time T03 ran there was no way to say "the default model, at this effort" and
+  T03 shipped the pairing as a validation error. **T06 makes the assumption true** by documenting
+  the empty string on `ModelSelection::model` as the "keep the configured default" sentinel and
+  teaching `create_with` and both adapters to honour it. The original reasoning, kept for the
+  record: "`create_with` already fills `effort` from the per-provider defaults only when the
+  selection carries none, so an explicit effort survives.
 - **`--effort` is a free string, not a clap enum.** The legal ladder is per provider and per
   model and is published by the harness (`docs/NATIVE-AGENTS.md` §"Reasoning effort"), so Fleet
   never hardcodes one. A bad value is the provider's error to report, not clap's.
@@ -591,6 +595,87 @@ whichever crate owns the behaviour and say so in the tracker.
 
 **Done when:** the workspace is green, a live four-child orchestrator run shows all five symptoms
 gone, and `SESSION_TODO.md` reflects reality.
+
+---
+
+### T06 — Let `--effort` stand alone
+
+**Added 2026-09-19, mid-flight.** T03 discovered that the plan's *Assumptions* were wrong about
+`create_with`: it substitutes the configured default model only when the **whole** selection is
+absent, so `--effort` without `--model` had no representation and T03 shipped it as a validation
+error. This task makes the assumption true instead of keeping the refusal.
+
+**Intent:** `fleet subagent run --effort <E>` with no `--model` starts a child on the provider's
+configured default model at the requested effort.
+
+**Skill to load:** `rust-ipc-protocol` (it changes how a request field is interpreted) and
+`rust-gpui-testing`.
+
+**Owns:** `crates/fleet-core/src/agents/state.rs`,
+`crates/fleet-daemon/src/services/agents/manager/commands.rs`,
+`crates/fleet-daemon/src/agents/claude/argv.rs`,
+`crates/fleet-daemon/src/agents/codex/params.rs`,
+`crates/fleet-daemon/src/agents/codex/tests/wire.rs`,
+`crates/fleet-cli/src/args.rs`, `crates/fleet-cli/src/commands/subagents.rs`,
+`crates/fleet-cli/src/commands/tests.rs`, `docs/NATIVE-AGENTS.md`,
+`docs/research/agents-contracts.md`, `README.md`.
+
+**Steps:**
+- Document the empty string on `ModelSelection::model` as the "keep the configured default"
+  sentinel. `ModelSelection.model` may **not** become an `Option`: it is on the wire with
+  byte-exact goldens, and `Option<ModelSelection>` already means "no opinion at all", which is a
+  different thing from "this effort, any model".
+- In `create_with`, resolve the selection through one pure helper so it can be unit tested: an
+  absent selection still takes both defaults; a present one with a blank `model` takes the
+  default model and keeps its own effort; a blank model with no configured default normalises to
+  the empty string so an adapter tests `is_empty()` alone.
+- Guard both adapters on the empty model. Claude's `--effort` is a session-level flag in its own
+  right (`claude --help`), so `argv.rs` emits it independently instead of only inside the
+  `--model` branch, and emits no `--model` at all when the id is empty. Codex reads
+  `model_reasoning_effort` from a separate config key, so `params.rs` only has to stop inserting
+  `"model": ""`.
+- Remove the CLI refusal and its test. A *present but blank* `--model ""` stays a validation
+  error — the flag was typed, so reading it as the default would hide a quoting mistake.
+- Docs: `docs/NATIVE-AGENTS.md` §15 and §7.1, `docs/research/agents-contracts.md`'s `run` flag
+  list, `README.md`'s `fleet subagent run` row, and the clap help on `--effort`.
+
+**Regression tests:** the resolution matrix in `manager/commands.rs`; an empty-model launch line
+in `claude/argv.rs` (effort alone, and nothing at all when there is no effort either); an
+empty-model `start_params` golden in `codex/tests/wire.rs`; the `model_selection` matrix and a
+wire-level `subagent run --effort` with no `--model` in `fleet-cli`.
+
+**Verification:** `cargo test -p fleet-core -p fleet-daemon -p fleet-cli`, then `make lint` and
+`make test`.
+
+**Done when:** `fleet subagent run --effort high` with no `--model` is accepted end to end, and
+no doc still says the flag requires a model.
+
+---
+
+### T07 — A resumed child keeps its PATH injection
+
+**Added 2026-09-19, mid-flight,** from T02's Follow-ups.
+
+**Intent:** a delegated child that the daemon restarts or lazily resumes can still run bare
+`fleet subagent complete`.
+
+**Skill to load:** `rust-workspace-architecture`.
+
+**Owns:** `crates/fleet-daemon/src/services/agents/manager.rs`,
+`crates/fleet-daemon/src/services/agents/delegation/run.rs`, `docs/NATIVE-AGENTS.md`.
+
+**Steps:** `manager.rs` rebuilds `StartRequest` from the durable thread record on restart and on
+lazy resume, and passes `path_prepend: None`, so a recovered child loses the directory T02
+injected. Re-run the daemon-side half of T02's resolution for any thread being resumed. The
+caller's `fleet_path` hint is *not* durable and must not be invented; the daemon-sibling rule is,
+and it is the rule that holds on both hosts. Document the behaviour beside T02's PATH paragraph
+in `docs/NATIVE-AGENTS.md` §15.
+
+**Regression test:** a resumed `StartRequest` carries the daemon-sibling directory rather than
+`None`.
+
+**Done when:** a child recovered after a provider exit gets the same `PATH` it was started with,
+as far as the daemon can still reconstruct it.
 
 ## Verification
 

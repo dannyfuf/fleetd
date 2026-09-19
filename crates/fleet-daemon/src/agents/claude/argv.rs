@@ -104,10 +104,16 @@ pub fn launch_args(launch: &Launch<'_>) -> HarnessResult<Vec<String>> {
         "stdio".to_owned(),
     ];
     if let Some(model) = &launch.start.model {
-        args.push("--model".to_owned());
-        // The 1M context window is a *suffix on the model id* (`claude-opus-5[1m]`), not a
-        // separate flag, which is why changing it costs a restart like any other model change.
-        args.push(model.model.clone());
+        // An empty model is the "keep the harness default" sentinel (`ModelSelection::model`),
+        // so it must emit no flag at all rather than `--model ""`, which Claude rejects.
+        if !model.model.is_empty() {
+            args.push("--model".to_owned());
+            // The 1M context window is a *suffix on the model id* (`claude-opus-5[1m]`), not a
+            // separate flag, which is why changing it costs a restart like any other model change.
+            args.push(model.model.clone());
+        }
+        // `--effort` is a session-level flag in its own right, not a qualifier on `--model`, so
+        // an effort-only selection still reaches the child.
         if let Some(effort) = &model.effort
             && !effort.trim().is_empty()
         {
@@ -209,6 +215,42 @@ mod tests {
                 "11111111-2222-4333-8444-555555555555",
             ]
         );
+    }
+
+    /// An effort-only selection still reaches Claude, because `--effort` is its own flag.
+    ///
+    /// `fleet subagent run --effort high` with no `--model` arrives as the empty-model sentinel
+    /// documented on `ModelSelection::model`, and the daemon had no default model to fill it
+    /// with. Emitting `--model ""` would be rejected by the CLI and dropping the effort would
+    /// silently launch a child that is not the one the caller asked for.
+    #[test]
+    fn an_empty_model_emits_the_effort_alone_and_never_a_bare_model_flag() {
+        let mut request = start();
+        request.model = Some(ModelSelection {
+            model: String::new(),
+            effort: Some("high".to_owned()),
+            provider: None,
+        });
+        let args = built(&request, None, "");
+        assert!(!args.contains(&"--model".to_owned()), "{args:?}");
+        assert!(!args.contains(&String::new()), "{args:?}");
+        assert_eq!(
+            args.iter()
+                .skip_while(|argument| *argument != "--effort")
+                .take(2)
+                .collect::<Vec<_>>(),
+            ["--effort", "high"]
+        );
+
+        // No effort either: the selection contributes nothing at all.
+        request.model = Some(ModelSelection {
+            model: String::new(),
+            effort: None,
+            provider: None,
+        });
+        let bare = built(&request, None, "");
+        assert!(!bare.contains(&"--model".to_owned()), "{bare:?}");
+        assert!(!bare.contains(&"--effort".to_owned()), "{bare:?}");
     }
 
     #[test]

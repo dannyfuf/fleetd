@@ -49,6 +49,8 @@
 - [ ] T03 — CLI: uncap `wait` and report a running timeout honestly, add `--effort`, add `tail --no-follow` and `--last` *(all of fleet-cli + agents-contracts + README)*
 - [ ] T04 — Report the directory `fleet doctor` would inject for subagents *(doctor + doctor_checks + DEVELOPMENT)*
 - [ ] T05 — Verify the batch end to end and record what is still deferred *(SESSION_TODO)*
+- [ ] T06 — Let `--effort` stand alone *(added mid-flight; core + daemon + fleet-cli + NATIVE-AGENTS + contracts + README)*
+- [ ] T07 — A resumed child keeps its PATH injection *(added mid-flight; daemon manager + NATIVE-AGENTS)*
 
 ### Ownership at a glance
 

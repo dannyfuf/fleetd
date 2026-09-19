@@ -412,12 +412,12 @@ pub struct SubagentRunArgs {
     /// Provider-native model override.
     #[arg(long)]
     pub model: Option<String>,
-    /// Provider-native reasoning effort for the model named by `--model`.
+    /// Provider-native reasoning effort, with or without `--model`.
     ///
     /// Free text, never an enum: the legal ladder is per provider and per model and is published
     /// by the harness, so Fleet passes whatever is given straight through and lets the provider
-    /// reject a value it does not know. `--model` is required with it, because a reasoning effort
-    /// reaches both providers as a qualifier on the model they were launched with.
+    /// reject a value it does not know. Passed alone, the child keeps the model configured as
+    /// that provider's default and runs at this effort.
     #[arg(long)]
     pub effort: Option<String>,
     /// Child-thread title override.

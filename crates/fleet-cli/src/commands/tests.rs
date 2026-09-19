@@ -1654,6 +1654,73 @@ async fn subagent_wait_json_bytes_are_unchanged_for_a_live_delegation() {
     server.await.unwrap();
 }
 
+/// `--effort` with no `--model` reaches the wire as the empty-model sentinel.
+///
+/// The regression this pins is a refusal, not a crash: the CLI used to reject the pairing
+/// outright, so an orchestrator could not ask for a high-effort child without also pinning a
+/// model id it had no reason to know.
+#[tokio::test]
+async fn subagent_run_sends_an_effort_without_a_model_as_the_default_model_sentinel() {
+    use crate::args::{AgentChoice, SubagentCommand, SubagentRunArgs};
+    use fleet_core::agents::ModelSelection;
+
+    let home = TempDir::new().unwrap();
+    let listener = bind(home.path()).await;
+    let brief_file = home.path().join("brief.md");
+    std::fs::write(&brief_file, "inspect the parser").unwrap();
+
+    let delegation = sample_delegation();
+    let expected = delegation.clone();
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut transport = Framed::new(socket, FleetCodec::new());
+        authenticate(&mut transport).await;
+        let request = next_request(&mut transport).await;
+        let RequestBody::DelegationRun { model, .. } = &request.body else {
+            panic!("expected a delegation run request, got {:?}", request.body);
+        };
+        assert_eq!(
+            model.clone(),
+            Some(ModelSelection {
+                model: String::new(),
+                effort: Some("high".to_owned()),
+                provider: None,
+            })
+        );
+        send_result(
+            &mut transport,
+            request.id,
+            Ok(ResponseBody::DelegationStarted {
+                delegation: expected,
+                warning: None,
+            }),
+        )
+        .await;
+    });
+
+    let client = Client::connect(home.path()).await.unwrap();
+    subagents::execute(
+        &client,
+        SubagentCommand::Run(SubagentRunArgs {
+            provider: AgentChoice::Codex,
+            brief_file: Some(brief_file),
+            expectation: "tests pass".to_owned(),
+            worktree: None,
+            mode: None,
+            model: None,
+            effort: Some("high".to_owned()),
+            title: None,
+            eager: false,
+            caller: Some(delegation.caller),
+            json: false,
+        }),
+        &subagents::Environment::default(),
+    )
+    .await
+    .unwrap();
+    server.await.unwrap();
+}
+
 fn sample_delegation() -> fleet_core::agents::Delegation {
     serde_json::from_value(serde_json::json!({
         "id": "00000000-0000-4000-8000-000000000003",

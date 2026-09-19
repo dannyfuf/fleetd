@@ -302,13 +302,12 @@ fn permission_mode(choice: AgentModeChoice) -> PermissionMode {
 /// per-provider defaults; naming only the model keeps that default effort, because `create_with`
 /// fills an absent effort and leaves a stated one alone.
 ///
-/// An effort without a model is refused rather than sent. `ModelSelection.model` is a required
-/// `String` that both adapters spend as a launch argument — Claude emits `--effort` only inside
-/// the `--model` branch of its argv, and Codex reads `model_reasoning_effort` from the same
-/// object — so there is no value for it that means "the provider's default". Sending an empty
-/// one would launch the child with an empty model name, and dropping the effort silently would
-/// give the caller a child that is not the one it asked for. Refusing says so while the caller
-/// can still fix it.
+/// An effort without a model is sent as a selection whose `model` is the empty string, which is
+/// that field's documented "keep the configured default" sentinel: the daemon fills it from the
+/// per-provider default in `create_with`, and an adapter handed an empty one names no model but
+/// still spends the effort. A *present but blank* `--model` is still a validation error — the
+/// caller typed the flag, so they meant something by it, and silently reading `--model ""` as
+/// "the default" would hide a shell-quoting mistake.
 fn model_selection(
     model: Option<String>,
     effort: Option<String>,
@@ -319,21 +318,16 @@ fn model_selection(
     {
         return Err(validation("effort cannot be empty"));
     }
+    if model.as_ref().is_some_and(|model| model.trim().is_empty()) {
+        return Err(validation("model cannot be empty"));
+    }
     match (model, effort) {
         (None, None) => Ok(None),
-        (None, Some(_)) => Err(validation(
-            "--effort requires --model: a reasoning effort is a qualifier on a named model, and the provider's default model is resolved by the daemon",
-        )),
-        (Some(model), effort) => {
-            if model.trim().is_empty() {
-                return Err(validation("model cannot be empty"));
-            }
-            Ok(Some(ModelSelection {
-                model,
-                effort,
-                provider: None,
-            }))
-        }
+        (model, effort) => Ok(Some(ModelSelection {
+            model: model.unwrap_or_default(),
+            effort,
+            provider: None,
+        })),
     }
 }
 
@@ -463,14 +457,21 @@ mod tests {
         );
     }
 
+    /// `--effort` alone rides on the empty-model sentinel rather than being refused or dropped.
     #[test]
-    fn an_effort_without_a_model_is_refused_rather_than_dropped() {
-        let refusal = model_selection(None, Some("high".to_owned())).unwrap_err();
-        assert!(
-            refusal.message.contains("--effort requires --model"),
-            "{}",
-            refusal.message
+    fn an_effort_without_a_model_asks_the_daemon_for_its_default_model() {
+        assert_eq!(
+            model_selection(None, Some("high".to_owned())).unwrap(),
+            Some(ModelSelection {
+                model: String::new(),
+                effort: Some("high".to_owned()),
+                provider: None,
+            })
         );
+    }
+
+    #[test]
+    fn a_blank_flag_value_is_a_validation_error() {
         for empty in ["", "   "] {
             assert!(
                 model_selection(Some("opus".to_owned()), Some(empty.to_owned()))

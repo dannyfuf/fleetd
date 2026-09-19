@@ -50,7 +50,12 @@ impl CodexHarness {
         });
         if let Some(object) = params.as_object_mut() {
             if let Some(model) = &request.start.model {
-                object.insert("model".to_owned(), json!(model.model));
+                // An empty model is the "keep the harness default" sentinel
+                // (`ModelSelection::model`); sending `"model": ""` would name a model that does
+                // not exist. The effort is a separate config key, so it survives on its own.
+                if !model.model.is_empty() {
+                    object.insert("model".to_owned(), json!(model.model));
+                }
                 if let Some(effort) = &model.effort {
                     object.insert(
                         "config".to_owned(),

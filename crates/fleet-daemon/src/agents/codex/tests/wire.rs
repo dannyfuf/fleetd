@@ -71,6 +71,36 @@ fn outbound_frames_are_byte_exact() {
     );
 }
 
+/// An effort-only selection names no model, because Codex reads the two from separate keys.
+///
+/// The empty string is `ModelSelection::model`'s "keep the harness default" sentinel, produced
+/// by `fleet subagent run --effort high` with no `--model` on a harness with no configured
+/// default either. `"model": ""` would name a model Codex does not have.
+#[test]
+fn an_empty_model_sends_the_reasoning_effort_alone() {
+    let harness = harness("codex".to_owned());
+    let start = harness.start_params(
+        &OpenSession {
+            start: StartRequest {
+                worktree_path: std::path::PathBuf::from("/w"),
+                model: Some(ModelSelection {
+                    model: String::new(),
+                    effort: Some("high".to_owned()),
+                    provider: None,
+                }),
+                ..start_request()
+            },
+        },
+        &session::TurnControls::from_mode(PermissionMode::FullAccess),
+    );
+    assert_eq!(
+        canonical(&start),
+        canonical_text(
+            r#"{"approvalPolicy":"never","approvalsReviewer":"user","config":{"model_reasoning_effort":"high"},"cwd":"/w","sandbox":"danger-full-access"}"#
+        )
+    );
+}
+
 /// The remaining outbound frames, byte-exact: steer, interrupt, settings and compaction.
 #[test]
 fn every_other_outbound_frame_is_byte_exact() {
