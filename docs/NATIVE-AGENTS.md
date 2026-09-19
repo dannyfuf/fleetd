@@ -1479,13 +1479,19 @@ Requests are internally tagged by `type`; their wire names are `delegation_run`,
 
 ```text
 DelegationRun { caller, provider, brief, expectation,
-    worktree?, mode?, model?, title?, eager=false }
+    worktree?, mode?, model?, title?, fleet_path?, env={}, eager=false }
 DelegationComplete { delegation, child, token, result, blocked=false }
 DelegationList { caller? }
 DelegationGet { delegation }
 DelegationCancel { delegation }
-DelegationWait { delegation, timeout_ms }
+DelegationWait { delegation, timeout_ms, caller? }
 ```
+
+Three of those fields are additive and arrived after phase 2, each omitted from JSON when it is
+absent or empty so an older peer's payload is byte-identical: `fleet_path` is the caller's
+`fleet` directory hint (§15 preamble), `env` is the child environment map (§15 preamble) and
+`caller` is the waiting thread that consumes a delivery (§15.2). None of the three bumped
+`PROTOCOL_VERSION` or added a capability string.
 
 `DelegationRun` answers `DelegationStarted { delegation, warning? }`.
 `DelegationList` answers `Delegations(Vec<Delegation>)`; complete, get, cancel and wait each answer
@@ -1997,8 +2003,11 @@ writes, `context N%`, and `$X.XX` when a cost was reported; a child with no usag
 all rather than a row of zeros. `fleet subagent cancel` is untouched — its human output remains the
 single word `cancelled`, with no brief, no usage and no report body.
 
-`run`, `wait` and `list` **elide the brief from their `--json` envelopes**, replacing it with its
-first 200 characters on a character boundary and setting `briefElided: true` beside it. A brief is
+`run`, `wait` and `list` **elide the brief from their `--json` envelopes**, replacing a brief longer
+than 200 characters with its first 200 on a character boundary and setting `briefElided: true`
+beside it. The flag is truthful rather than a marker of which verb answered: a brief of 200
+characters or fewer is carried whole and the key is omitted entirely, not set to `false`, so a
+caller may trust `delegation.brief` whenever it does not see the flag. A brief is
 written by the orchestrator, so echoing a 250-line one back costs it 250 lines of its own context to
 learn nothing. The elision is a rendering rule in the CLI: the wire still carries the whole brief,
 and `status` (with `cancel`, which shares its envelope) still prints it whole, which is where a

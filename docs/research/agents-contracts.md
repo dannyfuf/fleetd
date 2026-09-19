@@ -879,17 +879,22 @@ output otherwise follows the exact copy in `NATIVE-AGENTS.md` §15.
 - `list [--caller T]` prints all delegations or those belonging to one caller, one fixed-field
   tab-separated line each. The line is **eight** fields, not the original six: id, status, provider,
   child, duration, total tokens, cost, delivery, with `-` for an unknown token total or cost.
-- `cancel <id>` cancels one live delegation. It shares `single_delegation`'s JSON path with
+- `cancel <id>` cancels one live delegation. It shares `whole_envelope`'s JSON path with
   `status`, and therefore keeps the whole brief in its envelope, but its human output remains the
   single word `cancelled` — it never acquires the brief, the usage or the report body.
 
 `SubagentEnvelope { protocol, delegation, warning, brief_elided }` and
 `SubagentsEnvelope { protocol, delegations, brief_elided }` carry `briefElided: bool` with
 `#[serde(skip_serializing_if = "std::ops::Not::not")]`, so it is absent when false. `run`, `wait`
-and `list` set it and replace `delegation.brief` with its first 200 characters on a character
-boundary; `status`, `cancel` and `complete` serialize the brief whole. The elision is done at render
-time in the CLI over a cloned `Delegation`, so the wire is untouched, and `PROTOCOL` stays `1`
-because the field is additive and omitted when false. Human output is unchanged by it.
+and `list` replace `delegation.brief` with its first 200 characters on a character boundary **when
+it is longer than that**, and set `briefElided: true` only when bytes were actually removed: a brief
+of 200 characters or fewer is carried whole and the key is absent, not `false`, so a consumer may
+trust `delegation.brief` whenever it does not see the flag. `list` cuts every row of its page and
+ORs the flags, never short-circuiting on the first long brief, so `briefElided: true` can never sit
+beside a row still carrying a whole one. `status`, `cancel` and `complete` serialize the brief
+whole. The elision is done at render time in the CLI over a cloned `Delegation`, so the wire is
+untouched, and `PROTOCOL` stays `1` because the field is additive and omitted when false. Human
+output is unchanged by it.
 
 The environment contract is therefore deliberately narrow: `FLEET_SESSION` is the `run` caller
 fallback, the `wait` caller fallback and the mandatory `complete` child; `FLEET_DELEGATION` is the
