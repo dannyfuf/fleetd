@@ -38,6 +38,8 @@
     An initial `make test` passed 861 app tests and the board socket flow before the previously
     recorded out-of-scope `agents/subagent-reopen-closed-caller.scenario` failed at line 13;
     the final phase-gate `make test` passed the complete workspace and all doctests.
+- [x] P1-T09 — Sweep quarantined worktree-board ids during deletion
+  - verified: `cargo test -p fleet-daemon --test boards_service deleting_a_worktree_sweeps_its_quarantined_suffixed_board_id` passed; `make lint` passed.
 
 ## Notes / decisions log
 (Append-only. Date-stamp entries. Capture anything that surprised you or that future-you will want.)

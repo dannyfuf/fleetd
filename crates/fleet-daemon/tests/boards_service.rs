@@ -538,6 +538,56 @@ async fn delete_worktrees_dispatch_cascades_only_the_worktree_board() {
 }
 
 #[tokio::test]
+async fn deleting_a_worktree_sweeps_its_quarantined_suffixed_board_id() {
+    let f = Fixture::new(pull_caps()).await;
+    let worktree = f.publish_worktree("acme/api#feature").await;
+    let context = f.state.load().await.unwrap().contexts[0].clone();
+    let mut blocker = new_board(&context, "2026-09-06T12:00:00Z");
+    blocker.id = worktree_board_id(&worktree.id);
+    f.store
+        .save(&BoardDocument {
+            version: BOARD_DOCUMENT_VERSION,
+            board: blocker,
+            cards: Vec::new(),
+        })
+        .unwrap();
+    let board = f
+        .boards
+        .ensure_for_worktree(&worktree.id)
+        .await
+        .unwrap()
+        .board;
+    assert_eq!(board.id.as_str(), "wt-acme-api-feature-2");
+    std::fs::write(f.home.board_path(&board.id), "not json").unwrap();
+    assert!(f.store.load(&board.id).is_err());
+    assert_eq!(f.store.quarantined(&board.id).unwrap().len(), 1);
+
+    let response = f
+        .services
+        .dispatch(RequestBody::DeleteWorktrees {
+            ids: vec![worktree.id.clone()],
+        })
+        .await
+        .unwrap();
+    let ResponseBody::WorktreesDeleted(results) = response else {
+        panic!("expected worktree deletion response");
+    };
+    assert!(results[0].ok);
+    assert!(f.store.quarantined(&board.id).unwrap().is_empty());
+
+    let recreated = f.publish_worktree("acme/api#feature").await;
+    assert_eq!(
+        f.boards
+            .ensure_for_worktree(&recreated.id)
+            .await
+            .unwrap()
+            .board
+            .id,
+        board.id
+    );
+}
+
+#[tokio::test]
 async fn prune_deleter_cascades_a_board_and_a_missing_board_is_a_noop() {
     let mut f = Fixture::new(pull_caps()).await;
     let worktree = f.publish_worktree("acme/api#feature").await;

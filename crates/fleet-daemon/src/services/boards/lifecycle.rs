@@ -1,5 +1,7 @@
 use super::*;
 
+const MAX_BOARD_ID_SUFFIX: u32 = 99;
+
 impl Boards {
     /// Lists healthy boards belonging to existing contexts, optionally restricted to one context.
     pub async fn list(&self, context: Option<&ContextId>) -> DaemonResult<Vec<BoardSummary>> {
@@ -295,7 +297,7 @@ impl Boards {
         if self.board_id_is_available(base)? {
             return Ok(base.clone());
         }
-        for suffix in 2..=u32::MAX {
+        for suffix in 2..=MAX_BOARD_ID_SUFFIX {
             let candidate = suffixed_board_id(base, suffix);
             if self.board_id_is_available(&candidate)? {
                 return Ok(candidate);
@@ -518,6 +520,14 @@ impl Boards {
                 self.changed(&id, BoardChangeReason::Deleted);
             }
         }
+        // Quarantined documents are absent from `list`, but still reserve every derived id.
+        // Worktree ids can recur, so their remains must leave with the deleted worktree.
+        for id in worktree_board_id_candidates(&base) {
+            if !self.store.quarantined(&id)?.is_empty() {
+                let _guard = self.gate(&id).await;
+                self.store.delete(&id)?;
+            }
+        }
         Ok(())
     }
 }
@@ -558,6 +568,11 @@ fn suffixed_board_id(base: &BoardId, suffix: u32) -> BoardId {
     let mut stem = base.as_str()[..keep].trim_end_matches('-').to_owned();
     stem.push_str(&suffix);
     BoardId::try_from(stem).expect("a suffixed worktree board id is always a valid board slug")
+}
+
+fn worktree_board_id_candidates(base: &BoardId) -> impl Iterator<Item = BoardId> + '_ {
+    std::iter::once(base.clone())
+        .chain((2..=MAX_BOARD_ID_SUFFIX).map(|suffix| suffixed_board_id(base, suffix)))
 }
 
 fn is_suffixed_worktree_board_id(id: &BoardId, base: &BoardId) -> bool {
