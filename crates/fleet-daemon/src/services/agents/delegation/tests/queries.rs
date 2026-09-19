@@ -3,8 +3,8 @@ use std::sync::Arc;
 use chrono::{DateTime, TimeZone, Utc};
 use fleet_core::{
     agents::{
-        AgentKind, Delegation, DelegationId, DelegationStatus, DeliveryState, ItemId, ThreadId,
-        TurnId,
+        AgentEvent, AgentKind, Delegation, DelegationId, DelegationStatus, DelegationUsage,
+        DeliveryState, ItemId, PermissionMode, Seq, SeqEvent, ThreadId, TurnId, TurnOutcome, Usage,
     },
     paths::FleetHome,
 };
@@ -76,6 +76,70 @@ impl Harness {
             })
             .await
             .expect("insert delegation");
+    }
+
+    /// Gives one child thread a settled turn with usage, and answers what a reader should see.
+    ///
+    /// The numbers are the log's, not a restatement of them: `store::usage`'s own tests pin the
+    /// arithmetic against `ThreadProjection`, and what these tests need to know is only that the
+    /// read verbs attach it to the right row.
+    async fn spend(&self, child: ThreadId) -> DelegationUsage {
+        let turn = TurnId::new();
+        let usage = Usage {
+            input_tokens: 900,
+            output_tokens: 120,
+            total_tokens: 1_020,
+            ..Usage::default()
+        };
+        let log = [
+            AgentEvent::SessionConfigured {
+                provider: AgentKind::Codex,
+                resume_cursor: None,
+                model: None,
+                models: Vec::new(),
+                mode: PermissionMode::Ask,
+                tools: Vec::new(),
+                commands: Vec::new(),
+                skills: Vec::new(),
+            },
+            AgentEvent::TurnStarted {
+                turn,
+                user_item: ItemId::new(),
+            },
+            AgentEvent::TokenUsage {
+                turn,
+                usage: usage.clone(),
+                context_pct: 18.5,
+                cost_usd: Some(0.27),
+            },
+            AgentEvent::TurnSettled {
+                turn,
+                outcome: TurnOutcome::Completed,
+                usage: usage.clone(),
+                duration_ms: 1_000,
+                files_changed: Vec::new(),
+            },
+        ];
+        for (position, event) in log.into_iter().enumerate() {
+            let seq = u64::try_from(position).unwrap_or_default() + 1;
+            self.store
+                .append(
+                    child,
+                    &SeqEvent {
+                        seq: Seq(seq),
+                        at: stamp(i64::try_from(seq).unwrap_or_default()),
+                        raw: None,
+                        event,
+                    },
+                )
+                .await
+                .expect("append a child event");
+        }
+        DelegationUsage {
+            usage,
+            cost_usd: Some(0.27),
+            context_pct: 18.5,
+        }
     }
 
     async fn finish(&self, mut delegation: Delegation, status: DelegationStatus) {
@@ -310,4 +374,64 @@ async fn list_is_newest_first_and_filters_by_caller() {
         .expect("list succeeds");
 
     assert_eq!(listed, ResponseBody::Delegations(vec![newest, oldest]));
+}
+
+/// The cost-visibility item: a caller reading its child's record can see what the child spent,
+/// without the daemon hydrating that child's transcript to answer.
+#[tokio::test]
+async fn get_and_wait_carry_what_the_child_spent() {
+    let harness = Harness::new();
+    let caller = ThreadId::new();
+    let finished = delegation(caller, 1);
+    harness.insert(finished.clone()).await;
+    let spent = harness.spend(finished.child).await;
+    harness
+        .finish(finished.clone(), DelegationStatus::Succeeded)
+        .await;
+
+    let read = one(harness
+        .service
+        .get(finished.id)
+        .await
+        .expect("get succeeds"));
+    assert_eq!(read.usage, Some(spent.clone()));
+    // On the `wait` path the record is re-read by the consume, so the fill has to come after it.
+    let answered = one(harness
+        .service
+        .wait(finished.id, 0, Some(caller))
+        .await
+        .expect("wait succeeds"));
+    assert_eq!(answered.delivery, DeliveryState::Consumed);
+    assert_eq!(answered.usage, Some(spent));
+}
+
+/// Every row of a page carries its own child's numbers, and a child that spent nothing carries
+/// `None` rather than a zero the CLI would have to render as a measurement.
+#[tokio::test]
+async fn list_carries_what_every_child_spent() {
+    let harness = Harness::new();
+    let caller = ThreadId::new();
+    let quiet = delegation(caller, 1);
+    let spender = delegation(caller, 2);
+    harness.insert(quiet.clone()).await;
+    harness.insert(spender.clone()).await;
+    let spent = harness.spend(spender.child).await;
+
+    let ResponseBody::Delegations(listed) = harness
+        .service
+        .list(Some(caller))
+        .await
+        .expect("list succeeds")
+    else {
+        panic!("list answers a page of delegations");
+    };
+
+    assert_eq!(
+        listed
+            .iter()
+            .map(|row| (row.id, row.usage.clone()))
+            .collect::<Vec<_>>(),
+        vec![(spender.id, Some(spent)), (quiet.id, None)],
+        "newest first, each row with its own child's spend"
+    );
 }

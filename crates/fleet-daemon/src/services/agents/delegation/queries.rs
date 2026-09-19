@@ -1,6 +1,11 @@
 //! `DelegationList`, `DelegationGet` and `DelegationWait`: the three read verbs.
 //!
 //! Reads come from SQLite, which is authoritative; bus events only wake `wait` for another read.
+//!
+//! These three, and only these three, fill [`Delegation::usage`]. It is computed, never stored, so
+//! it is attached here rather than by the store's row decoder — and deliberately *not* on the
+//! change path: `publish_changed` carries a repaint hint the GUI already has its own numbers for,
+//! and a SQL read on every `DelegationChanged` would put one on the event path.
 
 use std::time::Duration;
 
@@ -19,20 +24,20 @@ use crate::services::agents::store::delegations;
 impl DelegationService {
     /// Every delegation, newest first, optionally narrowed to one caller.
     pub(crate) async fn list(&self, caller: Option<ThreadId>) -> Result<ResponseBody, ProtoError> {
-        let delegations = self
+        let mut delegations = self
             .inner
             .store
             .delegations(caller)
             .await
             .map_err(storage_error)?;
+        self.fill_usage(&mut delegations).await?;
         Ok(ResponseBody::Delegations(delegations))
     }
 
     /// One delegation by id.
     pub(crate) async fn get(&self, delegation: DelegationId) -> Result<ResponseBody, ProtoError> {
-        Ok(ResponseBody::Delegation(
-            self.read_delegation(delegation).await?,
-        ))
+        let record = self.read_delegation(delegation).await?;
+        Ok(ResponseBody::Delegation(self.with_usage(record).await?))
     }
 
     /// Blocks until one delegation is terminal, or until `timeout_ms` passes.
@@ -52,9 +57,8 @@ impl DelegationService {
         let mut events = self.inner.events.subscribe();
         let current = self.read_delegation(delegation).await?;
         if current.status.is_terminal() {
-            return Ok(ResponseBody::Delegation(
-                self.consume_for(current, caller).await?,
-            ));
+            let consumed = self.consume_for(current, caller).await?;
+            return Ok(ResponseBody::Delegation(self.with_usage(consumed).await?));
         }
 
         let terminal = tokio::time::timeout(Duration::from_millis(timeout_ms), async {
@@ -88,9 +92,40 @@ impl DelegationService {
             Ok(result) => result?,
             Err(_) => self.read_delegation(delegation).await?,
         };
-        Ok(ResponseBody::Delegation(
-            self.consume_for(current, caller).await?,
-        ))
+        let consumed = self.consume_for(current, caller).await?;
+        Ok(ResponseBody::Delegation(self.with_usage(consumed).await?))
+    }
+
+    /// Attaches what one child has spent to the record about to be answered.
+    ///
+    /// Called *after* [`Self::consume_for`], never before: consuming answers a record re-read from
+    /// the store, which would drop a `usage` attached to the record that went in.
+    async fn with_usage(&self, mut record: Delegation) -> Result<Delegation, ProtoError> {
+        record.usage = self
+            .inner
+            .store
+            .delegation_usage(record.child)
+            .await
+            .map_err(storage_error)?;
+        Ok(record)
+    }
+
+    /// The same attachment for a whole page, in one trip to the reader pool.
+    async fn fill_usage(&self, records: &mut [Delegation]) -> Result<(), ProtoError> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        let children = records.iter().map(|record| record.child).collect();
+        let usage = self
+            .inner
+            .store
+            .delegation_usages(children)
+            .await
+            .map_err(storage_error)?;
+        for record in records {
+            record.usage = usage.get(&record.child).cloned();
+        }
+        Ok(())
     }
 
     /// Marks a terminal result read when the waiter is the delegation's own caller.

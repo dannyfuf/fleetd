@@ -56,16 +56,20 @@ mod read;
 mod schema;
 #[cfg(test)]
 mod tests;
+mod usage;
 mod writer;
 
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
 use anyhow::Context;
 use fleet_core::{
-    agents::{AgentThreadSummary, Delegation, DelegationId, Seq, SeqEvent, ThreadId},
+    agents::{
+        AgentThreadSummary, Delegation, DelegationId, DelegationUsage, Seq, SeqEvent, ThreadId,
+    },
     ids::HostId,
 };
 use fleet_proto::agents::AgentSeenCursor;
@@ -287,6 +291,52 @@ impl SqliteAgentStore {
             .readers
             .read("list live delegations", move |conn| {
                 delegations::live(conn, caller)
+            })
+            .await
+    }
+
+    /// What one delegated child's own thread has spent, or `None` when it has spent nothing.
+    ///
+    /// Fills [`Delegation::usage`] on the `get` and `wait` read paths. The numbers are the child
+    /// thread's **own** — a grandchild's spend is not summed in — and cover its **settled** turns
+    /// plus, while a turn is in flight, that turn's latest report. That is the definition
+    /// `ThreadProjection` shows in the GUI footer, reached without hydrating the thread:
+    /// `manager.projection()` would replay a cold child's whole event log to answer it.
+    pub(crate) async fn delegation_usage(
+        &self,
+        child: ThreadId,
+    ) -> anyhow::Result<Option<DelegationUsage>> {
+        self.inner
+            .readers
+            .read("read a delegated child's usage", move |conn| {
+                usage::thread_usage(conn, child)
+            })
+            .await
+    }
+
+    /// [`Self::delegation_usage`] for many children, in **one** trip to the reader pool.
+    ///
+    /// A child that has spent nothing is absent from the map rather than present as a zero. `list`
+    /// calls this once per page, so the statements run N times but the pool is entered once; N is
+    /// bounded by the `LIMIT` every delegation read carries, and delegation rows are few by
+    /// construction — the depth and concurrency ceilings are what keep them so.
+    pub(crate) async fn delegation_usages(
+        &self,
+        children: Vec<ThreadId>,
+    ) -> anyhow::Result<HashMap<ThreadId, DelegationUsage>> {
+        self.inner
+            .readers
+            .read("read delegated children's usage", move |conn| {
+                let mut answers = HashMap::with_capacity(children.len());
+                for child in children {
+                    if answers.contains_key(&child) {
+                        continue;
+                    }
+                    if let Some(usage) = usage::thread_usage(conn, child)? {
+                        answers.insert(child, usage);
+                    }
+                }
+                Ok(answers)
             })
             .await
     }
