@@ -35,9 +35,9 @@
     `card move`, and the scope-aware `board list`, then was stopped.
 - [x] P1-T08 — Record the decision and finish the docs
   - verified: every phase-added signature was read against `docs/BOARD.md`; `make lint` passed.
-    `make test` passed 861 app tests and the board socket flow before the previously recorded
-    out-of-scope `agents/subagent-reopen-closed-caller.scenario` failed at line 13 because mode
-    remained `Native` after detaching the caller instead of returning to `Terminal`.
+    An initial `make test` passed 861 app tests and the board socket flow before the previously
+    recorded out-of-scope `agents/subagent-reopen-closed-caller.scenario` failed at line 13;
+    the final phase-gate `make test` passed the complete workspace and all doctests.
 
 ## Notes / decisions log
 (Append-only. Date-stamp entries. Capture anything that surprised you or that future-you will want.)
@@ -46,6 +46,11 @@
   `Board` (not a separate store or a scope enum); one board per worktree; board id derived from
   the worktree id but never trusted for lookup; deletion cascade via a late-bound observer on
   `Worktrees`; `board.worktree` capability, `PROTOCOL_VERSION` stays 8.
+- 2026-09-19 — P1-T08 added ADR 0018 and reconciled the board, architecture, README, and decision
+  indexes. The phase review pinned both worktree-board request timeout policies, made duplicate
+  errors scope-neutral, narrowed composition-only daemon seams, and corrected protocol/path drift.
+  Final `make lint` and `make test` both passed; the intermittent headless and GitHub-cache failures
+  remain recorded below because they reproduced in earlier stage runs.
 
 ## Follow-ups
 (Things discovered mid-flight that are out of scope for this plan. Each gets a one-line description.)

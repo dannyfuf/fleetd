@@ -311,14 +311,14 @@ boards_service`, `cargo test -p fleet-proto`, `cargo test -p fleet-client`,
 
 ## Definition of done
 
-- [ ] Every P1 task is `[x]` in the tracker and the tracker matches the code.
-- [ ] `make lint` is clean.
-- [ ] `make test` passes (this repo has no separate type-check step; clippy `-D warnings` is it).
-- [ ] `make restart` has been run and the manual CLI check in P1-T07 was done against it.
-- [ ] `docs/BOARD.md`, `README.md` and ADR 0018 agree with the code.
-- [ ] No `unwrap`, `todo!`, `dbg!`, `TODO`, bare `.detach()` or `let _ =` on a fallible call
+- [x] Every P1 task is `[x]` in the tracker and the tracker matches the code.
+- [x] `make lint` is clean.
+- [x] `make test` passes (this repo has no separate type-check step; clippy `-D warnings` is it).
+- [x] `make restart` has been run and the manual CLI check in P1-T07 was done against it.
+- [x] `docs/BOARD.md`, `README.md` and ADR 0018 agree with the code.
+- [x] No `unwrap`, `todo!`, `dbg!`, `TODO`, bare `.detach()` or `let _ =` on a fallible call
       in the diff.
-- [ ] Follow-ups (e.g. `fleet board delete`) are captured in the tracker.
+- [x] Follow-ups (e.g. `fleet board delete`) are captured in the tracker.
 
 ## Risks and rollback
 
