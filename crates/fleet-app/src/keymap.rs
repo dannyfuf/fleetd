@@ -793,8 +793,8 @@ key_table! {
     "right", "FleetTextInput" => text_input::MoveRight;
     "alt-left", "FleetTextInput" => text_input::MoveWordLeft;
     "alt-right", "FleetTextInput" => text_input::MoveWordRight;
-    "home", "FleetTextInput" => text_input::MoveToLineStart;
-    "end", "FleetTextInput" => text_input::MoveToLineEnd;
+    "home", "FleetTextInput" => text_input::MoveToRowStart;
+    "end", "FleetTextInput" => text_input::MoveToRowEnd;
     "cmd-left", "FleetTextInput" => text_input::MoveToLineStart;
     "cmd-right", "FleetTextInput" => text_input::MoveToLineEnd;
     "up", "FleetTextInput" => text_input::MoveUp;
@@ -805,8 +805,8 @@ key_table! {
     "shift-right", "FleetTextInput" => text_input::SelectRight;
     "alt-shift-left", "FleetTextInput" => text_input::SelectWordLeft;
     "alt-shift-right", "FleetTextInput" => text_input::SelectWordRight;
-    "shift-home", "FleetTextInput" => text_input::SelectToLineStart;
-    "shift-end", "FleetTextInput" => text_input::SelectToLineEnd;
+    "shift-home", "FleetTextInput" => text_input::SelectToRowStart;
+    "shift-end", "FleetTextInput" => text_input::SelectToRowEnd;
     "cmd-shift-left", "FleetTextInput" => text_input::SelectToLineStart;
     "cmd-shift-right", "FleetTextInput" => text_input::SelectToLineEnd;
     "shift-up", "FleetTextInput" => text_input::SelectUp;
@@ -815,6 +815,8 @@ key_table! {
     "cmd-shift-down", "FleetTextInput" => text_input::SelectToEnd;
     "ctrl-a", "FleetTextInput" => text_input::MoveToLineStart;
     "ctrl-e", "FleetTextInput" => text_input::MoveToLineEnd;
+    "ctrl-shift-a", "FleetTextInput" => text_input::SelectToLineStart;
+    "ctrl-shift-e", "FleetTextInput" => text_input::SelectToLineEnd;
     "ctrl-b", "FleetTextInput" => text_input::MoveLeft;
     "ctrl-f", "FleetTextInput" => text_input::MoveRight;
     "backspace", "FleetTextInput" => text_input::Backspace;
@@ -834,7 +836,8 @@ key_table! {
     "cmd-v", "FleetTextInput" => text_input::Paste;
     "cmd-z", "FleetTextInput" => text_input::Undo;
     "cmd-shift-z", "FleetTextInput" => text_input::Redo;
-    "enter", "FleetTextInput && mode == multiline" => text_input::Newline;
+    "enter", "FleetTextInput && mode == multiline && enter == newline" => text_input::Newline;
+    "shift-enter", "FleetTextInput && mode == multiline" => text_input::Newline;
 
     "enter",        "Filter" => filter::Accept;
     "escape",       "Filter" => filter::Escape;
@@ -1011,6 +1014,7 @@ mod tests {
         "Palette",
         "FleetTextInput",
         "FleetTextInput && mode == multiline",
+        "FleetTextInput && mode == multiline && enter == newline",
         "Jobs",
         "Dialog",
         "Dialog > Create",
@@ -1190,6 +1194,7 @@ mod tests {
             ),
             Some(2)
         );
+        assert_eq!(bindings().len(), table().len(), "every built-in row parses");
     }
 
     #[test]
@@ -1198,7 +1203,11 @@ mod tests {
             .into_iter()
             .filter(|spec| spec.context.starts_with("FleetTextInput"))
             .collect();
-        assert_eq!(input_rows.len(), 46, "the gallery binding table drifted");
+        assert_eq!(
+            input_rows.len(),
+            49,
+            "visual-row actions, logical ctrl-shift selection and owner-aware Enter must stay in the gallery table"
+        );
         for keys in ["tab", "shift-tab", "ctrl-n", "ctrl-p", "escape", "ctrl-v"] {
             assert!(
                 input_rows.iter().all(|spec| spec.keys != keys),
@@ -1206,10 +1215,15 @@ mod tests {
             );
         }
         assert!(input_rows.iter().any(|spec| {
-            spec.keys == "enter" && spec.context == "FleetTextInput && mode == multiline"
+            spec.keys == "enter"
+                && spec.context == "FleetTextInput && mode == multiline && enter == newline"
         }));
         assert!(input_rows.iter().all(|spec| {
-            spec.keys != "enter" || spec.context == "FleetTextInput && mode == multiline"
+            spec.keys != "enter"
+                || spec.context == "FleetTextInput && mode == multiline && enter == newline"
+        }));
+        assert!(input_rows.iter().any(|spec| {
+            spec.keys == "shift-enter" && spec.context == "FleetTextInput && mode == multiline"
         }));
     }
 

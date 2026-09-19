@@ -30,7 +30,7 @@ use element::{LineLayoutCache, TextInputElement};
 pub use history::{HISTORY_CAP, TYPING_GROUP_WINDOW};
 
 #[cfg(test)]
-mod live_tests;
+pub(crate) mod live_tests;
 #[cfg(test)]
 mod tests;
 
@@ -39,6 +39,8 @@ pub const TEXT_INPUT_KEY_CONTEXT: &str = "FleetTextInput";
 
 const SINGLE_LINE_MODE: &str = "single_line";
 const MULTILINE_MODE: &str = "multiline";
+const ENTER_NEWLINE: &str = "newline";
+const ENTER_OWNER: &str = "owner";
 
 /// Events emitted by a [`TextInput`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,6 +65,8 @@ pub struct TextInput {
     invalid: Option<SharedString>,
     hide_status_line: bool,
     read_only: bool,
+    enter_inserts_newline: bool,
+    embedded: bool,
     filter: Option<fn(char) -> bool>,
     line_cache: LineLayoutCache,
     last_bounds: Option<gpui::Bounds<gpui::Pixels>>,
@@ -71,6 +75,7 @@ pub struct TextInput {
     scroll_row: usize,
     reveal_caret: bool,
     drag_anchor: Option<usize>,
+    vertical_goal_x: Option<gpui::Pixels>,
     composition_group_open: bool,
     blur_subscription: Option<Subscription>,
     #[cfg(test)]
@@ -92,6 +97,8 @@ impl TextInput {
             invalid: None,
             hide_status_line: false,
             read_only: false,
+            enter_inserts_newline: true,
+            embedded: false,
             filter: None,
             line_cache: LineLayoutCache::default(),
             last_bounds: None,
@@ -100,6 +107,7 @@ impl TextInput {
             scroll_row: 0,
             reveal_caret: true,
             drag_anchor: None,
+            vertical_goal_x: None,
             composition_group_open: false,
             blur_subscription: None,
             #[cfg(test)]
@@ -115,12 +123,27 @@ impl TextInput {
 
     /// Replace the value, park the caret at its end and clear undo history.
     pub fn set_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
+        self.set_text_inner(text, true, cx);
+    }
+
+    /// Replace the value without emitting an owner-visible change event.
+    pub(crate) fn set_text_silent(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
+        self.set_text_inner(text, false, cx);
+    }
+
+    fn set_text_inner(
+        &mut self,
+        text: impl Into<String>,
+        emit_changed: bool,
+        cx: &mut Context<Self>,
+    ) {
         let before = self.buffer.text().to_owned();
         self.finish_composition();
         self.buffer.set_text(text);
         self.line_cache.clear();
+        self.vertical_goal_x = None;
         self.reveal_caret = true;
-        if self.buffer.text() != before {
+        if emit_changed && self.buffer.text() != before {
             cx.emit(TextInputEvent::Changed);
         }
         cx.notify();
@@ -212,6 +235,25 @@ impl TextInput {
         }
     }
 
+    /// Choose whether plain Enter inserts a newline in multi-line mode.
+    ///
+    /// The value is published as the `enter = newline | owner` key-context attribute. It has
+    /// no effect in single-line mode, where Enter always belongs to the containing surface.
+    pub fn set_enter_inserts_newline(&mut self, inserts: bool, cx: &mut Context<Self>) {
+        if self.enter_inserts_newline != inserts {
+            self.enter_inserts_newline = inserts;
+            cx.notify();
+        }
+    }
+
+    /// Render only the editing surface so a crate-owned wrapper can supply its own chrome.
+    pub(crate) fn set_embedded(&mut self, embedded: bool, cx: &mut Context<Self>) {
+        if self.embedded != embedded {
+            self.embedded = embedded;
+            cx.notify();
+        }
+    }
+
     /// Set validation state. Multi-line mode uses the border and ignores the message visually.
     pub fn set_invalid(&mut self, message: Option<SharedString>, cx: &mut Context<Self>) {
         if self.invalid != message {
@@ -286,6 +328,58 @@ impl TextInput {
         }
     }
 
+    /// Move one row vertically, using wrapped geometry when it belongs to the current text.
+    ///
+    /// Returns whether the caret moved. Consecutive visual moves retain a pixel goal-x; every
+    /// other edit or motion clears it. Without current geometry this falls back to the engine's
+    /// logical-line motion.
+    pub fn move_vertical(&mut self, down: bool, select: bool, cx: &mut Context<Self>) -> bool {
+        if matches!(self.mode(), InputMode::SingleLine) || self.is_composing() {
+            return false;
+        }
+        let moved = if self.has_current_layout() {
+            self.move_visual_row(down, select)
+        } else if down {
+            self.buffer.move_down(select)
+        } else {
+            self.buffer.move_up(select)
+        };
+        if moved {
+            self.reveal_caret = true;
+            cx.notify();
+        }
+        moved
+    }
+
+    /// Whether the caret belongs to the first visual row, or first logical line without layout.
+    pub(crate) fn on_first_visual_row(&self) -> bool {
+        if !self.has_current_layout() {
+            return self.buffer.on_first_line();
+        }
+        self.position_for_offset(self.buffer.caret())
+            .is_none_or(|position| position.y < self.line_height)
+    }
+
+    /// Whether the caret belongs to the last visual row, or last logical line without layout.
+    pub(crate) fn on_last_visual_row(&self) -> bool {
+        if !self.has_current_layout() {
+            return self.buffer.on_last_line();
+        }
+        let caret = self.buffer.caret();
+        let Some(position) = self.position_for_offset(caret) else {
+            return self.buffer.on_last_line();
+        };
+        let wrapped = position.x == gpui::Pixels::ZERO
+            && position.y > gpui::Pixels::ZERO
+            && self.buffer.line_start(caret) != caret;
+        let y = if wrapped {
+            position.y - self.line_height
+        } else {
+            position.y
+        };
+        y + self.line_height >= self.content_height()
+    }
+
     pub(super) fn ensure_blur_subscription(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.blur_subscription.is_none() {
             let focus = self.focus_handle.clone();
@@ -320,6 +414,7 @@ impl TextInput {
     }
 
     pub(super) fn changed(&mut self, cx: &mut Context<Self>) {
+        self.vertical_goal_x = None;
         self.reveal_caret = true;
         cx.emit(TextInputEvent::Changed);
         cx.notify();
@@ -327,6 +422,7 @@ impl TextInput {
 
     fn view_changed(&mut self, cx: &mut Context<Self>) {
         self.finish_composition();
+        self.vertical_goal_x = None;
         self.reveal_caret = true;
         cx.notify();
     }
@@ -376,19 +472,23 @@ impl TextInput {
         self.motion(cx, |buffer| buffer.move_to_line_end(false));
     }
 
+    fn move_row_start(&mut self, _: &MoveToRowStart, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to_visual_row_boundary(false, false, cx);
+    }
+
+    fn move_row_end(&mut self, _: &MoveToRowEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to_visual_row_boundary(true, false, cx);
+    }
+
     fn move_up(&mut self, _: &MoveUp, _: &mut Window, cx: &mut Context<Self>) {
-        if matches!(self.mode(), InputMode::SingleLine) {
+        if !self.move_vertical(false, false, cx) {
             cx.propagate();
-        } else {
-            self.motion(cx, |buffer| buffer.move_up(false));
         }
     }
 
     fn move_down(&mut self, _: &MoveDown, _: &mut Window, cx: &mut Context<Self>) {
-        if matches!(self.mode(), InputMode::SingleLine) {
+        if !self.move_vertical(true, false, cx) {
             cx.propagate();
-        } else {
-            self.motion(cx, |buffer| buffer.move_down(false));
         }
     }
 
@@ -424,20 +524,20 @@ impl TextInput {
         self.motion(cx, |buffer| buffer.move_to_line_end(true));
     }
 
+    fn select_row_start(&mut self, _: &SelectToRowStart, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to_visual_row_boundary(false, true, cx);
+    }
+
+    fn select_row_end(&mut self, _: &SelectToRowEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to_visual_row_boundary(true, true, cx);
+    }
+
     fn select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
-        if matches!(self.mode(), InputMode::SingleLine) {
-            cx.propagate();
-        } else {
-            self.motion(cx, |buffer| buffer.move_up(true));
-        }
+        self.move_vertical(false, true, cx);
     }
 
     fn select_down(&mut self, _: &SelectDown, _: &mut Window, cx: &mut Context<Self>) {
-        if matches!(self.mode(), InputMode::SingleLine) {
-            cx.propagate();
-        } else {
-            self.motion(cx, |buffer| buffer.move_down(true));
-        }
+        self.move_vertical(true, true, cx);
     }
 
     fn select_start(&mut self, _: &SelectToStart, _: &mut Window, cx: &mut Context<Self>) {
@@ -633,6 +733,9 @@ impl TextInput {
         if self.buffer.is_empty() {
             return Some(0);
         }
+        if !self.has_current_layout() {
+            return None;
+        }
         let bounds = self.last_bounds?;
         let total_rows = self.line_cache.visual_rows().max(1);
         let visual_row = if position.y < bounds.top() {
@@ -671,6 +774,9 @@ impl TextInput {
     }
 
     pub(super) fn position_for_offset(&self, offset: usize) -> Option<Point<gpui::Pixels>> {
+        if !self.has_current_layout() {
+            return None;
+        }
         let (line_index, local) = self.line_for_offset(offset)?;
         let row_start = self.line_cache.visual_row_start(line_index)?;
         let (_, line) = self.line_cache.line(line_index)?;
@@ -691,7 +797,91 @@ impl TextInput {
                 InputMode::Multiline { .. } => MULTILINE_MODE,
             },
         );
+        context.set(
+            "enter",
+            if self.enter_inserts_newline {
+                ENTER_NEWLINE
+            } else {
+                ENTER_OWNER
+            },
+        );
         context
+    }
+
+    fn has_current_layout(&self) -> bool {
+        self.line_height > gpui::Pixels::ZERO && self.line_cache.is_current(self.buffer.revision())
+    }
+
+    fn content_height(&self) -> gpui::Pixels {
+        self.line_height * self.line_cache.visual_rows().max(1) as f32
+    }
+
+    fn move_visual_row(&mut self, down: bool, select: bool) -> bool {
+        let position = match self.position_for_offset(self.buffer.caret()) {
+            Some(position) => position,
+            None => return false,
+        };
+        let x = self.vertical_goal_x.unwrap_or(position.x);
+        let y = if down {
+            position.y + self.line_height
+        } else {
+            position.y - self.line_height
+        };
+        if y < gpui::Pixels::ZERO || y >= self.content_height() {
+            return false;
+        }
+        let Some(offset) = self.offset_for_content_point(point(x, y + self.line_height / 2.0))
+        else {
+            return false;
+        };
+        let moved = self.buffer.move_to(offset, select);
+        if moved {
+            self.vertical_goal_x = Some(x);
+        }
+        moved
+    }
+
+    fn move_to_visual_row_boundary(&mut self, end: bool, select: bool, cx: &mut Context<Self>) {
+        let target = self
+            .position_for_offset(self.buffer.caret())
+            .and_then(|position| {
+                let x = if end {
+                    self.last_bounds?.size.width
+                } else {
+                    gpui::Pixels::ZERO
+                };
+                self.offset_for_content_point(point(x, position.y + self.line_height / 2.0))
+            });
+        let moved = match target {
+            Some(target) => self.buffer.move_to(target, select),
+            None if end => self.buffer.move_to_line_end(select),
+            None => self.buffer.move_to_line_start(select),
+        };
+        self.vertical_goal_x = None;
+        if moved {
+            self.reveal_caret = true;
+            cx.notify();
+        }
+    }
+
+    fn offset_for_content_point(&self, position: Point<gpui::Pixels>) -> Option<usize> {
+        if !self.has_current_layout() {
+            return None;
+        }
+        let total_rows = self.line_cache.visual_rows().max(1);
+        let visual_row = (f32::from(position.y.max(gpui::Pixels::ZERO))
+            / f32::from(self.line_height))
+        .floor() as usize;
+        let visual_row = visual_row.min(total_rows.saturating_sub(1));
+        let (start, layout, row_in_line) = self.line_cache.line_for_visual_row(visual_row)?;
+        let local = layout.closest_index_for_position(
+            point(
+                position.x,
+                self.line_height * row_in_line as f32 + self.line_height / 2.0,
+            ),
+            self.line_height,
+        );
+        Some(start + local)
     }
 
     fn border_color(&self, focused: bool, cx: &App) -> gpui::Hsla {
@@ -710,6 +900,50 @@ impl TextInput {
             TextRole::Data
         } else {
             TextRole::Ui
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_bounds(&self) -> Option<gpui::Bounds<gpui::Pixels>> {
+        self.last_bounds
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_line_height(&self) -> gpui::Pixels {
+        self.line_height
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_position_for_offset(&self, offset: usize) -> Option<Point<gpui::Pixels>> {
+        self.position_for_offset(offset)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_visual_rows(&self) -> usize {
+        self.line_cache.visual_rows()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_reset_shape_probe(&mut self) {
+        self.line_cache.reset_probe();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_shape_miss_counts(&self) -> &[usize] {
+        self.line_cache.miss_counts()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_scroll_row(&self) -> usize {
+        self.scroll_row
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_value_color(&self, cx: &App) -> gpui::Hsla {
+        if self.buffer.is_empty() {
+            cx.theme().colors.text_muted
+        } else {
+            cx.theme().colors.text
         }
     }
 
@@ -797,7 +1031,32 @@ impl Focusable for TextInput {
 impl Render for TextInput {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let focused = self.focus_handle.is_focused(window);
-        self.render_chrome(focused, TextInputElement { input: cx.entity() }, cx)
+        let theme = cx.theme();
+        let role = self.value_role();
+        let content = if self.embedded {
+            styled_with(div(), role.style(theme), theme)
+                .flex()
+                .flex_1()
+                .min_w_0()
+                .h(role.style(theme).line_height)
+                .when(
+                    matches!(self.mode(), InputMode::Multiline { .. }),
+                    |element| element.h_auto(),
+                )
+                .overflow_hidden()
+                .text_color(theme.colors.text)
+                .child(TextInputElement { input: cx.entity() })
+                .into_any_element()
+        } else {
+            self.render_chrome(focused, TextInputElement { input: cx.entity() }, cx)
+                .into_any_element()
+        };
+        div()
+            .when(self.embedded, |element| {
+                element.flex().flex_1().min_w_0().w_full()
+            })
+            .when(!self.embedded, |element| element.w_full())
+            .child(content)
             .key_context(self.key_context())
             .track_focus(&self.focus_handle)
             .cursor(if self.read_only {
@@ -811,6 +1070,8 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::move_word_right))
             .on_action(cx.listener(Self::move_line_start))
             .on_action(cx.listener(Self::move_line_end))
+            .on_action(cx.listener(Self::move_row_start))
+            .on_action(cx.listener(Self::move_row_end))
             .on_action(cx.listener(Self::move_up))
             .on_action(cx.listener(Self::move_down))
             .on_action(cx.listener(Self::move_start))
@@ -821,6 +1082,8 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::select_word_right))
             .on_action(cx.listener(Self::select_line_start))
             .on_action(cx.listener(Self::select_line_end))
+            .on_action(cx.listener(Self::select_row_start))
+            .on_action(cx.listener(Self::select_row_end))
             .on_action(cx.listener(Self::select_up))
             .on_action(cx.listener(Self::select_down))
             .on_action(cx.listener(Self::select_start))

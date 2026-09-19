@@ -11,13 +11,17 @@ gpui::actions!(
         MoveWordLeft,
         /// `alt-right`: move to the next word boundary.
         MoveWordRight,
-        /// `home` / `cmd-left` / `ctrl-a`: move to the logical line start.
+        /// `cmd-left` / `ctrl-a`: move to the logical line start.
         MoveToLineStart,
-        /// `end` / `cmd-right` / `ctrl-e`: move to the logical line end.
+        /// `cmd-right` / `ctrl-e`: move to the logical line end.
         MoveToLineEnd,
-        /// `up`: move one logical line up.
+        /// `home`: move to the current visual row start.
+        MoveToRowStart,
+        /// `end`: move to the current visual row end.
+        MoveToRowEnd,
+        /// `up`: move one visual row up, or one logical line without a layout.
         MoveUp,
-        /// `down`: move one logical line down.
+        /// `down`: move one visual row down, or one logical line without a layout.
         MoveDown,
         /// `cmd-up`: move to the document start.
         MoveToStart,
@@ -31,13 +35,17 @@ gpui::actions!(
         SelectWordLeft,
         /// `shift-alt-right`: extend the selection to the next word boundary.
         SelectWordRight,
-        /// `shift-home` / `shift-cmd-left`: extend to the logical line start.
+        /// `shift-cmd-left`: extend to the logical line start.
         SelectToLineStart,
-        /// `shift-end` / `shift-cmd-right`: extend to the logical line end.
+        /// `shift-cmd-right`: extend to the logical line end.
         SelectToLineEnd,
-        /// `shift-up`: extend one logical line up.
+        /// `shift-home`: extend to the current visual row start.
+        SelectToRowStart,
+        /// `shift-end`: extend to the current visual row end.
+        SelectToRowEnd,
+        /// `shift-up`: extend one visual row up, or one logical line without a layout.
         SelectUp,
-        /// `shift-down`: extend one logical line down.
+        /// `shift-down`: extend one visual row down, or one logical line without a layout.
         SelectDown,
         /// `shift-cmd-up`: extend to the document start.
         SelectToStart,

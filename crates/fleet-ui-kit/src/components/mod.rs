@@ -128,8 +128,8 @@ pub use markdown_text::{
 };
 pub use mode_word::{Mode, ModeWord};
 pub use multiline_input::{
-    HISTORY_LIMIT, MULTILINE_INPUT_KEY_CONTEXT, MultilineBuffer, MultilineInput,
-    MultilineInputEvent, PromptHistory, Trigger,
+    HISTORY_LIMIT, MULTILINE_INPUT_KEY_CONTEXT, MultilineInput, MultilineInputEvent, PromptHistory,
+    Trigger,
 };
 pub use number_field::NumberField;
 pub use overlay::{Overlay, OverlayLayer};

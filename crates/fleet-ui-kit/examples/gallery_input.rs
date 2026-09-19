@@ -1164,62 +1164,6 @@ fn expanded_confirm() -> ConfirmDialog {
     .action_label("Delete")
 }
 
-fn text_input_bindings() -> Vec<KeyBinding> {
-    let context = Some(TEXT_INPUT_KEY_CONTEXT);
-    vec![
-        KeyBinding::new("left", text_input::MoveLeft, context),
-        KeyBinding::new("right", text_input::MoveRight, context),
-        KeyBinding::new("alt-left", text_input::MoveWordLeft, context),
-        KeyBinding::new("alt-right", text_input::MoveWordRight, context),
-        KeyBinding::new("home", text_input::MoveToLineStart, context),
-        KeyBinding::new("end", text_input::MoveToLineEnd, context),
-        KeyBinding::new("cmd-left", text_input::MoveToLineStart, context),
-        KeyBinding::new("cmd-right", text_input::MoveToLineEnd, context),
-        KeyBinding::new("up", text_input::MoveUp, context),
-        KeyBinding::new("down", text_input::MoveDown, context),
-        KeyBinding::new("cmd-up", text_input::MoveToStart, context),
-        KeyBinding::new("cmd-down", text_input::MoveToEnd, context),
-        KeyBinding::new("shift-left", text_input::SelectLeft, context),
-        KeyBinding::new("shift-right", text_input::SelectRight, context),
-        KeyBinding::new("alt-shift-left", text_input::SelectWordLeft, context),
-        KeyBinding::new("alt-shift-right", text_input::SelectWordRight, context),
-        KeyBinding::new("shift-home", text_input::SelectToLineStart, context),
-        KeyBinding::new("shift-end", text_input::SelectToLineEnd, context),
-        KeyBinding::new("cmd-shift-left", text_input::SelectToLineStart, context),
-        KeyBinding::new("cmd-shift-right", text_input::SelectToLineEnd, context),
-        KeyBinding::new("shift-up", text_input::SelectUp, context),
-        KeyBinding::new("shift-down", text_input::SelectDown, context),
-        KeyBinding::new("cmd-shift-up", text_input::SelectToStart, context),
-        KeyBinding::new("cmd-shift-down", text_input::SelectToEnd, context),
-        KeyBinding::new("ctrl-a", text_input::MoveToLineStart, context),
-        KeyBinding::new("ctrl-e", text_input::MoveToLineEnd, context),
-        KeyBinding::new("ctrl-b", text_input::MoveLeft, context),
-        KeyBinding::new("ctrl-f", text_input::MoveRight, context),
-        KeyBinding::new("backspace", text_input::Backspace, context),
-        KeyBinding::new("delete", text_input::Delete, context),
-        KeyBinding::new("alt-backspace", text_input::DeleteWordBackward, context),
-        KeyBinding::new("alt-delete", text_input::DeleteWordForward, context),
-        KeyBinding::new("cmd-backspace", text_input::DeleteToLineStart, context),
-        KeyBinding::new("cmd-delete", text_input::DeleteToLineEnd, context),
-        KeyBinding::new("ctrl-w", text_input::DeleteWordBackward, context),
-        KeyBinding::new("ctrl-u", text_input::DeleteToLineStart, context),
-        KeyBinding::new("ctrl-k", text_input::DeleteToLineEnd, context),
-        KeyBinding::new("ctrl-h", text_input::Backspace, context),
-        KeyBinding::new("ctrl-d", text_input::Delete, context),
-        KeyBinding::new("cmd-a", text_input::SelectAll, context),
-        KeyBinding::new("cmd-c", text_input::Copy, context),
-        KeyBinding::new("cmd-x", text_input::Cut, context),
-        KeyBinding::new("cmd-v", text_input::Paste, context),
-        KeyBinding::new("cmd-z", text_input::Undo, context),
-        KeyBinding::new("cmd-shift-z", text_input::Redo, context),
-        KeyBinding::new(
-            "enter",
-            text_input::Newline,
-            Some("FleetTextInput && mode == multiline"),
-        ),
-    ]
-}
-
 impl Render for InputGallery {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
@@ -1371,7 +1315,7 @@ fn main() {
         (1180.0, 880.0),
         Quit,
         |cx| {
-            cx.bind_keys(text_input_bindings());
+            cx.bind_keys(support::input::bindings());
             cx.bind_keys([
                 // Always available, in both modes.
                 KeyBinding::new("ctrl-t", ToggleTheme, None),

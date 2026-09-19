@@ -235,6 +235,7 @@ const GROUPS: &[(&str, &[&str])] = &[
             "Dialog > QuitDaemon",
             "FleetTextInput",
             "FleetTextInput && mode == multiline",
+            "FleetTextInput && mode == multiline && enter == newline",
         ],
     ),
 ];

@@ -68,15 +68,15 @@ impl Render for InputHost {
     }
 }
 
-fn bindings() -> Vec<KeyBinding> {
+pub(crate) fn test_bindings() -> Vec<KeyBinding> {
     let context = Some(TEXT_INPUT_KEY_CONTEXT);
     vec![
         KeyBinding::new("left", text_input::MoveLeft, context),
         KeyBinding::new("right", text_input::MoveRight, context),
         KeyBinding::new("alt-left", text_input::MoveWordLeft, context),
         KeyBinding::new("alt-right", text_input::MoveWordRight, context),
-        KeyBinding::new("home", text_input::MoveToLineStart, context),
-        KeyBinding::new("end", text_input::MoveToLineEnd, context),
+        KeyBinding::new("home", text_input::MoveToRowStart, context),
+        KeyBinding::new("end", text_input::MoveToRowEnd, context),
         KeyBinding::new("cmd-left", text_input::MoveToLineStart, context),
         KeyBinding::new("cmd-right", text_input::MoveToLineEnd, context),
         KeyBinding::new("up", text_input::MoveUp, context),
@@ -87,8 +87,8 @@ fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("shift-right", text_input::SelectRight, context),
         KeyBinding::new("alt-shift-left", text_input::SelectWordLeft, context),
         KeyBinding::new("alt-shift-right", text_input::SelectWordRight, context),
-        KeyBinding::new("shift-home", text_input::SelectToLineStart, context),
-        KeyBinding::new("shift-end", text_input::SelectToLineEnd, context),
+        KeyBinding::new("shift-home", text_input::SelectToRowStart, context),
+        KeyBinding::new("shift-end", text_input::SelectToRowEnd, context),
         KeyBinding::new("cmd-shift-left", text_input::SelectToLineStart, context),
         KeyBinding::new("cmd-shift-right", text_input::SelectToLineEnd, context),
         KeyBinding::new("shift-up", text_input::SelectUp, context),
@@ -97,6 +97,8 @@ fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-shift-down", text_input::SelectToEnd, context),
         KeyBinding::new("ctrl-a", text_input::MoveToLineStart, context),
         KeyBinding::new("ctrl-e", text_input::MoveToLineEnd, context),
+        KeyBinding::new("ctrl-shift-a", text_input::SelectToLineStart, context),
+        KeyBinding::new("ctrl-shift-e", text_input::SelectToLineEnd, context),
         KeyBinding::new("ctrl-b", text_input::MoveLeft, context),
         KeyBinding::new("ctrl-f", text_input::MoveRight, context),
         KeyBinding::new("backspace", text_input::Backspace, context),
@@ -118,6 +120,11 @@ fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-shift-z", text_input::Redo, context),
         KeyBinding::new(
             "enter",
+            text_input::Newline,
+            Some("FleetTextInput && mode == multiline && enter == newline"),
+        ),
+        KeyBinding::new(
+            "shift-enter",
             text_input::Newline,
             Some("FleetTextInput && mode == multiline"),
         ),
@@ -141,7 +148,7 @@ fn hosted(
 ) -> HostedInput {
     cx.update(|cx| {
         cx.set_global(Theme::dark());
-        cx.bind_keys(bindings());
+        cx.bind_keys(test_bindings());
     });
     let text = text.to_owned();
     let events = Rc::new(RefCell::new(Vec::new()));
@@ -229,6 +236,45 @@ fn multiline_enter_inserts_a_newline(cx: &mut gpui::TestAppContext) {
     let (mut visual, input, _, _, _) = hosted(cx, mode, "first", |_, _| {});
     visual.simulate_keystrokes("enter");
     input.read_with(&visual, |input, _| assert_eq!(input.text(), "first\n"));
+}
+
+#[gpui::test]
+fn multiline_enter_with_owner_policy_propagates(cx: &mut gpui::TestAppContext) {
+    let mode = InputMode::Multiline {
+        min_rows: 1,
+        max_rows: 4,
+    };
+    let (mut visual, input, _, propagated, _) = hosted(cx, mode, "first", |input, cx| {
+        input.set_enter_inserts_newline(false, cx);
+    });
+    visual.simulate_keystrokes("enter");
+    input.read_with(&visual, |input, _| assert_eq!(input.text(), "first"));
+    assert_eq!(propagated.get().enter, 1);
+}
+
+#[gpui::test]
+fn visual_up_moves_below_the_first_row_and_propagates_at_the_top(cx: &mut gpui::TestAppContext) {
+    let mode = InputMode::Multiline {
+        min_rows: 1,
+        max_rows: 4,
+    };
+    let paragraph = "wrapping words across a deliberately narrow editor ".repeat(12);
+    let (mut visual, input, _, propagated, _) = hosted(cx, mode, &paragraph, |_, _| {});
+    let end = input.read_with(&visual, |input, _| input.buffer.caret());
+    visual.simulate_keystrokes("up");
+    input.read_with(&visual, |input, _| assert!(input.buffer.caret() < end));
+    assert_eq!(propagated.get().up, 0);
+
+    visual.update(|window, cx| {
+        input.update(cx, |input, cx| {
+            input.buffer.set_caret(0);
+            input.reveal_caret = true;
+            cx.notify();
+        });
+        window.draw(cx).clear(cx);
+    });
+    visual.simulate_keystrokes("up");
+    assert_eq!(propagated.get().up, 1);
 }
 
 #[gpui::test]

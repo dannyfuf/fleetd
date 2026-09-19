@@ -425,9 +425,11 @@ collapses the sheet back to 440 px (a second `Esc` closes the panel).
 ## Dialogs and text inputs
 
 Every live `TextInput` entity publishes `FleetTextInput`; this is the one application table that
-defines its editing. Printable text and IME input are delivered by the component itself. `Tab`, `S-Tab`,
-`ctrl-n`, `ctrl-p`, and `Esc` remain container keys. `Enter` also remains a container key in a
-single-line input and inserts a newline only under `FleetTextInput && mode == multiline`.
+defines its editing. Printable text and IME input are delivered by the component itself. `Tab`,
+`S-Tab`, `ctrl-n`, `ctrl-p`, and `Esc` remain container keys. A multi-line input publishes
+`enter = newline | owner`: plain `Enter` inserts only under
+`FleetTextInput && mode == multiline && enter == newline`, while `Shift-Enter` inserts in every
+multi-line input. The agent composer publishes `owner`, so its plain `Enter` reaches Send/Steer.
 
 ### Motion
 
@@ -437,16 +439,18 @@ single-line input and inserts a newline only under `FleetTextInput && mode == mu
 | `right` | move right one grapheme |
 | `alt-left` | move to the previous word boundary |
 | `alt-right` | move to the next word boundary |
-| `home` | move to the logical line start |
-| `end` | move to the logical line end |
+| `home` | move to the visual row start (logical line without a layout) |
+| `end` | move to the visual row end (logical line without a layout) |
 | `cmd-left` | move to the logical line start |
 | `cmd-right` | move to the logical line end |
-| `up` | move one logical line up |
-| `down` | move one logical line down |
+| `up` | move one visual row up (logical line without a layout) |
+| `down` | move one visual row down (logical line without a layout) |
 | `cmd-up` | move to the document start |
 | `cmd-down` | move to the document end |
 | `ctrl-a` | move to the logical line start |
 | `ctrl-e` | move to the logical line end |
+| `ctrl-shift-a` | extend to the logical line start |
+| `ctrl-shift-e` | extend to the logical line end |
 | `ctrl-b` | move left one grapheme |
 | `ctrl-f` | move right one grapheme |
 
@@ -458,12 +462,12 @@ single-line input and inserts a newline only under `FleetTextInput && mode == mu
 | `shift-right` | extend right one grapheme |
 | `alt-shift-left` | extend to the previous word boundary |
 | `alt-shift-right` | extend to the next word boundary |
-| `shift-home` | extend to the logical line start |
-| `shift-end` | extend to the logical line end |
+| `shift-home` | extend to the visual row start (logical line without a layout) |
+| `shift-end` | extend to the visual row end (logical line without a layout) |
 | `cmd-shift-left` | extend to the logical line start |
 | `cmd-shift-right` | extend to the logical line end |
-| `shift-up` | extend one logical line up |
-| `shift-down` | extend one logical line down |
+| `shift-up` | extend one visual row up (logical line without a layout) |
+| `shift-down` | extend one visual row down (logical line without a layout) |
 | `cmd-shift-up` | extend to the document start |
 | `cmd-shift-down` | extend to the document end |
 | `cmd-a` | select all |
@@ -505,7 +509,8 @@ single-line input and inserts a newline only under `FleetTextInput && mode == mu
 
 | Key | Action |
 | --- | --- |
-| `enter` | insert a logical newline under `FleetTextInput && mode == multiline` only |
+| `enter` | insert under `FleetTextInput && mode == multiline && enter == newline` only |
+| `shift-enter` | insert under `FleetTextInput && mode == multiline` |
 
 **Key ownership.** A surface with bare-letter or caret-collision commands publishes its existing
 word while browsing and a distinct `*Editing` word while a field owns typing. The browsing words

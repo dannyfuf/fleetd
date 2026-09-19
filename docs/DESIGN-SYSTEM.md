@@ -742,27 +742,31 @@ horizontally instead. Both use the border ladder danger → focus → rest.
 `select_all(cx)`, `move_to_end(cx)`, `set_placeholder(value, cx)`, `set_label(option, cx)`,
 `set_icon(option, cx)`, `set_mono(bool, cx)`, `set_preview(option, cx)`,
 `set_hide_status_line(bool, cx)`, `set_read_only(bool, cx)`, `set_invalid(option, cx)`,
-`set_filter(option, cx)`, `is_empty()`, `is_composing()`, `is_read_only()`, `is_invalid()`,
+`set_filter(option, cx)`, `set_enter_inserts_newline(bool, cx)`, `is_empty()`, `is_composing()`, `is_read_only()`, `is_invalid()`,
 `has_selection()`, `focus_handle()`, `focus(window, cx)`, `mode()`, `buffer()`, and
-`submit(cx)`. `InputMode::{SingleLine, Multiline { min_rows, max_rows }}` selects behavior.
+`submit(cx)`, plus `move_vertical(down, select, cx) -> bool` for owners that route a claimed
+vertical key back into the editor. `InputMode::{SingleLine, Multiline { min_rows, max_rows }}` selects behavior.
 The filter is `Option<fn(char) -> bool>` and applies only to user insertion and paste.
 **Events.** `TextInputEvent::{Changed, Submitted, Blurred}`. `Submitted` is emitted only when a
 single-line owner explicitly calls `submit`; the input does not consume `Enter` itself.
 **Actions.** `text_input::{MoveLeft, MoveRight, MoveWordLeft, MoveWordRight, MoveToLineStart,
-MoveToLineEnd, MoveUp, MoveDown, MoveToStart, MoveToEnd, SelectLeft, SelectRight,
-SelectWordLeft, SelectWordRight, SelectToLineStart, SelectToLineEnd, SelectUp, SelectDown,
+MoveToLineEnd, MoveToRowStart, MoveToRowEnd, MoveUp, MoveDown, MoveToStart, MoveToEnd, SelectLeft, SelectRight,
+SelectWordLeft, SelectWordRight, SelectToLineStart, SelectToLineEnd, SelectToRowStart,
+SelectToRowEnd, SelectUp, SelectDown,
 SelectToStart, SelectToEnd, SelectAll, Backspace, Delete, DeleteWordBackward,
 DeleteWordForward, DeleteToLineStart, DeleteToLineEnd, Newline, Copy, Cut, Paste, Undo, Redo}`.
 **Key context.** `TEXT_INPUT_KEY_CONTEXT` is `FleetTextInput`; its `mode` attribute is
-`single_line` or `multiline`.
+`single_line` or `multiline`, and `enter` is `newline` (the default) or `owner`.
 **States.** single-line empty with placeholder · filled · focused with caret · selection ·
 marked IME text · invalid with message · read-only · numeric-filtered · label with leading
 icon; multi-line at minimum rows · grown to maximum rows with scroll and a multi-line selection.
 These are the states in the gallery; a state absent there is not implemented.
 **Usage rule.** Never decode or forward editing keys around a `TextInput`; bind the exported
 actions and let the entity own editing. Single-line mode propagates `Enter`, `Tab`, `Shift-Tab`,
-`Up` and `Down`; multi-line `Newline` must be bound under
-`FleetTextInput && mode == multiline`. A dialog's bare-letter bindings must live under a
+`Up` and `Down`; multi-line plain `Newline` is bound under
+`FleetTextInput && mode == multiline && enter == newline`, while `Shift-Enter` is bound under
+`FleetTextInput && mode == multiline`. Visual `Up`/`Down` propagates at the first/last visual
+row (selection-extending motion stops there), allowing an owner to bind history. A dialog's bare-letter bindings must live under a
 context word that is absent while the input is focused. Read-only inputs still support motion,
 selection and copy. Surface code may call `submit` after handling its own single-line submit
 action.
@@ -1284,27 +1288,28 @@ losing which model is answering is worse than losing its name's tail. No segment
 invented: a tab that has not published an effort has three blocks, not four.
 
 #### `MultilineInput`
-**Purpose.** The docked composer: `TextInput`'s wrapping, multi-line sibling.
-**API.** Entity. `MultilineInput::new(&mut Context<Self>, placeholder)`, `text()`, `is_empty()`,
-`is_composing()`,
+**Purpose.** The docked composer: a thin owner of a shared multi-line `TextInput` that adds the
+prompt glyph, submission, prompt history and completion-trigger reporting.
+**API.** Entity. `MultilineInput::new(&mut Context<Self>, placeholder)`, `text(cx)`, `is_empty(cx)`,
+`is_composing(cx)`,
 `set_text(.., cx)`, `clear(cx)`, `set_placeholder(.., cx)`, `set_focus_visible(bool, cx)`,
-`set_read_only(bool, cx)`, `submit(cx)`, `push_history(..)`, `active_trigger()`,
-`focus_handle()`, readers `buffer()` and `history()`, and the three `-> bool` motions an owner
+`set_read_only(bool, cx)`, `submit(cx)`, `push_history(..)`, `active_trigger(cx)`,
+`focus_handle()`, readers `buffer(cx)` and `history()`, and the three `-> bool` motions an owner
 falls through on — `recall_previous(cx)`, `caret_up(cx)`, `caret_down(cx)`, each answering
 whether it moved; emits `MultilineInputEvent::{Submit(String), Trigger(Trigger), Changed,
-Escape}` under `MULTILINE_INPUT_KEY_CONTEXT`. `MultilineBuffer` is the pure editing model and
-`PromptHistory` the last `HISTORY_LIMIT` (100) prompts plus the draft `↑` was opened from.
+Escape}` under `MULTILINE_INPUT_KEY_CONTEXT`. `buffer(cx)` returns the inner `InputBuffer`;
+`PromptHistory` owns the last `HISTORY_LIMIT` (100) prompts plus the draft `↑` opened from.
 **States.** empty (placeholder) · typing · multi-line (grows one visual row at a time, to eight) ·
 capped (internal scroll thumb; wheel is consumed) · IME composition · read-only · dimmed while a
 decision owns the bare keys.
-**Keyboard.** printable · `⏎` submit · `⇧⏎` newline (the **only** newline modifier) ·
-`Backspace`/`Delete` · word-wise deletion · line/word motion · shift-selection · select-all ·
-paste · `Home`/`End` visual-row bounds (`cmd`/`ctrl` variants keep logical-line bounds) · `↑`/`↓`
-history at the **visual** buffer edge · `@` `$` `/` report a `Trigger`. Plain `⏎` is consumed
-without submit while `is_composing()`; an owner-level Send/Steer action must guard the same state.
+**Keyboard.** The inner `TextInput` owns every editing action. The wrapper sets `enter = owner`:
+plain `⏎` submits through the app's Send/Steer binding (or the wrapper fallback), `⇧⏎` inserts a
+newline, `↑`/`↓` recall history at the visual buffer edge, and `Esc` reports escape when no owner
+binding takes it. `@` `$` `/` report a `Trigger`. Plain `⏎` is consumed without submit while
+`is_composing(cx)`; an owner-level Send/Steer action guards the same state.
 **Usage rule (triggers report).** A trigger character is **inserted and reported, never
 consumed**, so all three stay typable: the owner opens a picker on `Trigger` and re-filters it
-from `active_trigger()` on every `Changed`. `@` and `$` fire wherever a token starts; `/` fires
+from `active_trigger(cx)` on every `Changed`. `@` and `$` fire wherever a token starts; `/` fires
 at **line start only**, because a harness expands a slash command only when it opens the whole
 message and offering it elsewhere is a whole class of "why didn't my command run?" bugs.
 **Usage rule (history).** `↑` recalls only at the **visual** (soft-wrapped) edge, and a caret at
@@ -1312,13 +1317,12 @@ a wrap boundary belongs to two rows — the one *farthest* from the edge under t
 ambiguous caret never claims the key. It declines while a selection is being extended and while
 an IME composition is live, and browsing ends on any edit, even one the user immediately undoes.
 **Usage rule (layout).** Long tokens break at character boundaries inside the resolved width.
-Caret motion, hit-testing, drag/double-click selection and visual-row bounds use one
-revision-tagged layout; stale geometry falls back to logical motion. Hard tabs survive in the
-stored/submitted draft and paint as `TAB_WIDTH` spaces. Shaping is cached per logical line by
-text, width and font so an edit does not reshape untouched lines.
+Caret motion, hit-testing, drag/double-click selection and visual-row bounds are the shared
+`TextInput` behavior; stale geometry falls back to logical motion. Hard tabs survive in the
+stored/submitted draft.
 **Usage rule.** It never acts on a thread: a submit, a trigger, a change and an escape are
-reported, and the owner decides what they mean. Bare-letter bindings above it must be shadowed
-in its key context.
+reported, and the owner decides what they mean. The app binds owner keys in `Agent > …`; it does
+not install `NoAction` shadows in the composer context.
 
 #### `Markdown`
 **Purpose.** Assistant prose, rendered from a stream.

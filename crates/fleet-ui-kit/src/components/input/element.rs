@@ -1,6 +1,6 @@
 //! Custom layout and paint for [`super::TextInput`].
 
-use std::ops::Range;
+use std::{collections::HashMap, ops::Range, sync::Arc};
 
 use gpui::{
     App, AvailableSpace, Bounds, ContentMask, Element, ElementId, ElementInputHandler, Entity,
@@ -10,7 +10,10 @@ use gpui::{
 };
 
 use super::{InputMode, TextInput};
-use crate::theme::{ActiveTheme, Theme, ThemeMode};
+use crate::{
+    scroll_thumb,
+    theme::{ActiveTheme, Theme, ThemeMode},
+};
 
 /// The painted half of a [`TextInput`]. It is custom because selection, caret, IME geometry and
 /// input-handler bounds must all use the same shaped lines used for hit testing.
@@ -25,6 +28,19 @@ struct LayoutKey {
     font: Font,
     font_size_bits: u32,
     theme_mode: ThemeMode,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct LineShapeKey {
+    line_index: usize,
+    text: String,
+    wrap_width_bits: Option<u32>,
+    font: Font,
+    font_size_bits: u32,
+    dark_theme: bool,
+    marked: Option<Range<usize>>,
+    placeholder: bool,
+    wrapped: bool,
 }
 
 pub(super) enum ShapedTextLine {
@@ -85,7 +101,8 @@ impl ShapedTextLine {
 struct CachedLine {
     start: usize,
     len: usize,
-    layout: Option<ShapedTextLine>,
+    shape_key: LineShapeKey,
+    layout: Option<Arc<ShapedTextLine>>,
 }
 
 /// Memoised logical-line layouts used by paint, pointer hit testing and the platform bridge.
@@ -93,30 +110,50 @@ struct CachedLine {
 pub(super) struct LineLayoutCache {
     key: Option<LayoutKey>,
     lines: Vec<CachedLine>,
+    shapes: HashMap<LineShapeKey, Arc<ShapedTextLine>>,
+    #[cfg(test)]
+    miss_counts: Vec<usize>,
 }
 
 impl LineLayoutCache {
     pub(super) fn clear(&mut self) {
         self.key = None;
-        self.lines.clear();
+    }
+
+    pub(super) fn is_current(&self, revision: u64) -> bool {
+        self.key
+            .as_ref()
+            .is_some_and(|key| key.revision == revision)
+            && !self.lines.is_empty()
+            && self.lines.iter().all(|line| line.layout.is_some())
     }
 
     pub(super) fn line(&self, index: usize) -> Option<(usize, &ShapedTextLine)> {
         let line = self.lines.get(index)?;
-        Some((line.start, line.layout.as_ref()?))
+        Some((line.start, line.layout.as_deref()?))
     }
 
     pub(super) fn visual_rows(&self) -> usize {
         self.lines
             .iter()
             .filter_map(|line| line.layout.as_ref())
-            .map(ShapedTextLine::visual_rows)
+            .map(|line| line.visual_rows())
             .sum()
     }
 
     #[cfg(test)]
     pub(super) fn logical_lines(&self) -> usize {
         self.lines.len()
+    }
+
+    #[cfg(test)]
+    pub(super) fn reset_probe(&mut self) {
+        self.miss_counts.clear();
+    }
+
+    #[cfg(test)]
+    pub(super) fn miss_counts(&self) -> &[usize] {
+        &self.miss_counts
     }
 
     pub(super) fn visual_row_start(&self, line_index: usize) -> Option<usize> {
@@ -133,7 +170,7 @@ impl LineLayoutCache {
     ) -> Option<(usize, &ShapedTextLine, usize)> {
         let mut row_start = 0;
         for line in &self.lines {
-            let layout = line.layout.as_ref()?;
+            let layout = line.layout.as_deref()?;
             let row_end = row_start + layout.visual_rows();
             if visual_row < row_end {
                 return Some((line.start, layout, visual_row - row_start));
@@ -150,37 +187,25 @@ impl LineLayoutCache {
         })
     }
 
-    fn take_lines(&mut self) -> Vec<(usize, usize, ShapedTextLine)> {
+    fn take_lines(&self) -> Vec<(usize, usize, Arc<ShapedTextLine>)> {
         self.lines
-            .iter_mut()
+            .iter()
             .filter_map(|line| {
                 line.layout
-                    .take()
+                    .clone()
                     .map(|layout| (line.start, line.len, layout))
             })
             .collect()
     }
-
-    fn restore_lines(&mut self, lines: Vec<(usize, usize, ShapedTextLine)>) {
-        for (start, len, layout) in lines {
-            if let Some(line) = self
-                .lines
-                .iter_mut()
-                .find(|line| line.start == start && line.len == len)
-            {
-                line.layout = Some(layout);
-            }
-        }
-    }
 }
 
 pub(super) struct InputLayout {
-    lines: Vec<(usize, usize, ShapedTextLine)>,
+    lines: Vec<(usize, usize, Arc<ShapedTextLine>)>,
     selections: Vec<PaintQuad>,
     caret: Option<PaintQuad>,
+    thumb: Option<PaintQuad>,
     horizontal_scroll: Pixels,
     scroll_row: usize,
-    revision: u64,
 }
 
 impl IntoElement for TextInputElement {
@@ -266,10 +291,10 @@ impl Element for TextInputElement {
             prepare_scroll(input, bounds, &theme);
             let horizontal_scroll = input.horizontal_scroll;
             let scroll_row = input.scroll_row;
-            let revision = input.buffer.revision();
             let lines = input.line_cache.take_lines();
             let selections = selection_quads(input, &lines, bounds, &theme);
             let caret = caret_quad(input, &lines, bounds, &theme);
+            let thumb = scroll_thumb_quad(input, bounds, &theme);
             #[cfg(test)]
             {
                 input.last_selection_quad_count = selections.len();
@@ -279,9 +304,9 @@ impl Element for TextInputElement {
                 lines,
                 selections,
                 caret,
+                thumb,
                 horizontal_scroll,
                 scroll_row,
-                revision,
             }
         })
     }
@@ -315,6 +340,7 @@ impl Element for TextInputElement {
         let lines = std::mem::take(&mut prepaint.lines);
         let selections = std::mem::take(&mut prepaint.selections);
         let caret = prepaint.caret.take();
+        let thumb = prepaint.thumb.take();
 
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             for selection in selections {
@@ -333,7 +359,7 @@ impl Element for TextInputElement {
                     break;
                 }
                 let origin = point(bounds.left() - horizontal_scroll, top);
-                let result = match line {
+                let result = match line.as_ref() {
                     ShapedTextLine::Unwrapped(line) => {
                         line.paint(origin, line_height, TextAlign::Left, None, window, cx)
                     }
@@ -349,14 +375,40 @@ impl Element for TextInputElement {
             if focused && let Some(caret) = caret {
                 window.paint_quad(caret);
             }
-        });
-
-        self.input.update(cx, |input, _cx| {
-            if input.buffer.revision() == prepaint.revision {
-                input.line_cache.restore_lines(lines);
+            if let Some(thumb) = thumb {
+                window.paint_quad(thumb);
             }
         });
     }
+}
+
+fn scroll_thumb_quad(
+    input: &TextInput,
+    bounds: Bounds<Pixels>,
+    theme: &Theme,
+) -> Option<PaintQuad> {
+    let InputMode::Multiline { .. } = input.mode() else {
+        return None;
+    };
+    let content_height = input.line_height * input.line_cache.visual_rows().max(1) as f32;
+    let viewport = bounds.size.height;
+    let max_scroll = (content_height - viewport).max(Pixels::ZERO);
+    let scroll = input.line_height * input.scroll_row as f32;
+    scroll_thumb(scroll, max_scroll, viewport, theme.metrics.diff_thumb_min_h).map(
+        |(top, height)| {
+            let width = theme.metrics.scroll_thumb_w;
+            fill(
+                Bounds::new(
+                    point(
+                        bounds.right() - width,
+                        bounds.top() + bounds.size.height * top,
+                    ),
+                    size(width, bounds.size.height * height),
+                ),
+                theme.colors.scroll_thumb,
+            )
+        },
+    )
 }
 
 fn prepare_lines(
@@ -400,45 +452,90 @@ fn prepare_lines(
         .flatten();
     let mut start = 0usize;
     let mut lines = Vec::new();
-    for raw_line in source.split('\n') {
+    #[cfg(test)]
+    let mut misses = 0;
+    for (line_index, raw_line) in source.split('\n').enumerate() {
         let line_end = start + raw_line.len();
         let local_marked = marked
             .as_ref()
             .and_then(|range| range_on_line(range, start, line_end));
-        let runs = text_runs(raw_line.len(), local_marked, color, style, theme);
-        let text = SharedString::from(raw_line.to_owned());
-        let layout = match input.mode() {
-            InputMode::SingleLine => ShapedTextLine::Unwrapped(Box::new(
-                window
-                    .text_system()
-                    .shape_line(text, font_size, &runs, None),
-            )),
-            InputMode::Multiline { .. } => {
-                let wrapped = match window
-                    .text_system()
-                    .shape_text(text, font_size, &runs, wrap_width, None)
-                {
-                    Ok(lines) => lines.into_iter().next(),
-                    Err(error) => {
-                        crate::paint_error::log_once(&error);
-                        None
-                    }
-                };
-                let Some(wrapped) = wrapped else {
-                    return;
-                };
-                ShapedTextLine::Wrapped(wrapped)
-            }
+        let shape_key = LineShapeKey {
+            line_index,
+            text: raw_line.to_owned(),
+            wrap_width_bits: wrap_width.map(|width| f32::from(width).to_bits()),
+            font: style.font(),
+            font_size_bits: f32::from(font_size).to_bits(),
+            dark_theme: matches!(theme.mode, ThemeMode::Dark),
+            marked: local_marked.clone(),
+            placeholder,
+            wrapped: matches!(input.mode(), InputMode::Multiline { .. }),
         };
+        let layout = input
+            .line_cache
+            .shapes
+            .get(&shape_key)
+            .cloned()
+            .or_else(|| {
+                #[cfg(test)]
+                {
+                    misses += 1;
+                }
+                let runs = text_runs(raw_line.len(), local_marked, color, style, theme);
+                let text = SharedString::from(raw_line.to_owned());
+                match input.mode() {
+                    InputMode::SingleLine => Some(Arc::new(ShapedTextLine::Unwrapped(Box::new(
+                        window
+                            .text_system()
+                            .shape_line(text, font_size, &runs, None),
+                    )))),
+                    InputMode::Multiline { .. } => match window
+                        .text_system()
+                        .shape_text(text, font_size, &runs, wrap_width, None)
+                    {
+                        Ok(lines) => lines
+                            .into_iter()
+                            .next()
+                            .map(ShapedTextLine::Wrapped)
+                            .map(Arc::new),
+                        Err(error) => {
+                            crate::paint_error::log_once(&error);
+                            None
+                        }
+                    },
+                }
+            });
+        let Some(layout) = layout else {
+            return;
+        };
+        input
+            .line_cache
+            .shapes
+            .insert(shape_key.clone(), layout.clone());
         lines.push(CachedLine {
             start,
             len: raw_line.len(),
+            shape_key,
             layout: Some(layout),
         });
         start = line_end + '\n'.len_utf8();
     }
+    input.line_cache.shapes.retain(|shape_key, _| {
+        lines.get(shape_key.line_index).is_some_and(|line| {
+            let active = &line.shape_key;
+            shape_key.line_index == active.line_index
+                && shape_key.text == active.text
+                && shape_key.font == active.font
+                && shape_key.font_size_bits == active.font_size_bits
+                && shape_key.dark_theme == active.dark_theme
+                && shape_key.marked == active.marked
+                && shape_key.placeholder == active.placeholder
+                && shape_key.wrapped == active.wrapped
+        })
+    });
     input.line_cache.key = Some(key);
     input.line_cache.lines = lines;
+    #[cfg(test)]
+    input.line_cache.miss_counts.push(misses);
 }
 
 fn range_on_line(range: &Range<usize>, line_start: usize, line_end: usize) -> Option<Range<usize>> {
@@ -485,7 +582,7 @@ fn widest_line(cache: &LineLayoutCache) -> Pixels {
         .lines
         .iter()
         .filter_map(|line| line.layout.as_ref())
-        .map(ShapedTextLine::width)
+        .map(|line| line.width())
         .max()
         .unwrap_or(Pixels::ZERO)
 }
@@ -536,7 +633,7 @@ fn prepare_scroll(input: &mut TextInput, bounds: Bounds<Pixels>, theme: &Theme) 
 
 fn selection_quads(
     input: &TextInput,
-    lines: &[(usize, usize, ShapedTextLine)],
+    lines: &[(usize, usize, Arc<ShapedTextLine>)],
     bounds: Bounds<Pixels>,
     theme: &Theme,
 ) -> Vec<PaintQuad> {
@@ -598,7 +695,7 @@ fn selection_quads(
 
 fn caret_quad(
     input: &TextInput,
-    lines: &[(usize, usize, ShapedTextLine)],
+    lines: &[(usize, usize, Arc<ShapedTextLine>)],
     bounds: Bounds<Pixels>,
     theme: &Theme,
 ) -> Option<PaintQuad> {
@@ -621,7 +718,7 @@ fn caret_quad(
 }
 
 fn position_for_offset(
-    lines: &[(usize, usize, ShapedTextLine)],
+    lines: &[(usize, usize, Arc<ShapedTextLine>)],
     offset: usize,
     line_height: Pixels,
 ) -> Option<gpui::Point<Pixels>> {

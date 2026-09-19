@@ -32,7 +32,11 @@
   - verified: `cargo test -p fleet-app` (876 passed), `make lint`, and `make harness` (59 of 59
     scenarios, virtual lane) passed. 46 `FleetTextInput` rows; the old `filter::`/`palette::`/
     `dialog::` families stay until their surfaces migrate (see the 2026-09-19 scope note).
-- [ ] P3-T04 — Re-base the agent composer on the shared component
+- [x] P3-T04 — Re-base the agent composer on the shared component
+  - verified: `cargo test -p fleet-ui-kit` (382 passed), `cargo test -p fleet-app` (876 passed,
+    110 of them agent_thread), `make lint`, and `make harness` (59 of 59, every `agents/*`
+    scenario) passed. `multiline_input/{buffer,element,platform}.rs` deleted; `FleetTextInput`
+    rows are now 49 (`home`/`end` → row actions, `ctrl-shift-a/e`, `shift-enter`, owner-aware `enter`).
 - [ ] P3-T05 — Migrate the board dialogs
 - [ ] P3-T06 — Migrate the remaining dialogs, filters and the lazygit overlay
 - [ ] P3-T07 — Delete the old input families and record the decision
@@ -90,6 +94,15 @@
   single printable key or `shift-` variant in a host context, and `Dialog > CardPicker` keeps
   `space` as the one documented exception (its query is a filter that never contains a space;
   the migrated input will filter `' '`). The chord resolver strips `&& …` predicates for depth.
+- 2026-09-19 — P3-T04 decisions (two deviations from the plan's Assumptions, both because the
+  composer soft-wraps): multi-line `up`/`down` and plain `home`/`end` operate on the **visual** row
+  (new `MoveToRowStart/End` + `SelectToRowStart/End` actions; `cmd-left/right`, `ctrl-a/e` stay
+  logical), and vertical motion at the first/last visual row `cx.propagate()`s so the agent thread's
+  own `up`/`down` history rows fire. The keymap decides whether `enter` inserts a newline through a
+  new `enter=newline|owner` key-context attribute (`TextInput::set_enter_inserts_newline`); the
+  composer publishes `owner`, and `shift-enter` → `Newline` is bound for every multi-line input.
+  The app never used `NoAction` shadowing for the composer: it binds owner keys in `Agent > *` and
+  routes back into the composer, which the propagation rule preserves.
 - 2026-09-18 — Decisions fixed at planning time: one engine seeded from the composer buffer; inputs are live
   entities owned by the surface; bytes inside, UTF-16 at the IME boundary, graphemes for motion; word and line rules
   as written in the plan; key-ownership rule via a browsing/editing context word (board-filter precedent), not
@@ -97,6 +110,9 @@
 
 ## Follow-ups
 (Things discovered mid-flight that are out of scope for this plan. Each gets a one-line description.)
+
+- `components/input.rs` is about 1100 lines after P3-T04; split the entity from its chrome/actions
+  in P3-T07 per `rust-workspace-architecture`.
 
 - Engine grapheme-boundary lookups scan from the text start (linear per call); fine for dialog-sized
   text, revisit with a boundary cache if a multi-kilobyte input ever feels slow.

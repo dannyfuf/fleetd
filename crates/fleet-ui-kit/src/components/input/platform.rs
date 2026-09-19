@@ -44,6 +44,7 @@ impl EntityInputHandler for TextInput {
     fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.buffer.unmark();
         self.finish_composition();
+        self.vertical_goal_x = None;
         self.line_cache.clear();
         cx.notify();
     }
@@ -166,6 +167,7 @@ impl EntityInputHandler for TextInput {
     ) {
         let range = self.buffer.range_from_utf16(&range_utf16);
         self.buffer.set_selected_range(range);
+        self.vertical_goal_x = None;
         self.reveal_caret = true;
         cx.notify();
     }
