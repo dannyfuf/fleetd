@@ -506,7 +506,7 @@ impl Boards {
     /// Skips a document this build cannot read; a `context` that does not exist is `NotFound`.
     pub async fn list(&self, context: Option<&ContextId>) -> DaemonResult<Vec<BoardSummary>>;
     pub async fn get(&self, id: &BoardId) -> DaemonResult<BoardView>;
-    /// Get-or-create the context's board (`defaults::new_board`). Errors if the context does not exist.
+    /// Get-or-create the context's unscoped board (`defaults::new_board`). Errors if the context does not exist.
     pub async fn ensure(&self, context: &ContextId) -> DaemonResult<BoardView>;
     pub async fn create(&self, context: &ContextId, name: Option<String>, prefix: Option<String>, backend: Option<BackendRef>) -> DaemonResult<BoardView>;
     /// A patch that changes nothing writes nothing and emits nothing, as an empty card patch does.
@@ -550,12 +550,15 @@ None` (not persisted), and a `repo_id` — on a card or as `Board.default_repo_i
 repository the state no longer has in the board's context is reported the same way and skipped
 when `create_worktree_from_card` picks a repository. `ensure`/`create` refuse a context whose
 board document is quarantined rather than creating an empty board over it; `delete_for_context`
-takes the quarantined remains with it. `summaries` reparses a board document only when its `stamp`
-changed or this daemon rewrote it. Boards whose context no longer exists are skipped by
-`list`/`summaries`, and deleting a context deletes its board in the same cascade
-(`delete_for_context`) so a later context deriving the same id cannot adopt it. Board locks are
-per board: no board's clone, sync or hook run blocks another board's requests, and `ensure` reads
-an existing board without taking one.
+takes the quarantined remains with it. `context_board` accepts only a board with the requested
+`context_id` and no `worktree_id`, on both its derived-id fast path and its fallback scan;
+`worktree_board` similarly treats the derived id only as a fast path and falls back to the
+persisted `worktree_id`. `summaries` reparses a board document only when its `stamp` changed or
+this daemon rewrote it. Boards whose context no longer exists are skipped by `list`/`summaries`;
+a worktree board whose worktree no longer exists is skipped as well. Deleting a context deletes
+its boards in the same cascade (`delete_for_context`) so a later context deriving the same id
+cannot adopt one. Board locks are per board: no board's clone, sync or hook run blocks another
+board's requests, and `ensure` reads an existing board without taking one.
 
 ## 5. Protocol (`fleet-proto`, version 6)
 

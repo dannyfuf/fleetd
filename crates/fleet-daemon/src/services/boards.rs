@@ -10,7 +10,7 @@ use crate::{
 };
 use fleet_core::{
     board::*,
-    ids::{BoardId, CardId, ContextId, HostId, JobId, RepoId, StatusId},
+    ids::{BoardId, CardId, ContextId, HostId, JobId, RepoId, StatusId, WorktreeId},
     model::Worktree,
 };
 use fleet_proto::{

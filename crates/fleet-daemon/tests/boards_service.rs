@@ -6,7 +6,7 @@ use chrono::{TimeZone, Utc};
 use fleet_core::{
     board::*,
     ids::BoardId,
-    model::{Context, Repo, RepoHooks},
+    model::{Context, Repo, RepoHooks, Worktree},
     paths::FleetHome,
     state::default_state,
 };
@@ -313,6 +313,87 @@ async fn ensure_is_idempotent_and_missing_context_is_not_found() {
         Err(DaemonError::Conflict(_))
     ));
     assert_eq!(f.boards.list(Some(&context)).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn context_lookup_and_listing_keep_worktree_boards_in_their_scope() {
+    let f = Fixture::new(pull_caps()).await;
+    let context = f.state.load().await.unwrap().contexts[0].clone();
+    let worktree = Worktree {
+        id: "acme/api#feature".parse().unwrap(),
+        repo_id: "acme/api".parse().unwrap(),
+        slug: "feature".into(),
+        branch: "feature".into(),
+        base_ref: "origin/main".into(),
+        path: f
+            .home
+            .worktrees_dir()
+            .join("acme/api/feature")
+            .display()
+            .to_string(),
+        session: "api/feature".into(),
+        host: None,
+        created_at: "2026-09-06T12:00:00Z".into(),
+        last_opened_at: None,
+        degraded: None,
+    };
+    f.state
+        .transaction({
+            let worktree = worktree.clone();
+            move |state| {
+                state.worktrees.push(worktree);
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+
+    // Poison the context-id fast path with a worktree board, while the real context board uses
+    // a non-derived id so the fallback scan is the only correct answer.
+    let mut scoped = new_worktree_board(&context, &worktree, "2026-09-06T12:00:00Z");
+    scoped.id = "work".parse().unwrap();
+    f.store
+        .save(&BoardDocument {
+            version: BOARD_DOCUMENT_VERSION,
+            board: scoped,
+            cards: Vec::new(),
+        })
+        .unwrap();
+    let mut context_board = new_board(&context, "2026-09-06T12:00:00Z");
+    context_board.id = "context-board".parse().unwrap();
+    f.store
+        .save(&BoardDocument {
+            version: BOARD_DOCUMENT_VERSION,
+            board: context_board.clone(),
+            cards: Vec::new(),
+        })
+        .unwrap();
+
+    assert_eq!(
+        f.boards.ensure(&context.id).await.unwrap().board.id,
+        context_board.id
+    );
+    let listed = f.boards.list(None).await.unwrap();
+    assert_eq!(listed.len(), 2);
+    assert_eq!(
+        listed
+            .iter()
+            .find(|summary| summary.id.as_str() == "work")
+            .and_then(|summary| summary.worktree_id.as_ref())
+            .map(|id| id.as_str()),
+        Some("acme/api#feature")
+    );
+    assert_eq!(f.boards.summaries().await.len(), 2);
+
+    f.state
+        .transaction(|state| {
+            state.worktrees.clear();
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(f.boards.list(None).await.unwrap().len(), 1);
+    assert_eq!(f.boards.summaries().await.len(), 1);
 }
 
 #[tokio::test]

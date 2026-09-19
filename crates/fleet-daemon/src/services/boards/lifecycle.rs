@@ -17,6 +17,9 @@ impl Boards {
             };
             if context.is_some_and(|id| *id != doc.board.context_id)
                 || !state.contexts.iter().any(|c| c.id == doc.board.context_id)
+                || doc.board.worktree_id.as_ref().is_some_and(|worktree| {
+                    !state.worktrees.iter().any(|item| item.id == *worktree)
+                })
             {
                 continue;
             }
@@ -151,6 +154,10 @@ impl Boards {
                 .contexts
                 .iter()
                 .any(|context| context.id == summary.context_id)
+                && summary
+                    .worktree_id
+                    .as_ref()
+                    .is_none_or(|worktree| state.worktrees.iter().any(|item| item.id == *worktree))
             {
                 summaries.push(summary);
             }

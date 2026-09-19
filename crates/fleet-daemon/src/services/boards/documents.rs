@@ -38,16 +38,38 @@ impl Boards {
         // and re-validating every board in the home on each card edit is the cost the
         // `summaries` memo was built to avoid, and this path bypasses it.
         if let Ok(id) = BoardId::try_from(context.as_str())
-            && self
-                .scan_load(&id)
-                .is_some_and(|doc| doc.board.context_id == *context)
+            && self.scan_load(&id).is_some_and(|doc| {
+                doc.board.context_id == *context && doc.board.worktree_id.is_none()
+            })
         {
             return Ok(Some(id));
         }
         for id in self.store.list()? {
+            if self.scan_load(&id).is_some_and(|doc| {
+                doc.board.context_id == *context && doc.board.worktree_id.is_none()
+            }) {
+                return Ok(Some(id));
+            }
+        }
+        Ok(None)
+    }
+
+    /// The board this worktree already owns, if the store holds one.
+    ///
+    /// The derived id is only a fast path: documents are identified by their persisted scope,
+    /// so an id collision or a future id-derivation change cannot hide an existing board.
+    pub fn worktree_board(&self, worktree: &WorktreeId) -> DaemonResult<Option<BoardId>> {
+        let derived = worktree_board_id(worktree);
+        if self
+            .scan_load(&derived)
+            .is_some_and(|doc| doc.board.worktree_id.as_ref() == Some(worktree))
+        {
+            return Ok(Some(derived));
+        }
+        for id in self.store.list()? {
             if self
                 .scan_load(&id)
-                .is_some_and(|doc| doc.board.context_id == *context)
+                .is_some_and(|doc| doc.board.worktree_id.as_ref() == Some(worktree))
             {
                 return Ok(Some(id));
             }
