@@ -51,6 +51,16 @@ fn worktree(id: &str) -> Worktree {
 }
 
 #[test]
+fn duplicate_error_names_a_generic_scope() {
+    let error = BoardError::Duplicate("acme/api#feature".into());
+
+    assert_eq!(
+        error.to_string(),
+        "board already exists for scope acme/api#feature"
+    );
+}
+
+#[test]
 fn board_card_and_document_round_trip() {
     let board = board();
     let mut card = card(&board);

@@ -294,7 +294,7 @@ pub enum BoardError {
     #[error("unknown status: {0}")] UnknownStatus(String),
     #[error("unknown label: {0}")] UnknownLabel(String),
     #[error("invalid {field}: {reason}")] Invalid { field: String, reason: String },
-    #[error("board already exists for context {0}")] Duplicate(String),
+    #[error("board already exists for scope {0}")] Duplicate(String),
     #[error("backend `{0}` is not registered")] UnknownBackend(String),
     #[error("backend does not support {0}")] Unsupported(&'static str),
     #[error("backend error: {0}")] Backend(String),

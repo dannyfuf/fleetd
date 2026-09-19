@@ -185,7 +185,7 @@ pub enum BoardError {
         reason: String,
     },
     /// The context already owns a board.
-    #[error("board already exists for context {0}")]
+    #[error("board already exists for scope {0}")]
     Duplicate(String),
     /// Unknown backend.
     #[error("backend `{0}` is not registered")]
