@@ -24,7 +24,10 @@
   - verified: `cargo test -p fleet-ui-kit input` (76 passed: 37 engine tests, 16 of them ported
     `MultilineBuffer` parity cases, plus the pre-existing input tests) and `make lint` passed.
     `multiline_input/buffer.rs` is untouched until P3-T04.
-- [ ] P3-T02 — Build the live `TextInput` component
+- [x] P3-T02 — Build the live `TextInput` component
+  - verified: `cargo test -p fleet-ui-kit` (392 passed, including 13 gpui interaction tests in
+    `input/live_tests.rs`), `cargo test -p fleet-lazygit` (135 passed), `cargo build --example
+    gallery_input`, `make lint` passed. The old live input is exported as `LegacyTextInput` until P3-T07.
 - [ ] P3-T03 — Replace the editing rows in the keymap with one action family
 - [ ] P3-T04 — Re-base the agent composer on the shared component
 - [ ] P3-T05 — Migrate the board dialogs
@@ -55,6 +58,14 @@
   injected `Instant`; the engine never reads a clock. Tabs: hard tab in multi-line, one space in
   single-line. `ctrl-k` at a multi-line line end joins the next line. Explicit history groups
   (`begin_history_group`/`end_history_group`) are for IME composition.
+- 2026-09-19 — P3-T02 landed `TextInput` (`input.rs` + `input/{actions,element,platform,live_tests}.rs`).
+  The `text_input::*` action family is defined in the kit (`gpui::actions!`, precedent `list_view.rs`)
+  and exported as `fleet_ui_kit::text_input`; the app keymap binds it in P3-T03. Key context is
+  `FleetTextInput` with attribute `mode=single_line|multiline`, so `Newline` binds under
+  `FleetTextInput && mode == multiline`. Single-line `MoveUp`/`MoveDown`/`Newline` call
+  `cx.propagate()`. The clock is `cx.background_executor().now()` so tests drive undo grouping.
+  Old `TextInput`/`TextInputEvent` re-exports were renamed `LegacyTextInput`/`LegacyTextInputEvent`
+  (lazygit updated) so the new component owns the name from day one.
 - 2026-09-18 — Decisions fixed at planning time: one engine seeded from the composer buffer; inputs are live
   entities owned by the surface; bytes inside, UTF-16 at the IME boundary, graphemes for motion; word and line rules
   as written in the plan; key-ownership rule via a browsing/editing context word (board-filter precedent), not

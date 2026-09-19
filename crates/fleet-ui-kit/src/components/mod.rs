@@ -101,7 +101,11 @@ pub use filter_bar::FilterBar;
 pub use freshness_stamp::{AGING_SECS, FRESH_SECS};
 pub use freshness_stamp::{Freshness, FreshnessStamp};
 pub use fuzzy_list::{FuzzyItem, FuzzyList};
-pub use input::{HISTORY_CAP, InputBuffer, InputMode, TYPING_GROUP_WINDOW};
+pub use input::actions as text_input;
+pub use input::{
+    HISTORY_CAP, InputBuffer, InputMode, TEXT_INPUT_KEY_CONTEXT, TYPING_GROUP_WINDOW, TextInput,
+    TextInputEvent,
+};
 pub use job_row::{JobRow, JobStatus};
 pub use job_ticker::JobTicker;
 pub use kanban_column::{COLUMN_WIDTH_CH, KanbanBoard, KanbanColumn};
@@ -156,9 +160,8 @@ pub use terminal_grid::{
 pub use terminal_modes::{TerminalMode, TerminalModes};
 pub use terminal_tab_strip::{TerminalAgentState, TerminalTab, TerminalTabKind, TerminalTabStrip};
 pub use text_area::{TAB_WIDTH, TEXT_AREA_ROWS, TextArea, TextAreaState};
-pub use text_field::{
-    EditEffect, TEXT_FIELD_KEY_CONTEXT, TextField, TextFieldState, TextInput, TextInputEvent,
-};
+pub use text_field::{EditEffect, TEXT_FIELD_KEY_CONTEXT, TextField, TextFieldState};
+pub use text_field::{TextInput as LegacyTextInput, TextInputEvent as LegacyTextInputEvent};
 pub use toast_stack::{COALESCE_WINDOW_MS, Toast, ToastDuration, ToastStack};
 pub use toggle::Toggle;
 pub use veil::Veil;

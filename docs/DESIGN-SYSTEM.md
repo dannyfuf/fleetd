@@ -723,20 +723,59 @@ Amber by default, because "in flight" is amber everywhere.
 
 ### 6.4 Input
 
-All input components are **presentational**: the caller owns the string, the caret, the cursor
-and the focus, and handles the keys. `RenderOnce` cannot own state, and the dialogs already own
-theirs. `MarkdownText` is grouped here because it is the read half of the description surface
-`TextArea` edits, and the two are always specified together.
+Inputs are live entities owned by the surface. The caller holds an `Entity<TextInput>`, focuses
+its `FocusHandle`, reads `text()`, and handles no editing keys around it. `MarkdownText` remains
+grouped here because it is the read half of the description surface currently edited by the
+legacy `TextArea` family.
+
+#### `TextInput`
+**Purpose.** Fleet's live IME-safe editor for single-line values and logical multi-line bodies.
+It owns the buffer, selection, undo history, clipboard bridge, focus, input handler, layout
+cache and scrolling.
+**Anatomy.** optional label · 36 px single-line box or `min_rows`–`max_rows` multi-line box ·
+optional leading icon · placeholder/value · selection · caret · marked-text underline. A
+single-line input reserves an 18 px status slot containing either preview or validation; a
+multi-line input has no status slot. Both use the border ladder danger → focus → rest.
+**API.** `TextInput::new(InputMode, cx)`, `text()`, `set_text(text, cx)`, `clear(cx)`,
+`select_all(cx)`, `move_to_end(cx)`, `set_placeholder(value, cx)`, `set_label(option, cx)`,
+`set_icon(option, cx)`, `set_mono(bool, cx)`, `set_preview(option, cx)`,
+`set_hide_status_line(bool, cx)`, `set_read_only(bool, cx)`, `set_invalid(option, cx)`,
+`set_filter(option, cx)`, `is_empty()`, `is_composing()`, `is_read_only()`, `is_invalid()`,
+`has_selection()`, `focus_handle()`, `focus(window, cx)`, `mode()`, `buffer()`, and
+`submit(cx)`. `InputMode::{SingleLine, Multiline { min_rows, max_rows }}` selects behavior.
+The filter is `Option<fn(char) -> bool>` and applies only to user insertion and paste.
+**Events.** `TextInputEvent::{Changed, Submitted, Blurred}`. `Submitted` is emitted only when a
+single-line owner explicitly calls `submit`; the input does not consume `Enter` itself.
+**Actions.** `text_input::{MoveLeft, MoveRight, MoveWordLeft, MoveWordRight, MoveToLineStart,
+MoveToLineEnd, MoveUp, MoveDown, MoveToStart, MoveToEnd, SelectLeft, SelectRight,
+SelectWordLeft, SelectWordRight, SelectToLineStart, SelectToLineEnd, SelectUp, SelectDown,
+SelectToStart, SelectToEnd, SelectAll, Backspace, Delete, DeleteWordBackward,
+DeleteWordForward, DeleteToLineStart, DeleteToLineEnd, Newline, Copy, Cut, Paste, Undo, Redo}`.
+**Key context.** `TEXT_INPUT_KEY_CONTEXT` is `FleetTextInput`; its `mode` attribute is
+`single_line` or `multiline`.
+**States.** single-line empty with placeholder · filled · focused with caret · selection ·
+marked IME text · invalid with message · read-only · numeric-filtered · label with leading
+icon; multi-line at minimum rows · grown to maximum rows with scroll and a multi-line selection.
+These are the states in the gallery; a state absent there is not implemented.
+**Usage rule.** Never decode or forward editing keys around a `TextInput`; bind the exported
+actions and let the entity own editing. Single-line mode propagates `Enter`, `Tab`, `Shift-Tab`,
+`Up` and `Down`; multi-line `Newline` must be bound under
+`FleetTextInput && mode == multiline`. A dialog's bare-letter bindings must live under a
+context word that is absent while the input is focused. Read-only inputs still support motion,
+selection and copy. Surface code may call `submit` after handling its own single-line submit
+action.
 
 #### `TextField`
+**Migration status.** `TextField`, `TextFieldState`, and the old live `TextInput` exported as
+`LegacyTextInput` are being replaced and will be removed once every surface is migrated.
 **Purpose.** A single-line input with a blue caret and a zero-shift validation line.
 **Anatomy.** optional label · 36 px box (optional leading icon, value, caret) · an 18 px line
 below that holds **either** the derived preview **or** the validation message — never both, and
 the slot is always present.
 **API.** `TextField::new(value).label(..).placeholder(..).caret(usize).focused(bool).icon(Icon)
 .preview(..).invalid(message).mono(bool).height(Pixels).hide_status_line(bool)`.
-`TextFieldState` is the editing model. `TextInput` is its live, IME-safe entity — `.is_invalid()`
-reports its validation state — and emits `TextInputEvent` under `TEXT_FIELD_KEY_CONTEXT`.
+`TextFieldState` is the editing model. `LegacyTextInput` is its live entity and emits
+`LegacyTextInputEvent` under `TEXT_FIELD_KEY_CONTEXT`.
 **States.** default · focused (accent border + caret) · placeholder (muted) · invalid (red
 border, red message) · disabled (not modelled: Fleet has no disabled inputs — a field that
 cannot be edited is rendered as a read-only `FactRow` with no box).
@@ -750,6 +789,8 @@ bindings must also be shadowed with `gpui::NoAction` in `TEXT_FIELD_KEY_CONTEXT`
 action must be removed while the field owns the keyboard.
 
 #### `TextArea` / `TextAreaState`
+**Migration status.** `TextArea` and `TextAreaState` are being replaced and will be removed once
+every surface is migrated.
 **Purpose.** The multi-line sibling of `TextField`: card descriptions and comments.
 **Anatomy.** optional label · a box with the same border ladder as `TextField` (danger beats
 focus beats rest) · line-wrapped value · the same 2 px accent caret bar. There is **no** 18 px

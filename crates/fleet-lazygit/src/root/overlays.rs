@@ -31,7 +31,7 @@ impl Lazygit {
         self.pending_prompt = None;
         self.prompt_input = (!prompt.buffer.is_multiline()).then(|| {
             cx.new(|cx| {
-                TextInput::new(cx)
+                LegacyTextInput::new(cx)
                     .with_mono(true)
                     .with_text(prompt.buffer.value())
             })
