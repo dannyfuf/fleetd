@@ -434,9 +434,17 @@ async fn the_board_preset_boots_with_cards_in_their_columns() {
         .list_boards(Some(booted.context()))
         .await
         .unwrap_or_else(|error| panic!("list boards: {error}"));
-    assert_eq!(boards.len(), 1, "the board preset seeds exactly one board");
+    assert_eq!(
+        boards.len(),
+        2,
+        "the board preset seeds the context board and acme/api#feature's"
+    );
+    let context_board = boards
+        .iter()
+        .find(|summary| summary.worktree_id.is_none())
+        .unwrap_or_else(|| panic!("the board preset must seed a context board"));
     let view = client
-        .get_board(boards[0].id.clone())
+        .get_board(context_board.id.clone())
         .await
         .unwrap_or_else(|error| panic!("read the board: {error}"));
     assert_eq!(view.cards.len(), 5, "the board preset seeds five cards");
@@ -453,6 +461,51 @@ async fn the_board_preset_boots_with_cards_in_their_columns() {
         environment.fake_bin.join("acli").is_file(),
         "a board scenario must never reach Atlassian"
     );
+
+    // The worktree board is the other half of the preset, and the two must stay tellable
+    // apart in a dump: different prefixes and disjoint titles are what
+    // `scenarios/workspace/board-tab.scenario` reads to prove the Hub kept showing the
+    // context board.
+    let worktree_board = boards
+        .iter()
+        .find(|summary| {
+            summary.worktree_id.as_ref().map(ToString::to_string)
+                == Some("acme/api#feature".to_owned())
+        })
+        .unwrap_or_else(|| panic!("the board preset must seed acme/api#feature's board"));
+    assert_ne!(
+        worktree_board.prefix, context_board.prefix,
+        "the two boards must number their cards differently"
+    );
+    let worktree_view = client
+        .get_board(worktree_board.id.clone())
+        .await
+        .unwrap_or_else(|error| panic!("read the worktree board: {error}"));
+    assert_eq!(
+        worktree_view.cards.len(),
+        3,
+        "the worktree board seeds three cards"
+    );
+    let worktree_columns: std::collections::BTreeSet<_> = worktree_view
+        .cards
+        .iter()
+        .map(|card| card.status_id.to_string())
+        .collect();
+    assert_eq!(
+        worktree_columns.len(),
+        2,
+        "the worktree board's cards must occupy two columns, saw {worktree_columns:?}"
+    );
+    let context_titles: std::collections::BTreeSet<_> =
+        view.cards.iter().map(|card| card.title.clone()).collect();
+    assert!(
+        worktree_view
+            .cards
+            .iter()
+            .all(|card| !context_titles.contains(&card.title)),
+        "the two card sets must be disjoint"
+    );
+
     drop(client);
     daemon
         .shutdown()

@@ -1,0 +1,84 @@
+# UX-SPEC.md §Board · KEYMAP.md §Workspace (Native mode) and §Board and card detail ·
+# BOARD.md §8 — `ctrl-s b` opens this worktree's own `fleet://board` tab, the pane is the Hub's
+# board with the Hub's board keys, and the Hub still shows the *context* board afterwards.
+#
+# The `board` preset seeds two boards under one context (§4): the context board, whose cards are
+# numbered `FLT-…`, and `acme/api#feature`'s own, numbered `FEA-…` from the prefix the daemon
+# derives from the slug. Their card sets are disjoint, so `lists["board.cards"]` alone says which
+# of the two a surface is drawing — which is what makes the last third of this file the roadmap's
+# context-board-lookup regression check rather than a second copy of `board/columns.scenario`.
+#
+# A tab row carries its name and its `native`/`pty` badge, never its command, so `board` here is
+# the name the app gives the reserved `fleet://board` command, and the tab is matched by command
+# only inside the app (`screens/workspace/actions.rs`). The tab is created on demand and is not in
+# config.json's `windows[]`: it is never one of the three tabs a session starts with, and a
+# sleep/wake does not bring it back.
+#
+# Headless: virtual-lane only, because of its `shot`. The keyboard does reach the focused view in
+# the headless lane (§7), so everything else here would run there.
+fixture: board
+await idle 20000
+assert screen == Hub && hub_tab == Worktrees
+
+# Open the only worktree's session. Its three tabs are config.json's default windows, and there
+# is no fourth: nothing has asked for the board tab yet.
+key o
+await screen == Workspace 20000
+await lists.tabs.rows[2] exists 20000
+assert lists.tabs.rows[3] absent && mode == Terminal
+
+# `ctrl-s b` asks fleetd for the tab and selects the reply.
+key ctrl-s b
+await lists.tabs.rows[3].label == "board" 20000
+assert lists.tabs.rows[3].badges[0] == native
+await lists.tabs.selected.label == "board" 10000
+
+# The tab draws the board itself rather than handing its keys to an embedded view, so the chain
+# names the surface a third word deep and the cursor opens on the first card of the first column.
+await focused == "board.column[0].card[0]" 20000
+assert screen == Workspace && mode == Native
+assert key_contexts[0] == "Workspace" && key_contexts[1] == "Native"
+assert key_contexts[2] == "Board"
+
+# It is *this worktree's* board: three cards in two columns, numbered from the slug's prefix.
+assert lists.board.rows[0].label == "Backlog" && lists.board.rows[0].badges[0] == "2"
+assert lists.board.rows[1].label == "Todo" && lists.board.rows[1].badges[0] == "1"
+assert lists["board.cards"].rows[0].badges[0] == "FEA-1"
+assert lists["board.cards"].rows[0].label == "Open the tab with ctrl-s b"
+assert lists["board.cards"].rows[1].badges[0] == "FEA-2"
+
+# `]` is a board key and it reaches the pane: the card changes column, both counts move by one,
+# and the cursor follows the card into its new column.
+key ]
+await lists.board.rows[0].badges[0] == "1" 10000
+assert lists.board.rows[1].badges[0] == "2"
+assert lists.board.selected.label == "Todo" && focused == "board.column[1].card[1]"
+assert lists["board.cards"].rows[1].badges[0] == "FEA-1"
+shot board-tab
+
+# Pressing it again is idempotent: the tab is found by its command and only selected, so no
+# fourth tab is created and the cursor has not moved.
+key ctrl-s b
+await idle 10000
+assert lists.tabs.rows[4] absent && lists.tabs.selected.label == "board"
+assert focused == "board.column[1].card[1]" && key_contexts[2] == "Board"
+
+# `ctrl-s 1` leaves the pane for the first PTY, and the board word leaves the chain with it.
+key ctrl-s 1
+await lists.tabs.selected.id == 1 10000
+assert mode == Terminal && key_contexts[1] == "Terminal" && key_contexts[2] absent
+
+# `ctrl-s s` back to the Hub, then `g b` for its board — which is the context board. A worktree
+# board must never be what a context-board lookup finds, and the `]` above must not have touched
+# it: five `FLT-…` cards, still 2 / 2 / 1 across the first three columns.
+key ctrl-s s
+await screen == Hub 10000
+key g b
+await hub_tab == Board 10000
+await lists["board.cards"].rows[0].badges[0] == "FLT-1" 20000
+assert lists["board.cards"].rows[0].label == "Photograph the daemon-down screen"
+assert lists.board.rows[0].badges[0] == "2" && lists.board.rows[1].badges[0] == "2"
+assert lists.board.rows[2].badges[0] == "1" && lists.board.rows[3].badges[0] == "0"
+assert focused == "board.column[0].card[0]" && key_contexts[1] == "Board"
+dump context-board
+quit

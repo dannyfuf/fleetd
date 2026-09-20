@@ -331,13 +331,13 @@ the scenario that hits them:
   session's wallpaper, bar and window-opacity rules are inside every baseline recorded from it.
 
 Fixture presets are `empty` (first run), `one-repo` (one clean repository and worktree), `busy`
-(several repositories, worktrees and pull requests, one worktree degraded), `board` (cards plus
-fake `acli`), and `agents` (native-agent configuration plus scripted transcripts). Each gets a
-private `FLEET_HOME`, child-only `HOME`, real local Git repositories, and fake `gh`/`acli`; it
-never reads the developer's Fleet home.
+(several repositories, worktrees and pull requests, one worktree degraded), `board` (two boards
+with cards, plus fake `acli`), and `agents` (native-agent configuration plus scripted
+transcripts). Each gets a private `FLEET_HOME`, child-only `HOME`, real local Git repositories,
+and fake `gh`/`acli`; it never reads the developer's Fleet home.
 
 A preset is applied by driving a private `fleetd` through `fleet-client`'s own typed operations
-before the run's daemon starts, so nothing is written to a Fleet file by hand. Three consequences
+before the run's daemon starts, so nothing is written to a Fleet file by hand. Four consequences
 follow:
 
 - **Jobs and toasts are not part of any preset.** The daemon's job registry is in memory, so a job
@@ -347,6 +347,12 @@ follow:
   unrequested jobs, directories or timing into a run.
 - **The `board` preset uses Fleet's local board backend.** The fake `acli` exists to keep a
   Jira-backed board off the network, not to serve the fixture's cards.
+- **The `board` preset seeds two boards, and they are tellable apart in a dump.** The context
+  board holds five cards across three columns and numbers them `FLT-…`; `acme/api#feature`'s own
+  board — asked for with `EnsureWorktreeBoard`, the request `ctrl-s b` sends, so its id, name and
+  prefix are the daemon's derivation — holds three disjoint cards in two columns and numbers them
+  `FEA-…` after the slug. `lists["board.cards"]` therefore says which of the two a surface is
+  drawing, which is what `scenarios/workspace/board-tab.scenario` reads.
 
 ## 5. Scripted-agent transcripts
 
