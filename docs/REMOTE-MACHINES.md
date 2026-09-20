@@ -204,6 +204,11 @@ and thread operations resolve that id; agent creation resolves its worktree. Exp
 targets that host. Explicit bulk ids partition by host and fan out when any target is remote.
 Agent/list/inspect/prune/bulk behavior is merged across local and endpoints. Config, context, repo,
 board, Hello, Ping, host, Doctor, update, and daemon lifecycle commands are local orchestration.
+That includes `EnsureWorktreeBoard`/`CreateWorktreeBoard` for a worktree another host owns: the
+board is this daemon's document, and the service resolves the worktree against the mirror as well
+as local state (`docs/BOARD.md` §4, `docs/decisions/0019-worktree-scoped-boards.md`). The board
+family is addressed by board and card ids that no mirrored snapshot carries, so it cannot be
+routed.
 
 Forwarding is: classify -> translate ids -> clear placement (`host=None`) -> `endpoint.request` ->
 `response_to_local`. Fanout runs parts concurrently and `merge_fanout` retains per-item failures.

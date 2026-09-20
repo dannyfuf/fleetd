@@ -94,3 +94,29 @@ and the typed client re-checks at dispatch.
 
 The protocol already exposes `DeleteBoard`, but `fleet board delete` remains a separate follow-up;
 today a worktree board is removed with its worktree or through another typed client.
+
+## Addendum: a worktree board for a mirrored remote worktree
+
+A Workspace session on a worktree another host owns opens its board with the same
+`EnsureWorktreeBoard` every local worktree uses, and that board is **owned by the daemon whose
+client asked for it**, stored in that daemon's board store and resolved against its contexts.
+`classify.rs` keeps every board request `Target::Local`.
+
+Routing board requests to the owning host was rejected. Only the two ensure/create requests name
+a worktree at all; every other request in the family is addressed by `board_id` or `card_id`
+alone, and a mirrored snapshot fragment carries no boards' cards, so nothing the router or the
+app holds could say which host a card belongs to. Federating boards would mean a new
+identifier space, a card mirror, and cross-host card ids; scoping a locally owned board to a
+remote worktree needs none of that, and matches the cards that already link a worktree on another
+host through `CreateWorktreeFromCard { host }`.
+
+The consequence is that the worktree such a board is scoped to is not in `State.worktrees`. The
+`Boards` service therefore takes a second late-bound seam beside `WorktreeCascade` —
+`RemoteWorktrees`, implemented for `Mirror` and installed in composition once the mirror exists —
+and every worktree-existence check in the service reads local state first and the mirror second.
+A worktree named by neither is still `not found: worktree <id>`. The board's context comes from
+the local repository with the same derived `owner/name` id when there is one, else the first
+context whose `owners` collect the repository's owner, else the active context, else
+`not found: context for remote worktree <id>`. Nothing is bundled into trash when such a worktree
+is deleted on its owner: the board is hidden by the same summaries filter that hides a board whose
+local worktree is gone, and returns if the owner recreates the worktree.
