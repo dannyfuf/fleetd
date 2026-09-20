@@ -238,6 +238,13 @@ impl AppState {
     /// the other end, not a failure of the keystroke, and the sentence carries its own remedy.
     /// `fleet-client` rechecks the capability at dispatch, so a connection that changes under
     /// this answer fails the request with the same sentence rather than hanging.
+    ///
+    /// A refusal reached with the board pane already on screen — a `fleet://board` tab the user
+    /// put in `windows[]`, a daemon downgraded under a live one — also drops the mirror and
+    /// writes the same sentence to [`BoardState::error`]. The pane draws whatever the mirror
+    /// holds, and what the mirror holds is never this tab's board: without that it would draw
+    /// skeleton columns for a load that can never go out, or the Hub's context board under a
+    /// worktree's heading. `ctrl-s b` from a tab that is not the board's only toasts.
     pub(crate) fn enter_worktree_board_scope(
         &mut self,
         worktree: WorktreeId,
@@ -249,6 +256,10 @@ impl AppState {
                 now,
                 dwell_for(ToastDuration::Normal),
             );
+            if self.board_pane_is_active() {
+                self.invalidate_board();
+                self.board.error = Some(WORKTREE_BOARDS_UNSUPPORTED.to_owned());
+            }
             return false;
         }
         self.point_board_at(Some(BoardScope::Worktree(worktree)));

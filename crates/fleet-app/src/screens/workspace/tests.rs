@@ -1340,6 +1340,8 @@ struct ScriptedRequester {
     requests: Rc<RefCell<Vec<RequestBody>>>,
     session: Session,
     created: Terminal,
+    /// Set to refuse every request, the way a daemon that cannot create the tab answers.
+    refusal: Option<String>,
 }
 
 impl MutationRequester for ScriptedRequester {
@@ -1347,14 +1349,20 @@ impl MutationRequester for ScriptedRequester {
         &self,
         body: RequestBody,
     ) -> async_channel::Receiver<Result<ResponseBody, ProtoError>> {
-        let answer = match &body {
-            RequestBody::NewTerminal { .. } => ResponseBody::Terminal(self.created.clone()),
-            _ => ResponseBody::Session(self.session.clone()),
+        let answer = match (&self.refusal, &body) {
+            (Some(message), _) => Err(ProtoError {
+                kind: ErrorKind::Conflict,
+                message: message.clone(),
+            }),
+            (None, RequestBody::NewTerminal { .. }) => {
+                Ok(ResponseBody::Terminal(self.created.clone()))
+            }
+            (None, _) => Ok(ResponseBody::Session(self.session.clone())),
         };
         self.requests.borrow_mut().push(body);
         let (reply, receiver) = async_channel::bounded(1);
         reply
-            .try_send(Ok(answer))
+            .try_send(answer)
             .unwrap_or_else(|error| panic!("test reply must be accepted: {error}"));
         receiver
     }
@@ -1381,6 +1389,7 @@ fn scripted(session: &Session) -> ScriptedRequester {
         requests: Rc::new(RefCell::new(Vec::new())),
         session: session.clone(),
         created,
+        refusal: None,
     }
 }
 
@@ -1547,4 +1556,68 @@ fn selecting_another_tab_ends_a_pending_board_claim(cx: &mut gpui::TestAppContex
     // Any other tab is the user choosing another surface, and the wait ends with it.
     cx.update(|cx| select_terminal(&local, &requester, &state, Some(TerminalId(1)), cx));
     assert_eq!(local.borrow().state.board_claim, None);
+}
+
+/// A pending `ctrl-s b` waits across the frames before its tab exists, but not across sessions.
+///
+/// The tab it is waiting for is created in the session the key was pressed in, so a claim kept
+/// past a move to another worktree would hold the mirror on a board nothing is going to draw.
+#[test]
+fn a_pending_board_claim_waits_only_in_the_session_that_made_it() {
+    let model = model_of(&app_with_worktree(None));
+    let elsewhere: WorktreeId = "buk/payroll#other"
+        .parse()
+        .unwrap_or_else(|error| panic!("{error}"));
+
+    assert!(pending_claim_survives(
+        Some(&BoardClaim::Requested {
+            worktree: worktree_id()
+        }),
+        &model
+    ));
+    assert!(!pending_claim_survives(
+        Some(&BoardClaim::Requested {
+            worktree: elsewhere
+        }),
+        &model
+    ));
+    // Only a wait survives: a pane that is drawing has the active tab to prove it, and no
+    // claim at all is nothing to keep.
+    assert!(!pending_claim_survives(
+        Some(&BoardClaim::Drawing {
+            worktree: worktree_id(),
+            generation: 0,
+        }),
+        &model
+    ));
+    assert!(!pending_claim_survives(None, &model));
+}
+
+/// A tab create the daemon refused ends the wait it started, scope and all.
+///
+/// The claim is what holds the worktree scope while the tab is in flight; left behind by a
+/// create that failed, it would keep the mirror off the Hub's board for the rest of the visit.
+#[gpui::test]
+fn a_refused_board_tab_create_ends_the_claim_it_made(cx: &mut gpui::TestAppContext) {
+    let (app, record) = app_with_board_tab(false);
+    let state = cx.new(|_| app);
+    let local = Rc::new(RefCell::new(local_with(|local| {
+        local.state.board_claim = Some(BoardClaim::Requested {
+            worktree: worktree_id(),
+        });
+    })));
+    let mut requester = scripted(&record);
+    requester.refusal = Some("too many terminals".to_owned());
+
+    cx.update(|cx| show_board_tab(&local, &requester, &state, cx));
+    cx.run_until_parked();
+
+    assert_eq!(local.borrow().state.board_claim, None);
+    state.read_with(cx, |app, _| {
+        assert_eq!(
+            app.sticky_error.as_ref().map(|error| error.text.as_str()),
+            Some("too many terminals"),
+            "a refused request is sticky, never silent"
+        );
+    });
 }

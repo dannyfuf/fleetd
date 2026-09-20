@@ -786,8 +786,13 @@ pub(super) fn request_shell_tab<T: MutationRequester + Clone + 'static>(
     state: &Entity<AppState>,
     cx: &mut App,
 ) {
-    let originating_session = match &request {
-        RequestBody::NewTerminal { session, .. } => session.clone(),
+    // A `fleet://board` create that never lands has to end the claim `ctrl-s b` made with it:
+    // the worktree scope it holds would otherwise outlive the tab it was waiting for and keep
+    // the mirror off the Hub's board for the rest of the visit.
+    let (originating_session, board_tab) = match &request {
+        RequestBody::NewTerminal {
+            session, command, ..
+        } => (session.clone(), command == NATIVE_BOARD),
         _ => return,
     };
     let capacity = state.read(cx).snapshot.as_ref().and_then(|snapshot| {
@@ -803,6 +808,9 @@ pub(super) fn request_shell_tab<T: MutationRequester + Clone + 'static>(
             })
     });
     if capacity == Some(false) {
+        if board_tab {
+            abandon_board_claim(local, state, cx);
+        }
         state.update(cx, |app, cx| {
             app.notify_workspace_tab_limit();
             cx.notify();
@@ -831,6 +839,9 @@ pub(super) fn request_shell_tab<T: MutationRequester + Clone + 'static>(
             }),
             // A refused request is sticky, never silent (§1.8) — this key used to fail quietly.
             Ok(Err(error)) => cx.update(|cx| {
+                if board_tab {
+                    abandon_board_claim(&local, &state, cx);
+                }
                 state.update(cx, |app, cx| {
                     app.sticky_error = Some(crate::state::StickyError {
                         text: error.message,
@@ -841,6 +852,9 @@ pub(super) fn request_shell_tab<T: MutationRequester + Clone + 'static>(
                 });
             }),
             Ok(Ok(_)) => cx.update(|cx| {
+                if board_tab {
+                    abandon_board_claim(&local, &state, cx);
+                }
                 show_sticky_error(
                     &state,
                     "could not create terminal: daemon returned an unexpected response".to_owned(),
@@ -848,6 +862,9 @@ pub(super) fn request_shell_tab<T: MutationRequester + Clone + 'static>(
                 );
             }),
             Err(_) => cx.update(|cx| {
+                if board_tab {
+                    abandon_board_claim(&local, &state, cx);
+                }
                 show_sticky_error(
                     &state,
                     "could not create terminal: daemon reply was lost".to_owned(),
@@ -1165,6 +1182,23 @@ fn open_board_tab(
     // and cancelling the load this keystroke started.
     local.borrow_mut().state.board_claim = Some(BoardClaim::Requested { worktree });
     show_board_tab(local, bridge, state, cx);
+}
+
+/// Ends a `ctrl-s b` whose tab is never going to arrive.
+///
+/// The claim is what holds the worktree scope across the frames before the tab exists
+/// ([`WorkspaceScreen::release_board_scope`]), so a create the daemon refused has to drop it.
+/// The scope itself is returned to the Hub's context on the notify this raises, where the one
+/// rule about leaving a worktree scope behind already lives.
+fn abandon_board_claim(local: &Rc<RefCell<Local>>, state: &Entity<AppState>, cx: &mut App) {
+    if !matches!(
+        local.borrow().state.board_claim,
+        Some(BoardClaim::Requested { .. })
+    ) {
+        return;
+    }
+    local.borrow_mut().state.board_claim = None;
+    state.update(cx, |_, cx| cx.notify());
 }
 
 /// The worktree whose board `ctrl-s b` is about, or nothing — having said why.

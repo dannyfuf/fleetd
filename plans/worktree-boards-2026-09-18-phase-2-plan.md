@@ -253,14 +253,14 @@ Targeted while iterating: `cargo test -p fleet-app`, `cargo test -p fleet-core c
 
 ## Definition of done
 
-- [ ] Every P2 task is `[x]` in the tracker and the tracker matches the code.
-- [ ] `make lint` is clean.
-- [ ] `make test` passes (clippy `-D warnings` is this repo's type gate).
-- [ ] `make harness` passes with `board-tab.scenario` in the report.
-- [ ] UX-SPEC, KEYMAP, APP-CONTRACTS, ARCHITECTURE, SWARM-INVENTORY and BOARD.md §8 agree with
+- [x] Every P2 task is `[x]` in the tracker and the tracker matches the code.
+- [x] `make lint` is clean.
+- [x] `make test` passes (clippy `-D warnings` is this repo's type gate).
+- [x] `make harness` passes with `board-tab.scenario` in the report.
+- [x] UX-SPEC, KEYMAP, APP-CONTRACTS, ARCHITECTURE, SWARM-INVENTORY and BOARD.md §8 agree with
       the code.
-- [ ] No IO, requests or `cx.notify` inside `render`; no bare `.detach()`; no `unwrap`.
-- [ ] Follow-ups captured in the tracker.
+- [x] No IO, requests or `cx.notify` inside `render`; no bare `.detach()`; no `unwrap`.
+- [x] Follow-ups captured in the tracker.
 
 ## Risks and rollback
 

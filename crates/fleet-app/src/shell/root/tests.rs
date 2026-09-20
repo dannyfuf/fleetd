@@ -1239,14 +1239,16 @@ fn worktree_board_view(context: &FleetContext, worktree: &Worktree) -> BoardView
         let card = create_card(
             &mut board,
             &cards,
-            format!("wt-card-{index}").parse().unwrap(),
+            format!("wt-card-{index}")
+                .parse()
+                .unwrap_or_else(|error| panic!("{error}")),
             CardDraft {
                 title: title.to_owned(),
                 ..CardDraft::default()
             },
             "2026-09-19T12:00:00Z",
         )
-        .unwrap();
+        .unwrap_or_else(|error| panic!("{error}"));
         cards.push(card);
     }
     // One card per column, so `l` / `h` have somewhere to go and `j` / `k` have nowhere.
@@ -1256,35 +1258,46 @@ fn worktree_board_view(context: &FleetContext, worktree: &Worktree) -> BoardView
     BoardView { board, cards }
 }
 
-/// The real shell standing in a worktree Workspace whose `fleet://board` tab is selected.
+/// Stages the worktree session the board pane lives in, on a daemon that serves its board.
 ///
-/// Only what the daemon owns is staged: the tab exists and it is the session's active one.
-/// Pointing the mirror is the pane's own job, so the fixture asserts that it did it and then
-/// answers the load the way fleetd would, with that worktree's board.
-fn root_board_pane_fixture(cx: &mut gpui::TestAppContext, name: &str) -> RootInputFixture {
-    let mut fixture = root_input_fixture(cx, name);
+/// Only what the daemon owns is staged: `ptys` shell tabs, then the session's `fleet://board`
+/// tab when `board_tab` says it already has one, and `active` is the tab the snapshot says is
+/// selected. Pointing the mirror is the pane's own job, and every caller is about what it does
+/// with that.
+fn stage_board_session(fixture: &mut RootInputFixture, ptys: usize, board_tab: bool, active: u64) {
     let state = fixture.state.clone();
     fixture.visual.update(|_, cx| {
         state.update(cx, |app, cx| {
             let worktree = filter_worktree("feat-one");
+            let mut terminals: Vec<fleet_core::sessions::Terminal> = (1..=ptys)
+                .map(|id| {
+                    workspace_terminal(id as u64, "sh", fleet_core::sessions::TerminalKind::Pty)
+                })
+                .collect();
+            if board_tab {
+                terminals.push(workspace_terminal(
+                    ptys as u64 + 1,
+                    fleet_core::config::NATIVE_BOARD,
+                    fleet_core::sessions::TerminalKind::Native,
+                ));
+            }
             let session = fleet_core::sessions::Session {
-                id: worktree.session.parse().unwrap(),
+                id: worktree
+                    .session
+                    .parse()
+                    .unwrap_or_else(|error| panic!("{error}")),
                 host: None,
                 kind: fleet_core::sessions::SessionKind::Worktree(worktree.id.clone()),
                 cwd: worktree.path.clone(),
-                terminals: vec![
-                    workspace_terminal(1, "sh", fleet_core::sessions::TerminalKind::Pty),
-                    workspace_terminal(
-                        2,
-                        fleet_core::config::NATIVE_BOARD,
-                        fleet_core::sessions::TerminalKind::Native,
-                    ),
-                ],
-                active_terminal: Some(fleet_core::ids::TerminalId(2)),
+                terminals,
+                active_terminal: Some(fleet_core::ids::TerminalId(active)),
                 slept_at: None,
                 kept_terminals: Vec::new(),
             };
-            let mut snapshot = app.snapshot.clone().unwrap();
+            let mut snapshot = app
+                .snapshot
+                .clone()
+                .unwrap_or_else(|| panic!("the fixture installs a snapshot"));
             snapshot.sessions = vec![session.clone()];
             app.daemon_capabilities
                 .insert(fleet_proto::response::BOARD_WORKTREE_CAPABILITY.to_owned());
@@ -1296,10 +1309,19 @@ fn root_board_pane_fixture(cx: &mut gpui::TestAppContext, name: &str) -> RootInp
             cx.notify();
         });
     });
-    // The pane's own `sync_board_scope` runs on this notify and points the mirror at the
-    // worktree; only then does a worktree board view pass `apply_board_view`'s scope guard,
-    // which is the whole point of the guard.
-    settle(&mut fixture);
+    settle(fixture);
+}
+
+/// The real shell standing in a worktree Workspace whose `fleet://board` tab is selected.
+///
+/// The pane's own `sync_board_scope` runs on the staged notify and points the mirror at the
+/// worktree; only then does a worktree board view pass `apply_board_view`'s scope guard, which
+/// is the whole point of the guard. The fixture asserts that it did, then answers the load the
+/// way fleetd would, with that worktree's board.
+fn root_board_pane_fixture(cx: &mut gpui::TestAppContext, name: &str) -> RootInputFixture {
+    let mut fixture = root_input_fixture(cx, name);
+    stage_board_session(&mut fixture, 1, true, 2);
+    let state = fixture.state.clone();
     let worktree = filter_worktree("feat-one");
     fixture.visual.update(|_, cx| {
         state.update(cx, |app, cx| {
@@ -1426,12 +1448,18 @@ fn real_shell_board_pane_gives_the_prefix_and_the_scope_back(cx: &mut gpui::Test
     // pane is gone, and the mirror goes back to the Hub's context board with it.
     assert_eq!(chain(&mut fixture), vec!["Workspace", "Terminal"]);
     let session = fixture.state.read_with(&fixture.visual, |app, _| {
-        app.active_session().unwrap().id.clone()
+        app.active_session()
+            .unwrap_or_else(|| panic!("the fixture installs a session"))
+            .id
+            .clone()
     });
     let state = fixture.state.clone();
     fixture.visual.update(|_, cx| {
         state.update(cx, |app, cx| {
-            let mut snapshot = app.snapshot.clone().unwrap();
+            let mut snapshot = app
+                .snapshot
+                .clone()
+                .unwrap_or_else(|| panic!("the fixture installs a snapshot"));
             snapshot.sessions[0].active_terminal = Some(fleet_core::ids::TerminalId(1));
             app.apply_snapshot(snapshot, Instant::now());
             cx.notify();
@@ -1450,6 +1478,123 @@ fn real_shell_board_pane_gives_the_prefix_and_the_scope_back(cx: &mut gpui::Test
     });
 }
 
+/// The scope `ctrl-s b` claims survives the very notify the keystroke raised.
+///
+/// fleetd owns the tab list, so the frames between the key and its snapshot still show the tab
+/// the user came from. The pane's `synchronize` runs on every one of them, and a release there
+/// would point the mirror back at the context and strand the `EnsureWorktreeBoard` the
+/// keystroke started — the board would then load only once the daemon listed the tab.
+#[gpui::test]
+fn real_shell_board_key_keeps_its_scope_until_its_tab_arrives(cx: &mut gpui::TestAppContext) {
+    let mut fixture = root_input_fixture(cx, "board-key-pending");
+    stage_board_session(&mut fixture, 1, true, 1);
+    let before = board_generation(&mut fixture);
+
+    dispatch_root_key(&mut fixture, "ctrl-s");
+    dispatch_root_key(&mut fixture, "b");
+    settle(&mut fixture);
+
+    let worktree = filter_worktree("feat-one");
+    fixture.state.read_with(&fixture.visual, |app, _| {
+        assert!(
+            !app.board_pane_is_active(),
+            "the snapshot still shows the tab the user came from"
+        );
+        assert!(
+            matches!(&app.board.scope, Some(crate::state::BoardScope::Worktree(id))
+                if id == &worktree.id),
+            "the mirror stays where the keystroke pointed it: {:?}",
+            app.board.scope
+        );
+        assert_eq!(
+            app.board_generation(),
+            before.wrapping_add(1),
+            "one invalidation, the keystroke's own: a second one strands its load"
+        );
+    });
+
+    // And the tab arriving is what turns the wait into a pane, with the same load still owed.
+    stage_board_session(&mut fixture, 1, true, 2);
+    fixture.state.read_with(&fixture.visual, |app, _| {
+        assert!(app.board_pane_is_active());
+        assert!(
+            matches!(&app.board.scope, Some(crate::state::BoardScope::Worktree(id))
+                if id == &worktree.id),
+            "{:?}",
+            app.board.scope
+        );
+        assert_eq!(app.board_generation(), before.wrapping_add(1));
+    });
+}
+
+/// A tab create that is refused gives the mirror back, rather than holding it for a dead wait.
+///
+/// The session is full, so the `fleet://board` tab `ctrl-s b` asks for can never arrive — the
+/// same shape as any other refused create — and the scope the keystroke claimed has to go back
+/// to the context instead of outliving the tab it was waiting for.
+#[gpui::test]
+fn real_shell_a_refused_board_tab_returns_the_scope(cx: &mut gpui::TestAppContext) {
+    let mut fixture = root_input_fixture(cx, "board-key-refused");
+    stage_board_session(&mut fixture, crate::state::WORKSPACE_TAB_LIMIT, false, 1);
+
+    dispatch_root_key(&mut fixture, "ctrl-s");
+    dispatch_root_key(&mut fixture, "b");
+    settle(&mut fixture);
+
+    fixture.state.read_with(&fixture.visual, |app, _| {
+        assert_eq!(
+            app.toasts
+                .last()
+                .map(|live| live.toast.text.as_ref().to_owned())
+                .as_deref(),
+            Some(crate::state::WORKSPACE_TAB_LIMIT_NOTICE),
+            "the create was attempted and refused"
+        );
+        assert!(
+            matches!(&app.board.scope, Some(crate::state::BoardScope::Context(id))
+                if id.as_str() == "work"),
+            "a tab that is never going to arrive may not hold the worktree scope: {:?}",
+            app.board.scope
+        );
+    });
+}
+
+/// Leaving the Workspace ends the wait: the tab the reply would select has nowhere to be drawn.
+#[gpui::test]
+fn real_shell_leaving_the_workspace_ends_a_pending_board_claim(cx: &mut gpui::TestAppContext) {
+    let mut fixture = root_input_fixture(cx, "board-key-left");
+    stage_board_session(&mut fixture, 1, true, 1);
+    dispatch_root_key(&mut fixture, "ctrl-s");
+    dispatch_root_key(&mut fixture, "b");
+
+    // The worktrees tab, not the Hub's board: only the Workspace's own release can answer here.
+    let state = fixture.state.clone();
+    fixture.visual.update(|_, cx| {
+        state.update(cx, |app, cx| {
+            app.screen = Screen::Hub {
+                tab: HubTab::Worktrees,
+            };
+            cx.notify();
+        });
+    });
+    settle(&mut fixture);
+
+    fixture.state.read_with(&fixture.visual, |app, _| {
+        assert!(
+            matches!(&app.board.scope, Some(crate::state::BoardScope::Context(id))
+                if id.as_str() == "work"),
+            "the Hub must not inherit a worktree scope: {:?}",
+            app.board.scope
+        );
+    });
+}
+
+fn board_generation(fixture: &mut RootInputFixture) -> u64 {
+    fixture
+        .state
+        .read_with(&fixture.visual, |app, _| app.board_generation())
+}
+
 /// `o` on a card linked to the worktree the pane is standing in is a no-op that says so.
 #[gpui::test]
 fn real_shell_board_pane_refuses_to_reopen_its_own_worktree(cx: &mut gpui::TestAppContext) {
@@ -1458,7 +1603,12 @@ fn real_shell_board_pane_refuses_to_reopen_its_own_worktree(cx: &mut gpui::TestA
     fixture.visual.update(|_, cx| {
         state.update(cx, |app, cx| {
             let worktree = app.active_worktree().cloned();
-            app.board.view.as_mut().unwrap().cards[0].worktree_id = worktree;
+            app.board
+                .view
+                .as_mut()
+                .unwrap_or_else(|| panic!("the fixture answers the pane's load"))
+                .cards[0]
+                .worktree_id = worktree;
             cx.notify();
         });
     });

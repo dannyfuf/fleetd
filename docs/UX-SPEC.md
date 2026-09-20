@@ -2009,10 +2009,11 @@ the app never invents an order the daemon does not agree with.
 * **cold** — skeleton columns while the first load is in flight, whichever request the scope
   named (`EnsureBoard` on the Hub, `EnsureWorktreeBoard` in the worktree tab);
 * **failed** — the message verbatim in a sticky row plus `The board could not be loaded. · r reload`;
-* **no context, no daemon** — the two states where a load can never go out take the failed
-  shape rather than cold columns, because skeletons promise a request that was never sent:
-  `fleetd is not reachable`, and `No active context — pick one with 1–9 or gt / gT`.
-  Activating a context clears the board, which drops the message and asks again;
+* **no context, no daemon, no worktree boards** — the three states where a load can never go out
+  take the failed shape rather than cold columns, because skeletons promise a request that was
+  never sent: `fleetd is not reachable`, `No active context — pick one with 1–9 or gt / gT`, and
+  — in a worktree's board tab on a daemon that serves no worktree boards — the same sentence the
+  refusal toasts. Activating a context clears the board, which drops the message and asks again;
 * **empty board** — `No cards yet. · c new card`;
 * **empty column** — `No cards here.` inside the column;
 * **no match** — `Nothing matches "<query>". · esc clear`.

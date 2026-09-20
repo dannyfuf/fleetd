@@ -125,12 +125,20 @@ impl WorkspaceScreen {
         state: &Entity<AppState>,
         cx: &mut App,
     ) {
-        let Some((worktree, _)) = self
+        // Matched by reference: this runs on every notify of every Workspace frame, and the
+        // clone — a worktree id plus a path — is only owed once the claim misses.
+        let drawing = self
             .draws_board(model)
-            .then(|| model.worktree.clone())
-            .flatten()
-        else {
-            self.release_board_scope(true, bridge, state, cx);
+            .then(|| model.worktree.as_ref().map(|(worktree, _)| worktree))
+            .flatten();
+        let Some(worktree) = drawing else {
+            // A `ctrl-s b` whose tab fleetd has not listed yet is still waiting here: this very
+            // notify is the one the keystroke raised, and its snapshot still shows the previous
+            // tab. Releasing the claim there would cancel the load the keystroke started, so
+            // only leaving the session it was pressed in ends the wait.
+            let survives =
+                pending_claim_survives(self.local.borrow().state.board_claim.as_ref(), model);
+            self.release_board_scope(!survives, bridge, state, cx);
             return;
         };
         let generation = state.read(cx).board_generation();
@@ -140,7 +148,7 @@ impl WorkspaceScreen {
             .state
             .board_claim
             .as_ref()
-            .is_some_and(|claim| claim.is_drawing(&worktree, generation))
+            .is_some_and(|claim| claim.is_drawing(worktree, generation))
         {
             return;
         }
@@ -149,11 +157,15 @@ impl WorkspaceScreen {
         // screen asked for last. A refusal (an old daemon, already toasted) leaves the mirror
         // where it was and is recorded all the same, so the pane asks once per generation
         // rather than once per notify.
-        if state.read(cx).board.scope != Some(BoardScope::Worktree(worktree.clone())) {
+        let pointed = matches!(
+            &state.read(cx).board.scope,
+            Some(BoardScope::Worktree(current)) if current == worktree
+        );
+        if !pointed {
             crate::screens::board::enter_worktree_scope(worktree.clone(), state, bridge, cx);
         }
         self.local.borrow_mut().state.board_claim = Some(BoardClaim::Drawing {
-            worktree,
+            worktree: worktree.clone(),
             generation: state.read(cx).board_generation(),
         });
     }
@@ -161,10 +173,14 @@ impl WorkspaceScreen {
     /// Gives the mirror back to the Hub's context scope once no board pane is drawing it.
     ///
     /// `drop_pending` says whether a `ctrl-s b` still waiting for fleetd to list and select its
-    /// tab ends here too. Inside the Workspace it does not: the frames between the keystroke
+    /// tab ends here too. On the per-notify path it does not: the frames between the keystroke
     /// and the snapshot still show the previous tab, and releasing there would cancel the load
     /// the keystroke just started. Leaving the Workspace ends the wait, because the tab the
     /// reply would select has nowhere left to be drawn.
+    ///
+    /// The scope is handed back whether or not a claim is still here to drop: the places a wait
+    /// dies where it happens — another tab selected, a tab create the daemon refused — only
+    /// clear the claim, and the worktree scope it was holding comes back on the next notify.
     pub(super) fn release_board_scope(
         &self,
         drop_pending: bool,
@@ -172,11 +188,13 @@ impl WorkspaceScreen {
         state: &Entity<AppState>,
         cx: &mut App,
     ) {
-        let claim = self.local.borrow().state.board_claim.clone();
-        match claim {
-            Some(BoardClaim::Requested { .. }) if !drop_pending => return,
-            Some(_) => {}
-            None => return,
+        if !drop_pending
+            && matches!(
+                self.local.borrow().state.board_claim,
+                Some(BoardClaim::Requested { .. })
+            )
+        {
+            return;
         }
         self.local.borrow_mut().state.board_claim = None;
         // The Hub takes the context scope back through its own observation, but only while its
@@ -342,6 +360,21 @@ pub(super) enum BoardClaim {
         /// `AppState::board_generation` when the scope was last claimed.
         generation: u64,
     },
+}
+
+/// Whether a `ctrl-s b` still waiting for its tab is waiting in the session that pressed it.
+///
+/// The wait outlives the frames between the keystroke and fleetd's snapshot, but not a move to
+/// another worktree: the tab it is waiting for is created in the session the key was pressed in,
+/// and a claim kept past that move would hold the mirror on a board no surface is going to draw.
+pub(super) fn pending_claim_survives(claim: Option<&BoardClaim>, model: &Model) -> bool {
+    let Some(BoardClaim::Requested { worktree }) = claim else {
+        return false;
+    };
+    model
+        .worktree
+        .as_ref()
+        .is_some_and(|(current, _)| current == worktree)
 }
 
 impl BoardClaim {

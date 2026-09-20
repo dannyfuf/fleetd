@@ -74,6 +74,28 @@ fn worktree_view(worktree: &Worktree) -> BoardView {
     }
 }
 
+/// The app in a worktree's Workspace, with `active` as the tab the daemon has selected.
+///
+/// `2` is the `fleet://board` tab the pane draws, `1` the PTY `ctrl-s b` is pressed from.
+fn state_in_workspace(active: u64) -> AppState {
+    let now = Instant::now();
+    let mut state = AppState::new("/tmp/fleet-board-pane-state", now);
+    let mut session = session_with("payroll/feat", &[1, 2]);
+    session.terminals[1].kind = fleet_core::sessions::TerminalKind::Native;
+    session.terminals[1].command = NATIVE_BOARD.to_owned();
+    session.active_terminal = Some(TerminalId(active));
+    let context = context("work");
+    let mut snapshot = snapshot();
+    snapshot.active_context = Some(context.id.clone());
+    snapshot.contexts = vec![context];
+    snapshot.sessions = vec![session.clone()];
+    state.apply_snapshot(snapshot, now);
+    state.screen = Screen::Workspace {
+        session: session.id,
+    };
+    state
+}
+
 /// The app on the board tab, connected to a daemon that serves worktree boards.
 fn state_on_board_with_worktree_boards() -> AppState {
     let mut state = state_on_board();
@@ -467,5 +489,64 @@ fn a_daemon_without_worktree_boards_refuses_the_scope_and_keeps_the_board_it_sho
             .as_ref(),
         WORKTREE_BOARDS_UNSUPPORTED,
         "the sentence carries its own remedy (\u{a7}2.7)"
+    );
+}
+
+/// A refusal the board pane can see is drawn in the pane, not only spoken in a toast.
+///
+/// The pane draws whatever the one mirror holds, and a refused scope means the mirror never
+/// holds this tab's board: without the failed shape the tab would draw skeleton columns for a
+/// load that can never go out, or the Hub's context board under a worktree's heading.
+#[test]
+fn a_refused_scope_under_the_board_pane_takes_the_failed_shape() {
+    let mut state = state_in_workspace(2);
+    assert!(state.board_pane_is_active());
+    state.apply_board_view(view());
+    assert!(state.board().is_some(), "the Hub loaded its board first");
+
+    assert!(!state.enter_worktree_board_scope(worktree("feat").id, Instant::now()));
+
+    assert_eq!(
+        state.board.error.as_deref(),
+        Some(WORKTREE_BOARDS_UNSUPPORTED),
+        "the pane says what the toast said"
+    );
+    assert!(
+        state.board().is_none(),
+        "the mirror is not holding this tab's board and may not draw another one under it"
+    );
+    assert_eq!(
+        state.board_scope(),
+        Some(BoardScope::Context(context("work").id)),
+        "a refused scope is still not entered"
+    );
+}
+
+/// `ctrl-s b` from a tab that is not the board's has no pane to draw a failure in.
+#[test]
+fn a_refusal_no_board_pane_can_draw_stays_a_toast() {
+    let mut state = state_in_workspace(1);
+    assert!(!state.board_pane_is_active());
+    state.apply_board_view(view());
+
+    assert!(!state.enter_worktree_board_scope(worktree("feat").id, Instant::now()));
+
+    assert!(
+        state.board.error.is_none(),
+        "nothing is drawing the board, and the Hub's next visit would inherit the message"
+    );
+    assert!(
+        state.board().is_some(),
+        "and the board that was showing is still showing"
+    );
+    assert_eq!(
+        state
+            .toasts
+            .last()
+            .unwrap_or_else(|| panic!("no toast"))
+            .toast
+            .text
+            .as_ref(),
+        WORKTREE_BOARDS_UNSUPPORTED
     );
 }

@@ -818,8 +818,12 @@ counter, so a reply from the scope just left can never land. Clear also resets t
 `None`, which is the Hub's board: a reconnect, a link change or a context switch takes a
 worktree scope with it, and the surface that wanted one enters it again.
 `enter_worktree_board_scope` refuses, toasts `WORKTREE_BOARDS_UNSUPPORTED`
-(§2.7, 3.2 s, `info`) and leaves the scope and the shown board untouched when the
-connected daemon does not advertise `board.worktree`.
+(§2.7, 3.2 s, `info`) and leaves the scope untouched when the
+connected daemon does not advertise `board.worktree`. Refused with the board pane already on
+screen — a `fleet://board` tab in `windows[]`, a daemon downgraded under a live one — it also
+drops the mirror and writes that same sentence to `BoardState::error`, because the pane draws
+what the mirror holds and what it holds is never that tab's board: the failed shape says so,
+where skeleton columns would promise a load that can never go out.
 `apply_daemon_event(Event, Instant)` handles
 `Event::BoardChanged` by setting `board_stale` only for the displayed board.
 
@@ -848,7 +852,10 @@ daemon that refused once is not asked again on every notify. `BoardClaim::Reques
 other half: `ctrl-s b` points the mirror before the tab exists so its load is in flight by the
 time the pane first paints, and the frames until fleetd lists and selects that tab still show
 the previous one — releasing there would cancel the load the keystroke started. Selecting any
-other tab drops the pending claim, as does leaving the Workspace.
+other tab drops the pending claim, as does a create the daemon refused, a move to another
+worktree's session, and leaving the Workspace. A claim dropped where it died leaves the worktree
+scope behind, and `release_board_scope` returns it to the context on the next notify whether or
+not a claim is still there to drop.
 
 `prefix::OpenBoard` (`ctrl-s b`, `Workspace > Prefix`) is the Workspace's way in: on a
 session with no worktree it toasts `boards belong to worktrees` and stops, otherwise it enters
