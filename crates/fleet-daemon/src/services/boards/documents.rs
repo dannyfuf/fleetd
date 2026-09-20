@@ -176,7 +176,7 @@ impl Boards {
         if card
             .worktree_id
             .as_ref()
-            .is_some_and(|id| !state.worktrees.iter().any(|w| w.id == *id))
+            .is_some_and(|id| self.known_worktree(&state, id).is_none())
         {
             card.worktree_id = None;
         }

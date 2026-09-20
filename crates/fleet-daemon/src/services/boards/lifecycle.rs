@@ -17,6 +17,10 @@ impl Boards {
             let Some(doc) = self.scan_load(&id) else {
                 continue;
             };
+            // Local state only, and the mirror is never consulted: a worktree board lives on
+            // the daemon that owns the worktree, so a document scoped to a worktree this
+            // daemon never published is either an orphan or the stale copy an older build
+            // made before the request was routed to its owner (`docs/BOARD.md` §4).
             if context.is_some_and(|id| *id != doc.board.context_id)
                 || !state.contexts.iter().any(|c| c.id == doc.board.context_id)
                 || doc.board.worktree_id.as_ref().is_some_and(|worktree| {
@@ -41,6 +45,9 @@ impl Boards {
             .load(id)?
             .ok_or_else(|| BoardError::BoardNotFound(id.to_string()))?;
         let state = self.state_store.load().await?;
+        // A *card* may link a worktree another host owns, so the scrub below reads the mirror
+        // too; the board's own scope is a local question and is not checked here.
+        let mirrored = self.mirrored_worktrees();
         let context = doc.board.context_id.clone();
         scrub_repo(&state, &context, &mut doc.board.default_repo_id);
         let mut index = self.index.write().await;
@@ -50,7 +57,7 @@ impl Boards {
             if card
                 .worktree_id
                 .as_ref()
-                .is_some_and(|id| !state.worktrees.iter().any(|w| w.id == *id))
+                .is_some_and(|id| !worktree_exists(&state, &mirrored, id))
             {
                 card.worktree_id = None;
             }
@@ -98,7 +105,7 @@ impl Boards {
         })
     }
 
-    /// Gets or creates the board scoped to one published worktree.
+    /// Gets or creates the board scoped to one worktree this daemon published.
     pub async fn ensure_for_worktree(&self, worktree: &WorktreeId) -> DaemonResult<BoardView> {
         let state = self.state_store.load().await?;
         worktree_context(&state, worktree)?;
@@ -194,6 +201,8 @@ impl Boards {
                 .contexts
                 .iter()
                 .any(|context| context.id == summary.context_id)
+                // Local state only, as in `list`: a board scoped elsewhere is not this
+                // daemon's to publish.
                 && summary
                     .worktree_id
                     .as_ref()
@@ -630,6 +639,50 @@ impl Boards {
         Ok(())
     }
 
+    /// Moves this daemon's own document for a worktree another host owns into the trash.
+    ///
+    /// A worktree board lives on the daemon that owns the worktree (`docs/BOARD.md` §4), so a
+    /// document found here for a hosted worktree is the copy an older build created before board
+    /// requests were routed to their owner. Left in place it shadows the real board — the derived
+    /// id is the same on both hosts — and it is trashed rather than merged, because nothing here
+    /// can tell which side of a divergence is the user's work. No `BoardChanged` is published:
+    /// the request this retirement runs under is about to return the *host's* board under that
+    /// same id, and a `Deleted` event would tell the app to drop the board it just opened.
+    pub async fn retire_hosted_worktree_board(
+        &self,
+        worktree: &WorktreeId,
+        host: &HostId,
+    ) -> DaemonResult<Option<RetiredBoard>> {
+        let Some(board) = self.worktree_board(worktree)? else {
+            return Ok(None);
+        };
+        let _guard = self.gate(&board).await;
+        // Re-read under the gate and by persisted scope: the id above came from a lock-free
+        // scan, and only the document itself proves which worktree it belongs to. `peek`, so a
+        // damaged file is reported instead of being quarantined and then retired as empty.
+        let Some(doc) = self.store.peek(&board)? else {
+            return Ok(None);
+        };
+        if doc.board.worktree_id.as_ref() != Some(worktree) {
+            return Ok(None);
+        }
+        let cards = doc.cards.len();
+        let trashed = self.store.delete_reporting(&board)?;
+        self.summaries.write().await.remove(&board);
+        self.index.write().await.retain(|_, owner| *owner != board);
+        let Some(path) = trashed.last().cloned() else {
+            // Nothing was left to move: the file went away between the read above and the
+            // rename, so there is no trashed document to report or to name in the log.
+            return Ok(None);
+        };
+        if cards == 0 {
+            tracing::info!(%worktree, %host, %board, path = %path.display(), "retired this daemon's empty board for a worktree another host owns");
+        } else {
+            tracing::warn!(%worktree, %host, %board, cards, path = %path.display(), "retired this daemon's board for a worktree another host owns; its cards must be re-created by hand on that host");
+        }
+        Ok(Some(RetiredBoard { board, path, cards }))
+    }
+
     /// Restores a worktree board bundled into the restored worktree directory.
     pub async fn restore_for_worktree(
         &self,
@@ -693,6 +746,11 @@ impl RepoContextMover for Boards {
     }
 }
 
+/// Resolves the worktree a board is scoped to, and the context that board belongs to.
+///
+/// This daemon's state is the only place it looks: a worktree board lives on the daemon that
+/// owns the worktree, so a worktree this daemon never published is `not found: worktree <id>`
+/// here and the request belongs to that worktree's owner (`docs/BOARD.md` §4).
 fn worktree_context(state: &State, id: &WorktreeId) -> DaemonResult<(Worktree, Context)> {
     let worktree = state
         .worktrees

@@ -27,15 +27,11 @@ impl Boards {
         // repository is the same wound with a name on it: `create_worktree_from_card` then
         // refuses to adopt or recreate the worktree, and this path refuses to clear it, so the
         // card can never reach any repository again. Only the worktree's own repository passes.
+        // A worktree another host owns counts as live here exactly as a local one does: the card
+        // links it through the same field, and clearing its repository strands it the same way.
         if let Some(next) = patch.repo_id.as_ref()
             && let Some(worktree) = doc.cards[index].worktree_id.clone()
-            && let Some(live) = self
-                .state_store
-                .load()
-                .await?
-                .worktrees
-                .into_iter()
-                .find(|w| w.id == worktree)
+            && let Some(live) = self.known_worktree(&self.state_store.load().await?, &worktree)
             && next.as_ref() != Some(&live.repo_id)
         {
             return Err(DaemonError::Conflict(match next {

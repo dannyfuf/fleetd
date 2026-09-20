@@ -178,11 +178,13 @@ correlates forwarded requests and responses, and rebroadcasts remote events. Leg
 
 `Router` classifies every `RequestBody` as local orchestration, one owning host, a host-partitioned
 fanout, or explicitly unsupported. Worktree operations resolve ownership from local state and the
-in-memory `Mirror`; session, terminal, job, and agent-thread requests resolve through id ownership
-tables. Before forwarding, the router converts local ids to that daemon's ids and clears explicit
-placement such as `host`, so the remote daemon executes its ordinary local service path. On the
-way back it reverses the translation. Worktree ids and thread UUIDs pass through but register an
-owner; session ids become `<host>/<remote-session>`; terminal and job ids use bijective mappings
+in-memory `Mirror`; session, terminal, job, agent-thread, board, and card requests resolve through
+id ownership tables — a card resolves its board, and a board its owning host, so a worktree board is
+always read and written on the daemon that owns the worktree. Before forwarding, the router converts
+local ids to that daemon's ids and clears explicit placement such as `host`, so the remote daemon
+executes its ordinary local service path. On the way back it reverses the translation. Worktree ids
+and thread UUIDs pass through but register an owner; board ids and card ids pass through the same
+way; session ids become `<host>/<remote-session>`; terminal and job ids use bijective mappings
 allocated from shared local counters.
 
 A remote `EnsureSession` therefore follows this complete path:

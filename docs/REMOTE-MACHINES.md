@@ -203,14 +203,46 @@ compile until classified. Worktree-scoped operations resolve the worktree; sessi
 and thread operations resolve that id; agent creation resolves its worktree. Explicit-host create
 targets that host. Explicit bulk ids partition by host and fan out when any target is remote.
 Agent/list/inspect/prune/bulk behavior is merged across local and endpoints. Config, context, repo,
-board, Hello, Ping, host, Doctor, update, and daemon lifecycle commands are local orchestration.
+Hello, Ping, host, Doctor, update, and daemon lifecycle commands are local orchestration, and so are
+the context boards: `EnsureBoard`, `CreateBoard` and `ListBoardBackends` never leave this daemon.
+The rest of the board family resolves an owner, because a worktree board is a document of the daemon
+that owns the worktree (`docs/BOARD.md` §0, `docs/decisions/0021-hosted-worktree-boards-route-to-owner.md`).
+`EnsureWorktreeBoard`/`CreateWorktreeBoard` resolve the worktree's owner. The board-addressed
+requests `GetBoard`, `UpdateBoard`, `DeleteBoard`, `CreateCard`, `SyncBoard` and
+`DescribeBoardBackend` resolve board ownership. The card-addressed requests `UpdateCard`,
+`MoveCard`, `DeleteCard`, `AddCardComment`, `ResolveCardConflict` and `CreateWorktreeFromCard`
+resolve the card's board and then that board's owner. `ListBoards` fans out `context_id: None` to
+every host and merges the answers with the local list: only a host's worktree boards are taken, a
+host summary replaces a local summary with the same id, a `context_id` filter is applied to hosted
+summaries by the host's own context id rather than rewriting it, and an unreachable host contributes
+nothing instead of hiding the local boards.
 
 Forwarding is: classify -> translate ids -> clear placement (`host=None`) -> `endpoint.request` ->
 `response_to_local`. Fanout runs parts concurrently and `merge_fanout` retains per-item failures.
 Terminal and job ids are bijectively remapped from a shared local counter; worktree ids pass
 through and register ownership; thread UUIDs pass through but register ownership. Local session
-ids are exactly `<host>/<remote>` and reverse by splitting the first slash. A Down transition
+ids are exactly `<host>/<remote>` and reverse by splitting the first slash. Board ids and card ids
+pass through untranslated, like worktree ids. Board ownership is learned from a host's snapshot
+(`Snapshot.boards`, worktree-scoped summaries only) and from every forwarded `Board`, `Boards` and
+`Card` answer; a card's board is remembered from the forwarded views that list it. A Down transition
 clears that host's mappings and triggers terminal-ended behavior; Ready rebuilds from snapshot.
+Board ownership is only ever added — by a snapshot, a forwarded answer or a passed event — and
+only a Down transition removes it, with the mirror fragment answering `host_of_board` in between; card-to-board is a stable fact and survives the transition, so a card
+request resolves again as soon as its board has an owner.
+
+A host's `Event::BoardChanged` is republished locally only for a board this router attributes to
+that host, registering the attribution when the snapshot had not yet supplied it; a host's
+context-board events are dropped, because a context board of another daemon is not addressable from
+here and its id collides with this daemon's own by construction. A hosted
+`EnsureWorktreeBoard`/`CreateWorktreeBoard` is refused before translation when the host's Hello
+carries no `board.worktree` capability, with that capability's own sentence prefixed `host <id>: ` —
+"this daemon does not support worktree boards; run `fleet daemon restart`". A host whose Hello has
+not arrived yet is forwarded to. Before each routed ensure/create for a hosted worktree, the
+local daemon moves its own `boards/<id>.json` for that worktree to its trash, if one is left, and
+logs that once:
+`info` naming the trashed path when the document held no cards, `warn` naming the path
+and the card count when it did, so cards this daemon wrote while the request was misrouted can be
+re-entered by hand. Documents are never merged.
 
 `router/create.rs` owns ensure-repo-then-create; `sessions.rs` owns attach/detach frame hooks;
 `lifecycle.rs` owns bulk lifecycle merge; `agents.rs` owns agent classification and thread-event
@@ -320,6 +352,9 @@ local filesystem or embedded native-Git code.
 emits events, and changes LinkState. `RemoteDaemon::start(home)` starts a private `DaemonProcess`
 and exposes a loopback `CommandMachine` using `sh -c 'exec "$@"' --`; its fleetd path comes from
 `FLEET_DAEMON`. Provider tests should probe without depending on the unfinished connect bridge.
+`crates/fleet-daemon/tests/remote_boards.rs` drives two real daemons over that harness to prove
+board routing: the host's cards answer the local client, `ListBoards` merges both daemons' boards,
+and the local daemon's stale document for a hosted worktree is retired rather than served.
 
 ## 14. Ownership table
 

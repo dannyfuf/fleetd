@@ -7,7 +7,7 @@ use std::{
 
 use fleet_core::{
     agents::ThreadId,
-    ids::{HostId, JobId, TerminalId, WorktreeId},
+    ids::{BoardId, CardId, HostId, JobId, TerminalId, WorktreeId},
     sessions::Session,
 };
 use fleet_proto::{
@@ -48,6 +48,10 @@ pub trait Resolver {
     fn host_of_terminal(&self, id: TerminalId) -> Option<HostId>;
     fn host_of_job(&self, id: &JobId) -> Option<HostId>;
     fn host_of_thread(&self, id: &ThreadId) -> Option<HostId>;
+    /// The host that owns a *worktree* board. Context boards are always this daemon's own.
+    fn host_of_board(&self, id: &BoardId) -> Option<HostId>;
+    /// The host that owns the board a card lives on.
+    fn host_of_card(&self, id: &CardId) -> Option<HostId>;
 }
 
 /// Federating request router shared by every local client connection.
@@ -158,6 +162,27 @@ impl Router {
                 });
             return agents::agent_list_target(hosts);
         }
+        // Every host's worktree boards are listed alongside this daemon's own, exactly as
+        // `AgentThreadList` federates threads. `context_id` is dropped on the way out because a
+        // host scopes its boards by *its* context ids; `merge_local_and_remote` filters the
+        // answer back down to the context the caller asked for.
+        if matches!(body, RequestBody::ListBoards { .. }) {
+            let hosts = self
+                .machines
+                .iter()
+                .into_iter()
+                .filter(|(_, provider)| provider.provider_name() != "legacy")
+                .filter_map(|(host, _)| {
+                    let endpoint = self.machines.endpoint(&host)?;
+                    self.pump_endpoint(host.clone(), endpoint);
+                    Some((host, RequestBody::ListBoards { context_id: None }))
+                })
+                .collect::<Vec<_>>();
+            if hosts.is_empty() {
+                return Target::Local;
+            }
+            return Target::Fanout(hosts);
+        }
         if let Some(parts) = self.lifecycle_fanout(body) {
             return Target::Fanout(parts);
         }
@@ -178,6 +203,9 @@ impl Router {
         }
         if endpoint.state() == LinkState::Down {
             return Err(unreachable(host));
+        }
+        if let Some(refusal) = worktree_board_refusal(endpoint.as_ref(), host, &body) {
+            return Err(refusal);
         }
         self.pump_endpoint(host.clone(), Arc::clone(&endpoint));
         let local_terminal = match &body {
@@ -279,7 +307,14 @@ impl Router {
                             &self.ids,
                         ))
                     } else {
-                        translate::unavailable_fanout_response(&body, &host, &error).ok_or(error)
+                        let substitute = translate::unavailable_fanout_response(&body, &host, &error);
+                        if substitute.is_some() && matches!(body, RequestBody::ListBoards { .. }) {
+                            // An empty board partition carries no per-item reason a user could
+                            // read, unlike a delete or prune result, so this line is the only
+                            // record that a host was left out of the listing.
+                            tracing::warn!(%host, %error, "listed boards without an unreachable host");
+                        }
+                        substitute.ok_or(error)
                     }
                 }
                 result => result,
@@ -438,6 +473,10 @@ impl Router {
                 for (event, publishable) in batch.into_iter().zip(ingested.publishable) {
                     if let Event::SnapshotChanged(snapshot) = &event {
                         event_mirror.apply(&event_host, snapshot.clone());
+                        // One more source of board ownership, not the authority: this fragment is
+                        // routinely older than the answer that registered the newest board, so it
+                        // only ever adds. The link going Down is the only thing that forgets.
+                        event_ids.register_host_boards(&event_host, &snapshot.boards);
                         agents::register_thread_events(
                             &event_threads,
                             &event,
@@ -461,6 +500,24 @@ impl Router {
                         )
                     {
                         continue;
+                    }
+                    // A host's *context* board changing is not this daemon's business, and its
+                    // board id collides with a local one, so republishing it would make every
+                    // client re-read the wrong board. Only a board this host is known to own
+                    // passes; the mirror answers for the window before `ids` learned it.
+                    if let Event::BoardChanged { board_id, .. } = &event {
+                        let owner = event_ids
+                            .host_of_board(board_id)
+                            .or_else(|| event_mirror.host_of_board(board_id));
+                        if owner.as_ref() != Some(&event_host) {
+                            tracing::debug!(
+                                host = %event_host,
+                                board = %board_id,
+                                "dropping a remote board event for a board this daemon does not route"
+                            );
+                            continue;
+                        }
+                        event_ids.register_board(&event_host, board_id.clone());
                     }
                     let Some(local) = translate::event_to_local(event, &event_host, &event_ids)
                     else {
@@ -525,6 +582,7 @@ impl Router {
                             &state_host,
                             &snapshot.worktrees,
                             &snapshot.agent_threads,
+                            &snapshot.boards,
                         );
                         agents::register_mirror_threads(
                             &state_threads,
@@ -593,6 +651,18 @@ impl Resolver for Router {
             .host_of_thread(id)
             .or_else(|| self.mirror.host_of_thread(id))
     }
+    fn host_of_board(&self, id: &BoardId) -> Option<HostId> {
+        self.ids
+            .host_of_board(id)
+            .or_else(|| self.mirror.host_of_board(id))
+    }
+    fn host_of_card(&self, id: &CardId) -> Option<HostId> {
+        // Card→board is the only durable half: it survives a link going down, so the board's
+        // owner is resolved fresh, ids first and the snapshot fragment second.
+        self.ids
+            .board_of_card(id)
+            .and_then(|board| self.host_of_board(&board))
+    }
 }
 
 fn remote_event_bytes(event: &Event) -> usize {
@@ -603,6 +673,39 @@ fn remote_event_bytes(event: &Event) -> usize {
             REMOTE_EVENT_BATCH_MAX_BYTES
         }
     }
+}
+
+/// Refuses a worktree-board request the owner's daemon is too old to serve.
+///
+/// An un-upgraded peer has no `EnsureWorktreeBoard`, so forwarding one yields a bare protocol
+/// error with no way for the user to know what to do. `None` hello means the link is still
+/// handshaking and the capability set is not known yet — the request proceeds and is answered,
+/// or fails, on its own.
+fn worktree_board_refusal(
+    endpoint: &dyn RemoteEndpoint,
+    host: &HostId,
+    body: &RequestBody,
+) -> Option<DaemonError> {
+    if !matches!(
+        body,
+        RequestBody::EnsureWorktreeBoard { .. } | RequestBody::CreateWorktreeBoard { .. }
+    ) {
+        return None;
+    }
+    let hello = endpoint.hello()?;
+    (!hello
+        .capabilities
+        .iter()
+        .any(|capability| capability == fleet_proto::response::BOARD_WORKTREE_CAPABILITY))
+    .then(|| {
+        annotate_remote_error(
+            host,
+            DaemonError::Unsupported(
+                "this daemon does not support worktree boards; run `fleet daemon restart`"
+                    .to_owned(),
+            ),
+        )
+    })
 }
 
 fn unreachable(host: &HostId) -> DaemonError {

@@ -8,8 +8,9 @@ use std::{
 
 use fleet_core::{
     agents::ThreadId,
+    board::{Board, BoardSettings, BoardSummary, BoardView, Card, Priority, SyncState},
     config::default_config,
-    ids::{HostId, JobId, TerminalId, WorktreeId},
+    ids::{BoardId, CardId, HostId, JobId, StatusId, TerminalId, WorktreeId},
     sessions::{Session, SessionKind, Terminal, TerminalKind, TerminalStatus},
 };
 use fleet_daemon::{
@@ -32,6 +33,8 @@ struct ScriptedResolver {
     second: WorktreeId,
     first_host: HostId,
     second_host: HostId,
+    hosted_board: BoardId,
+    hosted_card: CardId,
 }
 
 impl Resolver for ScriptedResolver {
@@ -60,6 +63,14 @@ impl Resolver for ScriptedResolver {
     fn host_of_thread(&self, _id: &ThreadId) -> Option<HostId> {
         None
     }
+
+    fn host_of_board(&self, id: &BoardId) -> Option<HostId> {
+        (id == &self.hosted_board).then(|| self.first_host.clone())
+    }
+
+    fn host_of_card(&self, id: &CardId) -> Option<HostId> {
+        (id == &self.hosted_card).then(|| self.first_host.clone())
+    }
 }
 
 #[test]
@@ -74,6 +85,8 @@ fn classifies_local_host_and_fanout_requests() {
         second: second.clone(),
         first_host: first_host.clone(),
         second_host: second_host.clone(),
+        hosted_board: board("wt-acme-api-one"),
+        hosted_card: card("card-one"),
     };
 
     assert_eq!(
@@ -112,7 +125,36 @@ fn classifies_local_host_and_fanout_requests() {
             },
             &resolver,
         ),
+        Target::Host(first_host.clone())
+    );
+    assert_eq!(
+        classify::classify(
+            &RequestBody::GetBoard {
+                board_id: board("wt-acme-api-one"),
+            },
+            &resolver,
+        ),
+        Target::Host(first_host.clone())
+    );
+    assert_eq!(
+        classify::classify(
+            &RequestBody::MoveCard {
+                card_id: card("card-one"),
+                status_id: status(),
+                index: None,
+            },
+            &resolver,
+        ),
         Target::Host(first_host)
+    );
+    assert_eq!(
+        classify::classify(
+            &RequestBody::GetBoard {
+                board_id: board("personal"),
+            },
+            &resolver,
+        ),
+        Target::Local
     );
 }
 
@@ -243,13 +285,22 @@ fn clear_host_removes_every_mapping_for_only_that_host() {
     let retained = ids.local_terminal(&other, TerminalId(1));
     let session = ids.local_session(&target_host, "acme/api");
     ids.register_worktree(&target_host, worktree("gone"));
+    ids.register_board(&target_host, board("wt-acme-api-gone"));
+    ids.register_card(&board("wt-acme-api-gone"), card("card-kept"));
 
     let cleared = ids.clear_host(&target_host);
 
     assert_eq!(cleared.terminals, vec![local]);
     assert_eq!(cleared.sessions, vec![session]);
+    assert_eq!(cleared.boards, vec![board("wt-acme-api-gone")]);
     assert!(ids.remote_terminal(local).is_none());
     assert!(ids.host_of_worktree(&worktree("gone")).is_none());
+    assert!(ids.host_of_board(&board("wt-acme-api-gone")).is_none());
+    // Card→board is a fact about the card, not about the link, so it outlives the host going down.
+    assert_eq!(
+        ids.board_of_card(&card("card-kept")),
+        Some(board("wt-acme-api-gone"))
+    );
     assert_eq!(ids.remote_terminal(retained), Some((other, TerminalId(1))));
 }
 
@@ -970,4 +1021,226 @@ async fn a_remote_daemon_shutting_down_never_reaches_the_local_bus() {
         marker,
         "a remote daemon's shutdown must not be republished as the local daemon's"
     );
+}
+
+#[tokio::test]
+async fn a_hosted_worktree_board_is_forwarded_and_its_cards_become_routable() {
+    let host = host("alpha");
+    let (router, remote) = router_with_remote(host.clone());
+    let worktree_id = worktree("feat-workflows-v1");
+    let board_id = board("wt-acme-api-feat-workflows-v1");
+    let card_id = card("card-eleven");
+    router.ids.register_worktree(&host, worktree_id.clone());
+    let ensure = RequestBody::EnsureWorktreeBoard {
+        worktree_id: worktree_id.clone(),
+    };
+
+    // The worktree's owner owns its board, so the scope request leaves this daemon instead of
+    // creating a second empty document here.
+    assert_eq!(router.route(&ensure), Target::Host(host.clone()));
+    remote.push_response(Ok(ResponseBody::Board(board_view(
+        &board_id,
+        Some(&worktree_id),
+        std::slice::from_ref(&card_id),
+    ))));
+    let answer = router
+        .forward(&host, ensure.clone())
+        .await
+        .expect("forward the worktree board ensure");
+    assert!(matches!(answer, ResponseBody::Board(view) if view.board.id == board_id));
+    assert_eq!(remote.requests(), vec![ensure]);
+
+    // The answer taught the router both halves, so a later card mutation follows the same daemon.
+    assert_eq!(
+        router.route(&RequestBody::MoveCard {
+            card_id,
+            status_id: status(),
+            index: None,
+        }),
+        Target::Host(host)
+    );
+}
+
+#[tokio::test]
+async fn a_board_event_is_published_only_for_a_board_this_daemon_routes() {
+    let host = host("alpha");
+    let (router, remote) = router_with_remote(host.clone());
+    let routed = board("wt-acme-api-routed");
+    let context_board = board("personal");
+    router.ids.register_board(&host, routed.clone());
+    let events = BroadcastBus::default();
+    let mut receiver = events.subscribe();
+    router.start_event_pumps(events);
+
+    // A host's context board carries an id this daemon also uses, so republishing its change
+    // would make every client re-read the wrong board.
+    remote.emit(Event::BoardChanged {
+        board_id: context_board.clone(),
+        reason: fleet_proto::event::BoardChangeReason::CardChanged,
+    });
+    remote.emit(Event::BoardChanged {
+        board_id: routed.clone(),
+        reason: fleet_proto::event::BoardChangeReason::CardChanged,
+    });
+
+    let published = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Event::BoardChanged { board_id, .. } =
+                receiver.recv().await.expect("router event")
+            {
+                return board_id;
+            }
+        }
+    })
+    .await
+    .expect("a routed board event reaches the local bus");
+    assert_eq!(published, routed);
+}
+
+#[tokio::test]
+async fn a_host_without_the_worktree_board_capability_is_refused_by_name() {
+    let host = host("alpha");
+    let (router, remote) = router_with_remote(host.clone());
+    remote.set_hello(fleet_daemon::machines::RemoteHello {
+        version: "fleetd old".to_owned(),
+        daemon_id: "old".to_owned(),
+        build_commit: None,
+        capabilities: vec![fleet_proto::REMOTE_MACHINES_CAPABILITY.to_owned()],
+    });
+
+    let error = router
+        .forward(
+            &host,
+            RequestBody::EnsureWorktreeBoard {
+                worktree_id: worktree("feat-workflows-v1"),
+            },
+        )
+        .await
+        .expect_err("an un-upgraded owner cannot serve a worktree board");
+
+    assert!(
+        matches!(&error, fleet_daemon::DaemonError::Unsupported(message)
+            if message == "host alpha: this daemon does not support worktree boards; run `fleet daemon restart`"),
+        "{error:?}"
+    );
+    // The refusal happens here, so the old daemon never sees a request it cannot answer.
+    assert!(remote.requests().is_empty());
+}
+
+#[tokio::test]
+async fn a_down_host_keeps_answering_board_ownership_through_the_mirror_until_ready() {
+    let host = host("alpha");
+    let (router, remote) = router_with_remote(host.clone());
+    let worktree_id = worktree("feat-workflows-v1");
+    let board_id = board("wt-acme-api-feat-workflows-v1");
+    router.ids.register_board(&host, board_id.clone());
+    router
+        .mirror
+        .apply(&host, snapshot_with_board(&board_id, Some(&worktree_id)));
+    let events = BroadcastBus::default();
+    router.start_event_pumps(events);
+
+    remote.set_state(fleet_proto::snapshot::LinkState::Down);
+    wait_until(|| router.ids.host_of_board(&board_id).is_none()).await;
+    // Ownership left the id table with the link, and the snapshot fragment covers the window:
+    // a board request still goes to its owner rather than being answered by an empty local board.
+    assert_eq!(
+        Resolver::host_of_board(&router, &board_id),
+        Some(host.clone())
+    );
+
+    remote.set_last_snapshot(snapshot_with_board(&board_id, Some(&worktree_id)));
+    remote.set_state(fleet_proto::snapshot::LinkState::Ready);
+    wait_until(|| router.ids.host_of_board(&board_id) == Some(host.clone())).await;
+}
+
+fn board(value: &str) -> BoardId {
+    value.parse().expect("board id")
+}
+
+fn card(value: &str) -> CardId {
+    value.parse().expect("card id")
+}
+
+fn status() -> StatusId {
+    "todo".parse().expect("status id")
+}
+
+fn board_summary(id: &BoardId, worktree: Option<&WorktreeId>) -> BoardSummary {
+    BoardSummary {
+        id: id.clone(),
+        context_id: "personal".parse().expect("context id"),
+        worktree_id: worktree.cloned(),
+        name: "board".to_owned(),
+        prefix: "FLT".to_owned(),
+        backend_kind: "local".to_owned(),
+        card_count: 11,
+        open_count: 11,
+        dirty_count: 0,
+        conflict_count: 0,
+        last_synced_at: None,
+        last_error: None,
+    }
+}
+
+fn board_view(id: &BoardId, worktree: Option<&WorktreeId>, cards: &[CardId]) -> BoardView {
+    BoardView {
+        board: Board {
+            id: id.clone(),
+            context_id: "personal".parse().expect("context id"),
+            worktree_id: worktree.cloned(),
+            name: "board".to_owned(),
+            prefix: "FLT".to_owned(),
+            next_number: 12,
+            backend: fleet_core::board::BackendRef::default(),
+            statuses: Vec::new(),
+            labels: Vec::new(),
+            properties: Vec::new(),
+            default_repo_id: None,
+            settings: BoardSettings::default(),
+            sync: SyncState::default(),
+            created_at: "2026-09-20T12:00:00Z".to_owned(),
+            updated_at: "2026-09-20T12:00:00Z".to_owned(),
+        },
+        cards: cards
+            .iter()
+            .cloned()
+            .map(|card_id| Card {
+                id: card_id,
+                board_id: id.clone(),
+                number: 1,
+                title: "card".to_owned(),
+                description: String::new(),
+                status_id: status(),
+                priority: Priority::default(),
+                labels: Vec::new(),
+                assignee: None,
+                estimate: None,
+                due_date: None,
+                parent_id: None,
+                repo_id: None,
+                worktree_id: None,
+                properties: Default::default(),
+                comments: Vec::new(),
+                activity: Vec::new(),
+                remote: None,
+                conflict: None,
+                dirty: false,
+                archived: false,
+                position: 0,
+                created_at: "2026-09-20T12:00:00Z".to_owned(),
+                updated_at: "2026-09-20T12:00:00Z".to_owned(),
+            })
+            .collect(),
+    }
+}
+
+fn snapshot_with_board(
+    id: &BoardId,
+    worktree: Option<&WorktreeId>,
+) -> fleet_proto::snapshot::Snapshot {
+    fleet_proto::snapshot::Snapshot {
+        boards: vec![board_summary(id, worktree)],
+        ..context_sync_snapshot(None)
+    }
 }

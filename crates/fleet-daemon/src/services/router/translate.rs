@@ -55,10 +55,18 @@ pub fn to_remote(
         }
         | CreateWorktreeFromPr {
             host: placement, ..
-        }
-        | CreateWorktreeFromCard {
-            host: placement, ..
         } => *placement = None,
+        CreateWorktreeFromCard {
+            host: placement, ..
+        } => {
+            // This request follows the card's board, which may be owned by a host the worktree is
+            // not meant to land on. Clearing the placement only when it already names the owner
+            // keeps "create it locally" meaning *there*, and leaves a third host's placement for
+            // the owner to act on.
+            if placement.as_ref() == Some(host) {
+                *placement = None;
+            }
+        }
         DeleteWorktrees { ids: worktrees } | InspectWorktrees { ids: worktrees, .. } => {
             for worktree in worktrees.iter().cloned() {
                 ids.register_worktree(host, worktree);
@@ -213,7 +221,31 @@ pub fn response_to_local(mut body: ResponseBody, host: &HostId, ids: &RemoteIds)
         | DelegationStarted { .. }
         | Delegations(_)
         | Delegation(_) => {}
-        CardWorktree { worktree, .. } => translate_worktree(worktree, host, ids),
+        Boards(summaries) => {
+            // A host's context boards are not addressable from here: their ids are derived from
+            // context ids every daemon shares, so a `personal` summary would shadow this
+            // daemon's own board. Only worktree boards survive, and each one is registered.
+            summaries.retain(|summary| summary.worktree_id.is_some());
+            for summary in summaries.iter() {
+                ids.register_board(host, summary.id.clone());
+            }
+        }
+        Board(view) => {
+            if view.board.worktree_id.is_some() {
+                ids.register_board(host, view.board.id.clone());
+                // The owner just listed the board, so its card set is authoritative: a card it
+                // dropped stops resolving to this host.
+                ids.replace_board_cards(
+                    &view.board.id,
+                    view.cards.iter().map(|card| card.id.clone()),
+                );
+            }
+        }
+        Card(card) => ids.register_card(&card.board_id, card.id.clone()),
+        CardWorktree { card, worktree, .. } => {
+            ids.register_card(&card.board_id, card.id.clone());
+            translate_worktree(worktree, host, ids);
+        }
         Watches(watches) => {
             for watch in watches {
                 translate_watch(watch, host, ids);
@@ -257,9 +289,6 @@ pub fn response_to_local(mut body: ResponseBody, host: &HostId, ids: &RemoteIds)
             }
         }
         AgentAck
-        | Boards(_)
-        | Board(_)
-        | Card(_)
         | BoardBackendSchema(_)
         | BoardBackends(_)
         | WatchStarted(_)
@@ -383,6 +412,16 @@ pub fn merge_fanout(
             }
             Ok(ResponseBody::AgentThreads(merged))
         }
+        RequestBody::ListBoards { .. } => {
+            let mut merged = Vec::new();
+            for (_, result) in parts {
+                match result? {
+                    ResponseBody::Boards(mut values) => merged.append(&mut values),
+                    other => return Err(unexpected_fanout_response("boards", &other)),
+                }
+            }
+            Ok(ResponseBody::Boards(merged))
+        }
         _ => generic_vec_merge(parts),
     }
 }
@@ -430,6 +469,32 @@ pub(crate) fn merge_local_and_remote(
         (ResponseBody::AgentThreads(mut local), ResponseBody::AgentThreads(mut remote)) => {
             local.append(&mut remote);
             Ok(ResponseBody::AgentThreads(local))
+        }
+        (ResponseBody::Boards(mut local), ResponseBody::Boards(remote)) => {
+            // The fanout part asked every host for all of its contexts, because a host scopes
+            // boards by *its* context ids. The caller's filter is therefore applied here, against
+            // the id the host sent, which is never rewritten.
+            let wanted = match original {
+                RequestBody::ListBoards { context_id } => context_id.clone(),
+                _ => None,
+            };
+            for summary in remote {
+                if wanted
+                    .as_ref()
+                    .is_some_and(|context| &summary.context_id != context)
+                {
+                    continue;
+                }
+                // The owner is authoritative about a board it owns: its summary replaces a
+                // leftover local document for the same id instead of listing it twice.
+                if let Some(existing) = local.iter_mut().find(|existing| existing.id == summary.id)
+                {
+                    *existing = summary;
+                } else {
+                    local.push(summary);
+                }
+            }
+            Ok(ResponseBody::Boards(local))
         }
         (ResponseBody::Ack, ResponseBody::Ack) => Ok(ResponseBody::Ack),
         (local, remote) => Err(DaemonError::Protocol(format!(
@@ -606,6 +671,9 @@ pub(crate) fn unavailable_fanout_response(
                 })
                 .collect(),
         })),
+        // An unreachable host must never hide this daemon's own boards, so its partition is an
+        // empty listing rather than a failure; `Router::fanout` logs the error it replaces.
+        RequestBody::ListBoards { .. } => Some(ResponseBody::Boards(Vec::new())),
         RequestBody::PruneWorktrees { ids: None, .. }
         | RequestBody::AgentThreadList
         | RequestBody::AgentSeenCursors
@@ -629,7 +697,6 @@ pub(crate) fn unavailable_fanout_response(
         | RequestBody::DelegationGet { .. }
         | RequestBody::DelegationCancel { .. }
         | RequestBody::DelegationWait { .. }
-        | RequestBody::ListBoards { .. }
         | RequestBody::GetBoard { .. }
         | RequestBody::EnsureBoard { .. }
         | RequestBody::EnsureWorktreeBoard { .. }
@@ -836,4 +903,353 @@ fn unexpected_fanout_response(expected: &str, actual: &ResponseBody) -> DaemonEr
     DaemonError::Protocol(format!(
         "fanout expected {expected} response, received {actual:?}"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use fleet_core::{
+        board::{Board, BoardSettings, BoardSummary, BoardView, Card, Priority, SyncState},
+        ids::{BoardId, CardId, ContextId, StatusId, WorktreeId},
+    };
+
+    use super::*;
+
+    #[test]
+    fn a_card_worktree_placement_is_cleared_only_for_the_board_owner() {
+        let owner = host("dev-box");
+        let elsewhere = host("build-box");
+        let ids = RemoteIds::default();
+
+        let translated = to_remote(create_from_card(Some(owner.clone())), &owner, &ids)
+            .expect("translate a placement naming the owner");
+        assert!(matches!(
+            translated,
+            RequestBody::CreateWorktreeFromCard { host: None, .. }
+        ));
+
+        let translated = to_remote(create_from_card(Some(elsewhere.clone())), &owner, &ids)
+            .expect("translate a placement naming a third host");
+        assert!(matches!(
+            translated,
+            RequestBody::CreateWorktreeFromCard { host: Some(placement), .. }
+                if placement == elsewhere
+        ));
+
+        let translated =
+            to_remote(create_from_card(None), &owner, &ids).expect("translate an unplaced request");
+        assert!(matches!(
+            translated,
+            RequestBody::CreateWorktreeFromCard { host: None, .. }
+        ));
+    }
+
+    #[test]
+    fn a_hosted_board_listing_keeps_only_worktree_boards_and_registers_them() {
+        let owner = host("dev-box");
+        let ids = RemoteIds::default();
+        let scoped = board("wt-acme-api-feature");
+        let context = board("personal");
+
+        let response = response_to_local(
+            ResponseBody::Boards(vec![
+                summary(scoped.clone(), Some("acme/api#feature")),
+                summary(context.clone(), None),
+            ]),
+            &owner,
+            &ids,
+        );
+
+        let ResponseBody::Boards(summaries) = response else {
+            panic!("expected a board listing");
+        };
+        assert_eq!(
+            summaries
+                .iter()
+                .map(|value| value.id.clone())
+                .collect::<Vec<_>>(),
+            vec![scoped.clone()]
+        );
+        assert_eq!(ids.host_of_board(&scoped), Some(owner));
+        assert_eq!(ids.host_of_board(&context), None);
+    }
+
+    #[test]
+    fn a_forwarded_board_view_registers_the_board_and_replaces_its_cards() {
+        let owner = host("dev-box");
+        let ids = RemoteIds::default();
+        let scoped = board("wt-acme-api-feature");
+        let first = card("card-one");
+        let second = card("card-two");
+        ids.register_card(&scoped, second.clone());
+
+        let response = response_to_local(
+            ResponseBody::Board(view(
+                &scoped,
+                Some("acme/api#feature"),
+                std::slice::from_ref(&first),
+            )),
+            &owner,
+            &ids,
+        );
+        assert!(matches!(response, ResponseBody::Board(_)));
+        assert_eq!(ids.host_of_board(&scoped), Some(owner.clone()));
+        assert_eq!(ids.board_of_card(&first), Some(scoped.clone()));
+        assert_eq!(ids.board_of_card(&second), None);
+
+        // A context board arrives with the same id as this daemon's own; nothing is claimed.
+        let context = board("personal");
+        let passed_through = response_to_local(
+            ResponseBody::Board(view(&context, None, &[card("card-three")])),
+            &owner,
+            &ids,
+        );
+        assert!(matches!(passed_through, ResponseBody::Board(_)));
+        assert_eq!(ids.host_of_board(&context), None);
+        assert_eq!(ids.board_of_card(&card("card-three")), None);
+    }
+
+    #[test]
+    fn a_forwarded_card_registers_the_board_it_names() {
+        let owner = host("dev-box");
+        let ids = RemoteIds::default();
+        let scoped = board("wt-acme-api-feature");
+
+        let answer = response_to_local(
+            ResponseBody::Card(card_payload(&scoped, card("card-one"))),
+            &owner,
+            &ids,
+        );
+        assert!(matches!(answer, ResponseBody::Card(_)));
+        assert_eq!(ids.board_of_card(&card("card-one")), Some(scoped.clone()));
+
+        let answer = response_to_local(
+            ResponseBody::CardWorktree {
+                card: card_payload(&scoped, card("card-two")),
+                worktree: worktree_record(),
+                created: true,
+            },
+            &owner,
+            &ids,
+        );
+        assert!(matches!(answer, ResponseBody::CardWorktree { .. }));
+        assert_eq!(ids.board_of_card(&card("card-two")), Some(scoped));
+        assert_eq!(
+            ids.host_of_worktree(&WorktreeId::try_from("acme/api#feature").expect("worktree")),
+            Some(owner)
+        );
+    }
+
+    #[test]
+    fn listing_boards_concatenates_hosts_and_lets_the_owner_replace_a_local_row() {
+        let first = host("dev-box");
+        let second = host("build-box");
+        let shared = board("wt-acme-api-feature");
+        let original = RequestBody::ListBoards { context_id: None };
+
+        let merged = merge_fanout(
+            &original,
+            vec![
+                (
+                    first,
+                    Ok(ResponseBody::Boards(vec![summary(
+                        shared.clone(),
+                        Some("acme/api#feature"),
+                    )])),
+                ),
+                (
+                    second,
+                    Ok(ResponseBody::Boards(vec![summary(
+                        board("wt-acme-api-other"),
+                        Some("acme/api#other"),
+                    )])),
+                ),
+            ],
+        )
+        .expect("merge a board fanout");
+
+        let with_local = merge_local_and_remote(
+            &original,
+            Ok(ResponseBody::Boards(vec![
+                stale(&shared),
+                summary(board("personal"), None),
+            ])),
+            Ok(merged),
+        )
+        .expect("merge local and remote boards");
+
+        let ResponseBody::Boards(summaries) = with_local else {
+            panic!("expected a board listing");
+        };
+        assert_eq!(summaries.len(), 3);
+        // Local rows keep their position and the owner's summary replaces the stale one in place.
+        assert_eq!(summaries[0].id, shared);
+        assert_eq!(summaries[0].card_count, 11);
+        assert_eq!(summaries[1].id, board("personal"));
+        assert_eq!(summaries[2].id, board("wt-acme-api-other"));
+    }
+
+    #[test]
+    fn listing_boards_for_one_context_keeps_only_that_contexts_hosted_summaries() {
+        let original = RequestBody::ListBoards {
+            context_id: Some(context("personal")),
+        };
+        let mut other = summary(board("wt-acme-api-other"), Some("acme/api#other"));
+        other.context_id = context("work");
+
+        let merged = merge_local_and_remote(
+            &original,
+            Ok(ResponseBody::Boards(Vec::new())),
+            Ok(ResponseBody::Boards(vec![
+                summary(board("wt-acme-api-feature"), Some("acme/api#feature")),
+                other,
+            ])),
+        )
+        .expect("merge a context-scoped listing");
+
+        let ResponseBody::Boards(summaries) = merged else {
+            panic!("expected a board listing");
+        };
+        assert_eq!(
+            summaries
+                .iter()
+                .map(|value| value.id.clone())
+                .collect::<Vec<_>>(),
+            vec![board("wt-acme-api-feature")]
+        );
+    }
+
+    #[test]
+    fn an_unreachable_host_contributes_an_empty_board_listing() {
+        let unreachable = DaemonError::Remote("host dev-box is unreachable".to_owned());
+        assert_eq!(
+            unavailable_fanout_response(
+                &RequestBody::ListBoards { context_id: None },
+                &host("dev-box"),
+                &unreachable,
+            ),
+            Some(ResponseBody::Boards(Vec::new()))
+        );
+    }
+
+    fn host(value: &str) -> HostId {
+        value.parse().expect("host id")
+    }
+
+    fn board(value: &str) -> BoardId {
+        value.parse().expect("board id")
+    }
+
+    fn card(value: &str) -> CardId {
+        value.parse().expect("card id")
+    }
+
+    fn context(value: &str) -> ContextId {
+        value.parse().expect("context id")
+    }
+
+    fn create_from_card(placement: Option<HostId>) -> RequestBody {
+        RequestBody::CreateWorktreeFromCard {
+            card_id: card("card-one"),
+            repo_id: None,
+            base: None,
+            host: placement,
+        }
+    }
+
+    fn summary(id: BoardId, worktree: Option<&str>) -> BoardSummary {
+        BoardSummary {
+            id,
+            context_id: context("personal"),
+            worktree_id: worktree.map(|id| WorktreeId::try_from(id).expect("worktree id")),
+            name: "board".to_owned(),
+            prefix: "FLT".to_owned(),
+            backend_kind: "local".to_owned(),
+            card_count: 11,
+            open_count: 0,
+            dirty_count: 0,
+            conflict_count: 0,
+            last_synced_at: None,
+            last_error: None,
+        }
+    }
+
+    /// The empty document this daemon created for a worktree another host owns.
+    fn stale(id: &BoardId) -> BoardSummary {
+        BoardSummary {
+            card_count: 0,
+            ..summary(id.clone(), Some("acme/api#feature"))
+        }
+    }
+
+    fn view(id: &BoardId, worktree: Option<&str>, cards: &[CardId]) -> BoardView {
+        BoardView {
+            board: Board {
+                id: id.clone(),
+                context_id: context("personal"),
+                worktree_id: worktree.map(|id| WorktreeId::try_from(id).expect("worktree id")),
+                name: "board".to_owned(),
+                prefix: "FLT".to_owned(),
+                next_number: 1,
+                backend: fleet_core::board::BackendRef::default(),
+                statuses: Vec::new(),
+                labels: Vec::new(),
+                properties: Vec::new(),
+                default_repo_id: None,
+                settings: BoardSettings::default(),
+                sync: SyncState::default(),
+                created_at: "2026-09-20T12:00:00Z".to_owned(),
+                updated_at: "2026-09-20T12:00:00Z".to_owned(),
+            },
+            cards: cards
+                .iter()
+                .cloned()
+                .map(|card| card_payload(id, card))
+                .collect(),
+        }
+    }
+
+    fn card_payload(board_id: &BoardId, id: CardId) -> Card {
+        Card {
+            id,
+            board_id: board_id.clone(),
+            number: 1,
+            title: "card".to_owned(),
+            description: String::new(),
+            status_id: StatusId::try_from("todo").expect("status id"),
+            priority: Priority::default(),
+            labels: Vec::new(),
+            assignee: None,
+            estimate: None,
+            due_date: None,
+            parent_id: None,
+            properties: Default::default(),
+            repo_id: None,
+            worktree_id: None,
+            activity: Vec::new(),
+            comments: Vec::new(),
+            remote: None,
+            conflict: None,
+            dirty: false,
+            archived: false,
+            position: 0,
+            created_at: "2026-09-20T12:00:00Z".to_owned(),
+            updated_at: "2026-09-20T12:00:00Z".to_owned(),
+        }
+    }
+
+    fn worktree_record() -> Worktree {
+        Worktree {
+            id: WorktreeId::try_from("acme/api#feature").expect("worktree id"),
+            repo_id: "acme/api".parse().expect("repo id"),
+            slug: "feature".to_owned(),
+            branch: "feature".to_owned(),
+            base_ref: "origin/main".to_owned(),
+            path: "/tmp/acme/api/feature".to_owned(),
+            session: "acme/api/feature".to_owned(),
+            host: None,
+            created_at: "2026-09-20T12:00:00Z".to_owned(),
+            last_opened_at: None,
+            degraded: None,
+        }
+    }
 }
