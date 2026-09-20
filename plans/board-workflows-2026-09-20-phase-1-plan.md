@@ -22,7 +22,7 @@ Add every type, field, validation, derived read and constant the automation engi
 - Proto: `BOARD_WORKTREE_CAPABILITY` `crates/fleet-proto/src/response.rs:59`; advertisement list `fleet-daemon/src/server/connection.rs:924-935` and its mirror :1029-1036 are **not** touched. Goldens are inline byte-exact literals through `assert_frame` `crates/fleet-proto/tests/support/mod.rs:16-42`; board examples `tests/compatibility.rs:143-166`, `board_view()` :344-369, legacy decode test :371-400.
 - The five `--env` refusal sentences: `crates/fleet-cli/src/commands/subagents.rs:353-380` (`RESERVED_ENV_PREFIX = "FLEET_"` :33). `MAX_LIVE_DELEGATIONS: usize = 8` `services/agents/delegation/limits.rs:9`.
 - Skills to load first: `rust-workspace-architecture` (new types, error policy, the ADR, the commit form), `rust-ipc-protocol` (the capability and the goldens), `rust-gpui-testing` (every test), `zed-quality-review` before calling the phase done.
-- Docs to keep in step: `docs/BOARD.md` §2 (:62, model block from :71), `docs/README.md` decision index, new `docs/decisions/0021-board-workflows.md`.
+- Docs to keep in step: `docs/BOARD.md` §2 (:62, model block from :71), `docs/README.md` decision index, new `docs/decisions/0022-board-workflows.md`.
 
 ## Assumptions
 
@@ -43,7 +43,7 @@ Add every type, field, validation, derived read and constant the automation engi
 - `board/ops.rs` (`CardDraft`/`CardPatch` fields, `is_zero`), `ops/patches.rs`, `ops/query.rs`, `ops/validation.rs`, `board/defaults.rs`, `board.rs` re-exports.
 - Tests: `board/tests.rs`, `board/ops/tests/{validation,patches,query}.rs`, new `board/ops/tests/automation.rs`.
 - `crates/fleet-daemon/src/stores/board.rs` and its `mod tests`; `crates/fleet-proto/src/response.rs` and `tests/compatibility.rs`.
-- `docs/BOARD.md`, `docs/README.md`, new `docs/decisions/0021-board-workflows.md`.
+- `docs/BOARD.md`, `docs/README.md`, new `docs/decisions/0022-board-workflows.md`.
 
 ## Tasks
 
@@ -108,13 +108,13 @@ Add every type, field, validation, derived read and constant the automation engi
 
 ### P1-T06 — The capability string, the `Card` goldens and the documents
 - **Intent:** Reserve the capability without advertising it, prove the new card shape on the wire, and make `docs/` describe the model before anything uses it.
-- **Touches:** `crates/fleet-proto/src/response.rs`, `tests/compatibility.rs`, `docs/BOARD.md`, `docs/README.md`, new `docs/decisions/0021-board-workflows.md`.
+- **Touches:** `crates/fleet-proto/src/response.rs`, `tests/compatibility.rs`, `docs/BOARD.md`, `docs/README.md`, new `docs/decisions/0022-board-workflows.md`.
 - **Steps:**
   - `BOARD_AUTOMATION_CAPABILITY: &str = "board.automation"` beside `BOARD_WORKTREE_CAPABILITY` (`response.rs:59`), with a doc comment naming what it gates and the sentence "defined in phase 1, advertised in phase 3". Leave the advertisement list and its test mirror alone.
   - Goldens through `assert_frame`: a `ResponseBody::Card` whose card carries `agent`, `blocked_by`, `pending_run` and one terminal `CardRun` with every optional field set; a `BoardView` whose status carries a full `ColumnAutomation`; and `a_card_without_automation_fields_encodes_as_it_did_before` asserting the legacy card's bytes. The existing board goldens (:143-166) and `legacy_board_shapes_without_worktree_id_decode_as_unscoped` (:371-400) stay byte-for-byte untouched — a diff in either is a missing `skip_serializing_if`, never a fixture to refresh.
   - `docs/BOARD.md` §2: extend the model block with the new types and a paragraph on the lazy document version and the `1..=2` read range. New §11 "Automation", model part only: the column block, the card fields, the run history and its caps, the three activity sentences of contracts §1.4 verbatim, the refusal table of §1.7 verbatim, the derived reads, the preset table, and a line saying the engine, the wire verbs and the face arrive in phases 3, 3 and 6-8.
-  - New ADR `docs/decisions/0021-board-workflows.md` in the shape of `0019-worktree-scoped-boards.md`, recording the design's Decisions section: a failed review stops; review scope comes from the checkpoint diff; the throttle is board-level and 1 in the preset; runs never commit; the routing column is Ready, not Queued; three rows, not a three-stage picker; model and effort lists; no spend cap in v1; skill actions run on Claude only; Todo stays human; live run state is never on the card; reports capped at 8 KiB and three per card; the document version bumps lazily; `after_card_entered` returns a plan applied outside the non-reentrant gate with an in-flight reservation; columns live in Board settings; one column glyph, ⚡; `A`/`X`/`>` on the workspace board and the detail only; no `satisfies_blockers` in v1; local daemon only. Each with its one-line argument and, where one exists, the named alternative.
-  - Add the `| [0021](decisions/0021-board-workflows.md) | … |` row to `docs/README.md` after 0020.
+  - New ADR `docs/decisions/0022-board-workflows.md` in the shape of `0019-worktree-scoped-boards.md`, recording the design's Decisions section: a failed review stops; review scope comes from the checkpoint diff; the throttle is board-level and 1 in the preset; runs never commit; the routing column is Ready, not Queued; three rows, not a three-stage picker; model and effort lists; no spend cap in v1; skill actions run on Claude only; Todo stays human; live run state is never on the card; reports capped at 8 KiB and three per card; the document version bumps lazily; `after_card_entered` returns a plan applied outside the non-reentrant gate with an in-flight reservation; columns live in Board settings; one column glyph, ⚡; `A`/`X`/`>` on the workspace board and the detail only; no `satisfies_blockers` in v1; runs live on the daemon that owns the worktree, reached through the router (ADR 0021, merged from PR #43 on 2026-09-20), so a laptop daemon never runs automation for a worktree it only mirrors. Each with its one-line argument and, where one exists, the named alternative.
+  - Add the `| [0022](decisions/0022-board-workflows.md) | … |` row to `docs/README.md` after 0021.
 - **Verification:** `cargo test -p fleet-proto --test compatibility`; read the `docs/` diff beside the code.
 - **Done when:** Every new shape has a golden, no existing golden moved, and a reader of §11 can describe the model without reading Rust.
 

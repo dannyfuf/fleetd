@@ -235,7 +235,7 @@ half-wired engine starts runs nothing closes. The pure engine and its table test
 - **Steps:**
   - `MoveCard` gains `#[serde(default, skip_serializing_if = "std::ops::Not::not")] cancel_run:
     bool`; add `CardRunStart { card_id }`, `CardRunCancel { card_id }`, `CardRunWait { card_id,
-    timeout_ms }`, each answering `ResponseBody::Card(Card)`; all three classify `Target::Local`;
+    timeout_ms }`, each answering `ResponseBody::Card(Card)`; all three classify like `MoveCard`, by `host_or_local(resolver.host_of_card(card_id))` (ADR 0021, merged from PR #43);
     three dispatch arms reach `Boards::{start_run, cancel_run, wait_run}` and `cancel_run` is
     forwarded on `MoveCard`.
   - Client `card_run_start`, `card_run_cancel`, `card_run_wait(CardId, u64)`, `move_card(..,

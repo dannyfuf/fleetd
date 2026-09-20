@@ -548,7 +548,7 @@ CardRunStart { card_id: CardId }                   → ResponseBody::Card(Card)
 CardRunCancel { card_id: CardId }                  → ResponseBody::Card(Card)
 CardRunWait { card_id: CardId, timeout_ms: u64 }   → ResponseBody::Card(Card)   // the CLI reads `runs.last()`
 ```
-`Target::Local` for all three (`router/classify.rs`). Client (`api/boards.rs`):
+The three run requests classify like `MoveCard`: `host_or_local(resolver.host_of_card(card_id))` (`router/classify.rs`, ADR 0021), and `MoveCard.cancel_run` rides through the existing arm. Client (`api/boards.rs`):
 `card_run_start(CardId) -> Result<Card>`, `card_run_cancel(CardId) -> Result<Card>`,
 `card_run_wait(CardId, timeout_ms: u64) -> Result<Card>`, `move_card(.., cancel_run: bool)`;
 `required_capability` maps the three run requests to `BOARD_AUTOMATION_CAPABILITY` with the error
