@@ -24,6 +24,32 @@ use fleet_proto::{
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{Mutex, RwLock};
 
+/// The worktrees other hosts own, as this daemon last mirrored them.
+///
+/// A worktree board may be scoped to a mirrored remote worktree, and those worktrees never
+/// reach the local `StateStore` — they live only in the router's mirror. The trait is the
+/// late-bound seam that lets `Boards` see them without naming the mirror's type, in the same
+/// shape as [`WorktreeCascade`] (`docs/BOARD.md` §4).
+pub(super) trait RemoteWorktrees: Send + Sync {
+    /// Every mirrored worktree currently known, each carrying its owning host.
+    fn worktrees(&self) -> Vec<Worktree>;
+}
+
+impl RemoteWorktrees for super::mirror::Mirror {
+    fn worktrees(&self) -> Vec<Worktree> {
+        super::mirror::Mirror::worktrees(self)
+    }
+}
+
+/// Where the boards service found a worktree it was asked about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum WorktreeOrigin {
+    /// Published by this daemon and present in its state.
+    Local,
+    /// Owned by another host and seen only through the mirror.
+    Mirrored,
+}
+
 /// Coordinates board persistence, backend synchronization, and worktree creation.
 #[derive(Clone)]
 pub struct Boards {
@@ -51,6 +77,9 @@ pub struct Boards {
     /// to twenty times a second. Reparsing and revalidating every card, comment and activity
     /// entry of every board at that rate is pure waste when no board file has changed.
     summaries: Arc<RwLock<HashMap<BoardId, (DocumentStamp, BoardSummary)>>>,
+    /// The mirror of the worktrees other hosts own, installed once composition has built it.
+    /// Absent in unit tests that compose `Boards` alone, which then see local worktrees only.
+    remote_worktrees: Arc<std::sync::OnceLock<Arc<dyn RemoteWorktrees>>>,
 }
 
 /// The size and modification time a summary was parsed from.
@@ -92,7 +121,28 @@ impl Boards {
             allocation: Arc::new(Mutex::new(())),
             unreadable: Arc::new(std::sync::Mutex::new(HashMap::new())),
             summaries: Arc::new(RwLock::new(HashMap::new())),
+            remote_worktrees: Arc::new(std::sync::OnceLock::new()),
         }
+    }
+
+    /// Installs the mirrored view of remote worktrees, once composition has built the mirror.
+    pub(super) fn set_remote_worktrees(&self, remote: Arc<dyn RemoteWorktrees>) {
+        if self.remote_worktrees.set(remote).is_err() {
+            tracing::warn!("the boards service already has a remote worktree view");
+        }
+    }
+
+    /// The mirrored worktrees, gathered once so a scan over every board takes one snapshot.
+    fn mirrored_worktrees(&self) -> Vec<Worktree> {
+        self.remote_worktrees
+            .get()
+            .map_or_else(Vec::new, |remote| remote.worktrees())
+    }
+
+    /// The worktree `id` names, whether this daemon published it or a host it mirrors owns it.
+    fn known_worktree(&self, state: &State, id: &WorktreeId) -> Option<(Worktree, WorktreeOrigin)> {
+        find_worktree(state, &self.mirrored_worktrees(), id)
+            .map(|(worktree, origin)| (worktree.clone(), origin))
     }
 
     /// Serializes the read-modify-write cycles of one board without touching the others.
@@ -115,4 +165,31 @@ impl Boards {
         });
         self.events.request_snapshot_current();
     }
+}
+
+/// Finds a worktree in this daemon's state, then among the worktrees it mirrors.
+///
+/// Local state wins: a worktree this daemon published is authoritative over a fragment that
+/// still lists it, and only one of the two can be acted on locally anyway.
+fn find_worktree<'a>(
+    state: &'a State,
+    mirrored: &'a [Worktree],
+    id: &WorktreeId,
+) -> Option<(&'a Worktree, WorktreeOrigin)> {
+    state
+        .worktrees
+        .iter()
+        .find(|worktree| worktree.id == *id)
+        .map(|worktree| (worktree, WorktreeOrigin::Local))
+        .or_else(|| {
+            mirrored
+                .iter()
+                .find(|worktree| worktree.id == *id)
+                .map(|worktree| (worktree, WorktreeOrigin::Mirrored))
+        })
+}
+
+/// Whether `id` names a worktree this daemon published or one it mirrors.
+fn worktree_exists(state: &State, mirrored: &[Worktree], id: &WorktreeId) -> bool {
+    find_worktree(state, mirrored, id).is_some()
 }

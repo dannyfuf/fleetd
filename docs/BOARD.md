@@ -508,7 +508,7 @@ impl BoardStore {
 
 ```rust
 // crates/fleet-daemon/src/services/boards.rs
-pub struct Boards { /* store, state_store (contexts/repos/worktrees lookup), backends, clock, jobs, worktrees: Arc<Worktrees>, events broadcaster, index: RwLock<HashMap<CardId, BoardId>> */ }
+pub struct Boards { /* store, state_store (contexts/repos/worktrees lookup), remote_worktrees: OnceLock<Arc<dyn RemoteWorktrees>> (the mirror, installed after composition), backends, clock, jobs, worktrees: Arc<Worktrees>, events broadcaster, index: RwLock<HashMap<CardId, BoardId>> */ }
 impl Boards {
     pub fn new(store: Arc<BoardStore>, state_store: Arc<StateStore>, backends: BoardBackends, clock: Arc<dyn Clock>, jobs: Arc<JobManager>, worktrees: Arc<Worktrees>, events: BroadcastBus) -> Self;
     /// Skips a document this build cannot read; a `context` that does not exist is `NotFound`.
@@ -519,7 +519,8 @@ impl Boards {
     pub async fn create(&self, context: &ContextId, name: Option<String>, prefix: Option<String>, backend: Option<BackendRef>) -> DaemonResult<BoardView>;
     /// Finds the board whose persisted scope names this worktree; the derived id is only a fast path.
     pub(super) fn worktree_board(&self, worktree: &WorktreeId) -> DaemonResult<Option<BoardId>>;
-    /// Get-or-create the board scoped to one published worktree (`defaults::new_worktree_board`).
+    /// Get-or-create the board scoped to one worktree (`defaults::new_worktree_board`), whether this
+    /// daemon published it or a host it mirrors owns it.
     pub async fn ensure_for_worktree(&self, worktree: &WorktreeId) -> DaemonResult<BoardView>;
     /// Create the worktree's only board; a second board is `BoardError::Duplicate`.
     pub async fn create_for_worktree(&self, worktree: &WorktreeId, name: Option<String>, prefix: Option<String>, backend: Option<BackendRef>) -> DaemonResult<BoardView>;
@@ -576,11 +577,40 @@ impl Worktrees {
     pub(super) fn set_cascade(&self, cascade: Arc<dyn WorktreeCascade>);
 }
 ```
+A second late-bound seam, in the same shape and for the same reason, gives `Boards` the worktrees
+other hosts own. `Mirror` is composed after `Boards`, and `Boards` must not depend on the router:
+
+```rust
+pub(super) trait RemoteWorktrees: Send + Sync {
+    fn worktrees(&self) -> Vec<Worktree>;   // impl'd for services::mirror::Mirror
+}
+impl Boards {
+    pub(super) fn set_remote_worktrees(&self, remote: Arc<dyn RemoteWorktrees>);
+}
+```
+A worktree board may be scoped to a **mirrored remote worktree** — one another host owns, which
+this daemon only sees through `Mirror` and never holds in its `StateStore`. Every worktree
+existence check in the service therefore reads local state first and the mirror second: a
+worktree named by neither is `not found: worktree <id>`, exactly as before. Such a board is owned
+by the daemon whose client asked for it and lives in that daemon's board store, like a context
+board and like the cards that already link a remote worktree through `CreateWorktreeFromCard {
+host }`. Board requests are **not** routed to the owning host: a card request carries only a
+`card_id`, and a mirrored snapshot carries no cards, so the owner could not resolve one
+(`docs/decisions/0019-worktree-scoped-boards.md`). The board's context is resolved from the
+worktree: the context of the local repository with the same `RepoId` when this daemon has that
+repository — ids are the derived `owner/name`, so a repository cloned on both hosts is the same
+id on both — otherwise the first context whose `owners` collect the repository owner, otherwise
+the active context, and `not found: context for remote worktree <id>` when there is none. When
+the owning host deletes the worktree it leaves the mirror and its board is hidden by the same
+filter that hides a board whose local worktree is gone; nothing is trashed, because the trash
+bundling of `WorktreeCascade` belongs to a local worktree directory this daemon never had. The
+board document stays, so the board returns with the worktree if the owner recreates it.
+
 Every mutation: load doc → apply pure op → `validate_card` → save → emit `Event::BoardChanged`.
-Cards whose `worktree_id` no longer exists in `State.worktrees` are reported with `worktree_id:
-None` (not persisted), and a `repo_id` — on a card or as `Board.default_repo_id` — naming a
-repository the state no longer has in the board's context is reported the same way and skipped
-when `create_worktree_from_card` picks a repository. `ensure`/`create` refuse a context whose
+Cards whose `worktree_id` names neither a worktree in `State.worktrees` nor a mirrored one are
+reported with `worktree_id: None` (not persisted), and a `repo_id` — on a card or as
+`Board.default_repo_id` — naming a repository the state no longer has in the board's context is
+reported the same way and skipped when `create_worktree_from_card` picks a repository. `ensure`/`create` refuse a context whose
 board document is quarantined rather than creating an empty board over it. Cascades preserve both
 a live document this build cannot read and any quarantined remains, because their persisted
 context/worktree scope cannot be inferred safely from the shared board id. Explicit board deletion
@@ -592,9 +622,9 @@ persisted `worktree_id`. Creating either scope appends `-2` through `-99` when a
 already occupies its default id, and refuses creation if all candidates are occupied. `summaries`
 reparses a board document only when its `stamp` changed or
 this daemon rewrote it. Boards whose context no longer exists are skipped by `list`/`summaries`;
-a worktree board whose worktree no longer exists is skipped as well. Deleting a context deletes
-its boards in the same cascade (`delete_for_context`) so a later context deriving the same id
-cannot adopt one. After any worktree deletion moves the worktree to trash, the late-bound
+a worktree board is skipped as well once neither local state nor the mirror names its
+worktree. Deleting a context deletes its boards in the same cascade (`delete_for_context`) so a
+later context deriving the same id cannot adopt one. After any worktree deletion moves the worktree to trash, the late-bound
 `WorktreeCascade` bundles the board document inside that same trash entry. Restoring the worktree
 restores its board and cards; expiry removes both together. A cascade failure is warned and
 swallowed because the lifecycle move has already committed. An unreadable restored board stays in
@@ -606,7 +636,9 @@ claim from suffix selection through the document save, preventing distinct base 
 the same suffix; backend validation stays outside that claim. Reads of existing boards remain
 lock-free. Repository moves use the context lifecycle gate and every affected worktree lifecycle
 claim while rewriting the scoped board documents and repository state; a failed state publication
-rolls those documents back to their prior context.
+rolls those documents back to their prior context. A board scoped to a mirrored worktree of that
+repository is rehomed with them — it took its context from this repository — but takes no
+lifecycle claim, because the owning host runs that worktree's lifecycle.
 
 ## 5. Protocol (`fleet-proto`, version 8)
 

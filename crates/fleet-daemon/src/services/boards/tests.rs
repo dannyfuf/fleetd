@@ -589,3 +589,283 @@ async fn archiving_a_card_during_the_clone_names_the_created_worktree() {
         Err(DaemonError::Conflict(message)) if message == ARCHIVED_CARD
     ));
 }
+
+/// Publishes `worktrees` as the inventory host `host` owns, the way an observed snapshot does.
+fn mirror_worktrees(services: &Services, host: &str, worktrees: Vec<serde_json::Value>) {
+    let snapshot = serde_json::from_value(serde_json::json!({
+        "generatedAt": "now",
+        "contexts": [], "repos": [], "clones": [], "worktrees": worktrees,
+        "activeContext": null, "sessions": [], "statuses": [], "jobs": [],
+        "daemon": {
+            "version": "fleetd test", "pid": 1, "startedAt": "now", "home": "/tmp/remote"
+        },
+    }))
+    .unwrap();
+    services.mirror.apply(&host.parse().unwrap(), snapshot);
+}
+
+/// One worktree record as a remote host publishes it in its own snapshot.
+fn remote_worktree(id: &WorktreeId) -> serde_json::Value {
+    serde_json::json!({
+        "id": id, "repoId": id.repo(), "slug": id.slug(), "branch": id.slug(),
+        "baseRef": "main", "path": format!("/remote/{}", id.slug()),
+        "session": format!("api/{}", id.slug()), "createdAt": "now"
+    })
+}
+
+/// Registers `acme/api` in the `work` context, as a local clone of the mirrored repository.
+async fn clone_repo_locally(services: &Services) {
+    services
+        .state
+        .transaction(|state| {
+            state.repos.push(
+                serde_json::from_value(serde_json::json!({
+                    "id": "acme/api", "owner": "acme", "name": "api",
+                    "url": "https://example.invalid/acme/api.git", "contextId": "work",
+                    "defaultBranch": "main", "path": "/tmp/acme-api", "clonedAt": "now"
+                }))
+                .unwrap(),
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+/// `ctrl-s b` in a Workspace on a worktree another host owns.
+///
+/// The worktree is never in this daemon's state — the mirror is the only place it exists — and
+/// the board it opens is this daemon's own document, kept beside the local worktrees' boards in
+/// the repository's context.
+#[tokio::test]
+async fn a_board_for_a_mirrored_worktree_is_created_and_stored_locally() {
+    let (_temp, services, _receiver) = fixture().await;
+    clone_repo_locally(&services).await;
+    let worktree: WorktreeId = "acme/api#feature".parse().unwrap();
+    mirror_worktrees(&services, "dev-box", vec![remote_worktree(&worktree)]);
+    assert!(
+        !services
+            .state
+            .load()
+            .await
+            .unwrap()
+            .worktrees
+            .iter()
+            .any(|item| item.id == worktree)
+    );
+
+    let view = services
+        .boards
+        .ensure_for_worktree(&worktree)
+        .await
+        .unwrap();
+
+    assert_eq!(view.board.worktree_id.as_ref(), Some(&worktree));
+    // The repository is cloned on both hosts, so both ids are `acme/api` and the board lands in
+    // the context that repository belongs to here.
+    assert_eq!(view.board.context_id.as_str(), "work");
+    assert_eq!(
+        view.board.default_repo_id.as_ref().map(RepoId::as_str),
+        Some("acme/api")
+    );
+    assert_eq!(
+        services.boards.store.list().unwrap(),
+        vec![view.board.id.clone()]
+    );
+    assert_eq!(services.boards.get(&view.board.id).await.unwrap(), view);
+    assert_eq!(
+        services
+            .boards
+            .ensure_for_worktree(&worktree)
+            .await
+            .unwrap(),
+        view
+    );
+    assert_eq!(
+        services
+            .boards
+            .summaries()
+            .await
+            .iter()
+            .filter_map(|summary| summary.worktree_id.clone())
+            .collect::<Vec<_>>(),
+        vec![worktree.clone()]
+    );
+
+    // Deleted on its owning host, the worktree leaves the mirror and its board is hidden,
+    // exactly as a board whose local worktree is gone is hidden.
+    mirror_worktrees(&services, "dev-box", Vec::new());
+    assert!(services.boards.summaries().await.is_empty());
+    assert!(services.boards.list(None).await.unwrap().is_empty());
+}
+
+/// A mirrored worktree of a repository this daemon never cloned still needs a context.
+#[tokio::test]
+async fn a_mirrored_worktree_without_a_local_repository_takes_the_owner_then_active_context() {
+    let (_temp, services, _receiver) = fixture().await;
+    let worktree: WorktreeId = "acme/api#feature".parse().unwrap();
+    mirror_worktrees(&services, "dev-box", vec![remote_worktree(&worktree)]);
+
+    // Nothing here names the repository, no context collects its owner, and no context is
+    // active: there is nowhere to put the board, and saying so beats inventing a placement.
+    let error = services
+        .boards
+        .ensure_for_worktree(&worktree)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, DaemonError::NotFound(message)
+            if message == "context for remote worktree acme/api#feature"),
+        "{error:?}"
+    );
+
+    // The active context is the surface the user asked from when nothing else places it.
+    services
+        .state
+        .transaction(|state| {
+            state.active_context_id = Some("work".parse().unwrap());
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let view = services
+        .boards
+        .ensure_for_worktree(&worktree)
+        .await
+        .unwrap();
+    assert_eq!(view.board.context_id.as_str(), "work");
+    assert_eq!(view.board.worktree_id.as_ref(), Some(&worktree));
+}
+
+/// A context that collects the repository's owner beats the merely active one.
+#[tokio::test]
+async fn a_mirrored_worktree_lands_in_the_context_that_collects_its_owner() {
+    let (_temp, services, _receiver) = fixture().await;
+    services
+        .state
+        .transaction(|state| {
+            state.contexts.push(Context {
+                id: "oss".parse().unwrap(),
+                name: "OSS".into(),
+                owners: vec!["acme".into()],
+                created_at: "now".into(),
+            });
+            state.active_context_id = Some("work".parse().unwrap());
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let worktree: WorktreeId = "acme/api#feature".parse().unwrap();
+    mirror_worktrees(&services, "dev-box", vec![remote_worktree(&worktree)]);
+
+    let view = services
+        .boards
+        .ensure_for_worktree(&worktree)
+        .await
+        .unwrap();
+
+    assert_eq!(view.board.context_id.as_str(), "oss");
+}
+
+/// A mistyped or stale worktree id is still a missing worktree, not a placement problem.
+#[tokio::test]
+async fn a_worktree_neither_published_nor_mirrored_is_still_not_found() {
+    let (_temp, services, _receiver) = fixture().await;
+    clone_repo_locally(&services).await;
+    mirror_worktrees(
+        &services,
+        "dev-box",
+        vec![remote_worktree(&"acme/api#feature".parse().unwrap())],
+    );
+
+    let error = services
+        .boards
+        .ensure_for_worktree(&"acme/api#ghost".parse().unwrap())
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(&error, DaemonError::NotFound(message) if message == "worktree acme/api#ghost"),
+        "{error:?}"
+    );
+}
+
+/// Explicit creation resolves a mirrored worktree exactly as `ensure` does.
+#[tokio::test]
+async fn create_for_worktree_resolves_a_mirrored_worktree_the_same_way() {
+    let (_temp, services, _receiver) = fixture().await;
+    clone_repo_locally(&services).await;
+    let worktree: WorktreeId = "acme/api#feature".parse().unwrap();
+    mirror_worktrees(&services, "dev-box", vec![remote_worktree(&worktree)]);
+
+    let view = services
+        .boards
+        .create_for_worktree(
+            &worktree,
+            Some("Feature plan".into()),
+            Some("PLAN".into()),
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(view.board.worktree_id.as_ref(), Some(&worktree));
+    assert_eq!(view.board.context_id.as_str(), "work");
+    assert_eq!(view.board.name, "Feature plan");
+    assert_eq!(view.board.prefix, "PLAN");
+    assert!(matches!(
+        services
+            .boards
+            .create_for_worktree(&worktree, None, None, None)
+            .await,
+        Err(DaemonError::Conflict(_))
+    ));
+}
+
+/// The board of a mirrored worktree took its context from the local repository, so it moves
+/// with that repository just as the boards of the repository's local worktrees do.
+#[tokio::test]
+async fn moving_a_repository_rehomes_the_board_of_its_mirrored_worktree() {
+    let (_temp, services, _receiver) = fixture().await;
+    clone_repo_locally(&services).await;
+    services
+        .state
+        .transaction(|state| {
+            state.contexts.push(Context {
+                id: "next".parse().unwrap(),
+                name: "Next".into(),
+                owners: vec![],
+                created_at: "now".into(),
+            });
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let worktree: WorktreeId = "acme/api#feature".parse().unwrap();
+    mirror_worktrees(&services, "dev-box", vec![remote_worktree(&worktree)]);
+    let view = services
+        .boards
+        .ensure_for_worktree(&worktree)
+        .await
+        .unwrap();
+
+    services
+        .dispatch(fleet_proto::request::RequestBody::MoveRepoToContext {
+            repo: "acme/api".parse().unwrap(),
+            context: "next".parse().unwrap(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        services
+            .boards
+            .get(&view.board.id)
+            .await
+            .unwrap()
+            .board
+            .context_id
+            .as_str(),
+        "next"
+    );
+}

@@ -175,6 +175,11 @@ impl Services {
             .with_local_daemon_id(local_daemon_id),
         );
         let mirror = Arc::new(mirror::Mirror::new());
+        // A Workspace session on a worktree another host owns opens its board here, on the daemon
+        // its client is talking to, so the board service must be able to see that worktree. It is
+        // not in local state — only in the mirror, which is composed after `Boards`
+        // (`docs/BOARD.md` §4, `docs/decisions/0019-worktree-scoped-boards.md`).
+        boards.set_remote_worktrees(Arc::clone(&mirror) as Arc<dyn boards::RemoteWorktrees>);
         let router = Arc::new(router::Router::with_ids(
             Arc::clone(&machines),
             Arc::clone(&mirror),
