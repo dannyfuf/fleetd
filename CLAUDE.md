@@ -21,6 +21,8 @@ editing, and load `zed-quality-review` before declaring a change done.
 | Write or change any test, fake, fixture, or regression test | `rust-gpui-testing` |
 | Add an action, keybinding, focus handle, dialog, modal, palette command, notification, window | `gpui-app-shell` |
 | Touch the GUI harness — `fleet-drive`, `fleet-harness`, `fleet-app/src/drive*`, a `harness_target` name, or `scenarios/` | `rust-gpui-testing`, then `docs/TESTING-HARNESS.md` (frozen: read it before changing a command, a target name or the grammar) |
+| Plan, break down, track, or report on tasks; run `fleet board` from a terminal or agent thread | `fleet-board-planning` |
+| Delegate work to a subagent, run `fleet subagent` or `fleet agent`, or act as a delegated child (`FLEET_DELEGATION` is set) | `fleet-subagent-cli` |
 | Review a diff or PR, or finish a task | `zed-quality-review` |
 
 ## Non-negotiables
