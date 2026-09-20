@@ -310,6 +310,7 @@ impl Shell {
         .on_action(cx.listener(Self::cancel_prefix))
         .on_action(cx.listener(Self::prefix_go_hub))
         .on_action(cx.listener(Self::prefix_enter_scroll))
+        .on_action(cx.listener(Self::prefix_open_board))
         .on_action(cx.listener(Self::prefix_toggle_zoom))
         .on_action(cx.listener(Self::leave_scroll))
         .on_action(cx.listener(Self::escape_scroll))

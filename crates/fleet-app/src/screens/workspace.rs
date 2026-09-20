@@ -29,6 +29,7 @@ use std::{cell::RefCell, collections::HashMap, path::PathBuf, rc::Rc, time::Inst
 
 use fleet_core::{
     agents::{ThreadId, ThreadProjection},
+    config::{NATIVE_BOARD, NATIVE_LAZYGIT},
     github::{PrChecks, PrReviewDecision, PrTab, derive_pr_state},
     ids::{HostId, RepoId, SessionId, TerminalId, WorktreeId},
     model::Worktree,
@@ -44,7 +45,8 @@ use fleet_proto::{
 };
 use fleet_ui_kit::{
     ActiveTheme, CellMetrics, ExitStrip, Icon, KeyHintRow, PrBadgeState, PrefixHint, ScrollPill,
-    SplitLayout, StatusKind, TerminalMode as KitTerminalMode, TerminalTabStrip, Text,
+    SplitLayout, StatusKind, TerminalMode as KitTerminalMode, TerminalTabStrip, Text, Toast,
+    ToastDuration,
 };
 use gpui::{
     AnyElement, App, ClipboardItem, Div, Entity, FocusHandle, Focusable, KeyDownEvent, MouseButton,
@@ -57,7 +59,7 @@ use crate::{
     bridge::Bridge,
     dialogs::{self, Dialogs},
     presentation::session_glyph,
-    state::{AppState, Overlay, Screen, TerminalMode},
+    state::{AppState, Overlay, Screen, TerminalMode, dwell_for},
     terminal::{
         MouseCell, SelectionGranularity, absolute_selection_at, cell_size, grid_modes, measure,
         surface, try_selection_text, viewport_base, zoom_bar,

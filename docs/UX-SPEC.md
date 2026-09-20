@@ -747,6 +747,8 @@ tab, every key except `ctrl-s` → the pane; `ctrl-s` then
 `h`/`l`, `p`/`n` prev/next tab · `Tab` last terminal tab (KEYMAP A2) · `w` last session (KEYMAP A3) ·
 `W` session switcher (KEYMAP A4) · `u` select this child's caller · `d` `AGENTS` picker ·
 `S` sleep this session and return to Hub (KEYMAP A5) · `c` new tab ·
+`b` this worktree's board tab — created the first time, selected every time; on a session with
+no worktree it toasts `boards belong to worktrees` ·
 `x` close tab (confirm if a keep-alive process runs) · `,` rename · `[` scroll · `]` paste ·
 `a`/`A` new native Claude/Codex agent thread · `F` the agent PTY popup (the terminal fallback) · `r` restart the exited command (KEYMAP A10) · `y` copy worktree path (KEYMAP A11)
 · `z` zoom · `!` sticky error slot (prefixed: `^s !`, KEYMAP A18) · `J` jobs · `?` help · `Esc` cancel

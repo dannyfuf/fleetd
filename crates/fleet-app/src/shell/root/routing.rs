@@ -165,6 +165,16 @@ impl Shell {
         });
     }
 
+    /// `ctrl-s b` — the active worktree's board tab (BOARD §8), and the palette row for it.
+    pub(super) fn prefix_open_board(
+        &mut self,
+        _: &prefix::OpenBoard,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.workspace.open_board_tab(&self.bridge, &self.state, cx);
+    }
+
     pub(super) fn prefix_toggle_zoom(
         &mut self,
         _: &prefix::ToggleZoom,

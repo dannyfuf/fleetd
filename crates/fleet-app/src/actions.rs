@@ -408,6 +408,8 @@ pub mod prefix {
             AgentsPicker,
             /// `ctrl-s c` — new terminal tab.
             NewTerminal,
+            /// `ctrl-s b` — open or select this worktree's board tab.
+            OpenBoard,
             /// `ctrl-s x` — close the current terminal.
             CloseTerminal,
             /// `ctrl-s r` — restart the exited command in this terminal.

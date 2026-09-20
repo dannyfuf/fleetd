@@ -774,13 +774,15 @@ pub(super) fn up_to_caller(app: &mut AppState) -> Option<ThreadId> {
     app.select_agent_thread(caller).then_some(caller)
 }
 
-/// Asks fleetd for a plain shell tab in the session's worktree path.
+/// Asks fleetd for one more tab in the session's worktree path and selects the answer.
 ///
-/// `ctrl-s c` and the `+` at the end of the strip are the same request, so they share this.
-pub(super) fn request_shell_tab(
+/// `ctrl-s c`, the `+` at the end of the strip and `ctrl-s b` are the same request with another
+/// command, so they share this: the capacity rule, the refusal and the "select what you just
+/// asked for" rule are properties of creating a tab, not of what runs inside it.
+pub(super) fn request_shell_tab<T: MutationRequester + Clone + 'static>(
     local: &Rc<RefCell<Local>>,
     request: RequestBody,
-    bridge: &Bridge,
+    bridge: &T,
     state: &Entity<AppState>,
     cx: &mut App,
 ) {
@@ -1016,9 +1018,9 @@ pub(super) fn neighbour_terminal(
 }
 
 /// Selects a terminal in the daemon and records it in the session's MRU.
-pub(super) fn select_terminal(
+pub(super) fn select_terminal<T: MutationRequester>(
     local: &Rc<RefCell<Local>>,
-    bridge: &Bridge,
+    bridge: &T,
     state: &Entity<AppState>,
     terminal: Option<TerminalId>,
     cx: &mut App,
@@ -1068,5 +1070,127 @@ pub(super) fn shell_tab_request(session: &Session) -> RequestBody {
         name: workspace_tabs::unique_terminal_name(session, "sh"),
         command: SHELL_TAB_COMMAND.to_owned(),
         cwd: session.cwd.clone(),
+    }
+}
+
+/// What `ctrl-s b` says on a session that has no worktree (§2.7: a refusal carrying its reason).
+///
+/// A board belongs to a context or to a worktree, and a fixed agent session is neither, so the
+/// key has nothing to open rather than something that failed — which is why this is a toast and
+/// not the sticky slot.
+pub(super) const BOARDS_BELONG_TO_WORKTREES: &str = "boards belong to worktrees";
+
+/// The name the board tab is created with; `ctrl-s ,` may rename it afterwards.
+const BOARD_TAB_NAME: &str = "board";
+
+/// What `ctrl-s b` has to do with the session's tab strip.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum BoardTab {
+    /// The session already carries the tab: select it.
+    Select(TerminalId),
+    /// It carries none: ask fleetd for it with this request.
+    ///
+    /// Boxed because a `RequestBody` is an order of magnitude larger than a terminal id, and
+    /// the selecting arm is the common one — the tab is created once per session.
+    Create(Box<RequestBody>),
+}
+
+/// Whether this session already carries its board tab, and what to send when it does not.
+///
+/// The tab is recognised by its **command**, never by its name: the name belongs to the user —
+/// `ctrl-s ,` renames it, and a `windows[]` entry may have named it something else — while
+/// `fleet://board` is what makes the daemon own a tab with no PTY behind it (BOARD §8).
+pub(super) fn board_tab_request(session: &Session) -> BoardTab {
+    session
+        .terminals
+        .iter()
+        .find(|terminal| terminal.command == NATIVE_BOARD)
+        .map_or_else(
+            || {
+                BoardTab::Create(Box::new(RequestBody::NewTerminal {
+                    session: session.id.clone(),
+                    name: BOARD_TAB_NAME.to_owned(),
+                    command: NATIVE_BOARD.to_owned(),
+                    cwd: session.cwd.clone(),
+                }))
+            },
+            |terminal| BoardTab::Select(terminal.id),
+        )
+}
+
+impl WorkspaceScreen {
+    /// `ctrl-s b`: this worktree's board tab, created the first time and selected every time.
+    ///
+    /// The listener for it is the shell's (`shell/root/routing.rs`) and not one of the
+    /// `Workspace > Prefix` listeners above, because the palette's `Workspace: Open board tab`
+    /// row dispatches the same action while the palette owns the keyboard — and the palette is
+    /// a *sibling* of this screen in the element tree, so only the root is on both dispatch
+    /// paths. The work itself still belongs here: the tab, its selection and this screen's
+    /// selection state are the Workspace's.
+    pub(crate) fn open_board_tab(&self, bridge: &Bridge, state: &Entity<AppState>, cx: &mut App) {
+        open_board_tab(&self.local, bridge, state, cx);
+    }
+}
+
+/// See [`WorkspaceScreen::open_board_tab`].
+fn open_board_tab(
+    local: &Rc<RefCell<Local>>,
+    bridge: &Bridge,
+    state: &Entity<AppState>,
+    cx: &mut App,
+) {
+    let Some(worktree) = board_tab_worktree(state, cx) else {
+        return;
+    };
+    // The mirror is pointed at the worktree before the tab exists, so the pane has its load in
+    // flight by the time it first paints — and a daemon that serves no worktree boards refuses
+    // here, having said so itself, instead of leaving behind a tab nothing can ever fill.
+    if !crate::screens::board::enter_worktree_scope(worktree, state, bridge, cx) {
+        return;
+    }
+    show_board_tab(local, bridge, state, cx);
+}
+
+/// The worktree whose board `ctrl-s b` is about, or nothing — having said why.
+pub(super) fn board_tab_worktree(state: &Entity<AppState>, cx: &mut App) -> Option<WorktreeId> {
+    let kind = state
+        .read(cx)
+        .active_session()
+        .map(|session| session.kind.clone())?;
+    match kind {
+        SessionKind::Worktree(worktree) => Some(worktree),
+        SessionKind::Agent(_) => {
+            state.update(cx, |app, cx| {
+                app.toast(
+                    Toast::new(BOARDS_BELONG_TO_WORKTREES).icon(Icon::Info),
+                    Instant::now(),
+                    dwell_for(ToastDuration::Normal),
+                );
+                cx.notify();
+            });
+            None
+        }
+    }
+}
+
+/// Selects the session's board tab, asking fleetd for it first when it carries none.
+///
+/// Creation goes through the same path as `ctrl-s c`, so the reply's terminal is selected by
+/// [`request_shell_tab`] exactly as a new shell's is — which is what makes the key idempotent:
+/// the second press finds the tab and only selects it.
+pub(super) fn show_board_tab<T: MutationRequester + Clone + 'static>(
+    local: &Rc<RefCell<Local>>,
+    requester: &T,
+    state: &Entity<AppState>,
+    cx: &mut App,
+) {
+    let Some(request) = state.read(cx).active_session().map(board_tab_request) else {
+        return;
+    };
+    match request {
+        BoardTab::Select(terminal) => {
+            select_terminal(local, requester, state, Some(terminal), cx);
+        }
+        BoardTab::Create(request) => request_shell_tab(local, *request, requester, state, cx),
     }
 }

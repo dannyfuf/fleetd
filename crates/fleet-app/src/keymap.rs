@@ -298,6 +298,7 @@ const AGENT_SESSION_ROWS: &[SharedRow] = &[
     ("ctrl-s u", || Box::new(prefix::UpToCaller)),
     ("ctrl-s d", || Box::new(prefix::AgentsPicker)),
     ("ctrl-s c", || Box::new(prefix::NewTerminal)),
+    ("ctrl-s b", || Box::new(prefix::OpenBoard)),
     ("ctrl-s y", || Box::new(prefix::CopyWorktreePath)),
     ("ctrl-s z", || Box::new(prefix::ToggleZoom)),
     ("ctrl-s v", || Box::new(prefix::ToggleWatchPane)),
@@ -614,6 +615,9 @@ key_table! {
     "u",            "Workspace > Prefix" => prefix::UpToCaller;
     "d",            "Workspace > Prefix" => prefix::AgentsPicker;
     "c",            "Workspace > Prefix" => prefix::NewTerminal;
+    // The board tab is created on demand rather than by `windows[]` (BOARD §8), so this one
+    // key both makes it and returns to it; pressing it twice is one tab, selected twice.
+    "b",            "Workspace > Prefix" => prefix::OpenBoard;
     "x",            "Workspace > Prefix" => prefix::CloseTerminal;
     "r",            "Workspace > Prefix" => prefix::RestartCommand;
     "y",            "Workspace > Prefix" => prefix::CopyWorktreePath;
@@ -1468,10 +1472,30 @@ mod tests {
         }
     }
 
+    /// The binding and its row in `docs/KEYMAP.md` are one change.
+    ///
+    /// The prefix table is written `| key | action |`, so the board-wide drift test above
+    /// cannot see it; this is the same check for the one row `prefix::OpenBoard` owns. A key
+    /// missing from the table is a key nobody finds, and a row with nothing bound is a lie.
+    #[test]
+    fn the_board_prefix_key_is_bound_and_documented() {
+        let keystroke = Keystroke::parse("b").unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            action_for_keystroke("Workspace > Prefix", &keystroke).map(|action| action.name()),
+            Some("prefix::OpenBoard")
+        );
+        let docs = include_str!("../../../docs/KEYMAP.md");
+        assert!(
+            docs.lines()
+                .any(|line| line.starts_with("| `b` |") && line.contains("board tab")),
+            "the `ctrl-s` table in docs/KEYMAP.md names no board row"
+        );
+    }
+
     #[test]
     fn live_prefix_resolution_uses_the_authoritative_table() {
         for keys in [
-            "s", "S", "ctrl-s", "1", "tab", "W", "u", "d", "[", "]", "escape",
+            "s", "S", "ctrl-s", "1", "tab", "W", "u", "d", "b", "[", "]", "escape",
         ] {
             let keystroke = Keystroke::parse(keys)
                 .unwrap_or_else(|error| panic!("invalid test key {keys:?}: {error}"));
@@ -1484,10 +1508,13 @@ mod tests {
             assert_eq!(action.name(), spec.action, "{keys}");
         }
 
+        // `o` is refused on purpose (KEYMAP "Recorded so they are not re-proposed"), which
+        // makes it the stable example of a key the live prefix consumes and resolves to
+        // nothing.
         assert!(
             action_for_keystroke(
                 "Workspace > Prefix",
-                &Keystroke::parse("b").unwrap_or_else(|error| panic!("{error}"))
+                &Keystroke::parse("o").unwrap_or_else(|error| panic!("{error}"))
             )
             .is_none(),
             "an unknown prefix key is consumed without inventing an action"
@@ -1550,6 +1577,7 @@ mod tests {
             ("ctrl-s u", "prefix::UpToCaller"),
             ("ctrl-s d", "prefix::AgentsPicker"),
             ("ctrl-s c", "prefix::NewTerminal"),
+            ("ctrl-s b", "prefix::OpenBoard"),
             ("ctrl-s y", "prefix::CopyWorktreePath"),
             ("ctrl-s z", "prefix::ToggleZoom"),
             ("ctrl-s v", "prefix::ToggleWatchPane"),

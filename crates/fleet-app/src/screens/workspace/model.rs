@@ -1,5 +1,32 @@
 use super::*;
 
+/// Which reserved `fleet://` surface a Fleet-drawn tab shows.
+///
+/// One variant per reserved command plus the one every older client needs: a daemon may list a
+/// `fleet://` tab this build has no pane for, and that tab has to draw something rather than the
+/// pane of whichever surface happens to share its worktree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum NativeTab {
+    /// `fleet://lazygit` — the embedded git pane, one per worktree.
+    Lazygit,
+    /// `fleet://board` — this worktree's board.
+    Board,
+    /// A reserved command this build draws nothing for.
+    Unknown,
+}
+
+impl NativeTab {
+    /// The surface a native terminal's command names.
+    #[must_use]
+    fn of(command: &str) -> Self {
+        match command {
+            NATIVE_LAZYGIT => Self::Lazygit,
+            NATIVE_BOARD => Self::Board,
+            _ => Self::Unknown,
+        }
+    }
+}
+
 /// A path interpreted either locally or by a named remote daemon.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Location {
@@ -40,8 +67,12 @@ pub(super) struct Model {
     pub(super) waking: bool,
     /// The VT modes the active terminal's last frame reported (§3.6: badged in the header).
     pub(super) modes: Vec<KitTerminalMode>,
-    /// Whether the active tab is drawn by Fleet rather than by a PTY.
-    pub(super) native: bool,
+    /// Which Fleet-drawn surface the active tab is, when it is one rather than a PTY.
+    ///
+    /// The reserved command decides it, not the tab's name: the daemon owns the tab list and
+    /// every `fleet://` command it lists is a surface this app draws (`docs/ARCHITECTURE.md`,
+    /// "Native tabs").
+    pub(super) native: Option<NativeTab>,
     /// The native agent thread the strip has selected, when an agent tab is active.
     pub(super) agent: Option<ThreadId>,
     /// The worktree the session belongs to, and where it lives — what a pane is built from.
@@ -107,7 +138,7 @@ impl HostReachability {
 impl Model {
     /// The terminal this client attaches to, which is never a Fleet-drawn or agent tab.
     pub(super) const fn attach_target(&self) -> Option<TerminalId> {
-        if self.native || self.agent.is_some() {
+        if self.native.is_some() || self.agent.is_some() {
             None
         } else {
             self.terminal
@@ -218,11 +249,16 @@ impl Model {
             keep_alive,
             running_jobs,
             failed_jobs,
-            native: agent.is_none()
-                && session
-                    .terminals
-                    .iter()
-                    .any(|entry| Some(entry.id) == terminal && entry.is_native()),
+            native: agent
+                .is_none()
+                .then(|| {
+                    session
+                        .terminals
+                        .iter()
+                        .find(|entry| Some(entry.id) == terminal && entry.is_native())
+                        .map(|entry| NativeTab::of(&entry.command))
+                })
+                .flatten(),
             agent,
             worktree: worktree.map(|worktree| {
                 (

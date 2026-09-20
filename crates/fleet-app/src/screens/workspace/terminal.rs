@@ -14,7 +14,7 @@ impl WorkspaceScreen {
         focused: bool,
         cx: &App,
     ) -> AnyElement {
-        if model.native {
+        if model.native.is_some() {
             return self.pane_area(model, cx);
         }
         let theme = cx.theme();

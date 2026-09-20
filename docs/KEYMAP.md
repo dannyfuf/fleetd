@@ -170,6 +170,7 @@ alone preserves them.
 | `u` | select the caller of the current child thread, attaching it first if needed |
 | `d` | agent picker: the palette pre-filtered to `AGENTS` |
 | `c` | new terminal tab (shell in worktree path) |
+| `b` | this worktree's board tab: created the first time, selected every time |
 | `x` | close current terminal (confirm if a keep-alive process is running) |
 | `r` | restart the exited command in this terminal [A10] |
 | `y` | copy the worktree path of the current session [A11] |
@@ -262,7 +263,7 @@ scroll mode or owned by a decision card preserves that mode's keyboard owner ins
 | every agent-thread sub-mode | `ctrl-s s` · `ctrl-s S` | go to Hub (thread keeps running) · sleep this session and return to the Hub |
 | every agent-thread sub-mode | `ctrl-s h`/`p` · `ctrl-s l`/`n` | previous / next tab, across the mixed terminal-and-thread strip |
 | every agent-thread sub-mode | `ctrl-s W` · `ctrl-s u` · `ctrl-s d` | session switcher · select the caller (attaching it first) · agent picker pre-filtered to `AGENTS` |
-| every agent-thread sub-mode | `ctrl-s c` · `ctrl-s y` · `ctrl-s z` | new terminal tab · copy the worktree path · zoom |
+| every agent-thread sub-mode | `ctrl-s c` · `ctrl-s b` · `ctrl-s y` · `ctrl-s z` | new terminal tab · this worktree's board tab · copy the worktree path · zoom |
 | every agent-thread sub-mode | `ctrl-s v` · `ctrl-s V` · `ctrl-s N` · `ctrl-s P` | the subagent watch pane: show/hide · dismiss · next · previous |
 | every agent-thread sub-mode | `ctrl-s !` · `ctrl-s J` · `ctrl-s ?` · `ctrl-s Esc` | sticky error · jobs panel · help · cancel the prefix |
 | both | `Esc` | close a picker, else abandon a gate draft, else leave scroll mode, else interrupt — and nothing at all on an idle thread |
@@ -617,7 +618,9 @@ a documented key).
 `Tab` is "next pane" in the Hub and "next PR tab" on the PR screen. `i` is "toggle detail" in
 the Hub and "leave Scroll mode" in the Workspace. `r` is "refresh" in Normal and "restart" after
 `ctrl-s`. `c` is "create without opening" on the PR screen, "new terminal tab" after `ctrl-s`,
-and "cancel job" in the Jobs panel. `f` cycles the Jobs filter in the list and toggles follow
+and "cancel job" in the Jobs panel. `b` is "open in browser" in the Hub and on the PR screen and
+"this worktree's board tab" after `ctrl-s`.
+`f` cycles the Jobs filter in the list and toggles follow
 inside an expanded log. `y` copies a path, a URL or a log path depending on the pane. All are
 mode- or pane-disjoint; the Help dialog groups by mode precisely so they can be read side by
 side.

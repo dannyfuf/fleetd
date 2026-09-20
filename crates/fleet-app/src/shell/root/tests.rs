@@ -154,6 +154,7 @@ fn workspace_prefix_consumes_bound_and_unbound_keys_with_daemon_banner() {
         ("N", Action::name(&prefix::NextWatch)),
         ("P", Action::name(&prefix::PrevWatch)),
         ("d", Action::name(&prefix::AgentsPicker)),
+        ("b", Action::name(&prefix::OpenBoard)),
     ] {
         state.enter_prefix();
         let keystroke = Keystroke::parse(keys).unwrap_or_else(|error| panic!("{error}"));
@@ -1133,4 +1134,98 @@ fn real_shell_rename_terminal_prompt_takes_the_keyboard(cx: &mut gpui::TestAppCo
     assert_dialog_input_focused(&mut fixture);
     fixture.visual.simulate_input("build");
     assert_eq!(dialog_input_text(&mut fixture), "build");
+}
+
+/// The same real shell, showing the Workspace of a worktree session.
+///
+/// The fixture's daemon advertises no capabilities, which is exactly the daemon `ctrl-s b` has
+/// to refuse rather than open an empty tab on.
+fn root_workspace_fixture(cx: &mut gpui::TestAppContext, name: &str) -> RootInputFixture {
+    let mut fixture = root_input_fixture(cx, name);
+    let state = fixture.state.clone();
+    fixture.visual.update(|_, cx| {
+        state.update(cx, |app, cx| {
+            let worktree = filter_worktree("feat-one");
+            let session = fleet_core::sessions::Session {
+                id: worktree
+                    .session
+                    .parse()
+                    .unwrap_or_else(|error| panic!("{error}")),
+                host: None,
+                kind: fleet_core::sessions::SessionKind::Worktree(worktree.id.clone()),
+                cwd: worktree.path.clone(),
+                terminals: Vec::new(),
+                active_terminal: None,
+                slept_at: None,
+                kept_terminals: Vec::new(),
+            };
+            let mut snapshot = app
+                .snapshot
+                .clone()
+                .unwrap_or_else(|| panic!("the fixture installs a snapshot"));
+            snapshot.sessions = vec![session.clone()];
+            app.apply_snapshot(snapshot, Instant::now());
+            app.screen = Screen::Workspace {
+                session: session.id,
+            };
+            cx.notify();
+        });
+    });
+    settle(&mut fixture);
+    fixture
+}
+
+fn last_toast(fixture: &mut RootInputFixture) -> Option<String> {
+    fixture.state.read_with(&fixture.visual, |app, _| {
+        app.toasts
+            .last()
+            .map(|live| live.toast.text.as_ref().to_owned())
+    })
+}
+
+/// `ctrl-s b` on a daemon without `board.worktree` says so and opens no tab.
+#[gpui::test]
+fn real_shell_board_key_refuses_a_daemon_without_worktree_boards(cx: &mut gpui::TestAppContext) {
+    let mut fixture = root_workspace_fixture(cx, "board-key");
+
+    dispatch_root_key(&mut fixture, "ctrl-s");
+    dispatch_root_key(&mut fixture, "b");
+
+    assert_eq!(
+        last_toast(&mut fixture).as_deref(),
+        Some(crate::state::WORKTREE_BOARDS_UNSUPPORTED)
+    );
+    fixture.state.read_with(&fixture.visual, |app, _| {
+        assert!(
+            !matches!(app.board.scope, Some(crate::state::BoardScope::Worktree(_))),
+            "a refused scope never moves the mirror: {:?}",
+            app.board.scope
+        );
+    });
+}
+
+/// The palette row runs the same action, although the palette is a sibling of the Workspace.
+///
+/// The listener lives on the shell root precisely for this: dispatched from the palette's own
+/// dispatch path, a `Workspace > Prefix` listener mounted on the Workspace would never see it,
+/// and the row would be one `Enter` that does nothing.
+#[gpui::test]
+fn real_shell_board_palette_row_reaches_the_same_handler(cx: &mut gpui::TestAppContext) {
+    let mut fixture = root_workspace_fixture(cx, "board-palette");
+
+    // `ctrl-s W` is the Workspace's way into the palette; it seeds the session filter, which
+    // `ctrl-u` clears the way a user retyping the query would.
+    dispatch_root_key(&mut fixture, "ctrl-s");
+    dispatch_root_key(&mut fixture, "W");
+    assert_dialog_input_focused(&mut fixture);
+    dispatch_root_key(&mut fixture, "ctrl-u");
+    fixture.visual.simulate_input("Open board tab");
+    settle(&mut fixture);
+    assert_eq!(dialog_input_text(&mut fixture), "Open board tab");
+    dispatch_root_key(&mut fixture, "enter");
+
+    assert_eq!(
+        last_toast(&mut fixture).as_deref(),
+        Some(crate::state::WORKTREE_BOARDS_UNSUPPORTED)
+    );
 }

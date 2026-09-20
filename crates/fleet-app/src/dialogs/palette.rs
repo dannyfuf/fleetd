@@ -250,6 +250,9 @@ pub enum Command {
     /// Save text edit.
     CardDetailSave,
 
+    /// Open or select the active worktree session's board tab.
+    WorkspaceOpenBoard,
+
     /// Open §3.8.1.
     NewWorktree,
     /// Open §3.8.2.
@@ -334,6 +337,7 @@ impl Command {
         Self::CardDetailKeepLocal,
         Self::CardDetailTakeRemote,
         Self::CardDetailSave,
+        Self::WorkspaceOpenBoard,
         Self::NewWorktree,
         Self::CloneRepo,
         Self::PruneWorktrees,
@@ -398,6 +402,7 @@ impl Command {
             Self::CardDetailTakeRemote => "Card detail: Resolve conflict: take remote",
             Self::CardDetailSave => "Card detail: Save text edit",
 
+            Self::WorkspaceOpenBoard => "Workspace: Open board tab",
             Self::NewWorktree => "New worktree",
             Self::CloneRepo => "Clone repo",
             Self::DeleteWorktree => "Delete worktree",
@@ -463,6 +468,7 @@ impl Command {
             Self::CardDetailTakeRemote => Icon::CloudDownload,
             Self::CardDetailSave => Icon::Check,
 
+            Self::WorkspaceOpenBoard => Icon::Boxes,
             Self::NewWorktree => Icon::GitBranchPlus,
             Self::CloneRepo => Icon::CloudDownload,
             Self::DeleteWorktree | Self::DeleteContext => Icon::Trash,
@@ -538,6 +544,7 @@ impl Command {
             Self::CardDetailTakeRemote => "card_detail::TakeRemote",
             Self::CardDetailSave => "card_detail::Save",
 
+            Self::WorkspaceOpenBoard => "prefix::OpenBoard",
             Self::NewWorktree => "worktrees::Create",
             Self::CloneRepo => "repos::Clone",
             Self::DeleteWorktree => "worktrees::Delete",
@@ -629,6 +636,14 @@ impl Command {
             // A resolution needs something to resolve; on a clean card both rows open the
             // detail and then return without doing anything.
             Self::CardDetailKeepLocal | Self::CardDetailTakeRemote => has_card && card.conflicted,
+            // The key is a Workspace prefix row, and its handler lives on the Workspace root:
+            // listed anywhere else the row would dispatch an action nothing is listening for.
+            Self::WorkspaceOpenBoard => {
+                connected
+                    && state
+                        .active_session()
+                        .is_some_and(|session| matches!(session.kind, SessionKind::Worktree(_)))
+            }
             Self::NewWorktree | Self::PruneWorktrees => {
                 connected && crate::dialogs::focused_repo(state).is_some()
             }
@@ -1569,6 +1584,9 @@ fn run_command<T: SessionTransport>(
             window.dispatch_action(Box::new(card_detail::Save), cx);
         }
 
+        Command::WorkspaceOpenBoard => {
+            window.dispatch_action(Box::new(crate::actions::prefix::OpenBoard), cx);
+        }
         Command::NewWorktree => open(Dialogs::CreateWorktree, cx),
         Command::CloneRepo => open(Dialogs::CloneRepo, cx),
         Command::MoveRepo => open(Dialogs::AssignRepo, cx),
@@ -2224,6 +2242,35 @@ mod tests {
         app.cursors.worktrees = 9;
         assert!(!Command::SleepSession.valid(&app));
         assert!(!Command::KillSession.valid(&app));
+    }
+
+    /// `Workspace: Open board tab` dispatches a `Workspace > Prefix` action, and that handler
+    /// exists only while the Workspace is showing a worktree session. Listed anywhere else the
+    /// row would be one `Enter` that does nothing at all (§3.9 lists no row that cannot run).
+    #[test]
+    fn the_board_tab_row_needs_a_worktree_session_on_screen() {
+        let mut app = AppState::new("/tmp/fleet", Instant::now());
+        app.daemon = crate::state::DaemonLink::Connected;
+        app.snapshot = Some(multi_session_snapshot(1));
+        assert!(
+            !Command::WorkspaceOpenBoard.valid(&app),
+            "the Hub has no board tab to open"
+        );
+
+        app.screen = Screen::Workspace {
+            session: "widgets/feature-0"
+                .parse()
+                .unwrap_or_else(|error| panic!("{error}")),
+        };
+        assert!(Command::WorkspaceOpenBoard.valid(&app));
+
+        if let Some(snapshot) = app.snapshot.as_mut() {
+            snapshot.sessions[0].kind = SessionKind::Agent(fleet_core::config::Agent::Claude);
+        }
+        assert!(
+            !Command::WorkspaceOpenBoard.valid(&app),
+            "an agent session has no worktree, so it has no board"
+        );
     }
 
     #[test]

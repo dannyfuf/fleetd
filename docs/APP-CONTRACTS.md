@@ -818,7 +818,15 @@ The board loader runs on tab entry, active-context change, reconnect, a stale
 board's next render, a Workspace board-tab activation, and a Workspace session change while
 that tab is active; `screens::board::{enter_context_scope, enter_worktree_scope}` are the two
 triggers that point the mirror and load it, the second answering `false` when the daemon
-refuses. Only one request is in flight per generation. Context switches
+refuses. `prefix::OpenBoard` (`ctrl-s b`, `Workspace > Prefix`) is the Workspace's way in: on a
+session with no worktree it toasts `boards belong to worktrees` and stops, otherwise it enters
+the worktree scope and then selects the session's `fleet://board` terminal — or asks for one
+with `NewTerminal { name: "board", command: "fleet://board", cwd }` and selects the reply, the
+same path `ctrl-s c` takes. The tab is created on demand and never written to `windows[]`, so
+pressing the key twice is one tab, selected twice. Its listener is the shell root's, because the
+palette's `Workspace: Open board tab` row dispatches the same action from a sibling branch of
+the element tree.
+Only one request is in flight per generation. Context switches
 (including A → B → A), scope switches and link changes reject old responses. Errors remain
 visible in state until reload; an event arriving during a refresh schedules one more load.
 

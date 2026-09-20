@@ -29,13 +29,11 @@ pub(crate) fn enter_context_scope(state: &Entity<AppState>, bridge: &Bridge, cx:
 
 /// Points the board at one worktree's board and loads it, or refuses and says why.
 ///
-/// The Workspace's board pane calls this when its tab is activated and when the session under
-/// it changes while it is (P2-T04). The answer is whether the scope was entered: a daemon
-/// without `board.worktree` refuses, toasts
+/// `ctrl-s b` calls this before it opens or selects the tab, and the Workspace's board pane
+/// calls it again when the session under it changes while the tab is showing (P2-T04). The
+/// answer is whether the scope was entered: a daemon without `board.worktree` refuses, toasts
 /// [`WORKTREE_BOARDS_UNSUPPORTED`](crate::state::WORKTREE_BOARDS_UNSUPPORTED), and leaves the
-/// mirror pointed where it was, so the caller can decline to open the pane at all.
-// P2-T04 wires this to the Workspace's board pane; until then the Hub is the only surface.
-#[allow(dead_code)]
+/// mirror pointed where it was, so the caller can decline to open the tab at all.
 pub(crate) fn enter_worktree_scope(
     worktree: WorktreeId,
     state: &Entity<AppState>,

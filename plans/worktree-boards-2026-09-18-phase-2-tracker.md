@@ -31,8 +31,13 @@
     64 of 64 (Hub board scenarios unchanged). `BoardScope::{Context, Worktree}` on `BoardState.scope`;
     invalidation reuses `board_generation`; `enter_context_scope`/`enter_worktree_scope` are the
     triggers P2-T04 wires (two `#[allow]`s parked until then). Capability refusal is a one-line toast.
-- [~] P2-T03 — Add `ctrl-s b` to open or select the board tab
-- [ ] P2-T04 — Render the board pane inside the Workspace
+- [x] P2-T03 — Add `ctrl-s b` to open or select the board tab
+  - verified: `cargo test -p fleet-app` (909 passed), `make lint`, `make harness` 64 of 64 (agent run
+    `20260920-000429` and an independent run). The listener lives on the shell root so the palette
+    row reaches it; the tab is matched by command, never by name; `Model.native` became
+    `Option<NativeTab::{Lazygit, Board, Unknown}>` and a board tab draws an empty native band until
+    P2-T04. Two workspace scenarios that used `ctrl-s b` as the unbound example now use `ctrl-s o`.
+- [~] P2-T04 — Render the board pane inside the Workspace
 - [ ] P2-T05 — Drive the tab with a harness scenario
 - [ ] P2-T06 — Reconcile the UX, keymap and contract docs
 

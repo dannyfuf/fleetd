@@ -28,7 +28,12 @@ impl WorkspaceScreen {
             self.panes.retain(|worktree, _| live.contains(worktree));
         }
 
-        let active = model.native.then(|| model.worktree.clone()).flatten();
+        // Only the git pane is built here: a `fleet://board` tab shares this worktree, and
+        // keying panes by worktree alone would have handed it the git view of the same
+        // directory. P2-T04 gives the board its own pane and this becomes a match over both.
+        let active = matches!(model.native, Some(NativeTab::Lazygit))
+            .then(|| model.worktree.clone())
+            .flatten();
         let Some((worktree, location)) = active else {
             // Not on a Fleet-drawn tab: nothing owns the keyboard on our behalf, and every
             // pane that exists is idle in the background.
@@ -109,10 +114,16 @@ impl WorkspaceScreen {
     /// state apart when the user moves between worktrees.
     pub(super) fn pane_area(&self, model: &Model, cx: &App) -> AnyElement {
         let theme = cx.theme();
-        let pane = model
-            .worktree
-            .as_ref()
-            .and_then(|(worktree, _)| self.panes.get(worktree));
+        // Only `fleet://lazygit` has a pane of its own today; every other reserved command
+        // draws the empty band and says why, and never this worktree's git view.
+        let pane = matches!(model.native, Some(NativeTab::Lazygit))
+            .then(|| {
+                model
+                    .worktree
+                    .as_ref()
+                    .and_then(|(worktree, _)| self.panes.get(worktree))
+            })
+            .flatten();
         let remote = model
             .worktree
             .as_ref()
@@ -121,13 +132,14 @@ impl WorkspaceScreen {
             Some(pane) => pane.view.clone().into_any_element(),
             // One frame at most: `sync_panes` creates the view before this runs, unless the
             // snapshot has no worktree for the session (an agent session, or a race with a
-            // deletion) or the worktree is remote, in which case the tab says which it is.
+            // deletion), the worktree is remote, or this build draws no pane for the tab's
+            // reserved command — in which case the tab says which it is.
             None => div()
                 .flex()
                 .size_full()
                 .items_center()
                 .justify_center()
-                .child(Text::ui(no_pane_reason(remote)).muted())
+                .child(Text::ui(no_pane_reason(model.native, remote)).muted())
                 .into_any_element(),
         };
         let id = model.worktree.as_ref().map_or_else(
@@ -148,17 +160,21 @@ impl WorkspaceScreen {
     }
 }
 
-/// What an empty Fleet-drawn tab says, which is never the same sentence for both reasons.
+/// What an empty Fleet-drawn tab says, which is never the same sentence for two reasons.
 ///
 /// §8 degrades a remote worktree's `fleet://lazygit` tab to a plain PTY, so a remote worktree
 /// on this tab is a state the user can only reach transiently — it still has to read as a
-/// deliberate refusal rather than as a missing record.
+/// deliberate refusal rather than as a missing record. A tab whose reserved command this build
+/// draws no pane for says that instead, because it is true of the tab and not of the worktree.
 #[must_use]
-pub(super) const fn no_pane_reason(remote: bool) -> &'static str {
-    if remote {
-        "git is not drawn here for a remote worktree"
-    } else {
-        "no worktree for this tab"
+pub(super) const fn no_pane_reason(tab: Option<NativeTab>, remote: bool) -> &'static str {
+    match tab {
+        // P2-T04 draws the board here; until it does, the tab is empty rather than showing the
+        // git pane that happens to belong to the same worktree.
+        Some(NativeTab::Board) => "the board is not drawn in this tab yet",
+        Some(NativeTab::Unknown) => "this tab has no pane in this build",
+        Some(NativeTab::Lazygit) | None if remote => "git is not drawn here for a remote worktree",
+        Some(NativeTab::Lazygit) | None => "no worktree for this tab",
     }
 }
 
