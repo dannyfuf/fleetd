@@ -1,0 +1,56 @@
+# docs/KEYMAP.md §Dialogs and text inputs — "A multi-line input publishes
+# `enter = newline | owner` … The agent composer publishes `owner`, so its plain `Enter` reaches
+# Send/Steer", while `Shift-Enter` inserts in every multi-line input.
+# docs/KEYMAP.md §Native agent thread — `^s a` starts a Claude thread whose composer is focused.
+#
+# The composer's buffer is not projected — the snapshot carries threads, not drafts — so the
+# edits are read back through what was actually sent: the tab label is the submitted prompt
+# (`scenarios/agents/thread-streaming.scenario` pins that), which is the only harness-visible
+# oracle for composer text. For the same reason the `up` history recall is not asserted here:
+# a recalled draft is a buffer, and nothing in version 1 of the snapshot shows it.
+#
+# Paste is deliberately not exercised: `clipboard set` and `clipboard get` fail in every lane by
+# design (`docs/TESTING-HARNESS.md` §1); the kit's own gpui tests cover `cmd-v`.
+#
+# No `shot`: this is a keyboard scenario, so it belongs in the headless subset too (§7).
+fixture: agents
+await idle
+key o
+await screen == Workspace 20000
+key ctrl-s a
+await agents.threads[0].provider == claude 20000
+assert mode == Agent && focused == agents.composer
+await idle 30000
+
+# The composer is reached with the keyboard rather than the pointer: `targets["agents.composer"]`
+# covers the whole composer column — the editor row, the host badge and the metadata strip — so
+# the centre a named `click` lands on is below the editor, and typing after such a click reaches
+# nothing while `focused` still answers `agents.composer`. That is a defect of the surface, not
+# of this scenario, so it is reported rather than pinned here.
+assert targets["agents.composer"] exists && key_contexts[1] == AgentIdle
+
+# Two words, then `alt-backspace` takes the second one back.
+type explain this crate
+key alt-backspace
+type module
+
+# `Shift-Enter` inserts a newline instead of sending: the thread is still idle afterwards, and
+# the composer still owns the keyboard.
+key shift-enter
+type please
+assert agents.threads[0].state == idle && focused == agents.composer
+assert lists.tabs.selected.label == Claude
+
+# Plain `Enter` is the owner's: it sends the two-line draft, and the tab takes its first line.
+key enter
+await agents.threads[0].state == working 20000
+assert lists.tabs.selected.label ~= "^explain this module"
+assert key_contexts[1] == AgentWorking
+dump sent
+
+# The turn settles normally, so nothing about the edited draft left the thread stuck.
+await agents.threads[0].state == idle 40000
+assert key_contexts[1] == AgentIdle && sticky_error absent
+assert lists.tabs.selected.label ~= "^explain this module"
+dump finished
+quit

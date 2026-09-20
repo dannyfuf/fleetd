@@ -81,13 +81,35 @@ pub const NATIVE_SCHEME: &str = "fleet://";
 /// The reserved command of the native git pane (`crates/fleet-lazygit`).
 pub const NATIVE_LAZYGIT: &str = "fleet://lazygit";
 
+/// The reserved command of the worktree board tab.
+///
+/// Unlike [`NATIVE_LAZYGIT`] this surface is *daemon-data-driven*: its content is the board the
+/// owning daemon already serves over the wire, not a process running beside the worktree.
+pub const NATIVE_BOARD: &str = "fleet://board";
+
 /// Every reserved command Fleet answers; any other `fleet://` command is rejected.
-const NATIVE_COMMANDS: &[&str] = &[NATIVE_LAZYGIT];
+const NATIVE_COMMANDS: &[&str] = &[NATIVE_LAZYGIT, NATIVE_BOARD];
 
 /// Whether a `windows[].command` names a Fleet-provided surface instead of a program.
 #[must_use]
 pub fn is_native_command(command: &str) -> bool {
     command.starts_with(NATIVE_SCHEME)
+}
+
+/// The program a reserved command degrades to on a proxied (remote) session, if any.
+///
+/// Only a *process-backed* surface degrades. `fleet://lazygit` is drawn by an implementation
+/// embedded in the client, so on a proxied session it would run `git` on the client machine
+/// instead of the worktree's host: the remote `lazygit` binary is the honest stand-in.
+/// `fleet://board` is daemon-data-driven — the owning daemon already serves its rows over the
+/// wire, exactly as it does for structured agent tabs — so it stays native on a remote worktree
+/// and there is no program to fall back to.
+#[must_use]
+pub fn proxied_degradation(command: &str) -> Option<&'static str> {
+    match command {
+        NATIVE_LAZYGIT => Some("lazygit"),
+        _ => None,
+    }
 }
 
 /// The legacy commands a swarm import upgrades to [`NATIVE_LAZYGIT`].
@@ -704,8 +726,9 @@ pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
         }
         if is_native_command(&window.command) && !NATIVE_COMMANDS.contains(&window.command.as_str())
         {
+            let provided = NATIVE_COMMANDS.join("`, `");
             return Err(ConfigError::Validation(format!(
-                "window `{}` uses unknown reserved command `{}`; the only one Fleet provides is `{NATIVE_LAZYGIT}`",
+                "window `{}` uses unknown reserved command `{}`; the ones Fleet provides are `{provided}`",
                 window.name, window.command
             )));
         }
@@ -844,17 +867,36 @@ mod tests {
         let mut config = default_config("/home/me/.fleet");
         assert!(validate_config(&config).is_ok());
 
+        // Both reserved commands are configurable tabs; neither is special-cased here.
+        for reserved in [NATIVE_LAZYGIT, NATIVE_BOARD] {
+            config.windows[2].command = reserved.to_owned();
+            assert!(
+                validate_config(&config).is_ok(),
+                "`{reserved}` is a command Fleet provides"
+            );
+        }
+
         config.windows[2].command = "fleet://gitui".to_owned();
         let error = validate_config(&config)
             .err()
             .unwrap_or_else(|| panic!("an unknown reserved command must be rejected"))
             .to_string();
         assert!(error.contains("fleet://gitui"), "{error}");
-        assert!(error.contains("fleet://lazygit"), "{error}");
+        assert!(error.contains(NATIVE_LAZYGIT), "{error}");
+        assert!(error.contains(NATIVE_BOARD), "{error}");
 
         // A plain program is never a reserved command, whatever it is called.
         config.windows[2].command = "lazygit".to_owned();
         assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn only_the_process_backed_reserved_command_degrades_when_proxied() {
+        // The board tab is data the owning daemon serves, so a remote worktree keeps it native;
+        // the embedded git UI would run `git` on the client machine, so it falls back.
+        assert_eq!(proxied_degradation(NATIVE_LAZYGIT), Some("lazygit"));
+        assert_eq!(proxied_degradation(NATIVE_BOARD), None);
+        assert_eq!(proxied_degradation("nvim ."), None);
     }
 
     #[test]

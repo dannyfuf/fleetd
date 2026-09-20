@@ -8,7 +8,9 @@ pub(crate) fn seed(state: &Entity<AppState>, cx: &mut App) {
             card_id,
             revision: host.card_detail.revision.wrapping_add(1),
             ..Default::default()
-        }
+        };
+        host.card_detail_input = None;
+        host.card_detail_input_subscription = None;
     });
 }
 
@@ -29,7 +31,11 @@ pub(super) fn commit_edit(state: &Entity<AppState>, bridge: &Bridge, cx: &mut Ap
     let (Some(surface), Some(card_id)) = (draft.edit, draft.card_id.clone()) else {
         return;
     };
-    let text = draft.area.text().trim().to_owned();
+    let Some(input) = read_host(state, cx, |host, _| host.card_detail_input.clone()) else {
+        return;
+    };
+    let value = input.read(cx).text().to_owned();
+    let text = value.trim().to_owned();
     let request = match surface {
         CardEdit::Title if text.is_empty() => {
             with_host(state, cx, |host| {
@@ -48,12 +54,16 @@ pub(super) fn commit_edit(state: &Entity<AppState>, bridge: &Bridge, cx: &mut Ap
         CardEdit::Description => RequestBody::UpdateCard {
             card_id,
             patch: CardPatch {
-                description: Some(draft.area.text().to_owned()),
+                description: Some(value),
                 ..CardPatch::default()
             },
         },
         CardEdit::Comment if text.is_empty() => {
-            with_host(state, cx, |host| host.card_detail.cancel());
+            with_host(state, cx, |host| {
+                host.card_detail.cancel();
+                host.card_detail_input = None;
+                host.card_detail_input_subscription = None;
+            });
             notify(state, cx);
             return;
         }
@@ -76,7 +86,11 @@ pub(super) fn commit_edit(state: &Entity<AppState>, bridge: &Bridge, cx: &mut Ap
             let Some(state) = state.upgrade() else { return };
             with_host(&state, cx, |host| {
                 host.card_detail
-                    .finish_save(revision, result.as_ref().err().cloned())
+                    .finish_save(revision, result.as_ref().err().cloned());
+                if !host.card_detail.is_editing() {
+                    host.card_detail_input = None;
+                    host.card_detail_input_subscription = None;
+                }
             });
             if let Ok(card) = result {
                 state.update(cx, |app, cx| {

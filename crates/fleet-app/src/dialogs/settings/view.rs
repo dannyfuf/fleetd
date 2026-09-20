@@ -32,7 +32,7 @@ pub(crate) fn render(
                 .column(RowColumn::flex(Text::ui(entry.title())))
         }));
 
-    let editing = &draft.editing;
+    let editing = host.read(cx).settings_input.clone();
     let pane = div()
         .id("settings-pane")
         .min_h_0()
@@ -45,7 +45,7 @@ pub(crate) fn render(
         .gap(tight)
         .children(pane_rows.iter().enumerate().map(|(index, row)| {
             let focused = index == draft.row;
-            row_element(row, focused, focused.then_some(editing.as_ref()).flatten())
+            row_element(row, focused, focused.then(|| editing.clone()).flatten())
         }))
         .children(
             section
@@ -92,29 +92,26 @@ pub(crate) fn render(
     let save_bridge = bridge.clone();
     let doctor_bridge = bridge.clone();
 
-    input_actions(root(focus), state)
-        .on_action(move |_: &dialog::Confirm, _window, cx| {
+    input_actions(root(focus), state, focus)
+        .on_action(move |_: &dialog::Confirm, window, cx| {
+            // §3.8.6: a text or number row is opened for editing by `Enter`; once its editor
+            // owns the keyboard the dialog publishes `SettingsEditing`, whose own `Enter` row
+            // reaches this handler again and saves. Every other row saves straight away.
+            if confirm_opens_editing(&save_state, window, cx) {
+                return;
+            }
             save(&save_state, &save_bridge, cx);
         })
         .on_action({
             let state = state.clone();
             let bridge = bridge.clone();
             move |_: &settings_actions::OpenConfigFile, _window, cx| {
-                // §3.8.6 surrenders every bound printable key to a focused input, `E` and `D`
-                // included: `Claude command` and `Codex command` are free text, and a key
-                // that replaced the screen instead of typing dropped the draft silently.
-                if insert_literal(&state, "E", cx) {
-                    return;
-                }
                 open_config_file(&state, &bridge, cx);
             }
         })
         .on_action({
             let state = state.clone();
             move |_: &settings_actions::RunDoctor, _window, cx| {
-                if insert_literal(&state, "D", cx) {
-                    return;
-                }
                 run_doctor(&state, &doctor_bridge, cx);
             }
         })
@@ -123,10 +120,14 @@ pub(crate) fn render(
 }
 
 /// Draws one row with the kit control its kind calls for.
+///
+/// `editing` is the live editor of §3.8.6, present only on the row that `Enter` opened. A text
+/// row *is* that editor; a number row keeps its `NumberField` chrome around it so the label and
+/// the unit stay where they were.
 pub(super) fn row_element(
     row: &SettingRow,
     focused: bool,
-    editing: Option<&TextFieldState>,
+    editing: Option<Entity<TextInput>>,
 ) -> AnyElement {
     match &row.kind {
         RowKind::Toggle(checked) => {
@@ -148,51 +149,39 @@ pub(super) fn row_element(
             .focused(focused)
             .into_any_element(),
         RowKind::Number { value, min, unit } => {
-            if let Some(input) = editing {
-                let valid = input
-                    .text()
-                    .trim()
-                    .parse::<i64>()
-                    .is_ok_and(|value| value >= *min);
-                let label = unit.as_ref().map_or_else(
-                    || row.label.clone(),
-                    |unit| format!("{} ({unit})", row.label),
-                );
-                let mut field = TextField::new(input.text().to_owned())
-                    .label(label)
-                    .caret(input.caret_chars())
-                    .focused(input_is_focused(focused, editing))
-                    .mono(true);
-                if !valid {
-                    field = field.invalid(format!("must be an integer of at least {min}"));
-                }
-                return field.into_any_element();
-            }
             let mut field = NumberField::labeled(row.label.clone(), *value)
                 .min(*min)
-                .focused(false);
+                .focused(focused && editing.is_none());
             if let Some(unit) = unit {
                 field = field.unit(unit.clone());
+            }
+            if let Some(input) = editing {
+                field = field.editor(input);
             }
             field.into_any_element()
         }
         RowKind::Text(value) => {
-            let mut field = TextField::new(
-                editing.map_or_else(|| value.clone(), |input| input.text().to_owned()),
-            )
-            .label(row.label.clone())
-            .caret(editing.map_or(0, TextFieldState::caret_chars))
-            .focused(input_is_focused(focused, editing))
-            .mono(true);
-            // The 18 px slot §3.8.1 reserves: the sub-label lives in the preview line, and an
-            // `invalid` message replaces it there, which is the zero-shift rule already.
-            if let Some(detail) = row.detail.clone() {
-                field = field.preview(detail);
+            if let Some(input) = editing {
+                return input.into_any_element();
             }
+            // §6.4: a value nobody is editing is a read-only fact, not an empty box. `Enter`
+            // opens the row and the editor it opens carries the placeholder and the rule.
+            let mut column = div().flex().flex_col().child(
+                FactRow::new(
+                    row.label.clone(),
+                    FactValue::from_option((!value.is_empty()).then(|| value.clone())),
+                )
+                .label_width(px(LABEL_WIDTH))
+                .mono(true),
+            );
+            // The sub-label and the failing rule share one line, and the rule wins it, which
+            // is the zero-shift rule the field used to state in its 18 px slot.
             if let Some(invalid) = row.invalid.clone() {
-                field = field.invalid(invalid);
+                column = column.child(FactRow::warning(invalid));
+            } else if let Some(detail) = row.detail.clone() {
+                column = column.child(Text::ui(detail).faint().ellipsize());
             }
-            field.into_any_element()
+            column.into_any_element()
         }
         RowKind::Fact(value) => KeyValueList::new()
             .row(row.label.clone(), FactValue::known(value.clone()))
@@ -200,99 +189,51 @@ pub(super) fn row_element(
     }
 }
 
-pub(super) fn input_is_focused(focused_row: bool, editing: Option<&TextFieldState>) -> bool {
-    focused_row && editing.is_some()
-}
-
-pub(super) fn input_actions(root: gpui::Div, state: &Entity<AppState>) -> gpui::Div {
-    root.on_key_down({
+pub(super) fn input_actions(
+    root: gpui::Div,
+    state: &Entity<AppState>,
+    focus: &FocusHandle,
+) -> gpui::Div {
+    root.on_action({
         let state = state.clone();
-        move |event, _window, cx| {
-            type_into_row(&state, event, cx);
-        }
+        let focus = focus.clone();
+        move |_: &settings_actions::MoveDown, window, cx| move_row(&state, 1, &focus, window, cx)
     })
     .on_action({
         let state = state.clone();
-        move |_: &settings_actions::MoveDown, _window, cx| move_row(&state, 1, "j", cx)
+        let focus = focus.clone();
+        move |_: &settings_actions::MoveUp, window, cx| move_row(&state, -1, &focus, window, cx)
     })
     .on_action({
         let state = state.clone();
-        move |_: &settings_actions::MoveUp, _window, cx| move_row(&state, -1, "k", cx)
+        let focus = focus.clone();
+        move |_: &dialog::CursorDown, window, cx| move_row(&state, 1, &focus, window, cx)
     })
     .on_action({
         let state = state.clone();
-        move |_: &dialog::CursorDown, _window, cx| move_row(&state, 1, "", cx)
+        let focus = focus.clone();
+        move |_: &dialog::CursorUp, window, cx| move_row(&state, -1, &focus, window, cx)
     })
     .on_action({
         let state = state.clone();
-        move |_: &dialog::CursorUp, _window, cx| move_row(&state, -1, "", cx)
+        let focus = focus.clone();
+        move |_: &dialog::NextField, window, cx| move_section(&state, 1, &focus, window, cx)
     })
     .on_action({
         let state = state.clone();
-        move |_: &dialog::NextField, _window, cx| move_section(&state, 1, cx)
+        let focus = focus.clone();
+        move |_: &dialog::PrevField, window, cx| move_section(&state, -1, &focus, window, cx)
     })
     .on_action({
         let state = state.clone();
-        move |_: &dialog::PrevField, _window, cx| move_section(&state, -1, cx)
+        move |_: &settings_actions::CyclePrev, _window, cx| cycle_row(&state, -1, cx)
     })
     .on_action({
         let state = state.clone();
-        move |_: &settings_actions::CyclePrev, _window, cx| cycle_row(&state, -1, "h", cx)
-    })
-    .on_action({
-        let state = state.clone();
-        move |_: &settings_actions::CycleNext, _window, cx| cycle_row(&state, 1, "l", cx)
+        move |_: &settings_actions::CycleNext, _window, cx| cycle_row(&state, 1, cx)
     })
     .on_action({
         let state = state.clone();
         move |_: &settings_actions::Toggle, _window, cx| toggle_row(&state, cx)
-    })
-    // `Backspace` / `ctrl-u` / `ctrl-w` are unambiguous edit intents, so unlike `j` / `k`
-    // they focus the row's input themselves.
-    .on_action({
-        let state = state.clone();
-        move |_: &dialog::Backspace, _window, cx| {
-            edit_focused(&state, cx, TextFieldState::backspace);
-        }
-    })
-    .on_action({
-        let state = state.clone();
-        move |_: &dialog::ClearInput, _window, cx| {
-            edit_focused(&state, cx, clear_all);
-        }
-    })
-    .on_action({
-        let state = state.clone();
-        move |_: &dialog::DeleteWord, _window, cx| {
-            edit_focused(&state, cx, TextFieldState::delete_word_before);
-        }
-    })
-    .on_action({
-        let state = state.clone();
-        move |_: &dialog::LineStart, _window, cx| {
-            move_caret(&state, cx, TextFieldState::move_to_start);
-        }
-    })
-    .on_action({
-        let state = state.clone();
-        move |_: &dialog::LineEnd, _window, cx| {
-            move_caret(&state, cx, TextFieldState::move_to_end);
-        }
-    })
-    .on_action({
-        let state = state.clone();
-        move |_: &dialog::CursorLeft, _window, cx| {
-            if !move_caret(&state, cx, TextFieldState::move_left) {
-                cycle_row(&state, -1, "", cx);
-            }
-        }
-    })
-    .on_action({
-        let state = state.clone();
-        move |_: &dialog::CursorRight, _window, cx| {
-            if !move_caret(&state, cx, TextFieldState::move_right) {
-                cycle_row(&state, 1, "", cx);
-            }
-        }
     })
 }

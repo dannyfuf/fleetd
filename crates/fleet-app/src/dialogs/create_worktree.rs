@@ -18,16 +18,24 @@ use fleet_proto::{
     snapshot::{HostStatus, LinkState},
 };
 use fleet_ui_kit::{Icon, prelude::*};
-use gpui::{AnyElement, App, Entity, FocusHandle, Window, div};
+use gpui::{AnyElement, App, AppContext, Entity, FocusHandle, Window, div};
 
 use crate::{
     actions::{create_worktree as create_actions, dialog},
     async_util::before_timeout,
     bridge::Bridge,
-    dialogs::{DialogHost, field, notify, open_session, root, step, type_into, with_host},
+    dialogs::{DialogHost, notify, open_session, read_host, root, step, with_host},
     presentation::FuzzyQuery,
     state::{AppState, Cursors, HubPane, RepoScope, Screen},
 };
+
+mod branch;
+#[cfg(test)]
+mod tests;
+mod view;
+
+pub(crate) use branch::refresh_status;
+pub(crate) use view::render;
 
 /// How many base rows the list shows (§3.8.1: "6 is swarm's number").
 pub const BASE_ROWS: usize = 6;
@@ -143,8 +151,8 @@ pub struct CreateState {
     pub(crate) host_index: usize,
     /// Whether the user moved the cycler, which freezes the late `defaultHost` seeding.
     pub(crate) host_touched: bool,
-    /// The branch input.
-    pub(crate) branch: TextFieldState,
+    /// The branch input, mirrored from the live editor on every `Changed`.
+    pub(crate) branch: String,
     /// Which field owns the keyboard.
     pub(crate) field: Field,
     /// Which base row carries the cursor.
@@ -180,7 +188,7 @@ impl CreateState {
         {
             rows.push(previous.clone());
         }
-        let query = FuzzyQuery::new(self.branch.text());
+        let query = FuzzyQuery::new(&self.branch);
         let remaining = BASE_ROWS.saturating_sub(rows.len());
         let is_tail = |candidate: &&String| !rows.contains(candidate);
         let has_matches = self
@@ -252,7 +260,7 @@ impl CreateState {
     #[must_use]
     pub fn preview_id(&self) -> Option<String> {
         let repo = self.repo.as_ref()?;
-        let slug = slugify(self.branch.text());
+        let slug = slugify(&self.branch);
         if slug.is_empty() {
             return None;
         }
@@ -265,7 +273,7 @@ impl CreateState {
         if self.branch.is_empty() {
             return None;
         }
-        match validate_branch(self.branch.text()) {
+        match validate_branch(&self.branch) {
             Ok(()) => None,
             Err(error) => Some(reason(&error)),
         }
@@ -277,7 +285,7 @@ impl CreateState {
         self.repo.is_some()
             && !self.branch.is_empty()
             && self.branch_error().is_none()
-            && !slugify(self.branch.text()).is_empty()
+            && !slugify(&self.branch).is_empty()
             && self.host_blocked().is_none()
     }
 
@@ -406,6 +414,7 @@ fn seed_with_transport<T: CreateTransport>(state: &Entity<AppState>, transport: 
         host.create = draft;
         seq
     });
+    branch::seed_input(state, cx);
     if let Some(repo) = repo {
         poll_base_refs(repo, seq, state, transport, cx);
     }
@@ -571,366 +580,17 @@ fn finish_base_ref_failure(
     });
 }
 
-/// The branch input, carrying the first of validity, collision and id preview that applies.
-fn branch_field(draft: &CreateState, duplicate: Option<&str>) -> TextField {
-    let preview = draft.preview_id();
-    let invalid = draft.branch_error();
-    let input = field(&draft.branch)
-        .label("Branch")
-        .placeholder("feat/rut-validator")
-        .mono(true)
-        .focused(draft.field == Field::Branch);
-    match (&invalid, duplicate, &preview) {
-        (Some(message), _, _) => input.invalid(message.clone()),
-        (None, Some(id), _) => {
-            input.preview(format!("{id} already exists \u{2014} \u{23ce} opens it"))
-        }
-        (None, None, Some(id)) => input.preview(format!("\u{2192} {id}")),
-        (None, None, None) => input,
-    }
-}
-
-/// The `Base` label with its fetch spinner, over the ref candidates.
-fn base_section(draft: &CreateState, tight: gpui::Pixels) -> Div {
-    let candidates = draft.base_candidates();
-    let base_header = div()
-        .flex()
-        .items_center()
-        .justify_between()
-        .child(Text::label("Base"))
-        .children(
-            draft
-                .fetching
-                .then(|| SpinnerWithLabel::new("create-base-fetch", "fetching")),
-        );
-    let previous_base = draft.previous_base.clone();
-    let base_list = FuzzyList::new(candidates.iter().enumerate().map(|(index, candidate)| {
-        let mut item = FuzzyItem::new(candidate.clone());
-        if index == 0 {
-            item = item.trailing("default");
-        } else if previous_base.as_deref() == Some(candidate.as_str()) {
-            item = item.trailing("(previous base)");
-        }
-        item
-    }))
-    .cursor(draft.base_cursor)
-    .cap(BASE_ROWS)
-    .under_text_field(true)
-    .harness_rows("dialog.row", 0)
-    .empty(Text::ui("No base refs yet.").muted());
-
-    div()
-        .flex()
-        .flex_col()
-        .gap(tight)
-        .child(base_header)
-        .children(draft.base_error.as_ref().map(|error| {
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .child(Text::ui(error.clone()).tone(Tone::Danger).ellipsize())
-                .child(KeyHintRow::new().key("enter", "retry"))
-        }))
-        .child(base_list)
-}
-
-/// The `Host` cycler, plus the one line that says why the shown host cannot take a create.
+/// `Tab` / `S-Tab`: branch, base, then the host cycler when one is configured.
 ///
-/// The cycler itself stays live even on a blocked host: the way out of an unreachable choice is
-/// `\u{2190}` / `\u{2192}`, so locking the control would trap the user on it. What the blocked
-/// entry loses is `Enter` (`can_submit`), and the reason says so in the daemon's own words.
-fn host_section(draft: &CreateState, tight: gpui::Pixels, cx: &App) -> Option<Div> {
-    let choice = draft.selected_choice()?;
-    let warning = Tone::Warning.color(cx.theme());
-    let cycler = Cycler::labeled("Host", choice.label.clone())
-        .has_prev(draft.host_index > 0)
-        .has_next(draft.host_index + 1 < draft.hosts.len())
-        .focused(draft.field == Field::Host);
-    // The note is one line in every state, so cycling hosts never moves the rest of the dialog.
-    let note = div().flex().items_center().gap(tight);
-    let note = match choice.blocked.as_deref() {
-        Some(reason) => note
-            .child(Icon::CloudOff.el().size(IconSize::Small).color(warning))
-            .child(
-                Text::ui(format!("{} \u{2014} {reason}", choice.label))
-                    .tone(Tone::Warning)
-                    .ellipsize(),
-            ),
-        None => note.child(Text::hint(
-            choice
-                .provider
-                .clone()
-                .unwrap_or_else(|| "this machine".to_owned()),
-        )),
-    };
-    Some(div().flex().flex_col().gap(tight).child(cycler).child(note))
-}
-
-/// The two lines under the fields: how long a create will take, and what runs after it.
-fn expectation(draft: &CreateState, cx: &App) -> Div {
-    let hair = cx.theme().space.xxs;
-    // §3.8.1 Icons: `zap` and `hourglass`, both 16 px Lucide strokes. A colour emoji here was
-    // the one glyph on the screen that was not part of the icon set (§0), and §1.4 keeps amber
-    // for "in flight / needs attention" rather than for decoration.
-    let (expectation_icon, expectation_tone, expectation) = if draft.prepared_ready {
-        (
-            Icon::Zap,
-            Tone::Warning,
-            "prepared copy ready \u{2014} create takes ~2 s",
-        )
-    } else {
-        (
-            Icon::Hourglass,
-            Tone::Muted,
-            "no prepared copy \u{2014} the first create copies the repo (~40 s) in the background",
-        )
-    };
-    let hooks_line = if draft.hooks.is_empty() {
-        "hooks: none".to_owned()
-    } else {
-        format!(
-            "hooks: {}  (run in background)",
-            draft.hooks.join(" \u{00b7} ")
-        )
-    };
-
-    div()
-        .flex()
-        .flex_col()
-        .gap(hair)
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(hair)
-                .child(
-                    expectation_icon
-                        .el()
-                        .size(IconSize::Medium)
-                        .color(expectation_tone.color(cx.theme())),
-                )
-                .child(Text::ui(expectation).muted()),
-        )
-        .child(Text::hint(hooks_line))
-}
-
-/// Renders the dialog (§3.8.1).
-pub(crate) fn render(
+/// Landing on the branch hands it the keyboard, and leaving it hands the keyboard back to the
+/// dialog, which is what publishes `Create` instead of `CreateEditing`.
+fn move_field(
     state: &Entity<AppState>,
-    bridge: &Bridge,
+    delta: isize,
     focus: &FocusHandle,
-    host: &Entity<DialogHost>,
-    _window: &mut Window,
+    window: &mut Window,
     cx: &mut App,
-) -> AnyElement {
-    let (gap, tight) = {
-        let theme = cx.theme();
-        (theme.space.md, theme.space.xs)
-    };
-    let draft = &host.read(cx).create;
-    let duplicate = draft
-        .preview_id()
-        .filter(|id| existing_worktree(state.read(cx), id).is_some());
-
-    // `dialog.field[N]` counts the tab cycle, so the indices are exactly [`Field`]'s order:
-    // branch, base, host. The host cycler is absent on a single-host daemon, and its index is
-    // simply absent from the dump with it.
-    let body = div()
-        .flex()
-        .flex_col()
-        .gap(gap)
-        .child(branch_field(draft, duplicate.as_deref()).harness_target_indexed("dialog.field", 0))
-        .child(base_section(draft, tight).harness_target_indexed("dialog.field", 1))
-        .children(
-            host_section(draft, tight, cx)
-                .map(|section| section.harness_target_indexed("dialog.field", 2)),
-        )
-        .child(expectation(draft, cx));
-
-    let mut card = Dialog::new("New worktree")
-        .icon(Icon::GitBranchPlus)
-        .width(super::Dialogs::CreateWorktree.width(cx))
-        .body(body)
-        .hint_row(
-            KeyHintRow::new()
-                .key("\u{21e5}", "field")
-                .key("\u{2303}n/\u{2303}p", "base")
-                .key("esc", "cancel"),
-        )
-        .primary(if duplicate.is_some() {
-            "\u{23ce} Open"
-        } else {
-            "\u{23ce} Create"
-        });
-    if let Some(repo) = draft.repo.as_ref() {
-        card = card.subtitle(format!("\u{00b7} {}", repo.as_str()));
-    }
-    if let Some(message) = draft.error.clone() {
-        card = card.error(message);
-    }
-
-    let create_state = state.clone();
-    let create_bridge = bridge.clone();
-    let alt_state = state.clone();
-    let alt_bridge = bridge.clone();
-    let cancel_state = state.clone();
-
-    // `left` / `right` cycle the host in this dialog; edit actions only mutate Branch while it
-    // owns focus.
-    root(focus)
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::Backspace, _, cx| {
-                edit_branch(&state, TextFieldState::backspace, cx);
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::DeleteWord, _, cx| {
-                edit_branch(&state, TextFieldState::delete_word_before, cx);
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::ClearInput, _, cx| {
-                edit_branch(
-                    &state,
-                    |input| {
-                        if input.is_empty() {
-                            false
-                        } else {
-                            input.clear();
-                            true
-                        }
-                    },
-                    cx,
-                );
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::LineStart, _, cx| {
-                move_branch_caret(&state, cx, TextFieldState::move_to_start);
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::LineEnd, _, cx| {
-                move_branch_caret(&state, cx, TextFieldState::move_to_end);
-            }
-        })
-        .on_key_down({
-            let state = state.clone();
-            move |event, _window, cx| {
-                edit_branch(&state, |input| type_into(input, event), cx);
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::NextField, _window, cx| move_field(&state, 1, cx)
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::PrevField, _window, cx| move_field(&state, -1, cx)
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::CursorDown, _window, cx| move_base(&state, 1, cx)
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::CursorUp, _window, cx| move_base(&state, -1, cx)
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &create_actions::HostPrev, _window, cx| {
-                if move_branch_caret(&state, cx, TextFieldState::move_left) {
-                    return;
-                }
-                cycle_host(&state, -1, cx);
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &create_actions::HostNext, _window, cx| {
-                if move_branch_caret(&state, cx, TextFieldState::move_right) {
-                    return;
-                }
-                cycle_host(&state, 1, cx);
-            }
-        })
-        .on_action(move |_: &dialog::Confirm, _window, cx| {
-            submit(true, &create_state, &create_bridge, cx);
-        })
-        .on_action(
-            move |_: &create_actions::CreateWithoutOpening, _window, cx| {
-                submit(false, &alt_state, &alt_bridge, cx);
-            },
-        )
-        .on_action(move |_: &dialog::Cancel, _window, cx| {
-            // §3.8.1: closing the dialog never cancels a running base fetch; it says so.
-            if with_host(&cancel_state, cx, |host| host.create.fetching) {
-                cancel_state.update(cx, |state, cx| {
-                    state.toast_short(
-                        "\u{27f3} base fetch still running \u{00b7} J",
-                        Icon::LoaderCircle,
-                        Instant::now(),
-                    );
-                    cx.notify();
-                });
-            }
-            // The shell owns closing the dialog.
-            cx.propagate();
-        })
-        .child(card)
-        .into_any_element()
-}
-
-fn edit_branch(
-    state: &Entity<AppState>,
-    edit: impl FnOnce(&mut TextFieldState) -> bool,
-    cx: &mut App,
-) -> bool {
-    let changed = with_host(state, cx, |host| edit_focused_field(&mut host.create, edit));
-    if changed {
-        notify(state, cx);
-    }
-    changed
-}
-
-fn edit_focused_field(
-    draft: &mut CreateState,
-    edit: impl FnOnce(&mut TextFieldState) -> bool,
-) -> bool {
-    if draft.field != Field::Branch || !edit(&mut draft.branch) {
-        return false;
-    }
-    draft.error = None;
-    draft.base_cursor = 0;
-    true
-}
-
-/// Moves the branch caret when the branch field owns the keyboard. Returns whether it did.
-fn move_branch_caret(
-    state: &Entity<AppState>,
-    cx: &mut App,
-    move_to: fn(&mut TextFieldState) -> bool,
-) -> bool {
-    let moved = with_host(state, cx, |host| {
-        if host.create.field != Field::Branch {
-            return false;
-        }
-        move_to(&mut host.create.branch);
-        true
-    });
-    if moved {
-        notify(state, cx);
-    }
-    moved
-}
-
-fn move_field(state: &Entity<AppState>, delta: isize, cx: &mut App) {
+) {
     with_host(state, cx, |host| {
         let has_hosts = !host.create.hosts.is_empty();
         let order: &[Field] = if has_hosts {
@@ -945,19 +605,47 @@ fn move_field(state: &Entity<AppState>, delta: isize, cx: &mut App) {
         let next = (current as isize + delta).rem_euclid(order.len() as isize) as usize;
         host.create.field = order[next];
     });
+    focus_field(state, focus, window, cx);
     notify(state, cx);
 }
 
-fn move_base(state: &Entity<AppState>, delta: isize, cx: &mut App) {
+/// Hands the keyboard to the branch editor while it is the focused field, and to the dialog
+/// itself otherwise.
+fn focus_field(state: &Entity<AppState>, focus: &FocusHandle, window: &mut Window, cx: &mut App) {
+    let input = read_host(state, cx, |host, _| {
+        (host.create.field == Field::Branch)
+            .then(|| host.create_branch.clone())
+            .flatten()
+    });
+    match input {
+        Some(input) => input.update(cx, |input, cx| input.focus(window, cx)),
+        None => window.focus(focus, cx),
+    }
+}
+
+fn move_base(
+    state: &Entity<AppState>,
+    delta: isize,
+    focus: &FocusHandle,
+    window: &mut Window,
+    cx: &mut App,
+) {
     with_host(state, cx, |host| {
         let len = host.create.base_candidates().len();
         host.create.base_cursor = step(host.create.base_cursor, delta, len);
         host.create.field = Field::Base;
     });
+    focus_field(state, focus, window, cx);
     notify(state, cx);
 }
 
-fn cycle_host(state: &Entity<AppState>, delta: isize, cx: &mut App) {
+fn cycle_host(
+    state: &Entity<AppState>,
+    delta: isize,
+    focus: &FocusHandle,
+    window: &mut Window,
+    cx: &mut App,
+) {
     with_host(state, cx, |host| {
         let len = host.create.hosts.len();
         host.create.host_touched = true;
@@ -966,6 +654,7 @@ fn cycle_host(state: &Entity<AppState>, delta: isize, cx: &mut App) {
             host.create.field = Field::Host;
         }
     });
+    focus_field(state, focus, window, cx);
     notify(state, cx);
 }
 
@@ -1002,7 +691,7 @@ fn submit_with_transport<T: CreateTransport>(
         }
         Some((
             draft.repo.clone()?,
-            draft.branch.text().to_owned(),
+            draft.branch.clone(),
             draft.selected_base(),
             draft.selected_host(),
         ))
@@ -1119,622 +808,4 @@ fn close(state: &Entity<AppState>, cx: &mut App) {
         app.close_overlay();
         cx.notify();
     });
-}
-
-#[cfg(test)]
-mod tests {
-    use std::{cell::RefCell, collections::VecDeque};
-
-    use super::*;
-
-    enum RecordedRequest {
-        Sent(RequestBody),
-        Requested(RequestBody),
-    }
-
-    type TestReplySender =
-        async_channel::Sender<Result<ResponseBody, fleet_proto::error::ProtoError>>;
-
-    #[derive(Clone, Default)]
-    struct FakeTransport {
-        requests: Rc<RefCell<Vec<RecordedRequest>>>,
-        replies: Rc<RefCell<VecDeque<TestReplySender>>>,
-    }
-
-    impl CreateTransport for FakeTransport {
-        fn send(&self, body: RequestBody) {
-            self.requests.borrow_mut().push(RecordedRequest::Sent(body));
-        }
-
-        fn request(&self, body: RequestBody) -> Reply {
-            let (sender, receiver) = async_channel::bounded(1);
-            self.requests
-                .borrow_mut()
-                .push(RecordedRequest::Requested(body));
-            self.replies.borrow_mut().push_back(sender);
-            receiver
-        }
-    }
-
-    fn worktree() -> fleet_core::model::Worktree {
-        fleet_core::model::Worktree {
-            id: WorktreeId::try_from("buk/payroll#feature").unwrap(),
-            repo_id: RepoId::try_from("buk/payroll").unwrap(),
-            slug: "feature".to_owned(),
-            branch: "feature".to_owned(),
-            base_ref: "origin/main".to_owned(),
-            path: "/tmp/feature".to_owned(),
-            session: "buk/payroll#feature".to_owned(),
-            host: None,
-            created_at: String::new(),
-            last_opened_at: None,
-            degraded: None,
-        }
-    }
-
-    fn snapshot_with_worktree() -> fleet_proto::snapshot::Snapshot {
-        fleet_proto::snapshot::Snapshot {
-            boards: Vec::new(),
-            generated_at: String::new(),
-            revision: None,
-            contexts: Vec::new(),
-            repos: Vec::new(),
-            clones: Vec::new(),
-            worktrees: vec![worktree()],
-            active_context: None,
-            sessions: Vec::new(),
-            agent_threads: Vec::new(),
-            statuses: Vec::new(),
-            pools: Vec::new(),
-            hosts: Vec::new(),
-            jobs: Vec::new(),
-            daemon: fleet_proto::snapshot::DaemonInfo {
-                version: String::new(),
-                pid: 1,
-                started_at: String::new(),
-                home: String::new(),
-            },
-        }
-    }
-
-    fn draft() -> CreateState {
-        CreateState {
-            repo: RepoId::try_from("buk/payroll").ok(),
-            default_base: "origin/main".to_owned(),
-            previous_base: Some("pull/412/head".to_owned()),
-            base_refs: vec![
-                "origin/main".to_owned(),
-                "origin/release-2026".to_owned(),
-                "origin/feat/payroll-import".to_owned(),
-            ],
-            ..CreateState::default()
-        }
-    }
-
-    #[test]
-    fn large_base_ref_lists_keep_default_previous_and_matching_cap() {
-        let mut draft = draft();
-        draft.base_refs = (0..10_000).map(|i| format!("origin/feature-{i}")).collect();
-        draft.branch = TextFieldState::from_text("feature-99");
-        let rows = draft.base_candidates();
-        assert_eq!(rows.len(), BASE_ROWS);
-        assert_eq!(&rows[..2], &["origin/main", "pull/412/head"]);
-        assert_eq!(rows[2], "origin/feature-99");
-        draft.branch = TextFieldState::from_text("no-match-at-all");
-        assert_eq!(draft.base_candidates()[2], "origin/feature-0");
-    }
-
-    #[test]
-    fn default_base_is_first_and_previous_base_second() {
-        let rows = draft().base_candidates();
-        assert_eq!(rows[0], "origin/main");
-        assert_eq!(rows[1], "pull/412/head");
-        assert!(rows.contains(&"origin/release-2026".to_owned()));
-        assert!(rows.len() <= BASE_ROWS);
-    }
-
-    #[test]
-    fn base_rows_are_filtered_by_the_typed_branch_but_never_emptied() {
-        let mut state = draft();
-        state.branch = TextFieldState::from_text("import");
-        let rows = state.base_candidates();
-        assert_eq!(rows[2], "origin/feat/payroll-import");
-        state.branch = TextFieldState::from_text("zzzz");
-        let rows = state.base_candidates();
-        assert!(
-            rows.len() > 2,
-            "an unmatchable branch must not hide every base"
-        );
-    }
-
-    #[test]
-    fn the_preview_is_the_worktree_id_the_create_will_produce() {
-        let mut state = draft();
-        state.branch = TextFieldState::from_text("feat/RUT validator");
-        assert_eq!(
-            state.preview_id().as_deref(),
-            Some("buk/payroll#feat-rut-validator")
-        );
-    }
-
-    #[test]
-    fn validation_states_the_failing_rule_and_blocks_enter() {
-        let mut state = draft();
-        state.branch = TextFieldState::from_text("feat/..bad");
-        assert_eq!(
-            state.branch_error().as_deref(),
-            Some("branch must not contain `..`")
-        );
-        assert!(!state.can_submit());
-        state.branch = TextFieldState::from_text("feat/ok");
-        assert_eq!(state.branch_error(), None);
-        assert!(state.can_submit());
-    }
-
-    #[test]
-    fn an_empty_branch_is_neither_invalid_nor_submittable() {
-        let state = draft();
-        assert_eq!(state.branch_error(), None);
-        assert!(!state.can_submit());
-    }
-
-    fn host_status(id: &str, provider: &str, link: LinkState, reachable: bool) -> HostStatus {
-        HostStatus {
-            id: HostId::try_from(id).unwrap_or_else(|error| panic!("{error}")),
-            provider: provider.to_owned(),
-            version: None,
-            link,
-            address: None,
-            agent_binaries: None,
-            reachable,
-            checked_at: "2026-09-04T12:00:00Z".to_owned(),
-            error: (!reachable).then(|| "ssh: connect timed out after 5s".to_owned()),
-        }
-    }
-
-    fn hosts(statuses: &[HostStatus]) -> Vec<HostChoice> {
-        std::iter::once(HostChoice::local())
-            .chain(statuses.iter().map(HostChoice::from_status))
-            .collect()
-    }
-
-    #[test]
-    fn the_host_cycler_maps_local_to_no_host() {
-        let mut state = draft();
-        state.hosts = hosts(&[host_status("devbox", "tailscale", LinkState::Ready, true)]);
-        assert_eq!(state.selected_host(), None, "`local` is not a host id");
-        state.host_index = 1;
-        assert_eq!(
-            state.selected_host().map(|host| host.as_str().to_owned()),
-            Some("devbox".to_owned())
-        );
-    }
-
-    #[test]
-    fn an_unreachable_host_is_disabled_with_the_daemons_reason() {
-        let mut state = draft();
-        state.branch = TextFieldState::from_text("feat/ok");
-        state.hosts = hosts(&[
-            host_status("devbox", "tailscale", LinkState::Down, false),
-            host_status("archdev", "legacy", LinkState::Legacy, true),
-            host_status("loopback", "command", LinkState::Ready, true),
-        ]);
-        assert!(state.can_submit(), "`local` is always submittable");
-
-        state.host_index = 1;
-        assert_eq!(
-            state.host_blocked(),
-            Some("ssh: connect timed out after 5s"),
-            "the refusal is the daemon's own probe error, not a local guess"
-        );
-        assert!(!state.can_submit());
-
-        state.host_index = 2;
-        assert_eq!(
-            state.host_blocked(),
-            Some("legacy entry \u{2014} migrate it to a tailscale host")
-        );
-        assert!(!state.can_submit());
-
-        state.host_index = 3;
-        assert_eq!(state.host_blocked(), None);
-        assert_eq!(
-            state
-                .selected_choice()
-                .and_then(|choice| choice.provider.as_deref()),
-            Some("command")
-        );
-        assert!(state.can_submit());
-    }
-
-    #[test]
-    fn a_blocked_default_host_never_becomes_the_seeded_selection() {
-        let devbox = HostId::try_from("devbox").unwrap();
-        let mut state = draft();
-        state.hosts = hosts(&[host_status("devbox", "tailscale", LinkState::Down, false)]);
-        assert!(!state.select_default_host(Some(&devbox)));
-        assert_eq!(state.host_index, 0, "a refused host is not preselected");
-
-        let mut state = draft();
-        state.hosts = hosts(&[host_status("devbox", "tailscale", LinkState::Ready, true)]);
-        assert!(state.select_default_host(Some(&devbox)));
-        assert_eq!(state.host_index, 1);
-
-        let mut state = draft();
-        state.hosts = hosts(&[host_status("devbox", "tailscale", LinkState::Ready, true)]);
-        state.host_touched = true;
-        assert!(
-            !state.select_default_host(Some(&devbox)),
-            "a late config answer never moves a cycler the user already moved"
-        );
-    }
-
-    #[test]
-    fn subsequence_matches_in_order_only() {
-        assert!(FuzzyQuery::new("import").matches("origin/feat/payroll-import"));
-        assert!(FuzzyQuery::new("").matches("origin/main"));
-        assert!(!FuzzyQuery::new("z").matches("origin/main"));
-        assert!(!FuzzyQuery::new("cb").matches("abc"));
-    }
-
-    #[gpui::test]
-    fn opening_initiates_base_ref_fetch(cx: &mut gpui::TestAppContext) {
-        let repo = RepoId::try_from("buk/payroll").unwrap();
-        let state = cx.new(|_| {
-            let mut state = AppState::new("/tmp/fleet", Instant::now());
-            state.scope = RepoScope::Repo(repo.clone());
-            state
-        });
-        let transport = FakeTransport::default();
-        cx.update(|cx| seed_with_transport(&state, &transport, cx));
-        cx.run_until_parked();
-        {
-            let requests = transport.requests.borrow();
-            assert!(matches!(
-                requests.as_slice(),
-                [RecordedRequest::Requested(RequestBody::ListBaseRefs {
-                    force: false,
-                    ..
-                })]
-            ));
-        }
-
-        transport
-            .replies
-            .borrow_mut()
-            .pop_front()
-            .unwrap()
-            .try_send(Ok(ResponseBody::BaseRefs(
-                fleet_proto::response::BaseRefs {
-                    refs: vec!["origin/main".to_owned()],
-                    fetching: false,
-                    fetched_at: String::new(),
-                },
-            )))
-            .unwrap();
-        cx.run_until_parked();
-        {
-            let requests = transport.requests.borrow();
-            assert!(matches!(
-                requests.as_slice(),
-                [
-                    RecordedRequest::Requested(RequestBody::ListBaseRefs { force: false, .. }),
-                    RecordedRequest::Requested(RequestBody::ListBaseRefs { force: true, .. })
-                ]
-            ));
-        }
-        cx.update(|cx| {
-            with_host(&state, cx, |host| {
-                assert_eq!(host.create.base_refs, ["origin/main"]);
-                assert!(host.create.fetching);
-            })
-        });
-        transport
-            .replies
-            .borrow_mut()
-            .pop_front()
-            .unwrap()
-            .try_send(Ok(ResponseBody::BaseRefs(
-                fleet_proto::response::BaseRefs {
-                    refs: vec!["origin/main".to_owned(), "origin/release".to_owned()],
-                    fetching: false,
-                    fetched_at: String::new(),
-                },
-            )))
-            .unwrap();
-        cx.run_until_parked();
-        cx.update(|cx| {
-            with_host(&state, cx, |host| {
-                assert_eq!(host.create.base_refs, ["origin/main", "origin/release"]);
-                assert!(!host.create.fetching);
-            })
-        });
-    }
-
-    #[gpui::test]
-    fn base_ref_failure_stops_spinner_and_retries(cx: &mut gpui::TestAppContext) {
-        let repo = RepoId::try_from("buk/payroll").unwrap();
-        let state = cx.new(|_| {
-            let mut state = AppState::new("/tmp/fleet", Instant::now());
-            state.scope = RepoScope::Repo(repo.clone());
-            state
-        });
-        let transport = FakeTransport::default();
-        cx.update(|cx| seed_with_transport(&state, &transport, cx));
-        cx.run_until_parked();
-        cx.executor().advance_clock(BASE_REF_TIMEOUT);
-        cx.run_until_parked();
-        cx.update(|cx| {
-            with_host(&state, cx, |host| {
-                assert!(!host.create.fetching);
-                assert_eq!(
-                    host.create.base_error.as_deref(),
-                    Some("base-ref cache timed out")
-                );
-                assert!(host.create.should_retry_base_refs());
-            });
-            submit_with_transport(false, &state, &transport, cx);
-        });
-        cx.run_until_parked();
-        cx.update(|cx| {
-            with_host(&state, cx, |host| {
-                assert!(host.create.fetching);
-                assert_eq!(host.create.base_error, None);
-            })
-        });
-        assert_eq!(transport.requests.borrow().len(), 2);
-    }
-
-    #[test]
-    fn edits_follow_focused_field_and_clear_error() {
-        let mut state = draft();
-        state.branch = TextFieldState::from_text("feature");
-        state.error = Some("already exists".to_owned());
-        state.base_cursor = 3;
-        state.field = Field::Base;
-        assert!(!edit_focused_field(&mut state, TextFieldState::backspace));
-        assert_eq!(state.branch.text(), "feature");
-        assert!(state.error.is_some());
-
-        state.field = Field::Branch;
-        assert!(edit_focused_field(&mut state, TextFieldState::backspace));
-        assert_eq!(state.branch.text(), "featur");
-        assert_eq!(state.error, None);
-        assert_eq!(state.base_cursor, 0);
-    }
-
-    struct CreateWithoutOpeningView {
-        state: Entity<AppState>,
-        transport: FakeTransport,
-        focus: FocusHandle,
-    }
-
-    impl gpui::Render for CreateWithoutOpeningView {
-        fn render(
-            &mut self,
-            _window: &mut Window,
-            _cx: &mut gpui::Context<Self>,
-        ) -> impl gpui::IntoElement {
-            let state = self.state.clone();
-            let transport = self.transport.clone();
-            root(&self.focus).on_action(
-                move |_: &create_actions::CreateWithoutOpening, _window, cx| {
-                    submit_with_transport(false, &state, &transport, cx);
-                },
-            )
-        }
-    }
-
-    #[gpui::test]
-    fn duplicate_without_opening_stays_in_hub(cx: &mut gpui::TestAppContext) {
-        let state = cx.new(|_| {
-            let mut state = AppState::new("/tmp/fleet", Instant::now());
-            state.snapshot = Some(snapshot_with_worktree());
-            state.overlay = Some(crate::state::Overlay::Dialog(
-                crate::dialogs::Dialogs::CreateWorktree,
-            ));
-            state
-        });
-        cx.update(|cx| {
-            with_host(&state, cx, |host| {
-                host.create = draft();
-                host.create.branch = TextFieldState::from_text("feature");
-            })
-        });
-        let transport = FakeTransport::default();
-        let window = cx.add_window(|_, cx| CreateWithoutOpeningView {
-            state: state.clone(),
-            transport: transport.clone(),
-            focus: cx.focus_handle(),
-        });
-        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
-        window
-            .update(&mut visual, |view, window, cx| {
-                window.focus(&view.focus, cx);
-                window.dispatch_action(Box::new(create_actions::CreateWithoutOpening), cx);
-            })
-            .unwrap();
-        visual.update(|_, cx| {
-            let app = state.read(cx);
-            assert!(app.overlay.is_none());
-            assert!(matches!(app.screen, Screen::Hub { .. }));
-        });
-        assert!(transport.requests.borrow().is_empty());
-    }
-
-    #[gpui::test]
-    fn opening_touches_worktree_before_ensuring_session(cx: &mut gpui::TestAppContext) {
-        let state = cx.new(|_| {
-            let mut state = AppState::new("/tmp/fleet", Instant::now());
-            state.snapshot = Some(snapshot_with_worktree());
-            state.overlay = Some(crate::state::Overlay::Dialog(
-                crate::dialogs::Dialogs::CreateWorktree,
-            ));
-            state
-        });
-        cx.update(|cx| {
-            with_host(&state, cx, |host| {
-                host.create = draft();
-                host.create.branch = TextFieldState::from_text("feature");
-            })
-        });
-        let transport = FakeTransport::default();
-        cx.update(|cx| submit_with_transport(true, &state, &transport, cx));
-        let requests = transport.requests.borrow();
-        assert!(matches!(
-            requests.as_slice(),
-            [
-                RecordedRequest::Sent(RequestBody::TouchWorktreeOpened { id }),
-                RecordedRequest::Requested(RequestBody::EnsureSession {
-                    worktree: Some(ensured),
-                    ..
-                })
-            ] if id == ensured
-        ));
-    }
-
-    fn tailscale_entry(node: &str) -> fleet_core::model::HostConfigEntry {
-        fleet_core::model::HostConfigEntry::Tailscale {
-            node: node.to_owned(),
-            user: Some("df".to_owned()),
-            ssh_options: Vec::new(),
-            identity_file: None,
-            ssh_host: None,
-            fleetd: "fleetd".to_owned(),
-            fleet_home: Some("~/.fleet".to_owned()),
-        }
-    }
-
-    fn config_with_default(default: &str) -> fleet_core::config::Config {
-        let mut config = fleet_core::config::default_config("/tmp/fleet");
-        config.hosts.insert(
-            HostId::try_from("devbox").unwrap_or_else(|error| panic!("{error}")),
-            tailscale_entry("devbox"),
-        );
-        config.default_host = default.to_owned();
-        config
-    }
-
-    fn seeded_with_hosts(
-        statuses: Vec<HostStatus>,
-        cx: &mut gpui::TestAppContext,
-    ) -> (Entity<AppState>, FakeTransport) {
-        let repo = RepoId::try_from("buk/payroll").unwrap();
-        let mut snapshot = snapshot_with_worktree();
-        snapshot.hosts = statuses;
-        let state = cx.new(|_| {
-            let mut state = AppState::new("/tmp/fleet", Instant::now());
-            state.scope = RepoScope::Repo(repo);
-            state.snapshot = Some(snapshot);
-            state
-        });
-        let transport = FakeTransport::default();
-        cx.update(|cx| seed_with_transport(&state, &transport, cx));
-        (state, transport)
-    }
-
-    fn answer_get_config(transport: &FakeTransport, config: fleet_core::config::Config) {
-        let index = transport
-            .requests
-            .borrow()
-            .iter()
-            .position(|request| {
-                matches!(request, RecordedRequest::Requested(RequestBody::GetConfig))
-            })
-            .unwrap_or_else(|| panic!("the dialog never asked for the configuration"));
-        transport
-            .replies
-            .borrow_mut()
-            .remove(index)
-            .unwrap_or_else(|| panic!("no reply slot for the configuration request"))
-            .try_send(Ok(ResponseBody::Config(config)))
-            .unwrap_or_else(|error| panic!("{error}"));
-    }
-
-    #[gpui::test]
-    fn the_picker_seeds_the_configured_default_host(cx: &mut gpui::TestAppContext) {
-        let (state, transport) = seeded_with_hosts(
-            vec![
-                host_status("devbox", "tailscale", LinkState::Ready, true),
-                host_status("archdev", "legacy", LinkState::Legacy, true),
-            ],
-            cx,
-        );
-        cx.update(|cx| {
-            with_host(&state, cx, |host| {
-                let labels: Vec<&str> = host
-                    .create
-                    .hosts
-                    .iter()
-                    .map(|choice| choice.label.as_str())
-                    .collect();
-                assert_eq!(labels, ["local", "devbox", "archdev"]);
-                assert_eq!(host.create.host_index, 0, "local until config answers");
-            });
-        });
-        answer_get_config(&transport, config_with_default("devbox"));
-        cx.run_until_parked();
-        cx.update(|cx| {
-            with_host(&state, cx, |host| {
-                assert_eq!(host.create.host_index, 1);
-                assert_eq!(
-                    host.create.selected_host().map(|id| id.as_str().to_owned()),
-                    Some("devbox".to_owned())
-                );
-            });
-        });
-    }
-
-    #[gpui::test]
-    fn an_unreachable_default_host_leaves_the_picker_on_local(cx: &mut gpui::TestAppContext) {
-        let (state, transport) = seeded_with_hosts(
-            vec![host_status("devbox", "tailscale", LinkState::Down, false)],
-            cx,
-        );
-        answer_get_config(&transport, config_with_default("devbox"));
-        cx.run_until_parked();
-        cx.update(|cx| {
-            with_host(&state, cx, |host| {
-                assert_eq!(host.create.host_index, 0);
-                assert_eq!(host.create.selected_host(), None);
-            });
-        });
-    }
-
-    #[gpui::test]
-    fn a_blocked_host_renders_its_reason_and_keeps_the_cycler_live(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| {
-            cx.set_global(fleet_ui_kit::Theme::dark());
-            let tight = cx.theme().space.xs;
-            let mut draft = draft();
-            draft.branch = TextFieldState::from_text("feat/ok");
-            draft.hosts = hosts(&[host_status("devbox", "tailscale", LinkState::Down, false)]);
-
-            draft.host_index = 1;
-            assert!(draft.host_blocked().is_some());
-            assert!(!draft.can_submit(), "`Enter` is refused on a blocked host");
-            assert!(
-                host_section(&draft, tight, cx).is_some(),
-                "the blocked host still draws its cycler and its reason"
-            );
-
-            draft.host_index = 0;
-            assert!(draft.can_submit());
-            assert!(host_section(&draft, tight, cx).is_some());
-
-            draft.hosts.clear();
-            assert!(
-                host_section(&draft, tight, cx).is_none(),
-                "the whole row is zero-suppressed when no host is configured"
-            );
-        });
-    }
-
-    #[test]
-    fn late_creation_does_not_override_navigation() {
-        let mut state = AppState::new("/tmp/fleet", Instant::now());
-        let intent = NavigationIntent::capture(&state);
-        state.cursors.worktrees = 4;
-        assert!(!intent.matches(&state));
-    }
 }

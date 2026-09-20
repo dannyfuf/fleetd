@@ -52,7 +52,9 @@ key escape
 await overlay absent 10000
 
 # An unbound key still leaves Prefix — that is what "one-shot" means — and opens nothing.
-key ctrl-s b
+# `o` is the key KEYMAP "Explicitly rejected" keeps free, so it stays unbound on purpose;
+# `b` used to stand here and is now the board tab.
+key ctrl-s o
 await mode == Terminal 10000
 assert overlay absent && screen == Workspace
 

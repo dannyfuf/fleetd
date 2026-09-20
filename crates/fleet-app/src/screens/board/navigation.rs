@@ -89,27 +89,6 @@ pub(super) fn on_click(click: BoardClick, state: &Entity<AppState>, bridge: &Bri
     }
 }
 
-/// Runs `edit` against the filter query while the input owns the keyboard.
-pub(super) fn edit_filter(state: &Entity<AppState>, cx: &mut App, edit: impl FnOnce(&mut String)) {
-    let edited = state.update(cx, |app, cx| {
-        if !app.board.filter_editing {
-            return false;
-        }
-        edit(&mut app.board.filter);
-        app.board.focus.row = 0;
-        app.clamp_board_focus();
-        cx.notify();
-        true
-    });
-    if edited {
-        cx.stop_propagation();
-    } else {
-        // The board is not in its filter input, so the same key belongs to the screen behind
-        // this handler rather than to a text edit nobody asked for.
-        cx.propagate();
-    }
-}
-
 /// Leaves the input but keeps the filter, which is stage one of the §3.10 `Esc`.
 pub(super) fn leave_filter_input(state: &Entity<AppState>, cx: &mut App) {
     state.update(cx, |app, cx| {

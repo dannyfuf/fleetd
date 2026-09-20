@@ -1,0 +1,769 @@
+//! Custom layout and paint for [`super::TextInput`].
+
+use std::{collections::HashMap, ops::Range, sync::Arc};
+
+use gpui::{
+    App, AvailableSpace, Bounds, ContentMask, Element, ElementId, ElementInputHandler, Entity,
+    Font, GlobalElementId, InspectorElementId, LayoutId, PaintQuad, Pixels, ShapedLine,
+    SharedString, Size, Style, TextAlign, TextRun, TextStyle, UnderlineStyle, Window, WrappedLine,
+    fill, point, prelude::*, relative, size,
+};
+
+use super::{InputMode, TextInput};
+use crate::{
+    scroll_thumb,
+    theme::{ActiveTheme, Theme, ThemeMode},
+};
+
+/// The painted half of a [`TextInput`]. It is custom because selection, caret, IME geometry and
+/// input-handler bounds must all use the same shaped lines used for hit testing.
+pub(super) struct TextInputElement {
+    pub(super) input: Entity<TextInput>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LayoutKey {
+    revision: u64,
+    wrap_width_bits: Option<u32>,
+    font: Font,
+    font_size_bits: u32,
+    theme_mode: ThemeMode,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct LineShapeKey {
+    line_index: usize,
+    text: String,
+    wrap_width_bits: Option<u32>,
+    font: Font,
+    font_size_bits: u32,
+    dark_theme: bool,
+    marked: Option<Range<usize>>,
+    placeholder: bool,
+    wrapped: bool,
+}
+
+pub(super) enum ShapedTextLine {
+    Unwrapped(Box<ShapedLine>),
+    Wrapped(WrappedLine),
+}
+
+impl ShapedTextLine {
+    pub(super) fn visual_rows(&self) -> usize {
+        match self {
+            Self::Unwrapped(_) => 1,
+            Self::Wrapped(line) => line.wrap_boundaries.len() + 1,
+        }
+    }
+
+    fn width(&self) -> Pixels {
+        match self {
+            Self::Unwrapped(line) => line.width(),
+            Self::Wrapped(line) => line.width(),
+        }
+    }
+
+    pub(super) fn position_for_index(
+        &self,
+        index: usize,
+        line_height: Pixels,
+    ) -> Option<gpui::Point<Pixels>> {
+        match self {
+            Self::Unwrapped(line) => Some(point(line.x_for_index(index), Pixels::ZERO)),
+            Self::Wrapped(line) => line.position_for_index(index, line_height),
+        }
+    }
+
+    pub(super) fn closest_index_for_position(
+        &self,
+        position: gpui::Point<Pixels>,
+        line_height: Pixels,
+    ) -> usize {
+        match self {
+            Self::Unwrapped(line) => line.closest_index_for_x(position.x),
+            Self::Wrapped(line) => match line.closest_index_for_position(position, line_height) {
+                Ok(index) | Err(index) => index,
+            },
+        }
+    }
+
+    /// The byte offsets the wrapped rows of this logical line start at, after the first.
+    ///
+    /// Borrowed rather than collected: a selection asks every visible line for these on every
+    /// frame, and a `Vec` per line is an allocation per frame per line.
+    fn row_boundaries(&self) -> impl Iterator<Item = usize> + '_ {
+        let wrapped = match self {
+            Self::Wrapped(line) => Some(line),
+            Self::Unwrapped(_) => None,
+        };
+        wrapped.into_iter().flat_map(|line| {
+            line.wrap_boundaries
+                .iter()
+                .map(move |boundary| line.runs()[boundary.run_ix].glyphs[boundary.glyph_ix].index)
+        })
+    }
+}
+
+struct CachedLine {
+    start: usize,
+    len: usize,
+    /// The document visual row this logical line's first row occupies.
+    row_start: usize,
+    shape_key: LineShapeKey,
+    layout: Arc<ShapedTextLine>,
+}
+
+impl CachedLine {
+    fn row_end(&self) -> usize {
+        self.row_start + self.layout.visual_rows()
+    }
+}
+
+/// Memoised logical-line layouts used by paint, pointer hit testing and the platform bridge.
+#[derive(Default)]
+pub(super) struct LineLayoutCache {
+    key: Option<LayoutKey>,
+    lines: Vec<CachedLine>,
+    shapes: HashMap<LineShapeKey, Arc<ShapedTextLine>>,
+    #[cfg(test)]
+    miss_counts: Vec<usize>,
+}
+
+impl LineLayoutCache {
+    pub(super) fn clear(&mut self) {
+        self.key = None;
+    }
+
+    pub(super) fn is_current(&self, revision: u64) -> bool {
+        self.key
+            .as_ref()
+            .is_some_and(|key| key.revision == revision)
+            && !self.lines.is_empty()
+    }
+
+    pub(super) fn line(&self, index: usize) -> Option<(usize, &ShapedTextLine)> {
+        let line = self.lines.get(index)?;
+        Some((line.start, line.layout.as_ref()))
+    }
+
+    pub(super) fn visual_rows(&self) -> usize {
+        self.lines.last().map_or(0, CachedLine::row_end)
+    }
+
+    #[cfg(test)]
+    pub(super) fn logical_lines(&self) -> usize {
+        self.lines.len()
+    }
+
+    #[cfg(test)]
+    pub(super) fn reset_probe(&mut self) {
+        self.miss_counts.clear();
+    }
+
+    #[cfg(test)]
+    pub(super) fn miss_counts(&self) -> &[usize] {
+        &self.miss_counts
+    }
+
+    pub(super) fn visual_row_start(&self, line_index: usize) -> Option<usize> {
+        Some(self.lines.get(line_index)?.row_start)
+    }
+
+    pub(super) fn line_for_visual_row(
+        &self,
+        visual_row: usize,
+    ) -> Option<(usize, &ShapedTextLine, usize)> {
+        let line = self.lines.get(self.line_index_for_row(visual_row))?;
+        Some((
+            line.start,
+            line.layout.as_ref(),
+            visual_row.checked_sub(line.row_start)?,
+        ))
+    }
+
+    /// The first logical line whose rows reach `row`, or `lines.len()` past the last row.
+    ///
+    /// Rows are contiguous and ascending, so this is a binary search rather than a walk over
+    /// the document.
+    fn line_index_for_row(&self, row: usize) -> usize {
+        self.lines.partition_point(|line| line.row_end() <= row)
+    }
+
+    pub(super) fn line_index_for_offset(&self, offset: usize) -> Option<(usize, usize)> {
+        self.lines.iter().enumerate().find_map(|(index, line)| {
+            (offset >= line.start && offset <= line.start + line.len)
+                .then_some((index, offset.saturating_sub(line.start).min(line.len)))
+        })
+    }
+
+    /// The lines whose rows intersect `rows` rows from `first_row`, and the row the first of
+    /// them starts at.
+    ///
+    /// Prepaint carries only these into paint, so a long value costs one `Arc` clone per
+    /// *visible* line per frame rather than one per line of the document.
+    fn visible_lines(
+        &self,
+        first_row: usize,
+        rows: usize,
+    ) -> (usize, Vec<(usize, usize, Arc<ShapedTextLine>)>) {
+        let end_row = first_row.saturating_add(rows);
+        let first = self.line_index_for_row(first_row);
+        let visible = self.lines[first..]
+            .iter()
+            .take_while(|line| line.row_start < end_row)
+            .map(|line| (line.start, line.len, line.layout.clone()))
+            .collect();
+        let row = self
+            .lines
+            .get(first)
+            .map_or(first_row, |line| line.row_start);
+        (row, visible)
+    }
+}
+
+pub(super) struct InputLayout {
+    lines: Vec<(usize, usize, Arc<ShapedTextLine>)>,
+    /// The document visual row `lines[0]` starts at.
+    first_row: usize,
+    selections: Vec<PaintQuad>,
+    caret: Option<PaintQuad>,
+    thumb: Option<PaintQuad>,
+    horizontal_scroll: Pixels,
+    scroll_row: usize,
+}
+
+impl IntoElement for TextInputElement {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for TextInputElement {
+    type RequestLayoutState = ();
+    type PrepaintState = InputLayout;
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        _cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let input = self.input.clone();
+        let text_style = window.text_style();
+        let font_size = text_style.font_size.to_pixels(window.rem_size());
+        let line_height = window.line_height();
+        let mut style = Style::default();
+        // A measured leaf otherwise negotiates its intrinsic width with flexbox. Long text can
+        // then make the leaf wider than the input box, leaving `shape_text` nothing to wrap.
+        // Fill the already-resolved value column so its definite width is the wrapping width.
+        style.size.width = relative(1.0).into();
+        let layout_id = window.request_measured_layout(
+            style,
+            move |known_dimensions, available_space, window, cx| {
+                let wrap_width = known_dimensions.width.or(match available_space.width {
+                    AvailableSpace::Definite(width) => Some(width),
+                    AvailableSpace::MinContent | AvailableSpace::MaxContent => None,
+                });
+                let theme = cx.theme().clone();
+                let (rows, shaped_width) = input.update(cx, |input, _cx| {
+                    input.line_height = line_height;
+                    prepare_lines(input, wrap_width, font_size, &text_style, &theme, window);
+                    let rows = match input.mode() {
+                        InputMode::SingleLine => 1,
+                        InputMode::Multiline { min_rows, max_rows } => input
+                            .line_cache
+                            .visual_rows()
+                            .max(1)
+                            .clamp(min_rows.max(1), max_rows.max(min_rows.max(1))),
+                    };
+                    (rows, widest_line(&input.line_cache))
+                });
+                Size {
+                    width: wrap_width.unwrap_or(shaped_width),
+                    height: line_height * rows as f32,
+                }
+            },
+        );
+        (layout_id, ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _layout: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        let theme = cx.theme().clone();
+        let line_height = window.line_height();
+        self.input.update(cx, |input, _cx| {
+            input.last_bounds = Some(bounds);
+            input.line_height = line_height;
+            prepare_scroll(input, bounds, &theme);
+            let horizontal_scroll = input.horizontal_scroll;
+            let scroll_row = input.scroll_row;
+            let (first_row, lines) = input
+                .line_cache
+                .visible_lines(scroll_row, visible_rows(bounds, line_height));
+            let selections = selection_quads(input, &lines, first_row, bounds, &theme);
+            let caret = caret_quad(input, bounds, &theme);
+            let thumb = scroll_thumb_quad(input, bounds, &theme);
+            #[cfg(test)]
+            {
+                input.last_selection_rows =
+                    selection_rows(&selections, bounds, line_height, scroll_row);
+            }
+            input.reveal_caret = false;
+            InputLayout {
+                lines,
+                first_row,
+                selections,
+                caret,
+                thumb,
+                horizontal_scroll,
+                scroll_row,
+            }
+        })
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _layout: &mut Self::RequestLayoutState,
+        prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let focus_handle = self.input.read(cx).focus_handle.clone();
+        let focused = focus_handle.is_focused(window);
+        let read_only = self.input.read(cx).read_only;
+        if focused && !read_only {
+            window.handle_input(
+                &focus_handle,
+                ElementInputHandler::new(bounds, self.input.clone()),
+                cx,
+            );
+        }
+        self.input
+            .update(cx, |input, cx| input.ensure_focus_subscriptions(window, cx));
+
+        let line_height = window.line_height();
+        let first_row = prepaint.first_row;
+        let horizontal_scroll = prepaint.horizontal_scroll;
+        let scroll_row = prepaint.scroll_row;
+        let lines = std::mem::take(&mut prepaint.lines);
+        let selections = std::mem::take(&mut prepaint.selections);
+        let caret = prepaint.caret.take();
+        let thumb = prepaint.thumb.take();
+
+        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            for selection in selections {
+                window.paint_quad(selection);
+            }
+            let mut row_start = first_row;
+            for (_, _, line) in &lines {
+                let top =
+                    bounds.top() + line_height * row_start as f32 - line_height * scroll_row as f32;
+                let height = line_height * line.visual_rows() as f32;
+                if top + height <= bounds.top() {
+                    row_start += line.visual_rows();
+                    continue;
+                }
+                if top >= bounds.bottom() {
+                    break;
+                }
+                let origin = point(bounds.left() - horizontal_scroll, top);
+                let result = match line.as_ref() {
+                    ShapedTextLine::Unwrapped(line) => {
+                        line.paint(origin, line_height, TextAlign::Left, None, window, cx)
+                    }
+                    ShapedTextLine::Wrapped(line) => {
+                        line.paint(origin, line_height, TextAlign::Left, None, window, cx)
+                    }
+                };
+                if let Err(error) = result {
+                    crate::paint_error::log_once(&error);
+                }
+                row_start += line.visual_rows();
+            }
+            if focused && let Some(caret) = caret {
+                window.paint_quad(caret);
+            }
+            if let Some(thumb) = thumb {
+                window.paint_quad(thumb);
+            }
+        });
+    }
+}
+
+/// How many visual rows the box can show, which is how much of the document paint can reach.
+fn visible_rows(bounds: Bounds<Pixels>, line_height: Pixels) -> usize {
+    if line_height <= Pixels::ZERO {
+        return 1;
+    }
+    ((f32::from(bounds.size.height) / f32::from(line_height)).ceil() as usize).max(1)
+}
+
+/// The document visual row each selection quad sits on, for the tests that pin the viewport.
+#[cfg(test)]
+fn selection_rows(
+    quads: &[PaintQuad],
+    bounds: Bounds<Pixels>,
+    line_height: Pixels,
+    scroll_row: usize,
+) -> Vec<usize> {
+    quads
+        .iter()
+        .map(|quad| {
+            let offset =
+                (f32::from(quad.bounds.top() - bounds.top()) / f32::from(line_height)).round();
+            scroll_row + offset.max(0.0) as usize
+        })
+        .collect()
+}
+
+fn scroll_thumb_quad(
+    input: &TextInput,
+    bounds: Bounds<Pixels>,
+    theme: &Theme,
+) -> Option<PaintQuad> {
+    let InputMode::Multiline { .. } = input.mode() else {
+        return None;
+    };
+    let content_height = input.line_height * input.line_cache.visual_rows().max(1) as f32;
+    let viewport = bounds.size.height;
+    let max_scroll = (content_height - viewport).max(Pixels::ZERO);
+    let scroll = input.line_height * input.scroll_row as f32;
+    scroll_thumb(scroll, max_scroll, viewport, theme.metrics.diff_thumb_min_h).map(
+        |(top, height)| {
+            let width = theme.metrics.scroll_thumb_w;
+            fill(
+                Bounds::new(
+                    point(
+                        bounds.right() - width,
+                        bounds.top() + bounds.size.height * top,
+                    ),
+                    size(width, bounds.size.height * height),
+                ),
+                theme.colors.scroll_thumb,
+            )
+        },
+    )
+}
+
+fn prepare_lines(
+    input: &mut TextInput,
+    wrap_width: Option<Pixels>,
+    font_size: Pixels,
+    style: &TextStyle,
+    theme: &Theme,
+    window: &mut Window,
+) {
+    let key = LayoutKey {
+        revision: input.buffer.revision(),
+        wrap_width_bits: wrap_width.map(|width| f32::from(width).to_bits()),
+        font: style.font(),
+        font_size_bits: f32::from(font_size).to_bits(),
+        theme_mode: theme.mode,
+    };
+    if input.line_cache.key.as_ref() == Some(&key) {
+        return;
+    }
+
+    let placeholder = input.buffer.is_empty();
+    let source = if placeholder {
+        input.placeholder.as_ref()
+    } else {
+        input.buffer.text()
+    };
+    let color = if placeholder {
+        theme.colors.text_muted
+    } else {
+        theme.colors.text
+    };
+    let marked = (!placeholder)
+        .then(|| input.buffer.marked_range())
+        .flatten();
+    let mut start = 0usize;
+    let mut row_start = 0usize;
+    let mut lines = Vec::new();
+    #[cfg(test)]
+    let mut misses = 0;
+    for (line_index, raw_line) in source.split('\n').enumerate() {
+        let line_end = start + raw_line.len();
+        let local_marked = marked
+            .as_ref()
+            .and_then(|range| range_on_line(range, start, line_end));
+        let shape_key = LineShapeKey {
+            line_index,
+            text: raw_line.to_owned(),
+            wrap_width_bits: wrap_width.map(|width| f32::from(width).to_bits()),
+            font: style.font(),
+            font_size_bits: f32::from(font_size).to_bits(),
+            dark_theme: matches!(theme.mode, ThemeMode::Dark),
+            marked: local_marked.clone(),
+            placeholder,
+            wrapped: matches!(input.mode(), InputMode::Multiline { .. }),
+        };
+        let layout = input
+            .line_cache
+            .shapes
+            .get(&shape_key)
+            .cloned()
+            .or_else(|| {
+                #[cfg(test)]
+                {
+                    misses += 1;
+                }
+                let runs = text_runs(raw_line.len(), local_marked, color, style, theme);
+                let text = SharedString::from(raw_line.to_owned());
+                match input.mode() {
+                    InputMode::SingleLine => Some(Arc::new(ShapedTextLine::Unwrapped(Box::new(
+                        window
+                            .text_system()
+                            .shape_line(text, font_size, &runs, None),
+                    )))),
+                    InputMode::Multiline { .. } => match window
+                        .text_system()
+                        .shape_text(text, font_size, &runs, wrap_width, None)
+                    {
+                        Ok(lines) => lines
+                            .into_iter()
+                            .next()
+                            .map(ShapedTextLine::Wrapped)
+                            .map(Arc::new),
+                        Err(error) => {
+                            crate::paint_error::log_once(&error);
+                            None
+                        }
+                    },
+                }
+            });
+        let Some(layout) = layout else {
+            return;
+        };
+        input
+            .line_cache
+            .shapes
+            .insert(shape_key.clone(), layout.clone());
+        let rows = layout.visual_rows();
+        lines.push(CachedLine {
+            start,
+            len: raw_line.len(),
+            row_start,
+            shape_key,
+            layout,
+        });
+        row_start += rows;
+        start = line_end + '\n'.len_utf8();
+    }
+    input.line_cache.shapes.retain(|shape_key, _| {
+        lines.get(shape_key.line_index).is_some_and(|line| {
+            let active = &line.shape_key;
+            shape_key.line_index == active.line_index
+                && shape_key.text == active.text
+                && shape_key.font == active.font
+                && shape_key.font_size_bits == active.font_size_bits
+                && shape_key.dark_theme == active.dark_theme
+                && shape_key.marked == active.marked
+                && shape_key.placeholder == active.placeholder
+                && shape_key.wrapped == active.wrapped
+        })
+    });
+    input.line_cache.key = Some(key);
+    input.line_cache.lines = lines;
+    #[cfg(test)]
+    input.line_cache.miss_counts.push(misses);
+}
+
+fn range_on_line(range: &Range<usize>, line_start: usize, line_end: usize) -> Option<Range<usize>> {
+    let start = range.start.max(line_start);
+    let end = range.end.min(line_end);
+    (start < end).then_some(start - line_start..end - line_start)
+}
+
+fn text_runs(
+    len: usize,
+    marked: Option<Range<usize>>,
+    color: gpui::Hsla,
+    style: &TextStyle,
+    theme: &Theme,
+) -> Vec<TextRun> {
+    let base = TextRun {
+        len,
+        font: style.font(),
+        color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let Some(marked) = marked else {
+        return vec![base];
+    };
+    [0..marked.start, marked.clone(), marked.end..len]
+        .into_iter()
+        .filter(|range| !range.is_empty())
+        .map(|range| TextRun {
+            len: range.len(),
+            underline: (range == marked).then_some(UnderlineStyle {
+                color: Some(color),
+                thickness: theme.metrics.hairline,
+                wavy: false,
+            }),
+            ..base.clone()
+        })
+        .collect()
+}
+
+fn widest_line(cache: &LineLayoutCache) -> Pixels {
+    cache
+        .lines
+        .iter()
+        .map(|line| line.layout.width())
+        .max()
+        .unwrap_or(Pixels::ZERO)
+}
+
+fn prepare_scroll(input: &mut TextInput, bounds: Bounds<Pixels>, theme: &Theme) {
+    match input.mode() {
+        InputMode::SingleLine => {
+            let Some((line_index, local)) = input.line_for_offset(input.buffer.caret()) else {
+                return;
+            };
+            let Some((_, line)) = input.line_cache.line(line_index) else {
+                return;
+            };
+            let Some(caret) = line.position_for_index(local, input.line_height) else {
+                return;
+            };
+            let caret_x = caret.x;
+            if input.reveal_caret {
+                input.horizontal_scroll = input.horizontal_scroll.min(caret_x);
+                input.horizontal_scroll = input
+                    .horizontal_scroll
+                    .max(caret_x + theme.metrics.focus_ring_w - bounds.size.width);
+            }
+            let max_scroll =
+                (line.width() + theme.metrics.focus_ring_w - bounds.size.width).max(Pixels::ZERO);
+            input.horizontal_scroll = input.horizontal_scroll.clamp(Pixels::ZERO, max_scroll);
+        }
+        InputMode::Multiline { max_rows, .. } => {
+            let total_rows = input.line_cache.visual_rows().max(1);
+            let visible = total_rows.min(max_rows.max(1));
+            let caret_row = input
+                .position_for_offset(input.buffer.caret())
+                .map_or(0, |position| {
+                    (f32::from(position.y) / f32::from(input.line_height)).floor() as usize
+                });
+            if input.reveal_caret {
+                if caret_row < input.scroll_row {
+                    input.scroll_row = caret_row;
+                } else if caret_row >= input.scroll_row + visible {
+                    input.scroll_row = caret_row + 1 - visible;
+                }
+            }
+            input.scroll_row = input.scroll_row.min(total_rows.saturating_sub(visible));
+            input.horizontal_scroll = Pixels::ZERO;
+        }
+    }
+}
+
+/// The selection rectangles of the rows `lines` covers, which prepaint has already cut to the
+/// viewport; `first_row` is the document visual row `lines[0]` starts at.
+fn selection_quads(
+    input: &TextInput,
+    lines: &[(usize, usize, Arc<ShapedTextLine>)],
+    first_row: usize,
+    bounds: Bounds<Pixels>,
+    theme: &Theme,
+) -> Vec<PaintQuad> {
+    let selected = input.buffer.selected_range();
+    if selected.is_empty() {
+        return Vec::new();
+    }
+    let mut quads = Vec::new();
+    let mut logical_row_start = first_row;
+    'lines: for (start, len, line) in lines {
+        let mut row_start = 0usize;
+        for (row, row_end) in line
+            .row_boundaries()
+            .chain(std::iter::once(*len))
+            .enumerate()
+        {
+            let visual_row = logical_row_start + row;
+            if visual_row < input.scroll_row {
+                row_start = row_end;
+                continue;
+            }
+            let top = bounds.top() + input.line_height * (visual_row - input.scroll_row) as f32;
+            if top >= bounds.bottom() {
+                break 'lines;
+            }
+            let end = start + len;
+            let local_start = (selected.start.max(*start).min(end) - start).max(row_start);
+            let local_end = (selected.end.max(*start).min(end) - start).min(row_end);
+            let includes_newline = row + 1 == line.visual_rows()
+                && selected.start <= end
+                && selected.end > end
+                && end < input.buffer.text().len();
+            if local_start >= local_end && !includes_newline {
+                row_start = row_end;
+                continue;
+            }
+            let left_x = if local_start == row_start {
+                Pixels::ZERO
+            } else {
+                line.position_for_index(local_start, input.line_height)
+                    .map_or(Pixels::ZERO, |position| position.x)
+            };
+            let right_x = line
+                .position_for_index(local_end, input.line_height)
+                .map_or(Pixels::ZERO, |position| position.x);
+            let left = bounds.left() + left_x - input.horizontal_scroll;
+            let mut right = bounds.left() + right_x - input.horizontal_scroll;
+            if includes_newline {
+                right = right.max(bounds.left() + right_x + theme.metrics.focus_ring_w);
+            }
+            quads.push(fill(
+                Bounds::from_corners(point(left, top), point(right, top + input.line_height)),
+                theme.colors.selection,
+            ));
+            row_start = row_end;
+        }
+        logical_row_start += line.visual_rows();
+    }
+    quads
+}
+
+fn caret_quad(input: &TextInput, bounds: Bounds<Pixels>, theme: &Theme) -> Option<PaintQuad> {
+    if input.buffer.has_selection() {
+        return None;
+    }
+    let position = input.position_for_offset(input.buffer.caret())?;
+    let top = bounds.top() + position.y - input.line_height * input.scroll_row as f32;
+    (top < bounds.bottom()).then(|| {
+        let x = bounds.left() + position.x - input.horizontal_scroll;
+        fill(
+            Bounds::new(
+                point(x, top),
+                size(theme.metrics.focus_ring_w, input.line_height),
+            ),
+            theme.colors.accent,
+        )
+    })
+}

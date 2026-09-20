@@ -29,7 +29,7 @@ use fleet_git::{
     ResetMode, StashOptions,
 };
 use fleet_ui_kit::prelude::*;
-use fleet_ui_kit::{AppFrame, TextInput, Toast};
+use fleet_ui_kit::{AppFrame, InputMode, TextInput, Toast};
 use gpui::{
     AnyElement, App, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, KeyDownEvent,
     Pixels, Render, Size, Task, UniformListScrollHandle, Window, canvas, div,

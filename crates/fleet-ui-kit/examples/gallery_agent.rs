@@ -708,6 +708,7 @@ fn main() {
         (1400.0, 900.0),
         Quit,
         |cx| {
+            cx.bind_keys(support::input::bindings());
             cx.bind_keys([
                 KeyBinding::new("ctrl-t", ToggleTheme, None),
                 KeyBinding::new("ctrl-q", Quit, None),

@@ -42,6 +42,9 @@ pub fn run(path: PathBuf) -> anyhow::Result<()> {
         .run(move |cx: &mut App| {
             Theme::init(ThemeMode::Dark, cx);
             keymap::init(cx);
+            // Standalone there is no host key table, so the prompt's editor rows come straight
+            // from the kit. Embedded in Fleet they arrive with Fleet's own table instead.
+            cx.bind_keys(fleet_ui_kit::text_input::default_bindings());
 
             cx.on_window_closed(|cx: &mut App, _window_id| {
                 if cx.windows().is_empty() {

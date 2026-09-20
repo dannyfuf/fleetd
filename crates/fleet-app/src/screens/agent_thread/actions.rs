@@ -36,13 +36,13 @@ impl AgentThreadView {
 
     /// `⏎`: accept a completion, answer the open decision, else send.
     pub(crate) fn send(&mut self, cx: &mut Context<Self>) {
-        if self.input.read(cx).is_composing() {
+        if self.input.read(cx).is_composing(cx) {
             return;
         }
         if self.accept_completion(cx) {
             return;
         }
-        let text = self.input.read(cx).text().to_owned();
+        let text = self.input.read(cx).text(cx).to_owned();
         self.send_text(text, cx);
     }
 
@@ -114,11 +114,11 @@ impl AgentThreadView {
     /// on a started thread it is identical to `⏎`, which is why the intent is one function and
     /// the difference is a return value rather than a second code path.
     pub(crate) fn send_background(&mut self, cx: &mut Context<Self>) {
-        if self.input.read(cx).is_composing() {
+        if self.input.read(cx).is_composing(cx) {
             return;
         }
         let is_new_thread = self.projection.turns.is_empty();
-        let text = self.input.read(cx).text().to_owned();
+        let text = self.input.read(cx).text(cx).to_owned();
         match submit_intent(false, true, is_new_thread) {
             Some(Submit::Background) => {
                 self.send_text(text, cx);
@@ -313,7 +313,7 @@ impl AgentThreadView {
         // A question's free-text answer is the composer's text, and typing it clears the
         // selection: the two are mutually exclusive, enforced in the model.
         if !self.composer_mode().binds_draft() {
-            let text = self.input.read(cx).text().to_owned();
+            let text = self.input.read(cx).text(cx).to_owned();
             self.sync_wizard();
             self.wizard.set_custom(text);
             self.prepare(cx);
@@ -323,7 +323,7 @@ impl AgentThreadView {
         let Some(picker) = self.picker.as_mut() else {
             return;
         };
-        let trigger = self.input.read(cx).active_trigger();
+        let trigger = self.input.read(cx).active_trigger(cx);
         match trigger.filter(|trigger| PickerKind::for_trigger(trigger.symbol) == Some(picker.kind))
         {
             Some(trigger) => picker.filter(&trigger.query),
@@ -443,7 +443,7 @@ impl AgentThreadView {
         let query = self
             .input
             .read(cx)
-            .active_trigger()
+            .active_trigger(cx)
             .filter(|trigger| PickerKind::for_trigger(trigger.symbol) == Some(kind))
             .map(|trigger| trigger.query.to_string())
             .unwrap_or_default();
@@ -601,7 +601,7 @@ impl AgentThreadView {
         let Some(symbol) = picker.kind.prefix() else {
             return;
         };
-        let text = self.input.read(cx).text().to_owned();
+        let text = self.input.read(cx).text(cx).to_owned();
         let kept = text
             .rfind(symbol)
             .map_or(text.len(), |at| at + symbol.len_utf8());
@@ -614,7 +614,7 @@ impl AgentThreadView {
         let Some(symbol) = picker.kind.prefix() else {
             return;
         };
-        let text = self.input.read(cx).text().to_owned();
+        let text = self.input.read(cx).text(cx).to_owned();
         let kept = text.rfind(symbol).unwrap_or(0);
         let text = text[..kept].to_owned();
         self.input.update(cx, |input, cx| input.set_text(text, cx));
@@ -702,7 +702,7 @@ impl AgentThreadView {
         {
             return;
         }
-        let typed = self.input.read(cx).text().trim().to_owned();
+        let typed = self.input.read(cx).text(cx).trim().to_owned();
         // A plan the harness produced as an item has no gate: its verbs send a turn.
         if let Some(gate) = self.open_gate().cloned() {
             let routed = decisions::route(&gate, action, &mut self.wizard, &typed);

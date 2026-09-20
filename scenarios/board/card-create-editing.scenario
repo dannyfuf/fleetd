@@ -1,0 +1,91 @@
+# docs/KEYMAP.md §Dialogs and text inputs — the shared `TextInput`'s motion, selection,
+# deletion and history rows, driven through a real dialog rather than a unit fixture.
+# docs/KEYMAP.md §Board and card detail — `c` opens the new-card dialog, `Tab` moves between
+# title and description, and `Enter` in the description inserts a newline (`enter = newline`)
+# instead of creating the card.
+#
+# The oracle is `dialog.fields[N]`, which carries the live editors of the dialogs whose whole
+# tab cycle is text (`docs/TESTING-HARNESS.md` §11); `fields[0]` is the title and `fields[1]`
+# the description, the same two fields `targets["dialog.field[N]"]` paints. Typing does not
+# notify `AppState`, so every text step is read with `assert`, which projects on demand, and
+# never with `await`, which waits for a notification that a keystroke into a dialog editor does
+# not raise.
+#
+# Paste is deliberately not exercised: `clipboard set` and `clipboard get` fail in every lane by
+# design (`docs/TESTING-HARNESS.md` §1), so `cmd-c` / `cmd-x` / `cmd-v` are covered by the kit's
+# own gpui tests instead of here.
+#
+# No `shot`: this is a keyboard scenario, so it belongs in the headless subset too (§7).
+fixture: board
+await idle 20000
+key g b
+await hub_tab == Board 10000
+assert lists.board.rows[0].badges[0] == "2"
+
+# `c` opens the dialog with the title already focused, which is what makes `type` land.
+key c
+await overlay == Dialog 10000
+await idle 10000
+assert dialog.name == CardCreate && key_contexts[1] == CardCreate
+assert dialog.fields[0].name == title && dialog.fields[0].focused == true
+assert dialog.fields[1].name == description && dialog.fields[1].focused == false
+assert targets["dialog.field[0]"] exists && targets["dialog.field[1]"] exists
+
+# `alt-backspace` removes the previous word run and keeps the space before it.
+type alpha beta
+assert dialog.fields[0].value == "alpha beta"
+key alt-backspace
+assert dialog.fields[0].value == "alpha "
+
+# `shift-left` twice selects the last two graphemes, and typing replaces the selection.
+type beta
+key shift-left shift-left
+type X
+assert dialog.fields[0].value == "alpha beX"
+
+# `cmd-z` restores what that replacement overwrote, as one undo step rather than three.
+key cmd-z
+assert dialog.fields[0].value == "alpha beta"
+
+# The undo restores the replaced *selection* as well as the text, so `end` collapses it before
+# the next deletion: `ctrl-w` over a selection deletes the selection, not a word run.
+key end
+
+# `ctrl-w` is the other word-delete row; `ctrl-u` deletes to the logical line start.
+key ctrl-w
+assert dialog.fields[0].value == "alpha "
+key ctrl-u
+assert dialog.fields[0].value == ""
+
+# `home` and `end` have no separate visual row here, so where the next character lands is the
+# proof that the caret moved.
+type card
+key home
+type A
+assert dialog.fields[0].value == "Acard"
+key end
+type Z
+assert dialog.fields[0].value == "AcardZ"
+
+# `Tab` moves to the description. Plain `Enter` inserts a newline there and does not create the
+# card, which is the whole point of `enter = newline` for a multi-line field.
+key tab
+assert dialog.fields[1].focused == true && dialog.fields[0].focused == false
+type first
+key enter
+type second
+assert dialog.fields[1].value ~= "^first\nsecond$"
+assert overlay == Dialog && dialog.fields[0].value == "AcardZ"
+
+# `cmd-backspace` deletes to the logical line start, which leaves the newline standing.
+key cmd-backspace
+assert dialog.fields[1].value ~= "^first\n$"
+dump edited
+
+# `Esc` cancels: no card was created, and the board is exactly where it was.
+key escape
+await overlay absent 10000
+assert screen == Hub && hub_tab == Board && mode == Normal && dialog absent
+assert lists.board.rows[0].badges[0] == "2" && focused == "board.column[0].card[0]"
+dump cancelled
+quit

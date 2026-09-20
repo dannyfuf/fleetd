@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use fleet_core::{
-    config::{NATIVE_LAZYGIT, WindowConfig, default_config},
+    config::{NATIVE_BOARD, NATIVE_LAZYGIT, WindowConfig, default_config},
     ids::{ContextId, HostId, RepoId, SessionId, TerminalId, WorktreeId},
     model::{Context, Repo, RepoHooks, Worktree},
     sessions::{Session, SessionKind, SessionState, Terminal, TerminalKind, TerminalStatus},
@@ -715,6 +715,70 @@ async fn immediate_exit_is_registered() {
 
     assert_eq!(code, Some(23));
     sessions.kill(session.id).await.unwrap();
+}
+
+/// `ctrl-s b` asks for the board tab on demand rather than through `windows[]`, so the request
+/// path — not just the configured layout — has to land a tab with no process behind it.
+#[tokio::test]
+async fn a_requested_board_tab_is_native_without_a_process() {
+    if isolated_test("a_requested_board_tab_is_native_without_a_process") {
+        return;
+    }
+
+    let fixture = fixture().await;
+    let sessions = Sessions::new(fixture.config, fixture.state);
+    let session = sessions
+        .ensure(Some(fixture.worktree), None, false)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    let cwd = session.cwd.clone();
+
+    let board = sessions
+        .new_terminal(
+            session.id.clone(),
+            "board".to_owned(),
+            NATIVE_BOARD.to_owned(),
+            cwd,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+
+    assert_eq!(board.kind, TerminalKind::Native);
+    assert!(board.is_native());
+    assert_eq!(board.command, NATIVE_BOARD);
+    assert_eq!(board.shell_pid, None, "there is no process behind it");
+    assert!(matches!(board.status, TerminalStatus::Running));
+    assert!(
+        matches!(
+            sessions.attach(board.id, 80, 24).await,
+            Err(DaemonError::NotFound(_))
+        ),
+        "a native board tab has no host to attach to"
+    );
+
+    // The tab joins the strip in request order, so `ctrl-s <n>` keeps counting positions.
+    let registered = sessions
+        .snapshot()
+        .into_iter()
+        .find(|entry| entry.id == session.id)
+        .unwrap_or_else(|| panic!("session disappeared"));
+    assert_eq!(
+        registered
+            .terminals
+            .iter()
+            .map(|terminal| (terminal.name.as_str(), terminal.kind))
+            .collect::<Vec<_>>(),
+        vec![
+            ("one", TerminalKind::Pty),
+            ("two", TerminalKind::Pty),
+            ("board", TerminalKind::Native),
+        ]
+    );
+
+    sessions
+        .kill(session.id)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
 }
 
 #[tokio::test]

@@ -28,7 +28,14 @@ impl WorkspaceScreen {
             self.panes.retain(|worktree, _| live.contains(worktree));
         }
 
-        let active = model.native.then(|| model.worktree.clone()).flatten();
+        // Only the git pane is built here, and only for `fleet://lazygit`: a `fleet://board`
+        // tab shares this worktree, and keying panes by worktree alone would have handed it the
+        // git view of the same directory. The board builds nothing — it is one scoped mirror
+        // and one shell-owned screen ([`WorkspaceScreen::board_area`]) — so this match stays
+        // the git pane's alone.
+        let active = matches!(model.native, Some(NativeTab::Lazygit))
+            .then(|| model.worktree.clone())
+            .flatten();
         let Some((worktree, location)) = active else {
             // Not on a Fleet-drawn tab: nothing owns the keyboard on our behalf, and every
             // pane that exists is idle in the background.
@@ -103,16 +110,139 @@ impl WorkspaceScreen {
         }
     }
 
+    /// Points the shared board mirror at the active board tab's worktree, or gives it back.
+    ///
+    /// This is the pane's whole lifecycle and it runs on the update path
+    /// ([`WorkspaceScreen::synchronize`], which every notify reaches) rather than in a paint:
+    /// entering a scope sends `EnsureWorktreeBoard`, and *render prepares nothing*. Every way
+    /// into the tab ends here — `ctrl-s b`, `ctrl-s <n>`, a click on the strip, a restored
+    /// session — because all of them end in the daemon listing this tab as the session's active
+    /// one, which is what [`Model::native`] reads.
+    pub(super) fn sync_board_scope(
+        &self,
+        model: &Model,
+        bridge: &Bridge,
+        state: &Entity<AppState>,
+        cx: &mut App,
+    ) {
+        // Matched by reference: this runs on every notify of every Workspace frame, and the
+        // clone — a worktree id plus a path — is only owed once the claim misses.
+        let drawing = self
+            .draws_board(model)
+            .then(|| model.worktree.as_ref().map(|(worktree, _)| worktree))
+            .flatten();
+        let Some(worktree) = drawing else {
+            // A `ctrl-s b` whose tab fleetd has not listed yet is still waiting here: this very
+            // notify is the one the keystroke raised, and its snapshot still shows the previous
+            // tab. Releasing the claim there would cancel the load the keystroke started, so
+            // only leaving the session it was pressed in ends the wait.
+            let survives =
+                pending_claim_survives(self.local.borrow().state.board_claim.as_ref(), model);
+            self.release_board_scope(!survives, bridge, state, cx);
+            return;
+        };
+        let generation = state.read(cx).board_generation();
+        if self
+            .local
+            .borrow()
+            .state
+            .board_claim
+            .as_ref()
+            .is_some_and(|claim| claim.is_drawing(worktree, generation))
+        {
+            return;
+        }
+        // A `clear_board` — a reconnect, a context switch — resets the scope, so the claim is
+        // checked against where the mirror actually points and not only against what this
+        // screen asked for last. A refusal (an old daemon, already toasted) leaves the mirror
+        // where it was and is recorded all the same, so the pane asks once per generation
+        // rather than once per notify.
+        let pointed = matches!(
+            &state.read(cx).board.scope,
+            Some(BoardScope::Worktree(current)) if current == worktree
+        );
+        if !pointed {
+            crate::screens::board::enter_worktree_scope(worktree.clone(), state, bridge, cx);
+        }
+        self.local.borrow_mut().state.board_claim = Some(BoardClaim::Drawing {
+            worktree: worktree.clone(),
+            generation: state.read(cx).board_generation(),
+        });
+    }
+
+    /// Gives the mirror back to the Hub's context scope once no board pane is drawing it.
+    ///
+    /// `drop_pending` says whether a `ctrl-s b` still waiting for fleetd to list and select its
+    /// tab ends here too. On the per-notify path it does not: the frames between the keystroke
+    /// and the snapshot still show the previous tab, and releasing there would cancel the load
+    /// the keystroke just started. Leaving the Workspace ends the wait, because the tab the
+    /// reply would select has nowhere left to be drawn.
+    ///
+    /// The scope is handed back whether or not a claim is still here to drop: the places a wait
+    /// dies where it happens — another tab selected, a tab create the daemon refused — only
+    /// clear the claim, and the worktree scope it was holding comes back on the next notify.
+    pub(super) fn release_board_scope(
+        &self,
+        drop_pending: bool,
+        bridge: &Bridge,
+        state: &Entity<AppState>,
+        cx: &mut App,
+    ) {
+        if !drop_pending
+            && matches!(
+                self.local.borrow().state.board_claim,
+                Some(BoardClaim::Requested { .. })
+            )
+        {
+            return;
+        }
+        self.local.borrow_mut().state.board_claim = None;
+        // The Hub takes the context scope back through its own observation, but only while its
+        // board tab is showing; leaving a worktree scope behind anywhere else would keep the
+        // loader eligible for a board nothing is drawing.
+        if matches!(state.read(cx).board.scope, Some(BoardScope::Worktree(_))) {
+            crate::screens::board::enter_context_scope(state, bridge, cx);
+        }
+    }
+
+    /// Whether this frame's `fleet://board` tab really draws the board.
+    ///
+    /// A board tab on a session the snapshot lists no worktree for — an agent session, a race
+    /// with a deletion — has nothing to be the board *of*, and says so in the empty band
+    /// instead, exactly as the git pane does.
+    pub(super) fn draws_board(&self, model: &Model) -> bool {
+        matches!(model.native, Some(NativeTab::Board)) && model.worktree.is_some()
+    }
+
     /// The band a Fleet-drawn tab fills.
     ///
     /// The element id is per worktree so gpui keeps each pane's hover, scroll and animation
     /// state apart when the user moves between worktrees.
-    pub(super) fn pane_area(&self, model: &Model, cx: &App) -> AnyElement {
+    pub(super) fn pane_area(
+        &self,
+        model: &Model,
+        pane: PaneCtx<'_>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement {
+        // `fleet://board` has no pane object of its own: the board is one scoped mirror in
+        // `AppState` and one shell-owned [`BoardScreen`], so the tab is a place to draw them
+        // rather than a thing to build and evict. Keying a per-worktree pane here would have
+        // been N copies of no state at all.
+        if self.draws_board(model) {
+            return self.board_area(model, pane, window, cx);
+        }
         let theme = cx.theme();
-        let pane = model
-            .worktree
-            .as_ref()
-            .and_then(|(worktree, _)| self.panes.get(worktree));
+        // Only `fleet://lazygit` has a pane of its own; every other reserved command draws the
+        // empty band and says why, and never this worktree's git view.
+        let pane = matches!(model.native, Some(NativeTab::Lazygit))
+            .then(|| {
+                model
+                    .worktree
+                    .as_ref()
+                    .and_then(|(worktree, _)| self.panes.get(worktree))
+            })
+            .flatten();
         let remote = model
             .worktree
             .as_ref()
@@ -121,21 +251,50 @@ impl WorkspaceScreen {
             Some(pane) => pane.view.clone().into_any_element(),
             // One frame at most: `sync_panes` creates the view before this runs, unless the
             // snapshot has no worktree for the session (an agent session, or a race with a
-            // deletion) or the worktree is remote, in which case the tab says which it is.
+            // deletion), the worktree is remote, or this build draws no pane for the tab's
+            // reserved command — in which case the tab says which it is.
             None => div()
                 .flex()
                 .size_full()
                 .items_center()
                 .justify_center()
-                .child(Text::ui(no_pane_reason(remote)).muted())
+                .child(Text::ui(no_pane_reason(model.native, remote)).muted())
                 .into_any_element(),
         };
-        let id = model.worktree.as_ref().map_or_else(
-            || "workspace-native-pane".to_owned(),
-            |(worktree, _)| format!("workspace-native-pane-{worktree}"),
-        );
         div()
-            .id(SharedString::from(id))
+            .id(SharedString::from(pane_element_id(model)))
+            .relative()
+            .flex()
+            .flex_1()
+            .w_full()
+            .min_h_0()
+            .overflow_hidden()
+            .bg(theme.colors.bg)
+            .child(body)
+            .into_any_element()
+    }
+
+    /// This worktree's board, drawn by the Hub board's own screen.
+    ///
+    /// Nothing is forked and nothing is prepared here: [`BoardScreen::render`] memoises its
+    /// derived model behind `BoardState.revision`, publishes the same `board.column[N].card[M]`
+    /// and `board.filter` harness targets the Hub board publishes, and mounts the four
+    /// `Filter > BoardFilter` listeners its editor needs. The pane's whole contribution is the
+    /// band and the scope, and the scope is set on the update path
+    /// ([`WorkspaceScreen::sync_board_scope`]).
+    fn board_area(
+        &self,
+        model: &Model,
+        pane: PaneCtx<'_>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let body = pane
+            .board
+            .render(pane.state, pane.bridge, pane.focus, window, cx);
+        div()
+            .id(SharedString::from(pane_element_id(model)))
             .relative()
             .flex()
             .flex_1()
@@ -148,17 +307,84 @@ impl WorkspaceScreen {
     }
 }
 
-/// What an empty Fleet-drawn tab says, which is never the same sentence for both reasons.
+/// The handles a Fleet-drawn band needs to compose itself, gathered once per frame.
+///
+/// `board` is the shell's one [`BoardScreen`], lent down from
+/// [`WorkspaceScreen::render_prepared`] rather than owned here, because the Hub's board tab
+/// draws through the very same screen.
+pub(super) struct PaneCtx<'a> {
+    pub(super) board: &'a mut BoardScreen,
+    pub(super) state: &'a Entity<AppState>,
+    pub(super) bridge: &'a Bridge,
+    pub(super) focus: &'a FocusHandle,
+}
+
+/// The per-worktree element id a Fleet-drawn band carries, so gpui keeps each tab's hover,
+/// scroll and animation state apart when the user moves between worktrees.
+fn pane_element_id(model: &Model) -> String {
+    model.worktree.as_ref().map_or_else(
+        || "workspace-native-pane".to_owned(),
+        |(worktree, _)| format!("workspace-native-pane-{worktree}"),
+    )
+}
+
+/// What an empty Fleet-drawn tab says, which is never the same sentence for two reasons.
 ///
 /// §8 degrades a remote worktree's `fleet://lazygit` tab to a plain PTY, so a remote worktree
 /// on this tab is a state the user can only reach transiently — it still has to read as a
-/// deliberate refusal rather than as a missing record.
+/// deliberate refusal rather than as a missing record. A tab whose reserved command this build
+/// draws no pane for says that instead, because it is true of the tab and not of the worktree.
 #[must_use]
-pub(super) const fn no_pane_reason(remote: bool) -> &'static str {
-    if remote {
-        "git is not drawn here for a remote worktree"
-    } else {
-        "no worktree for this tab"
+pub(super) const fn no_pane_reason(tab: Option<NativeTab>, remote: bool) -> &'static str {
+    match tab {
+        Some(NativeTab::Unknown) => "this tab has no pane in this build",
+        Some(NativeTab::Lazygit) | None if remote => "git is not drawn here for a remote worktree",
+        // A board tab only reaches this sentence with no worktree under it: the board itself
+        // needs no local path and is drawn for a remote worktree like any other.
+        Some(NativeTab::Lazygit | NativeTab::Board) | None => "no worktree for this tab",
+    }
+}
+
+/// What the Workspace has done to the one board mirror it shares with the Hub.
+///
+/// The claim exists because pointing the mirror and drawing the tab do not happen in the same
+/// frame: `ctrl-s b` points it first so the load is in flight by the time the pane paints, and
+/// the daemon's snapshot is what finally makes the tab active.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum BoardClaim {
+    /// `ctrl-s b` pointed the mirror at this worktree; the tab's selection is still in flight.
+    Requested { worktree: WorktreeId },
+    /// The board tab is the session's active tab and the pane is drawing it.
+    Drawing {
+        worktree: WorktreeId,
+        /// `AppState::board_generation` when the scope was last claimed.
+        generation: u64,
+    },
+}
+
+/// Whether a `ctrl-s b` still waiting for its tab is waiting in the session that pressed it.
+///
+/// The wait outlives the frames between the keystroke and fleetd's snapshot, but not a move to
+/// another worktree: the tab it is waiting for is created in the session the key was pressed in,
+/// and a claim kept past that move would hold the mirror on a board no surface is going to draw.
+pub(super) fn pending_claim_survives(claim: Option<&BoardClaim>, model: &Model) -> bool {
+    let Some(BoardClaim::Requested { worktree }) = claim else {
+        return false;
+    };
+    model
+        .worktree
+        .as_ref()
+        .is_some_and(|(current, _)| current == worktree)
+}
+
+impl BoardClaim {
+    /// Whether the pane is already drawing this worktree's board on this generation.
+    fn is_drawing(&self, worktree: &WorktreeId, generation: u64) -> bool {
+        matches!(
+            self,
+            Self::Drawing { worktree: claimed, generation: claimed_generation }
+                if claimed == worktree && *claimed_generation == generation
+        )
     }
 }
 

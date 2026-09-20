@@ -11,7 +11,12 @@ pub(crate) fn render(
 ) -> AnyElement {
     let gap = cx.theme().space.sm;
     adopt_late_schema(state, cx);
-    let draft = read_host(state, cx, |host, _| host.board_settings.clone());
+    let (draft, input) = read_host(state, cx, |host, _| {
+        (
+            host.board_settings.clone(),
+            host.board_settings_input.clone(),
+        )
+    });
     let repos = repo_choices(state.read(cx));
     let repo_index = repo_position(&repos, draft.default_repo_id.as_ref());
     let repo_off_grid = !repo_listed(&repos, draft.default_repo_id.as_ref());
@@ -49,29 +54,35 @@ pub(crate) fn render(
         .gap(gap)
         .overflow_y_scroll()
         .track_scroll(&draft.scroll)
-        .child(
-            TextField::new(draft.name.clone())
-                .label(SettingRow::Name.label())
-                .placeholder("Fleet")
-                .caret(if focused == SettingRow::Name {
-                    draft.caret
-                } else {
-                    draft.name.chars().count()
-                })
-                .focused(focused == SettingRow::Name),
-        )
-        .child(
-            TextField::new(draft.prefix.clone())
-                .label(SettingRow::Prefix.label())
-                .placeholder("FLT")
-                .mono(true)
-                .caret(if focused == SettingRow::Prefix {
-                    draft.caret
-                } else {
-                    draft.prefix.chars().count()
-                })
-                .focused(focused == SettingRow::Prefix),
-        )
+        .child(if focused == SettingRow::Name {
+            input.clone().map_or_else(
+                || div().into_any_element(),
+                |input| input.into_any_element(),
+            )
+        } else {
+            // §6.4: a value nobody is editing is a read-only fact, not an empty box. The
+            // editor `Enter` opens carries the placeholder and the label.
+            FactRow::new(
+                SettingRow::Name.label(),
+                FactValue::from_option((!draft.name.is_empty()).then(|| draft.name.clone())),
+            )
+            .label_width(px(LABEL_WIDTH))
+            .into_any_element()
+        })
+        .child(if focused == SettingRow::Prefix {
+            input.clone().map_or_else(
+                || div().into_any_element(),
+                |input| input.into_any_element(),
+            )
+        } else {
+            FactRow::new(
+                SettingRow::Prefix.label(),
+                FactValue::from_option((!draft.prefix.is_empty()).then(|| draft.prefix.clone())),
+            )
+            .label_width(px(LABEL_WIDTH))
+            .mono(true)
+            .into_any_element()
+        })
         .child(
             Cycler::labeled(
                 SettingRow::DefaultRepo.label(),
@@ -125,7 +136,7 @@ pub(crate) fn render(
                 .rows
                 .iter()
                 .enumerate()
-                .map(|(index, row)| backend_element(row, &draft, index)),
+                .map(|(index, row)| backend_element(row, &draft, input.as_ref(), index)),
         );
 
     let mut card = Dialog::new("Board settings")
@@ -148,107 +159,54 @@ pub(crate) fn render(
     let save_bridge = bridge.clone();
 
     root(focus)
-        .on_key_down({
+        .on_action({
             let state = state.clone();
-            move |event, _window, cx| {
-                let Some(text) = typed_char(event) else {
-                    return;
-                };
-                if insert(&state, text, cx) {
-                    cx.stop_propagation();
-                }
+            let focus = focus.clone();
+            move |_: &settings_actions::MoveDown, window, cx| {
+                move_to_row(&state, 1, &focus, window, cx)
             }
         })
         .on_action({
             let state = state.clone();
-            move |_: &settings_actions::MoveDown, _window, cx| move_row(&state, 1, "j", cx)
+            let focus = focus.clone();
+            move |_: &settings_actions::MoveUp, window, cx| {
+                move_to_row(&state, -1, &focus, window, cx)
+            }
         })
         .on_action({
             let state = state.clone();
-            move |_: &settings_actions::MoveUp, _window, cx| move_row(&state, -1, "k", cx)
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::CursorDown, _window, cx| move_row(&state, 1, "", cx)
+            let focus = focus.clone();
+            move |_: &dialog::CursorDown, window, cx| move_to_row(&state, 1, &focus, window, cx)
         })
         // KEYMAP §Board says the board dialog rows are "in addition to everything the generic
         // Dialog context binds", and `tab` is one of them: without these two it was a dead key
         // here while every other multi-row dialog moved on it.
         .on_action({
             let state = state.clone();
-            move |_: &dialog::NextField, _window, cx| move_row(&state, 1, "", cx)
+            let focus = focus.clone();
+            move |_: &dialog::NextField, window, cx| move_to_row(&state, 1, &focus, window, cx)
         })
         .on_action({
             let state = state.clone();
-            move |_: &dialog::PrevField, _window, cx| move_row(&state, -1, "", cx)
+            let focus = focus.clone();
+            move |_: &dialog::PrevField, window, cx| move_to_row(&state, -1, &focus, window, cx)
         })
         .on_action({
             let state = state.clone();
-            move |_: &dialog::CursorUp, _window, cx| move_row(&state, -1, "", cx)
+            let focus = focus.clone();
+            move |_: &dialog::CursorUp, window, cx| move_to_row(&state, -1, &focus, window, cx)
         })
         .on_action({
             let state = state.clone();
-            move |_: &settings_actions::CycleNext, _window, cx| cycle(&state, 1, "l", cx)
+            move |_: &settings_actions::CycleNext, _window, cx| cycle(&state, 1, cx)
         })
         .on_action({
             let state = state.clone();
-            move |_: &settings_actions::CyclePrev, _window, cx| cycle(&state, -1, "h", cx)
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::CursorRight, _window, cx| {
-                if !caret(&state, cx, TextFieldState::move_right) {
-                    cycle(&state, 1, "", cx);
-                }
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::CursorLeft, _window, cx| {
-                if !caret(&state, cx, TextFieldState::move_left) {
-                    cycle(&state, -1, "", cx);
-                }
-            }
+            move |_: &settings_actions::CyclePrev, _window, cx| cycle(&state, -1, cx)
         })
         .on_action({
             let state = state.clone();
             move |_: &settings_actions::Toggle, _window, cx| toggle(&state, cx)
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::Backspace, _window, cx| {
-                edit(&state, cx, |input| {
-                    input.backspace();
-                });
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::DeleteWord, _window, cx| {
-                edit(&state, cx, |input| {
-                    input.delete_word_before();
-                });
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::ClearInput, _window, cx| {
-                edit(&state, cx, |input| {
-                    input.clear();
-                });
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::LineStart, _window, cx| {
-                caret(&state, cx, TextFieldState::move_to_start);
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::LineEnd, _window, cx| {
-                caret(&state, cx, TextFieldState::move_to_end);
-            }
         })
         .on_action(move |_: &dialog::Confirm, _window, cx| {
             save(&save_state, &save_bridge, cx);
@@ -279,21 +237,31 @@ fn adopt_late_schema(state: &Entity<AppState>, cx: &mut App) {
         return;
     }
     with_host(state, cx, |host| {
-        let (row, caret) = (host.board_settings.row, host.board_settings.caret);
+        let row = host.board_settings.row;
         host.board_settings.select_backend(&kind, &schema);
         host.board_settings.row = row;
-        host.board_settings.caret = caret;
     });
 }
 
 /// Draws one backend settings row as the control its `PropertyKind` names.
-fn backend_element(row: &BackendRow, draft: &BoardSettingsState, index: usize) -> AnyElement {
+fn backend_element(
+    row: &BackendRow,
+    draft: &BoardSettingsState,
+    input: Option<&Entity<TextInput>>,
+    index: usize,
+) -> AnyElement {
     let focused = draft.focused() == SettingRow::BackendSetting(index);
     let label = if row.required {
         format!("{} \u{2217}", row.name)
     } else {
         row.name.clone()
     };
+    if focused && row.is_text() {
+        return input.cloned().map_or_else(
+            || div().into_any_element(),
+            |input| input.into_any_element(),
+        );
+    }
     match row.kind {
         PropertyKind::Bool => Toggle::labeled(label, row.flag())
             .label_width(px(LABEL_WIDTH))
@@ -324,11 +292,7 @@ fn backend_element(row: &BackendRow, draft: &BoardSettingsState, index: usize) -
         // An unset optional number is drawn as an empty field with its placeholder, never as
         // `0`: every backend number row here has a non-zero default, and a dialog that shows
         // `0` states a value the daemon is not using.
-        // …and only while it is not the row being edited: `BackendRow::is_text` is true for a
-        // number, so `left`/`right`/`ctrl-a`/`ctrl-e` move a caret `NumberField` does not draw.
-        // On "10" that turned a `left` and a typed `5` into "150" with nothing on screen to
-        // explain it. The focused row is drawn as the text field it is actually edited as.
-        PropertyKind::Number if !row.value.trim().is_empty() && !focused => {
+        PropertyKind::Number if !row.value.trim().is_empty() => {
             let mut field = NumberField::labeled(label, row.value.trim().parse().unwrap_or(0))
                 .min(0)
                 .focused(false);
@@ -338,31 +302,29 @@ fn backend_element(row: &BackendRow, draft: &BoardSettingsState, index: usize) -
             field.into_any_element()
         }
         _ => {
-            let mut field = TextField::new(row.value.clone())
-                .label(label)
-                .placeholder(placeholder(row))
-                .mono(row.kind == PropertyKind::Number)
-                .caret(if focused {
-                    draft.caret
-                } else {
-                    row.value.chars().count()
-                })
-                .focused(focused);
+            let mut column = div().flex().flex_col().child(
+                FactRow::new(
+                    label,
+                    FactValue::from_option((!row.value.is_empty()).then(|| row.value.clone())),
+                )
+                .label_width(px(LABEL_WIDTH))
+                .mono(row.kind == PropertyKind::Number),
+            );
             if let Some(message) = row.error() {
-                field = field.invalid(message);
+                column = column.child(FactRow::warning(message));
             }
-            field.into_any_element()
+            column.into_any_element()
         }
     }
 }
 
-/// What an empty backend text row suggests.
-#[must_use]
-fn placeholder(row: &BackendRow) -> &'static str {
-    match row.kind {
-        PropertyKind::MultiSelect => "comma, separated, values",
-        PropertyKind::Date => "YYYY-MM-DD",
-        _ if row.required => "required",
-        _ => "optional",
-    }
+fn move_to_row(
+    state: &Entity<AppState>,
+    delta: isize,
+    focus: &FocusHandle,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    move_row(state, delta, cx);
+    materialize_input(state, Some(window), Some(focus), cx);
 }

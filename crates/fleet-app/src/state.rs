@@ -44,7 +44,7 @@ mod terminal;
 mod test_support;
 
 pub use agents::{AgentCounts, AgentThreads};
-pub use board::{BoardFocus, BoardState, GroupBy};
+pub use board::{BoardFocus, BoardScope, BoardState, GroupBy, WORKTREE_BOARDS_UNSUPPORTED};
 pub use connection::{DaemonLink, DaemonLossReason, daemon_log_path, reconnect_backoff};
 use harness::HarnessCache;
 pub use harness::{
@@ -166,6 +166,12 @@ pub struct AppState {
     pub notifications: NotificationsConfig,
     /// The overlay that owns the keyboard, when any.
     pub overlay: Option<Overlay>,
+    /// The context word derived from the open dialog's draft.
+    ///
+    /// Dialog drafts live in `DialogHost`; this mirror lets `context_chain` remain the single
+    /// authoritative chain used by rendering and the input-generation gate. The dialog and word
+    /// travel together so a newly opened dialog can never inherit the previous dialog's word.
+    dialog_key_context: Option<(Dialogs, &'static str)>,
     /// The filter of the focused list.
     pub filter: FilterState,
     /// Whether the detail panel is open (`i`). Never focusable.
@@ -267,6 +273,7 @@ impl AppState {
             terminal_config: fleet_core::config::TerminalConfig::default(),
             notifications: NotificationsConfig::default(),
             overlay: None,
+            dialog_key_context: None,
             filter: FilterState::default(),
             detail_open: false,
             rail_collapsed: false,

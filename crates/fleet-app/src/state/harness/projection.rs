@@ -359,6 +359,13 @@ impl AppState {
                 }
                 (HubPane::List, HubTab::Prs) => format!("prs.row[{}]", self.pr_cursor()),
             }),
+            Screen::Workspace { .. } if self.board_pane_is_active() => Some(format!(
+                // The board pane's rows are the Hub board's rows, drawn by the same view, so a
+                // scenario that drives one drives the other with the same vocabulary
+                // (`docs/TESTING-HARNESS.md` §3).
+                "board.column[{}].card[{}]",
+                self.board.focus.column, self.board.focus.row
+            )),
             Screen::Workspace { .. } => {
                 let tabs = self.tab_rows();
                 let index = tabs.selected?;
@@ -398,7 +405,9 @@ impl AppState {
         };
         Some(DialogSnapshot {
             name: dialog.context_name().to_owned(),
-            fields: Vec::new(),
+            // Recorded by the harness command that is about to project, because the live
+            // editors belong to the dialog host entity rather than to `AppState`.
+            fields: self.harness.dialog_fields().to_vec(),
             buttons: Vec::new(),
             message: None,
         })

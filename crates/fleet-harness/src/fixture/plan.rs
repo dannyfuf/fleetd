@@ -80,6 +80,13 @@ pub struct Worktree {
     pub dirty_files: Vec<String>,
     /// What the post-create hook does, which is how a fixture gets a degraded row.
     pub hook: Hook,
+    /// Cards seeded onto this worktree's own board, which is how a fixture gets one.
+    ///
+    /// The board itself is asked for with `EnsureWorktreeBoard`, so its id, name and prefix
+    /// are the daemon's derivation rather than a fixture's guess; only the cards are described
+    /// here. An empty list is a worktree with no board at all, which is every worktree but the
+    /// `board` preset's.
+    pub board: Vec<Card>,
 }
 
 impl Worktree {
@@ -91,6 +98,7 @@ impl Worktree {
             base: None,
             dirty_files: Vec::new(),
             hook: Hook::None,
+            board: Vec::new(),
         }
     }
 
@@ -388,13 +396,39 @@ fn busy() -> Fixture {
     }
 }
 
+/// The board preset: one context board, and one worktree board under the same context.
+///
+/// The two card sets are deliberately disjoint and their prefixes differ — the context board
+/// is `FLT`, and `acme/api#feature`'s board takes the `FEA` the daemon derives from the slug —
+/// so a dump says which of the two a surface is showing. That is what
+/// `scenarios/workspace/board-tab.scenario` reads to prove the Hub still shows the *context*
+/// board after the Workspace tab has shown the worktree's.
 fn board() -> Fixture {
     Fixture {
         repositories: vec![Repository {
             owner: "acme".to_owned(),
             name: "api".to_owned(),
             branches: Vec::new(),
-            worktrees: vec![Worktree::clean("feature")],
+            worktrees: vec![Worktree {
+                board: vec![
+                    Card {
+                        title: "Open the tab with ctrl-s b".to_owned(),
+                        description: "Created on demand, selected every time.".to_owned(),
+                        column: 0,
+                    },
+                    Card {
+                        title: "Scope the mirror to this worktree".to_owned(),
+                        description: "One BoardState, two scopes.".to_owned(),
+                        column: 0,
+                    },
+                    Card {
+                        title: "Draw the board inside the Workspace".to_owned(),
+                        description: "The Hub's board view, lent to the tab.".to_owned(),
+                        column: 1,
+                    },
+                ],
+                ..Worktree::clean("feature")
+            }],
             pull_requests: Vec::new(),
         }],
         board: Some(Board {

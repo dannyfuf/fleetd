@@ -36,7 +36,27 @@ pub(crate) fn seed(state: &Entity<AppState>, cx: &mut App) {
         (None, Some(current)) if accepts_free_text(&kind_now, schema) => current.clone(),
         _ => String::new(),
     };
-    with_host(state, cx, |host| {
+    let input = cx.new(|cx| {
+        let mut input = TextInput::new(InputMode::SingleLine, cx);
+        input.set_filter(Some(|character| character != ' '), cx);
+        input.set_label(Some(picker_label(state.read(cx), &kind_now).into()), cx);
+        input.set_placeholder(
+            if kind_now.is_multi_select(schema) {
+                "filter values"
+            } else {
+                "type to filter or set"
+            },
+            cx,
+        );
+        input.set_text(query.clone(), cx);
+        input.set_invalid(
+            free_text_error(&kind_now, query.trim(), schema).map(Into::into),
+            cx,
+        );
+        input
+    });
+    let host = crate::dialogs::host::host_for(state, cx);
+    host.update(cx, |host, _| {
         let kind = host.card_picker.kind.clone();
         let then_worktree = host.card_picker.then_worktree;
         let then_detail = host.card_picker.then_detail;
@@ -59,18 +79,83 @@ pub(crate) fn seed(state: &Entity<AppState>, cx: &mut App) {
             then_worktree,
             then_detail,
             cursor: at.unwrap_or(0),
-            // The caret sits at the end of the seeded value, so `ctrl-u` clears it and a typed
-            // character extends it, rather than editing in front of it.
-            caret: query.chars().count(),
-            query,
             ..Default::default()
         };
+        host.card_picker_input = Some(input.clone());
+    });
+    let weak_host = host.downgrade();
+    let weak_state = state.downgrade();
+    let subscription = cx.subscribe(&input, move |input, event, cx| {
+        if !matches!(event, TextInputEvent::Changed) {
+            return;
+        }
+        let Some(host) = weak_host.upgrade() else {
+            return;
+        };
+        let Some(state) = weak_state.upgrade() else {
+            return;
+        };
+        let query = input.read(cx).text().to_owned();
+        let invalid = {
+            let draft = &host.read(cx).card_picker;
+            free_text_error(
+                &draft.kind,
+                query.trim(),
+                property_kind(state.read(cx), &draft.kind),
+            )
+        };
+        let input = input.clone();
+        // The event originates inside this input's update. Validation belongs to the next update
+        // turn so the subscriber never re-enters the entity that is emitting it.
+        cx.defer(move |cx| {
+            input.update(cx, |input, cx| {
+                input.set_invalid(invalid.map(Into::into), cx)
+            })
+        });
+        host.update(cx, |host, cx| {
+            host.card_picker.cursor = 0;
+            host.card_picker.error = None;
+            prepare(state.read(cx), &mut host.card_picker, &query);
+            cx.notify();
+        });
+    });
+    host.update(cx, |host, _| {
+        host.card_picker_input_subscription = Some(subscription)
+    });
+    let query = input.read(cx).text().to_owned();
+    host.update(cx, |host, cx| {
+        prepare(state.read(cx), &mut host.card_picker, &query);
+    });
+}
+
+/// Refresh rows when the board or repository snapshot changes under the open picker.
+pub(crate) fn refresh(state: &Entity<AppState>, cx: &mut App) {
+    let query = read_host(state, cx, |host, cx| {
+        host.card_picker_input
+            .as_ref()
+            .map_or_else(String::new, |input| input.read(cx).text().to_owned())
+    });
+    let host = crate::dialogs::host::host_for(state, cx);
+    host.update(cx, |host, cx| {
+        let before = host.card_picker.prepared.clone();
+        prepare(state.read(cx), &mut host.card_picker, &query);
+        if host.card_picker.prepared != before {
+            host.card_picker.cursor = step(host.card_picker.cursor, 0, host.card_picker.rows.len());
+            cx.notify();
+        }
     });
 }
 
 /// `Enter`: turn the selection into a request, send it, and close.
 pub(super) fn apply(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
-    let draft = read_host(state, cx, |host, _| host.card_picker.clone());
+    let (draft, query) = read_host(state, cx, |host, cx| {
+        (
+            host.card_picker.clone(),
+            host.card_picker_input
+                .as_ref()
+                .map_or_else(String::new, |input| input.read(cx).text().to_owned()),
+        )
+    });
     let Some(card_id) = draft.card_id.clone() else {
         return;
     };
@@ -88,7 +173,7 @@ pub(super) fn apply(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
         return;
     }
     let schema = property_kind(state.read(cx), &draft.kind);
-    if let Some(message) = free_text_error(&draft.kind, draft.query.trim(), schema) {
+    if let Some(message) = free_text_error(&draft.kind, query.trim(), schema) {
         with_host(state, cx, |host| host.card_picker.error = Some(message));
         notify(state, cx);
         return;
@@ -109,7 +194,7 @@ pub(super) fn apply(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
         notify(state, cx);
         return;
     }
-    let value = chosen.unwrap_or_else(|| draft.query.trim().to_owned());
+    let value = chosen.unwrap_or_else(|| query.trim().to_owned());
 
     if draft.then_worktree && value.is_empty() {
         with_host(state, cx, |host| {
@@ -156,6 +241,8 @@ pub(super) fn close(state: &Entity<AppState>, cx: &mut App) {
         if dialog.is_some() {
             host.open = dialog.clone();
         }
+        host.card_picker_input = None;
+        host.card_picker_input_subscription = None;
         dialog
     });
     state.update(cx, |app, cx| {

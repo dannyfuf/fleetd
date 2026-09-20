@@ -244,6 +244,34 @@ fn snapshot(count: usize) -> Snapshot {
     }
 }
 
+#[test]
+fn board_tab_summary_ignores_worktree_boards_in_the_active_context() {
+    let context: ContextId = "zed".parse().expect("context id");
+    let summary = |id: &str, worktree_id: Option<&str>, open_count, conflict_count| BoardSummary {
+        id: id.parse().expect("board id"),
+        context_id: context.clone(),
+        worktree_id: worktree_id.map(|id| id.parse().expect("worktree id")),
+        name: id.to_owned(),
+        prefix: "ZED".to_owned(),
+        backend_kind: "local".to_owned(),
+        card_count: open_count,
+        open_count,
+        dirty_count: 0,
+        conflict_count,
+        last_synced_at: None,
+        last_error: None,
+    };
+    let boards = vec![
+        summary("wt-acme-api-feature", Some("acme/api#feature"), 7, 1),
+        summary("zed", None, 2, 0),
+    ];
+
+    let selected = context_board_summary(&boards, Some(&context)).expect("context board summary");
+    assert_eq!(selected.id.as_str(), "zed");
+    assert_eq!(selected.open_count, 2);
+    assert_eq!(selected.conflict_count, 0);
+}
+
 fn context(id: &str) -> Context {
     Context {
         id: id.parse().unwrap_or_else(|error| panic!("{error}")),

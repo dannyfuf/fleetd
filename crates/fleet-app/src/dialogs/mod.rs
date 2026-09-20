@@ -13,7 +13,6 @@ mod edit_hooks;
 pub mod filter;
 mod help;
 mod host;
-mod input;
 mod palette;
 mod quit;
 mod rename_terminal;
@@ -31,11 +30,15 @@ pub(crate) use crate::state::move_cursor as step;
 pub use confirm::ConfirmRequest;
 pub use host::{ActiveDialog, request_confirm, request_edit_hooks};
 pub(crate) use host::{
-    DialogHost, SessionTransport, notify, open_agent_session, open_agent_thread_worktree,
-    open_agents_picker, open_session, open_worktree, read_host, retain_task, with_host,
+    DialogHost, SessionTransport, dialog_fields, focused_input, notify, open_agent_session,
+    open_agent_thread_worktree, open_agents_picker, open_session, open_worktree, read_host,
+    retain_task, with_host,
 };
-pub(crate) use input::{clear_all, field, type_into, typed_char};
+#[cfg(test)]
+pub(crate) use host::{focused_input_text, hook_row_count};
 pub(crate) use settings::editor_command;
+#[cfg(test)]
+pub(crate) use settings::refresh_rows as settings_refresh_rows;
 
 /// §3.8 card width for a single-field prompt: new/edit context, rename, assign repo.
 const NARROW_W: Pixels = px(460.0);
@@ -94,7 +97,7 @@ impl Dialogs {
     /// The second half of this dialog's key context, i.e. `Dialog > <name>`.
     ///
     /// `NewContext` and `EditContext` share `Context` because `docs/KEYMAP.md` gives them one
-    /// row (`ctrl-d` deletes from either).
+    /// row (`ctrl-shift-d` deletes from either).
     #[must_use]
     pub const fn context_name(&self) -> &'static str {
         match self {

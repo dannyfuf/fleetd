@@ -2,7 +2,7 @@ use super::{CommandOutput, unknown, validation, worktrees::parse_host};
 use crate::{
     args::{
         BoardArgs, BoardCardCommand, BoardCardFields, BoardCommand, BoardConflictPolicy,
-        BoardCreateArgs, BoardPriority, BoardResolution, BoardSetArgs,
+        BoardCreateArgs, BoardPriority, BoardResolution, BoardSetArgs, BoardWorktreeSelector,
     },
     envelope::{
         BoardBackendSchemaEnvelope, BoardBackendsEnvelope, BoardCardEnvelope, BoardEnvelope,
@@ -16,11 +16,13 @@ use fleet_core::{
         BackendDescriptor, BackendRef, Board, BoardPatch, BoardView, Card, CardDraft, CardPatch,
         ConflictPolicy, ConflictResolution, Label, Priority, merge_settings, summarize, valid_date,
     },
-    ids::{BoardId, ContextId, JobId, LabelId, RepoId, StatusId},
+    ids::{BoardId, ContextId, JobId, LabelId, RepoId, SessionId, StatusId, WorktreeId},
+    sessions::SessionKind,
 };
 use fleet_proto::{
     error::{ErrorKind, ProtoError},
     job::{JobRecord, JobStatus},
+    snapshot::Snapshot,
 };
 use std::time::Duration;
 
@@ -30,6 +32,7 @@ pub(super) async fn board(
 ) -> Result<CommandOutput, ProtoError> {
     let BoardArgs {
         board,
+        worktree,
         context,
         json,
         command,
@@ -39,13 +42,30 @@ pub(super) async fn board(
     if board.is_some() && context.is_some() {
         return Err(validation("--board and --context cannot be used together"));
     }
+    if board.is_some() && worktree.is_some() {
+        return Err(validation("--board and --worktree cannot be used together"));
+    }
+    if context.is_some() && worktree.is_some() {
+        return Err(validation(
+            "--context and --worktree cannot be used together",
+        ));
+    }
     match command {
-        BoardCommand::List => list(client, board, context, json).await,
+        BoardCommand::List => {
+            if worktree.is_some() {
+                return Err(validation(
+                    "board list accepts --board to narrow the table, not --worktree",
+                ));
+            }
+            list(client, board, context, json).await
+        }
         BoardCommand::Backends => backends(client, json).await,
-        BoardCommand::Create(arguments) => create(client, board, context, arguments, json).await,
+        BoardCommand::Create(arguments) => {
+            create(client, board, worktree, context, arguments, json).await
+        }
         // Every remaining command names one board, and each resolves it the same way.
         command => {
-            let view = resolve_board(client, board, context).await?;
+            let view = resolve_board(client, board, worktree, context).await?;
             match command {
                 BoardCommand::Show => show(client, &view, json).await,
                 BoardCommand::Describe => describe(client, &view, json).await,
@@ -110,27 +130,44 @@ async fn backends(client: &Client, json: bool) -> Result<CommandOutput, ProtoErr
     Ok(CommandOutput::success(text))
 }
 
-/// Creates a board in the named or active context and prints it.
+/// Creates a board for the selected worktree or the named or active context, then prints it.
 async fn create(
     client: &Client,
     board: Option<BoardId>,
+    worktree: Option<BoardWorktreeSelector>,
     context: Option<ContextId>,
     arguments: BoardCreateArgs,
     json: bool,
 ) -> Result<CommandOutput, ProtoError> {
     if board.is_some() {
-        return Err(validation("board create accepts --context, not --board"));
+        return Err(validation(
+            "board create accepts --context or --worktree, not --board",
+        ));
     }
-    let context = resolve_context(client, context).await?;
     let settings = backend_settings(&serde_json::Value::Null, &arguments.settings)?;
-    let view = client
-        .create_board(
-            context,
-            arguments.name,
-            arguments.prefix,
-            arguments.backend.map(|kind| BackendRef { kind, settings }),
-        )
-        .await?;
+    let backend = arguments.backend.map(|kind| BackendRef { kind, settings });
+    let view = match worktree {
+        Some(worktree) => {
+            client
+                .create_worktree_board(
+                    resolve_worktree(client, worktree).await?,
+                    arguments.name,
+                    arguments.prefix,
+                    backend,
+                )
+                .await?
+        }
+        None => {
+            client
+                .create_board(
+                    resolve_context(client, context).await?,
+                    arguments.name,
+                    arguments.prefix,
+                    backend,
+                )
+                .await?
+        }
+    };
     board_show_output(
         &view,
         descriptor_for(client, &view, json).await.as_ref(),
@@ -210,7 +247,7 @@ async fn resolve_context(
     match context {
         Some(context) => Ok(context),
         None => client.get_snapshot().await?.active_context.ok_or_else(|| {
-            validation("no active context; select one with --context or use --board")
+            validation("no active context; select one with --context, --worktree, or --board")
         }),
     }
 }
@@ -218,16 +255,52 @@ async fn resolve_context(
 async fn resolve_board(
     client: &Client,
     board: Option<BoardId>,
+    worktree: Option<BoardWorktreeSelector>,
     context: Option<ContextId>,
 ) -> Result<BoardView, ProtoError> {
-    match board {
-        Some(board) => client.get_board(board).await,
-        None => {
-            client
-                .ensure_board(resolve_context(client, context).await?)
-                .await
+    if let Some(board) = board {
+        return client.get_board(board).await;
+    }
+    if let Some(worktree) = worktree {
+        return client
+            .ensure_worktree_board(resolve_worktree(client, worktree).await?)
+            .await;
+    }
+    client
+        .ensure_board(resolve_context(client, context).await?)
+        .await
+}
+
+async fn resolve_worktree(
+    client: &Client,
+    selector: BoardWorktreeSelector,
+) -> Result<WorktreeId, ProtoError> {
+    match selector {
+        BoardWorktreeSelector::Explicit(worktree) => Ok(worktree),
+        BoardWorktreeSelector::FromSession => {
+            let snapshot = client.get_snapshot().await?;
+            let session = std::env::var("FLEET_SESSION").ok();
+            worktree_from_session(&snapshot, session.as_deref())
         }
     }
+}
+
+fn worktree_from_session(
+    snapshot: &Snapshot,
+    session: Option<&str>,
+) -> Result<WorktreeId, ProtoError> {
+    let worktree = session
+        .and_then(|session| SessionId::try_from(session).ok())
+        .and_then(|session| snapshot.sessions.iter().find(|item| item.id == session))
+        .and_then(|session| match &session.kind {
+            SessionKind::Worktree(worktree) => Some(worktree.clone()),
+            SessionKind::Agent(_) => None,
+        });
+    worktree.ok_or_else(|| {
+        validation(
+            "no worktree session: pass --worktree=<owner/name#slug> or run inside a worktree terminal",
+        )
+    })
 }
 
 /// The descriptor for `kind`, or `None` when the daemon cannot name it.

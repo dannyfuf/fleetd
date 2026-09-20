@@ -50,6 +50,7 @@ impl BackendRow {
     /// A number row takes digits only, which is what lets `h` and `l` keep their cycling
     /// meaning there: the letter is refused, so the key falls through to the cursor.
     #[must_use]
+    #[cfg(test)]
     pub(super) fn accepts(&self, text: &str) -> bool {
         if !self.is_text() {
             return false;

@@ -1,14 +1,17 @@
 use super::{Result, expect_ack, unexpected};
-use crate::Client;
+use crate::{Client, connection::worktree_board_capability_error};
 use fleet_core::{
     board::{
         BackendDescriptor, BackendRef, BackendSchema, BoardPatch, BoardSummary, BoardView, Card,
         CardDraft, CardPatch, ConflictResolution,
     },
-    ids::{BoardId, CardId, ContextId, HostId, JobId, RepoId, StatusId},
+    ids::{BoardId, CardId, ContextId, HostId, JobId, RepoId, StatusId, WorktreeId},
     model::Worktree,
 };
-use fleet_proto::{request::RequestBody, response::ResponseBody};
+use fleet_proto::{
+    request::RequestBody,
+    response::{BOARD_WORKTREE_CAPABILITY, ResponseBody},
+};
 
 impl Client {
     /// Lists the boards in one context, or in every context.
@@ -38,6 +41,18 @@ impl Client {
         }
     }
 
+    /// Returns a worktree's board, creating it when the worktree has none.
+    pub async fn ensure_worktree_board(&self, worktree_id: WorktreeId) -> Result<BoardView> {
+        self.require_worktree_board_capability()?;
+        match self
+            .request(RequestBody::EnsureWorktreeBoard { worktree_id })
+            .await?
+        {
+            ResponseBody::Board(value) => Ok(value),
+            response => Err(unexpected("ensure_worktree_board", response)),
+        }
+    }
+
     /// Creates a board in a context.
     pub async fn create_board(
         &self,
@@ -57,6 +72,37 @@ impl Client {
         {
             ResponseBody::Board(value) => Ok(value),
             response => Err(unexpected("create_board", response)),
+        }
+    }
+
+    /// Creates the only board scoped to a worktree.
+    pub async fn create_worktree_board(
+        &self,
+        worktree_id: WorktreeId,
+        name: Option<String>,
+        prefix: Option<String>,
+        backend: Option<BackendRef>,
+    ) -> Result<BoardView> {
+        self.require_worktree_board_capability()?;
+        match self
+            .request(RequestBody::CreateWorktreeBoard {
+                worktree_id,
+                name,
+                prefix,
+                backend,
+            })
+            .await?
+        {
+            ResponseBody::Board(value) => Ok(value),
+            response => Err(unexpected("create_worktree_board", response)),
+        }
+    }
+
+    fn require_worktree_board_capability(&self) -> Result<()> {
+        if self.supports_capability(BOARD_WORKTREE_CAPABILITY) {
+            Ok(())
+        } else {
+            Err(worktree_board_capability_error())
         }
     }
 

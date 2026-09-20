@@ -325,7 +325,7 @@ roadmap would be ceremony.
     this worktree have?" row and add a row for the seeded closed set.
   - `docs/UX-SPEC.md` line about `^s x` closing the tab and keeping the transcript: add that the
     close survives a relaunch.
-  - Write ADR 0018 in the style of 0017: context (window-local set, three reproduction paths),
+  - Write ADR 0019 in the style of 0017: context (window-local set, three reproduction paths),
     decision (per-installation daemon-side marker, additive capability), consequences (the
     owed thread-delete verb must clear the table).
 - **Verification:** Read each changed paragraph against the code once more; `make lint` for
@@ -367,7 +367,7 @@ make restart
 - [ ] `make test` passes, including the new proto, store, daemon, client and app tests.
 - [ ] `make harness` passes, including the new scenario.
 - [ ] The manual reproduction from T01 no longer reproduces on any of the three paths.
-- [ ] `docs/NATIVE-AGENTS.md`, `docs/APP-CONTRACTS.md`, `docs/UX-SPEC.md` and ADR 0018 match the
+- [ ] `docs/NATIVE-AGENTS.md`, `docs/APP-CONTRACTS.md`, `docs/UX-SPEC.md` and ADR 0019 match the
       code.
 - [ ] The tracker reflects reality and every follow-up is captured.
 

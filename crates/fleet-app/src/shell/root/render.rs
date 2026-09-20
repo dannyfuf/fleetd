@@ -60,17 +60,14 @@ impl Shell {
         let state = &self.state;
         let bridge = &self.bridge;
         let focus = &self.overlay_focus;
-        Some(match overlay? {
-            Overlay::Jobs => self.jobs.render(state, bridge, focus, window, cx),
-            Overlay::Dialog(_) | Overlay::Palette => self.dialogs.clone().into_any_element(),
-            Overlay::Filter => crate::dialogs::filter::render(
-                state,
-                self.hub.context(state, bridge),
-                focus,
-                window,
-                cx,
-            ),
-        })
+        match overlay? {
+            Overlay::Jobs => Some(self.jobs.render(state, bridge, focus, window, cx)),
+            Overlay::Dialog(_) | Overlay::Palette => Some(self.dialogs.clone().into_any_element()),
+            // §3.10 replaces the pane header *in place*: the filter editor is drawn in the body
+            // and owns the keyboard from there, so there is no overlay layer to mount and the
+            // `Filter` key context wraps the body instead ("no overlay, no reflow").
+            Overlay::Filter => None,
+        }
     }
 
     fn render_splash(
@@ -127,13 +124,18 @@ impl Shell {
                 .into_any_element();
         }
         match state.screen {
-            Screen::Hub { .. } => {
-                self.hub
-                    .render(&self.state, &self.bridge, &self.body_focus, window, cx)
-            }
+            Screen::Hub { .. } => self.hub.render(
+                &mut self.board,
+                &self.state,
+                &self.bridge,
+                &self.body_focus,
+                window,
+                cx,
+            ),
             Screen::Workspace { .. } => {
                 let veiled = state.drops_terminal_keys();
                 let workspace = self.workspace.render_prepared(
+                    &mut self.board,
                     &self.state,
                     &self.bridge,
                     &self.body_focus,

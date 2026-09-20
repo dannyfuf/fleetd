@@ -9,7 +9,7 @@ use fleet_core::agents::{
     TurnOutcome, TurnState,
 };
 use fleet_ui_kit::{TranscriptRowId, TranscriptRowKind};
-use gpui::{AppContext as _, EntityInputHandler as _, TestAppContext};
+use gpui::{AppContext as _, TestAppContext};
 
 use super::fixtures::{
     assistant, command, delegation_item, delegation_record, edit, permission_gate, projection,
@@ -298,7 +298,7 @@ fn a_composer_submit_sends_the_text_it_reported(cx: &mut TestAppContext) {
         .collect();
     assert_eq!(sent, ["ship it".to_owned()]);
     view.read_with(cx, |view, cx| {
-        assert!(view.input().read(cx).text().is_empty());
+        assert!(view.input().read(cx).text(cx).is_empty());
         // The bubble is optimistic: it is on screen in the same frame the key was pressed.
         assert_eq!(count_user_rows(view), 1);
     });
@@ -322,8 +322,8 @@ fn send_actions_do_not_submit_an_open_ime_composition(cx: &mut TestAppContext) {
     cx.run_until_parked();
 
     view.read_with(cx, |view, cx| {
-        assert_eq!(view.input().read(cx).text(), "漢");
-        assert!(view.input().read(cx).is_composing());
+        assert_eq!(view.input().read(cx).text(cx), "漢");
+        assert!(view.input().read(cx).is_composing(cx));
         assert_eq!(count_user_rows(view), 0);
     });
 }
@@ -653,7 +653,7 @@ fn edit_seeds_the_composer_and_stands_the_gates_keys_down(cx: &mut TestAppContex
     view.update(cx, |view, cx| view.decide_key("e", cx));
     cx.run_until_parked();
     view.read_with(cx, |view, cx| {
-        assert_eq!(view.input().read(cx).text(), "git push --force");
+        assert_eq!(view.input().read(cx).text(cx), "git push --force");
         assert!(
             view.is_composing(cx),
             "the draft may start with a y, so the gate's context stands down"
@@ -1180,7 +1180,7 @@ fn a_refused_send_fails_its_bubble_and_frees_the_composer(cx: &mut TestAppContex
     submit("second", cx);
     assert_eq!(sends(&commands.borrow()), ["first".to_owned()]);
     view.read_with(cx, |view, cx| {
-        assert_eq!(view.input().read(cx).text(), "second");
+        assert_eq!(view.input().read(cx).text(cx), "second");
     });
 
     view.update(cx, |view, cx| {
@@ -1284,7 +1284,7 @@ fn a_composer_that_cannot_reach_its_machine_keeps_the_draft(cx: &mut TestAppCont
     assert!(commands.borrow().is_empty());
     view.read_with(cx, |view, cx| {
         assert_eq!(
-            view.input().read(cx).text(),
+            view.input().read(cx).text(cx),
             "ship it",
             "the message survives until the link does come back"
         );
@@ -1477,7 +1477,7 @@ fn accepting_login_requests_the_sign_in_and_clears_the_trigger(cx: &mut TestAppC
     );
     view.read_with(cx, |view, cx| {
         assert!(
-            view.input().read(cx).text().is_empty(),
+            view.input().read(cx).text(cx).is_empty(),
             "a built-in sends nothing, so its trigger text goes with it"
         );
     });
@@ -1509,6 +1509,6 @@ fn accepting_logout_dispatches_the_mutation_and_clears_the_trigger(cx: &mut Test
         commands.borrow()
     );
     view.read_with(cx, |view, cx| {
-        assert!(view.input().read(cx).text().is_empty());
+        assert!(view.input().read(cx).text(cx).is_empty());
     });
 }

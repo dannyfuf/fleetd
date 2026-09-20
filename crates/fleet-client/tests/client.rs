@@ -6,7 +6,7 @@ use fleet_core::{
         BackendDescriptor, BackendRef, BackendSchema, BoardPatch, BoardView, Card, CardDraft,
         CardPatch, ConflictResolution, new_board, summarize,
     },
-    ids::TerminalId,
+    ids::{TerminalId, WorktreeId},
     model::{Context, Worktree},
 };
 use fleet_proto::{
@@ -16,13 +16,13 @@ use fleet_proto::{
     event::{Event, EventKind, ToastLevel},
     job::{JobKind, JobRecord, JobStatus},
     request::{Request, RequestBody},
-    response::{Response, ResponseBody},
+    response::{BOARD_WORKTREE_CAPABILITY, HelloResponse, Response, ResponseBody},
     terminal::{
         Cell, CellAttrs, CellWidth, Color, CursorShape, CursorState, FrameUpdate, RowUpdate,
         TerminalModes, ViewportInfo,
     },
 };
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{FutureExt, SinkExt, StreamExt};
 use smol_str::SmolStr;
 use tempfile::TempDir;
 use tokio::{net::UnixListener, sync::oneshot, time::timeout};
@@ -353,13 +353,55 @@ async fn board_api_round_trips_over_the_unix_socket() {
         .expect("board API round trip");
 }
 
+#[tokio::test]
+async fn worktree_board_api_requires_capability_before_sending_requests() {
+    timeout(Duration::from_secs(10), async {
+        let home = TempDir::new().unwrap();
+        let listener = bind(home.path()).await;
+        let server = async {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut transport = Framed::new(socket, FleetCodec::new());
+            authenticate(&mut transport, None).await;
+            transport
+        };
+        let (client, mut transport) = tokio::join!(Client::connect(home.path()), server);
+        let client = client.unwrap();
+        let worktree = WorktreeId::try_from("acme/api#task").unwrap();
+
+        for error in [
+            client
+                .ensure_worktree_board(worktree.clone())
+                .await
+                .unwrap_err(),
+            client
+                .create_worktree_board(worktree, None, None, None)
+                .await
+                .unwrap_err(),
+        ] {
+            assert_eq!(error.kind, ErrorKind::Validation);
+            assert_eq!(
+                error.message,
+                "this daemon does not support worktree boards; run `fleet daemon restart`"
+            );
+        }
+        assert!(transport.next().now_or_never().is_none());
+    })
+    .await
+    .expect("worktree board capability check");
+}
+
 async fn board_api_round_trips() {
     let home = TempDir::new().unwrap();
     let listener = bind(home.path()).await;
     let server = async {
         let (socket, _) = listener.accept().await.unwrap();
         let mut transport = Framed::new(socket, FleetCodec::new());
-        authenticate(&mut transport, None).await;
+        authenticate_with_capabilities(
+            &mut transport,
+            None,
+            vec![BOARD_WORKTREE_CAPABILITY.to_owned()],
+        )
+        .await;
         transport
     };
     let (client, mut transport) = tokio::join!(Client::connect(home.path()), server);
@@ -380,6 +422,10 @@ async fn board_api_round_trips() {
         board: board.clone(),
         cards: vec![card.clone()],
     };
+    let worktree_id =
+        WorktreeId::try_from("acme/api#task").unwrap_or_else(|error| panic!("{error}"));
+    let mut worktree_view = view.clone();
+    worktree_view.board.worktree_id = Some(worktree_id.clone());
     let summary = summarize(&board, &view.cards);
     let worktree: Worktree = serde_json::from_value(serde_json::json!({
         "id":"acme/api#task", "repoId":"acme/api", "slug":"task", "branch":"task",
@@ -435,6 +481,14 @@ async fn board_api_round_trips() {
         view
     );
     check!(
+        RequestBody::EnsureWorktreeBoard {
+            worktree_id: worktree_id.clone()
+        },
+        ResponseBody::Board(worktree_view.clone()),
+        client.ensure_worktree_board(worktree_id.clone()),
+        worktree_view.clone()
+    );
+    check!(
         RequestBody::CreateBoard {
             context_id: context.id.clone(),
             name: Some("Team".into()),
@@ -449,6 +503,22 @@ async fn board_api_round_trips() {
             Some(BackendRef::default())
         ),
         view
+    );
+    check!(
+        RequestBody::CreateWorktreeBoard {
+            worktree_id: worktree_id.clone(),
+            name: Some("Task board".into()),
+            prefix: Some("TSK".into()),
+            backend: Some(BackendRef::default())
+        },
+        ResponseBody::Board(worktree_view.clone()),
+        client.create_worktree_board(
+            worktree_id,
+            Some("Task board".into()),
+            Some("TSK".into()),
+            Some(BackendRef::default())
+        ),
+        worktree_view
     );
     let board_patch = BoardPatch {
         default_repo_id: Some(None),
@@ -659,6 +729,14 @@ async fn bind(home: &Path) -> UnixListener {
 }
 
 async fn authenticate(transport: &mut ServerTransport, also_subscribed: Option<Vec<EventKind>>) {
+    authenticate_with_capabilities(transport, also_subscribed, Vec::new()).await;
+}
+
+async fn authenticate_with_capabilities(
+    transport: &mut ServerTransport,
+    also_subscribed: Option<Vec<EventKind>>,
+    capabilities: Vec<String>,
+) {
     let hello = transport.next().await.unwrap().unwrap();
     assert!(matches!(
         hello.body,
@@ -667,15 +745,25 @@ async fn authenticate(transport: &mut ServerTransport, also_subscribed: Option<V
             ..
         }
     ));
-    send_response(
-        transport,
-        hello.id,
-        ResponseBody::Hello {
-            protocol: PROTOCOL_VERSION,
-            server: "test-daemon".to_owned(),
-        },
-    )
-    .await;
+    transport
+        .send(
+            serde_json::to_value(HelloResponse {
+                response: Response {
+                    id: hello.id,
+                    result: Ok(ResponseBody::Hello {
+                        protocol: PROTOCOL_VERSION,
+                        server: "test-daemon".to_owned(),
+                    }),
+                },
+                snapshot_revision: None,
+                capabilities,
+                daemon_id: "test-daemon".to_owned(),
+                build_commit: None,
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap();
 
     let subscribe = transport.next().await.unwrap().unwrap();
     let RequestBody::Subscribe { events } = subscribe.body else {

@@ -1061,11 +1061,46 @@ fn a_remote_worktree_never_yields_a_local_path() {
     assert_eq!(location.local_path(), Some(PathBuf::from(REMOTE_PATH)));
 }
 
-/// The empty Fleet-drawn tab has to say which of the two reasons it is empty for.
+/// The empty Fleet-drawn tab has to say which of the reasons it is empty for.
 #[test]
 fn the_empty_git_pane_names_the_remote_case_separately() {
-    assert_ne!(no_pane_reason(true), no_pane_reason(false));
-    assert!(no_pane_reason(true).contains("remote"));
+    let git = Some(NativeTab::Lazygit);
+    assert_ne!(no_pane_reason(git, true), no_pane_reason(git, false));
+    assert!(no_pane_reason(git, true).contains("remote"));
+    // A board needs no local path, so a remote worktree is not a reason for its tab to be
+    // empty: the only one left is a session the snapshot lists no worktree for at all.
+    let board = Some(NativeTab::Board);
+    assert_eq!(no_pane_reason(board, true), no_pane_reason(board, false));
+    assert_eq!(no_pane_reason(board, false), no_pane_reason(git, false));
+    assert_ne!(
+        no_pane_reason(Some(NativeTab::Unknown), false),
+        no_pane_reason(board, false)
+    );
+}
+
+/// A tab's reserved command, not its name, is what decides which surface it is.
+#[test]
+fn the_reserved_command_decides_the_native_tab_kind() {
+    let mut board = terminal(3, TerminalKind::Native);
+    board.command = fleet_core::config::NATIVE_BOARD.to_owned();
+    board.name = "lg".to_owned();
+    let mut git = terminal(4, TerminalKind::Native);
+    git.command = fleet_core::config::NATIVE_LAZYGIT.to_owned();
+    git.name = "board".to_owned();
+    let unknown = terminal(5, TerminalKind::Native);
+
+    for (record, expected) in [
+        (board, NativeTab::Board),
+        (git, NativeTab::Lazygit),
+        (unknown, NativeTab::Unknown),
+    ] {
+        let mut session = session("native/session", record);
+        session.kind = SessionKind::Worktree(worktree_id());
+        let app = app_with_session(session);
+        assert_eq!(model_of(&app).native, Some(expected));
+    }
+    let pty = app_with_session(session("pty/session", terminal(6, TerminalKind::Pty)));
+    assert_eq!(model_of(&pty).native, None);
 }
 
 /// The daemon link — not the last probe — is what the workspace calls (un)reachable (§3, §10).
@@ -1310,6 +1345,299 @@ fn a_rebuilt_agent_tab_is_offered_its_file_listing_again(cx: &mut gpui::TestAppC
             view.files(),
             ["lib.rs".to_owned()],
             "a rebuilt tab has to be offered the listing again, not left with none"
+        );
+    });
+}
+
+// -- the board tab (`ctrl-s b`, P2-T03) ---------------------------------------------------
+
+/// A requester that records every request and answers it the way fleetd would.
+///
+/// Cloneable because [`request_shell_tab`] carries one into its reply task; the record is
+/// shared so a clone's requests are still the ones the test reads.
+#[derive(Clone)]
+struct ScriptedRequester {
+    requests: Rc<RefCell<Vec<RequestBody>>>,
+    session: Session,
+    created: Terminal,
+    /// Set to refuse every request, the way a daemon that cannot create the tab answers.
+    refusal: Option<String>,
+}
+
+impl MutationRequester for ScriptedRequester {
+    fn request(
+        &self,
+        body: RequestBody,
+    ) -> async_channel::Receiver<Result<ResponseBody, ProtoError>> {
+        let answer = match (&self.refusal, &body) {
+            (Some(message), _) => Err(ProtoError {
+                kind: ErrorKind::Conflict,
+                message: message.clone(),
+            }),
+            (None, RequestBody::NewTerminal { .. }) => {
+                Ok(ResponseBody::Terminal(self.created.clone()))
+            }
+            (None, _) => Ok(ResponseBody::Session(self.session.clone())),
+        };
+        self.requests.borrow_mut().push(body);
+        let (reply, receiver) = async_channel::bounded(1);
+        reply
+            .try_send(answer)
+            .unwrap_or_else(|error| panic!("test reply must be accepted: {error}"));
+        receiver
+    }
+}
+
+/// A worktree session, optionally already carrying its `fleet://board` tab.
+fn app_with_board_tab(has_board: bool) -> (AppState, Session) {
+    let mut record = session("payroll/feat", terminal(1, TerminalKind::Pty));
+    record.kind = SessionKind::Worktree(worktree_id());
+    if has_board {
+        let mut board = terminal(2, TerminalKind::Native);
+        board.command = fleet_core::config::NATIVE_BOARD.to_owned();
+        board.name = "board".to_owned();
+        record.terminals.push(board);
+    }
+    (app_with_session(record.clone()), record)
+}
+
+fn scripted(session: &Session) -> ScriptedRequester {
+    let mut created = terminal(9, TerminalKind::Native);
+    created.command = fleet_core::config::NATIVE_BOARD.to_owned();
+    created.name = "board".to_owned();
+    ScriptedRequester {
+        requests: Rc::new(RefCell::new(Vec::new())),
+        session: session.clone(),
+        created,
+        refusal: None,
+    }
+}
+
+/// `ctrl-s b` on a session that already has the tab is a selection, never a second tab.
+#[gpui::test]
+fn the_board_key_selects_the_tab_the_session_already_has(cx: &mut gpui::TestAppContext) {
+    let (app, record) = app_with_board_tab(true);
+    let state = cx.new(|_| app);
+    let local = Rc::new(RefCell::new(local_with(|_| {})));
+    let requester = scripted(&record);
+
+    cx.update(|cx| show_board_tab(&local, &requester, &state, cx));
+    cx.run_until_parked();
+
+    let requests = requester.requests.borrow().clone();
+    assert!(
+        matches!(
+            requests.as_slice(),
+            [RequestBody::SelectTerminal {
+                terminal: TerminalId(2),
+                ..
+            }]
+        ),
+        "{requests:?}"
+    );
+}
+
+/// Without one it is created by command and name, and the reply's tab is the one selected.
+#[gpui::test]
+fn the_board_key_creates_the_tab_and_selects_the_reply(cx: &mut gpui::TestAppContext) {
+    let (app, record) = app_with_board_tab(false);
+    let state = cx.new(|_| app);
+    let local = Rc::new(RefCell::new(local_with(|_| {})));
+    let requester = scripted(&record);
+
+    cx.update(|cx| show_board_tab(&local, &requester, &state, cx));
+    cx.run_until_parked();
+
+    let requests = requester.requests.borrow().clone();
+    let [
+        RequestBody::NewTerminal {
+            name,
+            command,
+            cwd,
+            session: asked,
+        },
+        RequestBody::SelectTerminal {
+            terminal: selected, ..
+        },
+    ] = requests.as_slice()
+    else {
+        panic!("{requests:?}");
+    };
+    assert_eq!(name, "board");
+    assert_eq!(command, fleet_core::config::NATIVE_BOARD);
+    assert_eq!(cwd, &record.cwd);
+    assert_eq!(asked, &record.id);
+    assert_eq!(*selected, TerminalId(9));
+}
+
+/// The tab is found by its command: a renamed board tab is still the board tab.
+#[test]
+fn the_board_tab_is_recognised_by_its_command_not_its_name() {
+    let (_, mut record) = app_with_board_tab(true);
+    record.terminals[1].name = "notes".to_owned();
+    assert_eq!(board_tab_request(&record), BoardTab::Select(TerminalId(2)));
+
+    let mut decoy = record.clone();
+    decoy.terminals[1].command = "clear".to_owned();
+    decoy.terminals[1].name = "board".to_owned();
+    assert!(matches!(
+        board_tab_request(&decoy),
+        BoardTab::Create(request) if matches!(*request, RequestBody::NewTerminal { .. })
+    ));
+}
+
+/// A session with no worktree has no board to open, and says so rather than failing silently.
+#[gpui::test]
+fn the_board_key_says_why_a_session_without_a_worktree_opens_nothing(
+    cx: &mut gpui::TestAppContext,
+) {
+    let app = app_with_session(session(
+        "swarm-agent-claude",
+        terminal(1, TerminalKind::Pty),
+    ));
+    let state = cx.new(|_| app);
+
+    let worktree = cx.update(|cx| board_tab_worktree(&state, cx));
+
+    assert_eq!(worktree, None);
+    state.read_with(cx, |app, _| {
+        assert!(
+            app.toasts
+                .iter()
+                .any(|live| live.toast.text.as_ref() == BOARDS_BELONG_TO_WORKTREES),
+            "{:?}",
+            app.toasts
+        );
+        assert!(app.sticky_error.is_none(), "a refusal is not an error");
+    });
+}
+
+/// A board tab only draws the board when the snapshot still names a worktree under it.
+#[test]
+fn the_board_band_needs_a_worktree_to_be_the_board_of() {
+    let screen = WorkspaceScreen {
+        model: None,
+        local: Rc::new(RefCell::new(local_with(|_| {}))),
+        panes: HashMap::new(),
+        agent_views: Rc::new(RefCell::new(AgentViews::new())),
+    };
+    let mut app = app_with_worktree(None);
+    let session = app
+        .active_session()
+        .unwrap_or_else(|| panic!("the fixture installs a session"))
+        .id
+        .clone();
+    let mut board = terminal(2, TerminalKind::Native);
+    board.command = fleet_core::config::NATIVE_BOARD.to_owned();
+    let mut snapshot = app
+        .snapshot
+        .clone()
+        .unwrap_or_else(|| panic!("the fixture installs a snapshot"));
+    snapshot.sessions[0].terminals.push(board);
+    snapshot.sessions[0].active_terminal = Some(TerminalId(2));
+    app.snapshot = Some(snapshot.clone());
+
+    assert!(screen.draws_board(&model_of(&app)));
+    assert_eq!(model_of(&app).native, Some(NativeTab::Board));
+
+    // The same tab on a session the snapshot lists no worktree for draws the empty band.
+    snapshot.worktrees.clear();
+    app.snapshot = Some(snapshot);
+    assert_eq!(
+        app.active_session().map(|session| &session.id),
+        Some(&session)
+    );
+    assert!(!screen.draws_board(&model_of(&app)));
+}
+
+/// `ctrl-s b` claims the scope before its tab exists; only that tab may keep the claim alive.
+///
+/// The frames between the keystroke and fleetd's snapshot still show the previous tab, so the
+/// release rule cannot be "the board tab is not active" alone — it would cancel the load the
+/// keystroke started.
+#[gpui::test]
+fn selecting_another_tab_ends_a_pending_board_claim(cx: &mut gpui::TestAppContext) {
+    let (app, record) = app_with_board_tab(true);
+    let state = cx.new(|_| app);
+    let requester = scripted(&record);
+    let claim = || {
+        Some(BoardClaim::Requested {
+            worktree: worktree_id(),
+        })
+    };
+
+    // Selecting the board tab itself is the very selection the claim is waiting for.
+    let local = Rc::new(RefCell::new(local_with(|local| {
+        local.state.board_claim = claim();
+    })));
+    cx.update(|cx| select_terminal(&local, &requester, &state, Some(TerminalId(2)), cx));
+    assert_eq!(local.borrow().state.board_claim, claim());
+
+    // Any other tab is the user choosing another surface, and the wait ends with it.
+    cx.update(|cx| select_terminal(&local, &requester, &state, Some(TerminalId(1)), cx));
+    assert_eq!(local.borrow().state.board_claim, None);
+}
+
+/// A pending `ctrl-s b` waits across the frames before its tab exists, but not across sessions.
+///
+/// The tab it is waiting for is created in the session the key was pressed in, so a claim kept
+/// past a move to another worktree would hold the mirror on a board nothing is going to draw.
+#[test]
+fn a_pending_board_claim_waits_only_in_the_session_that_made_it() {
+    let model = model_of(&app_with_worktree(None));
+    let elsewhere: WorktreeId = "buk/payroll#other"
+        .parse()
+        .unwrap_or_else(|error| panic!("{error}"));
+
+    assert!(pending_claim_survives(
+        Some(&BoardClaim::Requested {
+            worktree: worktree_id()
+        }),
+        &model
+    ));
+    assert!(!pending_claim_survives(
+        Some(&BoardClaim::Requested {
+            worktree: elsewhere
+        }),
+        &model
+    ));
+    // Only a wait survives: a pane that is drawing has the active tab to prove it, and no
+    // claim at all is nothing to keep.
+    assert!(!pending_claim_survives(
+        Some(&BoardClaim::Drawing {
+            worktree: worktree_id(),
+            generation: 0,
+        }),
+        &model
+    ));
+    assert!(!pending_claim_survives(None, &model));
+}
+
+/// A tab create the daemon refused ends the wait it started, scope and all.
+///
+/// The claim is what holds the worktree scope while the tab is in flight; left behind by a
+/// create that failed, it would keep the mirror off the Hub's board for the rest of the visit.
+#[gpui::test]
+fn a_refused_board_tab_create_ends_the_claim_it_made(cx: &mut gpui::TestAppContext) {
+    let (app, record) = app_with_board_tab(false);
+    let state = cx.new(|_| app);
+    let local = Rc::new(RefCell::new(local_with(|local| {
+        local.state.board_claim = Some(BoardClaim::Requested {
+            worktree: worktree_id(),
+        });
+    })));
+    let mut requester = scripted(&record);
+    requester.refusal = Some("too many terminals".to_owned());
+
+    cx.update(|cx| show_board_tab(&local, &requester, &state, cx));
+    cx.run_until_parked();
+
+    assert_eq!(local.borrow().state.board_claim, None);
+    state.read_with(cx, |app, _| {
+        assert_eq!(
+            app.sticky_error.as_ref().map(|error| error.text.as_str()),
+            Some("too many terminals"),
+            "a refused request is sticky, never silent"
         );
     });
 }

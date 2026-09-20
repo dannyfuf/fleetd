@@ -40,6 +40,7 @@
 //!   query untypable, because bindings outrank the text input. Only `Esc` closes the palette;
 //!   see `docs/APP-CONTRACTS.md`.
 
+use fleet_ui_kit::text_input;
 use gpui::{Action, App, DummyKeyboardMapper, KeyBinding, KeyBindingContextPredicate, Keystroke};
 
 use crate::actions::fleet::Cancel;
@@ -153,6 +154,31 @@ macro_rules! key_table {
             })
         }
 
+        /// Resolves one keystroke against a live context chain using gpui's depth rule.
+        #[cfg(test)]
+        #[must_use]
+        pub fn action_for_chain(
+            chain: &[&str],
+            keystroke: &Keystroke,
+        ) -> Option<Box<dyn Action>> {
+            PARSED_BINDINGS.with(|bindings| {
+                let mut best: Option<(usize, &KeyBinding)> = None;
+                for (spec, binding) in bindings {
+                    let keystrokes = binding.keystrokes();
+                    if keystrokes.len() != 1 || !keystroke.should_match(&keystrokes[0]) {
+                        continue;
+                    }
+                    let Some(depth) = context_depth(spec.context, chain) else {
+                        continue;
+                    };
+                    if best.is_none_or(|(deepest, _)| depth >= deepest) {
+                        best = Some((depth, binding));
+                    }
+                }
+                best.map(|(_, binding)| binding.action().boxed_clone())
+            })
+        }
+
         /// Resolves one keystroke against one exact key context.
         ///
         /// This is used by the Workspace's live prefix interceptor. GPUI's rendered context
@@ -216,11 +242,19 @@ const AGENT_THREAD_CONTEXTS: &[&str] = &[
     "Agent > AgentDecision > AgentPlan",
 ];
 
-/// The five of those that still draw a live composer.
+/// The contexts published while the live composer is actively editing.
+///
+/// Decision contexts still draw the composer, but publish their browsing word only while the
+/// gate owns bare answer keys. Once a gate draft is being composed, `agent_context_chain`
+/// publishes `AgentIdle` or `AgentWorking` instead.
+#[cfg(test)]
+const AGENT_COMPOSER_CONTEXTS: &[&str] = &["Agent > AgentIdle", "Agent > AgentWorking"];
+
+/// Every context that keeps the composer's `^s` controls available.
 ///
 /// `AgentNativeScroll` keeps only the three escapes its own block binds: a frozen tail has no
 /// model to change, no traits menu and no access mode, and §12 gives it `q`/`i`/`esc` to leave.
-const AGENT_COMPOSER_CONTEXTS: &[&str] = &[
+const AGENT_CONTROL_CONTEXTS: &[&str] = &[
     "Agent > AgentIdle",
     "Agent > AgentWorking",
     "Agent > AgentDecision > AgentPermission",
@@ -264,6 +298,7 @@ const AGENT_SESSION_ROWS: &[SharedRow] = &[
     ("ctrl-s u", || Box::new(prefix::UpToCaller)),
     ("ctrl-s d", || Box::new(prefix::AgentsPicker)),
     ("ctrl-s c", || Box::new(prefix::NewTerminal)),
+    ("ctrl-s b", || Box::new(prefix::OpenBoard)),
     ("ctrl-s y", || Box::new(prefix::CopyWorktreePath)),
     ("ctrl-s z", || Box::new(prefix::ToggleZoom)),
     ("ctrl-s v", || Box::new(prefix::ToggleWatchPane)),
@@ -310,7 +345,7 @@ const SHARED_TABLES: &[(&str, &[&str], &[SharedRow])] = &[
     ),
     (
         "with a composer",
-        AGENT_COMPOSER_CONTEXTS,
+        AGENT_CONTROL_CONTEXTS,
         AGENT_CONTROL_ROWS,
     ),
 ];
@@ -392,7 +427,11 @@ pub fn is_prefix_key(keystroke: &Keystroke) -> bool {
 fn context_depth(context: &str, chain: &[&str]) -> Option<usize> {
     let mut index = 0;
     let mut depth = 0;
-    for word in context.split(" > ") {
+    // The live chain carries identifiers but not attributes. Attribute predicates can never be
+    // prefix rows (they bind one key), and for subsequence resolution their identifier is the
+    // satisfiable part: `FleetTextInput && mode == multiline` matches `FleetTextInput`.
+    let identifiers = context.split_once(" && ").map_or(context, |(head, _)| head);
+    for word in identifiers.split(" > ") {
         let found = chain[index..].iter().position(|link| *link == word)?;
         depth = index + found;
         index = depth + 1;
@@ -428,6 +467,36 @@ key_table! {
     ",", "Hub > Board" => board::Settings;
     "r", "Hub > Board" => board::Reload;
     "/", "Hub > Board" => board::Filter;
+
+    // BOARD §8: the `fleet://board` tab draws the very same board with the very same keys, so
+    // every `Hub > Board` row above is repeated here against the same action. The word sits
+    // under `Workspace > Native`, which keeps `ctrl-s` — the prefix is never a board key.
+    "h", "Workspace > Native > Board" => board::PrevColumn;
+    "left", "Workspace > Native > Board" => board::PrevColumn;
+    "l", "Workspace > Native > Board" => board::NextColumn;
+    "right", "Workspace > Native > Board" => board::NextColumn;
+    "j", "Workspace > Native > Board" => board::NextCard;
+    "down", "Workspace > Native > Board" => board::NextCard;
+    "k", "Workspace > Native > Board" => board::PrevCard;
+    "up", "Workspace > Native > Board" => board::PrevCard;
+    "enter", "Workspace > Native > Board" => board::OpenCard;
+    "c", "Workspace > Native > Board" => board::NewCard;
+    "s", "Workspace > Native > Board" => board::PickStatus;
+    "p", "Workspace > Native > Board" => board::PickPriority;
+    "a", "Workspace > Native > Board" => board::PickAssignee;
+    "t", "Workspace > Native > Board" => board::PickLabels;
+    "e", "Workspace > Native > Board" => board::PickEstimate;
+    "[", "Workspace > Native > Board" => board::MovePrevColumn;
+    "]", "Workspace > Native > Board" => board::MoveNextColumn;
+    "w", "Workspace > Native > Board" => board::CreateWorktree;
+    "o", "Workspace > Native > Board" => board::OpenWorktree;
+    "S", "Workspace > Native > Board" => board::Sync;
+    "F", "Workspace > Native > Board" => board::FullSync;
+    "x", "Workspace > Native > Board" => board::OpenRemote;
+    "d", "Workspace > Native > Board" => board::DeleteCard;
+    ",", "Workspace > Native > Board" => board::Settings;
+    "r", "Workspace > Native > Board" => board::Reload;
+    "/", "Workspace > Native > Board" => board::Filter;
     "escape", "Dialog > CardDetail" => card_detail::Close;
     "i", "Dialog > CardDetail" => card_detail::EditTitle;
     "d", "Dialog > CardDetail" => card_detail::EditDescription;
@@ -444,6 +513,9 @@ key_table! {
     // `Card detail:` rows can save or cancel an edit already typed instead of reseeding one over
     // it. Without a way in from the detail those rows can never be listed and that path is dead.
     ":",      "Dialog > CardDetail" => OpenPalette;
+    "escape", "Dialog > CardDetailEditing" => card_detail::Close;
+    "enter", "Dialog > CardDetailEditing" => card_detail::EditProperty;
+    "ctrl-s", "Dialog > CardDetailEditing" => card_detail::Save;
     "ctrl-enter", "Dialog > CardCreate" => board::CreateAndOpen;
     "space", "Dialog > CardPicker" => settings::Toggle;
     "j", "Dialog > BoardSettings" => settings::MoveDown;
@@ -451,6 +523,7 @@ key_table! {
     "h", "Dialog > BoardSettings" => settings::CyclePrev;
     "l", "Dialog > BoardSettings" => settings::CycleNext;
     "space", "Dialog > BoardSettings" => settings::Toggle;
+    "enter", "Dialog > BoardSettingsEditing" => dialog::Confirm;
 
     "ctrl-q",       "Fleet" => Quit;
     "ctrl-shift-q", "Fleet" => QuitAndStopDaemon;
@@ -572,6 +645,9 @@ key_table! {
     "u",            "Workspace > Prefix" => prefix::UpToCaller;
     "d",            "Workspace > Prefix" => prefix::AgentsPicker;
     "c",            "Workspace > Prefix" => prefix::NewTerminal;
+    // The board tab is created on demand rather than by `windows[]` (BOARD §8), so this one
+    // key both makes it and returns to it; pressing it twice is one tab, selected twice.
+    "b",            "Workspace > Prefix" => prefix::OpenBoard;
     "x",            "Workspace > Prefix" => prefix::CloseTerminal;
     "r",            "Workspace > Prefix" => prefix::RestartCommand;
     "y",            "Workspace > Prefix" => prefix::CopyWorktreePath;
@@ -747,20 +823,65 @@ key_table! {
     "n",             "Agent > AgentDecision > AgentPlan" => native_agent::Refine;
     "enter",         "Agent > AgentDecision > AgentPlan" => native_agent::Send;
 
+    "left", "FleetTextInput" => text_input::MoveLeft;
+    "right", "FleetTextInput" => text_input::MoveRight;
+    "alt-left", "FleetTextInput" => text_input::MoveWordLeft;
+    "alt-right", "FleetTextInput" => text_input::MoveWordRight;
+    "home", "FleetTextInput" => text_input::MoveToRowStart;
+    "end", "FleetTextInput" => text_input::MoveToRowEnd;
+    "cmd-left", "FleetTextInput" => text_input::MoveToLineStart;
+    "cmd-right", "FleetTextInput" => text_input::MoveToLineEnd;
+    "up", "FleetTextInput" => text_input::MoveUp;
+    "down", "FleetTextInput" => text_input::MoveDown;
+    "cmd-up", "FleetTextInput" => text_input::MoveToStart;
+    "cmd-down", "FleetTextInput" => text_input::MoveToEnd;
+    "shift-left", "FleetTextInput" => text_input::SelectLeft;
+    "shift-right", "FleetTextInput" => text_input::SelectRight;
+    "alt-shift-left", "FleetTextInput" => text_input::SelectWordLeft;
+    "alt-shift-right", "FleetTextInput" => text_input::SelectWordRight;
+    "shift-home", "FleetTextInput" => text_input::SelectToRowStart;
+    "shift-end", "FleetTextInput" => text_input::SelectToRowEnd;
+    "cmd-shift-left", "FleetTextInput" => text_input::SelectToLineStart;
+    "cmd-shift-right", "FleetTextInput" => text_input::SelectToLineEnd;
+    "shift-up", "FleetTextInput" => text_input::SelectUp;
+    "shift-down", "FleetTextInput" => text_input::SelectDown;
+    "cmd-shift-up", "FleetTextInput" => text_input::SelectToStart;
+    "cmd-shift-down", "FleetTextInput" => text_input::SelectToEnd;
+    "ctrl-a", "FleetTextInput" => text_input::MoveToLineStart;
+    "ctrl-e", "FleetTextInput" => text_input::MoveToLineEnd;
+    "ctrl-shift-a", "FleetTextInput" => text_input::SelectToLineStart;
+    "ctrl-shift-e", "FleetTextInput" => text_input::SelectToLineEnd;
+    "ctrl-b", "FleetTextInput" => text_input::MoveLeft;
+    "ctrl-f", "FleetTextInput" => text_input::MoveRight;
+    "backspace", "FleetTextInput" => text_input::Backspace;
+    "delete", "FleetTextInput" => text_input::Delete;
+    "alt-backspace", "FleetTextInput" => text_input::DeleteWordBackward;
+    "alt-delete", "FleetTextInput" => text_input::DeleteWordForward;
+    "cmd-backspace", "FleetTextInput" => text_input::DeleteToLineStart;
+    "cmd-delete", "FleetTextInput" => text_input::DeleteToLineEnd;
+    "ctrl-w", "FleetTextInput" => text_input::DeleteWordBackward;
+    "ctrl-u", "FleetTextInput" => text_input::DeleteToLineStart;
+    "ctrl-k", "FleetTextInput" => text_input::DeleteToLineEnd;
+    "ctrl-h", "FleetTextInput" => text_input::Backspace;
+    "ctrl-d", "FleetTextInput" => text_input::Delete;
+    "cmd-a", "FleetTextInput" => text_input::SelectAll;
+    "cmd-c", "FleetTextInput" => text_input::Copy;
+    "cmd-x", "FleetTextInput" => text_input::Cut;
+    "cmd-v", "FleetTextInput" => text_input::Paste;
+    "cmd-z", "FleetTextInput" => text_input::Undo;
+    "cmd-shift-z", "FleetTextInput" => text_input::Redo;
+    "enter", "FleetTextInput && mode == multiline && enter == newline" => text_input::Newline;
+    "shift-enter", "FleetTextInput && mode == multiline" => text_input::Newline;
+
     "enter",        "Filter" => filter::Accept;
     "escape",       "Filter" => filter::Escape;
     "ctrl-n",       "Filter" => filter::CursorDown;
     "down",         "Filter" => filter::CursorDown;
     "ctrl-p",       "Filter" => filter::CursorUp;
     "up",           "Filter" => filter::CursorUp;
-    "backspace",    "Filter" => filter::Backspace;
-    "ctrl-w",       "Filter" => filter::DeleteWord;
-    "ctrl-u",       "Filter" => filter::Clear;
 
-    "left", "Filter > BoardFilter" => board::PrevColumn;
-    "ctrl-b", "Filter > BoardFilter" => board::PrevColumn;
-    "right", "Filter > BoardFilter" => board::NextColumn;
-    "ctrl-f", "Filter > BoardFilter" => board::NextColumn;
+    "shift-tab", "Filter > BoardFilter" => board::PrevColumn;
+    "tab", "Filter > BoardFilter" => board::NextColumn;
 
     "enter",        "Palette" => palette::Run;
     "escape",       "Palette" => palette::Close;
@@ -768,9 +889,6 @@ key_table! {
     "down",         "Palette" => palette::CursorDown;
     "ctrl-p",       "Palette" => palette::CursorUp;
     "up",           "Palette" => palette::CursorUp;
-    "backspace",    "Palette" => palette::Backspace;
-    "ctrl-w",       "Palette" => palette::DeleteWord;
-    "ctrl-u",       "Palette" => palette::Clear;
 
     "J",            "Jobs" => jobs::Close;
     "escape",       "Jobs" => jobs::Close;
@@ -798,17 +916,11 @@ key_table! {
     "down",         "Dialog" => dialog::CursorDown;
     "ctrl-p",       "Dialog" => dialog::CursorUp;
     "up",           "Dialog" => dialog::CursorUp;
-    "backspace",    "Dialog" => dialog::Backspace;
-    "ctrl-w",       "Dialog" => dialog::DeleteWord;
-    "ctrl-u",       "Dialog" => dialog::ClearInput;
-    "ctrl-a",       "Dialog" => dialog::LineStart;
-    "ctrl-e",       "Dialog" => dialog::LineEnd;
-    "left",         "Dialog" => dialog::CursorLeft;
-    "right",        "Dialog" => dialog::CursorRight;
 
     "left",         "Dialog > Create" => create_worktree::HostPrev;
     "right",        "Dialog > Create" => create_worktree::HostNext;
     "alt-enter",    "Dialog > Create" => create_worktree::CreateWithoutOpening;
+    "alt-enter",    "Dialog > CreateEditing" => create_worktree::CreateWithoutOpening;
 
     "y",            "Dialog > Confirm" => confirm::Accept;
     "enter",        "Dialog > Confirm" => confirm::Accept;
@@ -819,7 +931,11 @@ key_table! {
     "I",            "Dialog > Confirm" => confirm::Recheck;
     "s",            "Dialog > Confirm" => confirm::ToggleKeep;
 
-    "ctrl-d",       "Dialog > Context" => context_dialog::Delete;
+    // `ctrl-d` is `FleetTextInput`'s delete-forward, and this dialog is two live editors with
+    // no browsing state between them: the deeper input would win every time. The stronger
+    // shift variant collides with nothing the editor owns, and matches the Hub, where the
+    // same delete is the uppercase `D`.
+    "ctrl-shift-d", "Dialog > Context" => context_dialog::Delete;
 
     "j",            "Dialog > Assign" => dialog::CursorDown;
     "k",            "Dialog > Assign" => dialog::CursorUp;
@@ -827,13 +943,15 @@ key_table! {
     "space",        "Dialog > Settings" => settings::Toggle;
     "h",            "Dialog > Settings" => settings::CyclePrev;
     "l",            "Dialog > Settings" => settings::CycleNext;
-    // `left` / `right` stay on the shared `dialog::CursorLeft` / `CursorRight` of the `Dialog`
-    // context: the settings dialog moves the caret when a text row has the keyboard and cycles
-    // the choice otherwise, so one binding serves both halves of §3.8.6.
+    // The arrows cycle only while browsing: a materialized row publishes `SettingsEditing`,
+    // this row leaves the chain with `Settings`, and `FleetTextInput` moves the caret instead.
+    "left",         "Dialog > Settings" => settings::CyclePrev;
+    "right",        "Dialog > Settings" => settings::CycleNext;
     "j",            "Dialog > Settings" => settings::MoveDown;
     "k",            "Dialog > Settings" => settings::MoveUp;
     "E",            "Dialog > Settings" => settings::OpenConfigFile;
     "D",            "Dialog > Settings" => settings::RunDoctor;
+    "enter",        "Dialog > SettingsEditing" => dialog::Confirm;
 
     "escape",       "Dialog > Help" => help::Close;
     "?",            "Dialog > Help" => help::Close;
@@ -887,11 +1005,14 @@ mod tests {
         "Hub > Prs",
         "Hub > Board",
         "Dialog > CardDetail",
+        "Dialog > CardDetailEditing",
         "Dialog > CardCreate",
         "Dialog > CardPicker",
         "Dialog > BoardSettings",
+        "Dialog > BoardSettingsEditing",
         "Workspace > Terminal",
         "Workspace > Native",
+        "Workspace > Native > Board",
         "Workspace > Prefix",
         "Workspace > Scroll",
         // `Agent` itself binds nothing: gpui evaluates a bare identifier against every node of
@@ -900,8 +1021,8 @@ mod tests {
         "Agent > Terminal",
         "Agent > Prefix",
         "Agent > Scroll",
-        "Agent > AgentIdle",
-        "Agent > AgentWorking",
+        AGENT_COMPOSER_CONTEXTS[0],
+        AGENT_COMPOSER_CONTEXTS[1],
         "Agent > AgentDecision > AgentPermission",
         "Agent > AgentDecision > AgentQuestion",
         "Agent > AgentDecision > AgentPlan",
@@ -911,14 +1032,20 @@ mod tests {
         "Agent > AgentNativeScroll",
         "Agent > AgentNativeScroll > AgentRow",
         "Filter",
+        "Filter > BoardFilter",
         "Palette",
+        "FleetTextInput",
+        "FleetTextInput && mode == multiline",
+        "FleetTextInput && mode == multiline && enter == newline",
         "Jobs",
         "Dialog",
         "Dialog > Create",
+        "Dialog > CreateEditing",
         "Dialog > Confirm",
         "Dialog > Context",
         "Dialog > Assign",
         "Dialog > Settings",
+        "Dialog > SettingsEditing",
         "Dialog > Help",
         "Dialog > Quit",
         "Dialog > QuitDaemon",
@@ -927,6 +1054,100 @@ mod tests {
         "Daemon > Doctor",
         "FirstRun",
     ];
+
+    /// Contexts that may remain in the live chain while a `FleetTextInput` owns editing.
+    ///
+    /// Every entry is an *ancestor* of a live editor, so a bare printable key here is a key the
+    /// user cannot type (`docs/APP-CONTRACTS.md` §3). `Fleet` wraps every surface there is;
+    /// `Workspace > Native` wraps the embedded pane whose prompt is an editor too.
+    const TEXT_INPUT_HOST_CONTEXTS: &[&str] = &[
+        "Fleet",
+        "Workspace > Native",
+        "Dialog",
+        "Dialog > CardDetailEditing",
+        "Dialog > BoardSettingsEditing",
+        "Dialog > CardPicker",
+        "Dialog > SettingsEditing",
+        "Dialog > CreateEditing",
+        "Dialog > CardCreate",
+        "Dialog > Clone",
+        "Dialog > Context",
+        "Dialog > Rename",
+        "Dialog > Hooks",
+        "Filter",
+        "Filter > BoardFilter",
+        "Palette",
+        AGENT_COMPOSER_CONTEXTS[0],
+        AGENT_COMPOSER_CONTEXTS[1],
+    ];
+
+    /// Printable owner keys intentionally retained by text-input host contexts.
+    const TEXT_INPUT_HOST_EXCEPTIONS: &[(&str, &str)] = &[
+        // The picker's query is a filter: `space` toggles the highlighted card, so the query
+        // never contains a space. Its `TextInput` filters `' '` out of typing and paste, so the
+        // model and this binding agree.
+        ("Dialog > CardPicker", "space"),
+    ];
+
+    /// Contexts that *would* wrap a live editor, but leave the chain before one takes over.
+    ///
+    /// The second half of the ownership rule: a container may keep bare printable keys only if
+    /// `AppState::context_chain` drops its whole word while an editor owns the keyboard. §3.12
+    /// C's banner is the one such container — it is appended innermost to a base chain, which
+    /// would otherwise put its `r` and `l` between the user and the agent composer — and
+    /// `state::navigation` and `state::agents` own the tests that keep that drop true.
+    const EDITOR_YIELDING_CONTEXTS: &[&str] = &["Daemon > Banner"];
+
+    /// Contexts that can never be an ancestor of a live `FleetTextInput`, so bare printable
+    /// keys are theirs to bind.
+    ///
+    /// Browsing words are here because their dialogs publish a distinct `*Editing` word the
+    /// moment a field owns typing; full-window surfaces are here because they draw no editor;
+    /// the `FleetTextInput` rows are the editor itself rather than a host around it.
+    const NO_LIVE_EDITOR_CONTEXTS: &[&str] = &[
+        "FleetTextInput",
+        "FleetTextInput && mode == multiline",
+        "FleetTextInput && mode == multiline && enter == newline",
+        "Hub",
+        "Hub > Repos",
+        "Hub > Worktrees",
+        "Hub > Prs",
+        "Hub > Board",
+        // The board pane's own word, for the same reason the Hub's is here: the board's filter
+        // input never wraps in it, because `AppState::context_chain` publishes
+        // `Filter > BoardFilter` and nothing else while that editor owns the keyboard.
+        "Workspace > Native > Board",
+        "Workspace > Terminal",
+        "Workspace > Prefix",
+        "Workspace > Scroll",
+        "Agent > Terminal",
+        "Agent > Prefix",
+        "Agent > Scroll",
+        "Agent > AgentDecision > AgentPermission",
+        "Agent > AgentDecision > AgentQuestion",
+        "Agent > AgentDecision > AgentPlan",
+        "Agent > AgentNativeScroll",
+        "Agent > AgentNativeScroll > AgentRow",
+        "Jobs",
+        "Jobs > Log",
+        "Dialog > CardDetail",
+        "Dialog > BoardSettings",
+        "Dialog > Settings",
+        "Dialog > Create",
+        "Dialog > Confirm",
+        "Dialog > Assign",
+        "Dialog > Help",
+        "Dialog > Quit",
+        "Dialog > QuitDaemon",
+        "Daemon > Down",
+        "Daemon > Doctor",
+        "FirstRun",
+    ];
+
+    fn is_bare_printable_owner_key(keys: &str) -> bool {
+        let key = keys.strip_prefix("shift-").unwrap_or(keys);
+        key == "space" || key.chars().count() == 1
+    }
 
     #[test]
     fn board_documentation_and_bindings_match_in_both_directions() {
@@ -943,7 +1164,10 @@ mod tests {
                     || action.starts_with("card_detail::")
                     || matches!(
                         context,
-                        "Dialog > CardCreate" | "Dialog > CardPicker" | "Dialog > BoardSettings"
+                        "Dialog > CardCreate"
+                            | "Dialog > CardPicker"
+                            | "Dialog > BoardSettings"
+                            | "Dialog > BoardSettingsEditing"
                     ))
                 .then_some((keys, context, action))
             })
@@ -955,7 +1179,10 @@ mod tests {
                     || spec.action.starts_with("card_detail::")
                     || matches!(
                         spec.context,
-                        "Dialog > CardCreate" | "Dialog > CardPicker" | "Dialog > BoardSettings"
+                        "Dialog > CardCreate"
+                            | "Dialog > CardPicker"
+                            | "Dialog > BoardSettings"
+                            | "Dialog > BoardSettingsEditing"
                     )
             })
             .map(|spec| (spec.keys, spec.context, spec.action))
@@ -964,15 +1191,52 @@ mod tests {
         assert_eq!(documented, registered);
     }
 
+    /// The floor sits within ten rows of the live table, so a silent loss is caught and a
+    /// deliberate retirement is a one-line edit here. The seven per-dialog editing rows
+    /// (`backspace`, `ctrl-w`, `ctrl-u`, `ctrl-a`, `ctrl-e`, `left`, `right`) moved to the
+    /// `FleetTextInput` table, and the two `Dialog > Settings` arrows that used to ride on
+    /// them were added back.
     #[test]
     fn key_table_is_well_formed() {
         let bindings = bindings();
         assert_eq!(bindings.len(), table().len());
         assert!(
-            bindings.len() > 200,
+            bindings.len() > 640,
             "the table lost rows: {}",
             bindings.len()
         );
+    }
+
+    /// One editing vocabulary, stated twice: `key_table!` feeds the Help overlay and the
+    /// documentation-drift test, and `text_input::default_bindings` serves every app that has
+    /// no key table of its own. They must not drift.
+    #[test]
+    fn the_kit_editor_table_matches_this_one() {
+        fn shape(bindings: Vec<gpui::KeyBinding>) -> Vec<String> {
+            let mut rows: Vec<String> = bindings
+                .iter()
+                .filter(|binding| {
+                    binding.predicate().is_some_and(|predicate| {
+                        format!("{predicate:?}").contains(fleet_ui_kit::TEXT_INPUT_KEY_CONTEXT)
+                    })
+                })
+                .map(|binding| {
+                    format!(
+                        "{:?} {} {:?}",
+                        binding.keystrokes(),
+                        binding.action().name(),
+                        binding
+                            .predicate()
+                            .map(|predicate| format!("{predicate:?}"))
+                    )
+                })
+                .collect();
+            rows.sort();
+            rows
+        }
+        let app = shape(bindings());
+        assert!(!app.is_empty());
+        assert_eq!(app, shape(fleet_ui_kit::text_input::default_bindings()));
     }
 
     #[test]
@@ -1022,6 +1286,68 @@ mod tests {
                 spec.keys, spec.context
             );
         }
+    }
+
+    /// Every dialog edits through a live input now, so `backspace` belongs to the component
+    /// wherever one is mounted and to nothing at all where none is.
+    #[test]
+    fn text_input_owns_backspace_below_every_dialog() {
+        let backspace = Keystroke::parse("backspace").unwrap_or_else(|error| panic!("{error}"));
+        for host in ["CardDetailEditing", "Clone", "Context", "Rename", "Hooks"] {
+            assert_eq!(
+                action_for_chain(&["Dialog", host, "FleetTextInput"], &backspace)
+                    .map(|action| action.name()),
+                Some("text_input::Backspace"),
+                "`Dialog > {host}` must leave backspace to its input"
+            );
+        }
+        assert_eq!(
+            action_for_chain(&["Dialog", "Clone"], &backspace).map(|action| action.name()),
+            None,
+            "the `Dialog` container binds no editing key of its own"
+        );
+    }
+
+    #[test]
+    fn predicate_contexts_match_their_identifier_in_chain_resolution() {
+        assert_eq!(
+            context_depth(
+                "FleetTextInput && mode == multiline",
+                &["Dialog", "CardCreate", "FleetTextInput"]
+            ),
+            Some(2)
+        );
+        assert_eq!(bindings().len(), table().len(), "every built-in row parses");
+    }
+
+    #[test]
+    fn text_input_leaves_container_keys_and_ctrl_v_unbound() {
+        let input_rows: Vec<_> = table()
+            .into_iter()
+            .filter(|spec| spec.context.starts_with("FleetTextInput"))
+            .collect();
+        assert_eq!(
+            input_rows.len(),
+            49,
+            "visual-row actions, logical ctrl-shift selection and owner-aware Enter must stay in the gallery table"
+        );
+        for keys in ["tab", "shift-tab", "ctrl-n", "ctrl-p", "escape", "ctrl-v"] {
+            assert!(
+                input_rows.iter().all(|spec| spec.keys != keys),
+                "`{keys}` belongs to the input's container"
+            );
+        }
+        assert!(input_rows.iter().any(|spec| {
+            spec.keys == "enter"
+                && spec.context == "FleetTextInput && mode == multiline && enter == newline"
+        }));
+        assert!(input_rows.iter().all(|spec| {
+            spec.keys != "enter"
+                || spec.context == "FleetTextInput && mode == multiline && enter == newline"
+        }));
+        assert!(input_rows.iter().any(|spec| {
+            spec.keys == "shift-enter" && spec.context == "FleetTextInput && mode == multiline"
+        }));
     }
 
     #[test]
@@ -1087,6 +1413,9 @@ mod tests {
             .filter(|spec| spec.context == "Workspace > Native")
             .collect();
         assert_eq!(bound.len(), 1, "Workspace > Native binds more than one key");
+        // `Workspace > Native > Board` is a different word, nested one deeper: the board tab
+        // draws the board itself instead of handing its keys to an embedded view, and it still
+        // reserves nothing beyond the prefix its parent binds.
         assert_eq!(bound[0].keys, "ctrl-s");
         assert_eq!(bound[0].action, "workspace::EnterPrefix");
     }
@@ -1181,10 +1510,30 @@ mod tests {
         }
     }
 
+    /// The binding and its row in `docs/KEYMAP.md` are one change.
+    ///
+    /// The prefix table is written `| key | action |`, so the board-wide drift test above
+    /// cannot see it; this is the same check for the one row `prefix::OpenBoard` owns. A key
+    /// missing from the table is a key nobody finds, and a row with nothing bound is a lie.
+    #[test]
+    fn the_board_prefix_key_is_bound_and_documented() {
+        let keystroke = Keystroke::parse("b").unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            action_for_keystroke("Workspace > Prefix", &keystroke).map(|action| action.name()),
+            Some("prefix::OpenBoard")
+        );
+        let docs = include_str!("../../../docs/KEYMAP.md");
+        assert!(
+            docs.lines()
+                .any(|line| line.starts_with("| `b` |") && line.contains("board tab")),
+            "the `ctrl-s` table in docs/KEYMAP.md names no board row"
+        );
+    }
+
     #[test]
     fn live_prefix_resolution_uses_the_authoritative_table() {
         for keys in [
-            "s", "S", "ctrl-s", "1", "tab", "W", "u", "d", "[", "]", "escape",
+            "s", "S", "ctrl-s", "1", "tab", "W", "u", "d", "b", "[", "]", "escape",
         ] {
             let keystroke = Keystroke::parse(keys)
                 .unwrap_or_else(|error| panic!("invalid test key {keys:?}: {error}"));
@@ -1197,10 +1546,13 @@ mod tests {
             assert_eq!(action.name(), spec.action, "{keys}");
         }
 
+        // `o` is refused on purpose (KEYMAP "Recorded so they are not re-proposed"), which
+        // makes it the stable example of a key the live prefix consumes and resolves to
+        // nothing.
         assert!(
             action_for_keystroke(
                 "Workspace > Prefix",
-                &Keystroke::parse("b").unwrap_or_else(|error| panic!("{error}"))
+                &Keystroke::parse("o").unwrap_or_else(|error| panic!("{error}"))
             )
             .is_none(),
             "an unknown prefix key is consumed without inventing an action"
@@ -1263,6 +1615,7 @@ mod tests {
             ("ctrl-s u", "prefix::UpToCaller"),
             ("ctrl-s d", "prefix::AgentsPicker"),
             ("ctrl-s c", "prefix::NewTerminal"),
+            ("ctrl-s b", "prefix::OpenBoard"),
             ("ctrl-s y", "prefix::CopyWorktreePath"),
             ("ctrl-s z", "prefix::ToggleZoom"),
             ("ctrl-s v", "prefix::ToggleWatchPane"),
@@ -1448,16 +1801,88 @@ mod tests {
     }
 
     #[test]
-    fn palette_and_filter_never_bind_printable_keys() {
+    fn text_input_hosts_never_bind_printable_owner_keys() {
+        for keys in [
+            "a",
+            "7",
+            ":",
+            "/",
+            "?",
+            ",",
+            ".",
+            "-",
+            "=",
+            "[",
+            "]",
+            "'",
+            "`",
+            "\\",
+            "shift-a",
+            "shift-?",
+            "space",
+            "shift-space",
+        ] {
+            assert!(is_bare_printable_owner_key(keys), "`{keys}` is printable");
+        }
+        for keys in [
+            "enter",
+            "escape",
+            "tab",
+            "backspace",
+            "delete",
+            "left",
+            "right",
+            "home",
+            "end",
+            "f1",
+            "ctrl-a",
+            "alt-a",
+            "cmd-a",
+            "platform-a",
+        ] {
+            assert!(
+                !is_bare_printable_owner_key(keys),
+                "`{keys}` is not a bare printable key"
+            );
+        }
+
         for spec in table() {
-            if spec.context == "Palette" || spec.context == "Filter" {
+            if TEXT_INPUT_HOST_CONTEXTS.contains(&spec.context) {
                 assert!(
-                    spec.keys.len() > 1,
+                    !is_bare_printable_owner_key(spec.keys)
+                        || TEXT_INPUT_HOST_EXCEPTIONS.contains(&(spec.context, spec.keys)),
                     "`{}` in `{}` would shadow typing",
                     spec.keys,
                     spec.context
                 );
             }
+        }
+    }
+
+    /// The list above is only as good as its coverage: the §3.12 C banner was missing from it,
+    /// and its bare `r` / `l` sat innermost on every base chain — including the agent
+    /// composer's. Forcing every context to be classified is what makes the next one land in
+    /// one of the three answers instead of in the silent default.
+    #[test]
+    fn every_key_context_is_classified_against_a_live_text_input() {
+        let mut contexts: Vec<&str> = table().into_iter().map(|spec| spec.context).collect();
+        contexts.sort_unstable();
+        contexts.dedup();
+        for context in contexts {
+            let answers = [
+                TEXT_INPUT_HOST_CONTEXTS,
+                EDITOR_YIELDING_CONTEXTS,
+                NO_LIVE_EDITOR_CONTEXTS,
+            ]
+            .into_iter()
+            .filter(|list| list.contains(&context))
+            .count();
+            assert_eq!(
+                answers, 1,
+                "`{context}` must say exactly once whether it can wrap a live `TextInput`: \
+                 a host binds no bare printable key, a yielding context leaves the chain while \
+                 an editor edits, and anything else declares that it never wraps one"
+            );
         }
     }
 }

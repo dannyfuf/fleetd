@@ -2,15 +2,16 @@
 
 use fleet_core::ids::TerminalId;
 use fleet_proto::{request::RequestBody, response::ResponseBody};
-use fleet_ui_kit::{Dialog, HarnessTargetExt, Icon, KeyHintRow, TextFieldState};
+use fleet_ui_kit::{Dialog, HarnessTargetExt, Icon, InputMode, KeyHintRow, TextInput};
 use gpui::{
-    AnyElement, App, Entity, FocusHandle, InteractiveElement, IntoElement, ParentElement, Window,
+    AnyElement, App, AppContext, Entity, FocusHandle, InteractiveElement, IntoElement,
+    ParentElement, Window,
 };
 
 use crate::{
     actions::dialog,
     bridge::Bridge,
-    dialogs::{DialogHost, field, notify, root, typed_char, with_host},
+    dialogs::{DialogHost, notify, read_host, root, with_host},
     state::AppState,
 };
 
@@ -18,10 +19,12 @@ type RenameReply = async_channel::Receiver<Result<ResponseBody, fleet_proto::err
 type RenameRequest = std::rc::Rc<dyn Fn(RequestBody) -> RenameReply>;
 
 /// Draft for the terminal selected when the dialog opened.
+///
+/// The name itself lives in `DialogHost.rename_input`; this holds only what the card states
+/// around it.
 #[derive(Debug, Default)]
 pub struct RenameState {
     terminal: Option<TerminalId>,
-    input: TextFieldState,
     error: Option<String>,
     in_flight: bool,
 }
@@ -35,14 +38,42 @@ pub(crate) fn seed(state: &Entity<AppState>, cx: &mut App) {
             .find(|terminal| terminal.id == active)
             .map(|terminal| (terminal.id, terminal.name.clone()))
     });
-    with_host(state, cx, |host| {
-        host.rename_terminal =
-            selected.map_or_else(RenameState::default, |(terminal, name)| RenameState {
-                terminal: Some(terminal),
-                input: TextFieldState::from_text(name),
-                error: None,
-                in_flight: false,
-            });
+    let name = selected
+        .as_ref()
+        .map_or_else(String::new, |(_, name)| name.clone());
+    let input = cx.new(|cx| {
+        let mut input = TextInput::new(InputMode::SingleLine, cx);
+        input.set_label(Some("Name".into()), cx);
+        input.set_hide_status_line(true, cx);
+        input.set_text(name, cx);
+        input
+    });
+    let host = crate::dialogs::host::host_for(state, cx);
+    host.update(cx, |host, _| {
+        host.rename_terminal = RenameState {
+            terminal: selected.map(|(terminal, _)| terminal),
+            error: None,
+            in_flight: false,
+        };
+        host.rename_input = Some(input.clone());
+    });
+    let weak_host = host.downgrade();
+    // A refusal is about the name that was sent, so the next keystroke retires it.
+    let subscription = cx.subscribe(&input, move |_, event, cx| {
+        if !matches!(event, fleet_ui_kit::TextInputEvent::Changed) {
+            return;
+        }
+        let Some(host) = weak_host.upgrade() else {
+            return;
+        };
+        host.update(cx, |host, cx| {
+            if host.rename_terminal.error.take().is_some() {
+                cx.notify();
+            }
+        });
+    });
+    host.update(cx, |host, _| {
+        host.rename_input_subscription = Some(subscription)
     });
 }
 
@@ -71,98 +102,82 @@ fn render_with_request(
     host: &Entity<DialogHost>,
     cx: &mut App,
 ) -> AnyElement {
-    let (input, error, in_flight) = {
+    let (error, in_flight) = {
         let draft = &host.read(cx).rename_terminal;
-        (draft.input.clone(), draft.error.clone(), draft.in_flight)
+        (draft.error.clone(), draft.in_flight)
+    };
+    let Some(input) = read_host(state, cx, |host, _| host.rename_input.clone()) else {
+        return root(focus).into_any_element();
     };
     let confirm_state = state.clone();
     let confirm_request = request.clone();
-    super::input::actions(
-        root(focus),
-        state,
-        |host| &mut host.rename_terminal.input,
-        notify,
-    )
-    .on_key_down({
-        let state = state.clone();
-        move |event, _window, cx| {
-            if let Some(text) = typed_char(event) {
-                with_host(&state, cx, |host| host.rename_terminal.input.insert(text));
-                notify(&state, cx);
-            }
-        }
-    })
-    .on_action(move |_: &dialog::Confirm, _window, cx| {
-        let request = with_host(&confirm_state, cx, |host| {
-            if host.rename_terminal.in_flight {
-                return None;
-            }
-            host.rename_terminal.error = None;
-            host.rename_terminal.in_flight = true;
-            (
-                host.rename_terminal.terminal,
-                host.rename_terminal.input.text().trim().to_owned(),
-            )
-                .into()
-        });
-        let Some((Some(terminal), name)) = request else {
-            return;
-        };
-        if name.is_empty() {
-            with_host(&confirm_state, cx, |host| {
-                host.rename_terminal.in_flight = false
+    root(focus)
+        .on_action(move |_: &dialog::Confirm, _window, cx| {
+            let typed = read_host(&confirm_state, cx, |host, cx| {
+                host.rename_input
+                    .as_ref()
+                    .map_or_else(String::new, |input| input.read(cx).text().trim().to_owned())
             });
-            return;
-        }
-        let reply = confirm_request(RequestBody::RenameTerminal { terminal, name });
-        let weak_state = confirm_state.downgrade();
-        let task = cx.spawn(async move |cx| {
-            let answer = reply.recv().await;
-            cx.update(|cx| {
-                let Some(state) = weak_state.upgrade() else {
-                    return;
-                };
-                match answer {
-                    Ok(Ok(body)) if rename_accepted(terminal, &body) => {
-                        state.update(cx, |app, cx| {
-                            app.mark_renamed(terminal);
-                            app.close_overlay();
-                            cx.notify();
-                        });
-                    }
-                    Ok(Err(error)) => rename_failed(&state, error.message, cx),
-                    Ok(Ok(_)) | Err(_) => rename_failed(
-                        &state,
-                        "rename: the daemon did not acknowledge the terminal".to_owned(),
-                        cx,
-                    ),
+            let request = with_host(&confirm_state, cx, |host| {
+                if host.rename_terminal.in_flight {
+                    return None;
                 }
+                host.rename_terminal.error = None;
+                host.rename_terminal.in_flight = true;
+                (host.rename_terminal.terminal, typed).into()
             });
-        });
-        crate::dialogs::retain_task(&confirm_state, cx, "rename-terminal", task);
-    })
-    .child({
-        let mut dialog = Dialog::new("Rename terminal")
-            .icon(Icon::FilePen)
-            .body(
-                field(&input)
-                    .label("Name")
-                    .focused(true)
-                    .hide_status_line(true)
-                    .harness_target_indexed("dialog.field", 0),
-            )
-            .hint_row(KeyHintRow::new().key("esc", "cancel"))
-            .primary(if in_flight {
-                "renaming…"
-            } else {
-                "enter  rename"
+            let Some((Some(terminal), name)) = request else {
+                return;
+            };
+            if name.is_empty() {
+                with_host(&confirm_state, cx, |host| {
+                    host.rename_terminal.in_flight = false
+                });
+                return;
+            }
+            let reply = confirm_request(RequestBody::RenameTerminal { terminal, name });
+            let weak_state = confirm_state.downgrade();
+            let task = cx.spawn(async move |cx| {
+                let answer = reply.recv().await;
+                cx.update(|cx| {
+                    let Some(state) = weak_state.upgrade() else {
+                        return;
+                    };
+                    match answer {
+                        Ok(Ok(body)) if rename_accepted(terminal, &body) => {
+                            state.update(cx, |app, cx| {
+                                app.mark_renamed(terminal);
+                                app.close_overlay();
+                                cx.notify();
+                            });
+                        }
+                        Ok(Err(error)) => rename_failed(&state, error.message, cx),
+                        Ok(Ok(_)) | Err(_) => rename_failed(
+                            &state,
+                            "rename: the daemon did not acknowledge the terminal".to_owned(),
+                            cx,
+                        ),
+                    }
+                });
             });
-        if let Some(error) = error {
-            dialog = dialog.error(error);
-        }
-        dialog
-    })
-    .into_any_element()
+            crate::dialogs::retain_task(&confirm_state, cx, "rename-terminal", task);
+        })
+        .child({
+            let mut dialog = Dialog::new("Rename terminal")
+                .icon(Icon::FilePen)
+                .body(input.clone().harness_target_indexed("dialog.field", 0))
+                .hint_row(KeyHintRow::new().key("esc", "cancel"))
+                .primary(if in_flight {
+                    "renaming…"
+                } else {
+                    "enter  rename"
+                });
+            if let Some(error) = error {
+                dialog = dialog.error(error);
+            }
+            dialog
+        })
+        .into_any_element()
 }
 
 fn rename_accepted(expected: TerminalId, response: &ResponseBody) -> bool {
@@ -183,7 +198,7 @@ mod tests {
 
     use fleet_core::sessions::{Terminal, TerminalKind, TerminalStatus};
     use fleet_proto::error::{ErrorKind, ProtoError};
-    use gpui::{AppContext, Context, Render, div};
+    use gpui::{Context, Render, div};
 
     use super::*;
 
@@ -208,6 +223,28 @@ mod tests {
                 ),
             ))
         }
+    }
+
+    /// Seeds the draft plus its live editor the way [`seed`] does, for a fixed terminal.
+    fn seed_named(
+        state: &Entity<AppState>,
+        terminal: TerminalId,
+        cx: &mut App,
+    ) -> Entity<DialogHost> {
+        let input = cx.new(|cx| {
+            let mut input = TextInput::new(InputMode::SingleLine, cx);
+            input.set_text("renamed", cx);
+            input
+        });
+        with_host(state, cx, |host| {
+            host.rename_terminal = RenameState {
+                terminal: Some(terminal),
+                error: None,
+                in_flight: false,
+            };
+            host.rename_input = Some(input);
+        });
+        super::super::host::host_for(state, cx)
     }
 
     fn terminal_record(id: TerminalId) -> Terminal {
@@ -237,17 +274,7 @@ mod tests {
             ));
             state
         });
-        let host = cx.update(|cx| {
-            with_host(&state, cx, |host| {
-                host.rename_terminal = RenameState {
-                    terminal: Some(terminal),
-                    input: TextFieldState::from_text("renamed"),
-                    error: None,
-                    in_flight: false,
-                };
-            });
-            super::super::host::host_for(&state, cx)
-        });
+        let host = cx.update(|cx| seed_named(&state, terminal, cx));
         let responses = Rc::new(RefCell::new(VecDeque::from([
             Err(ProtoError {
                 kind: ErrorKind::Conflict,
@@ -338,17 +365,7 @@ mod tests {
             ));
             state
         });
-        let host = cx.update(|cx| {
-            with_host(&state, cx, |host| {
-                host.rename_terminal = RenameState {
-                    terminal: Some(terminal),
-                    input: TextFieldState::from_text("renamed"),
-                    error: None,
-                    in_flight: false,
-                };
-            });
-            super::super::host::host_for(&state, cx)
-        });
+        let host = cx.update(|cx| seed_named(&state, terminal, cx));
         let request: RenameRequest = Rc::new(|_body| async_channel::bounded(1).1);
 
         cx.update(|cx| {

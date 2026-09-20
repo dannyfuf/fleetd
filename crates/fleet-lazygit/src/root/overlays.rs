@@ -1,5 +1,4 @@
 use super::*;
-use gpui::EntityInputHandler;
 
 enum PromptEdit<'a> {
     Backspace,
@@ -30,10 +29,13 @@ impl Lazygit {
     ) {
         self.pending_prompt = None;
         self.prompt_input = (!prompt.buffer.is_multiline()).then(|| {
+            let value = prompt.buffer.value().to_owned();
             cx.new(|cx| {
-                TextInput::new(cx)
-                    .with_mono(true)
-                    .with_text(prompt.buffer.value())
+                let mut input = TextInput::new(InputMode::SingleLine, cx);
+                input.set_mono(true, cx);
+                input.set_hide_status_line(true, cx);
+                input.set_text(value, cx);
+                input
             })
         });
         self.state.push_overlay(Overlay::Prompt(prompt));
@@ -277,40 +279,12 @@ impl Lazygit {
         }
     }
 
-    fn edit_prompt(&mut self, edit: PromptEdit<'_>, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(input) = self.prompt_input.clone() {
-            input.update(cx, |input, cx| {
-                let mut state = input.state().clone();
-                match edit {
-                    PromptEdit::Backspace => {
-                        state.backspace();
-                    }
-                    PromptEdit::DeleteWord => {
-                        state.delete_word_before();
-                    }
-                    PromptEdit::DeleteToStart => {
-                        state.delete_to_start();
-                    }
-                    PromptEdit::Left => {
-                        state.move_left();
-                    }
-                    PromptEdit::Right => {
-                        state.move_right();
-                    }
-                    PromptEdit::Home => {
-                        state.move_to_start();
-                    }
-                    PromptEdit::End => {
-                        state.move_to_end();
-                    }
-                    PromptEdit::Insert(text) => state.insert(text),
-                }
-                let caret = state.offset_to_utf16(state.cursor());
-                input.set_text(state.text().to_owned(), cx);
-                input.set_selected_text_range(caret..caret, window, cx);
-            });
-            return;
-        }
+    /// Edits the multi-line prompt buffer or the menu filter.
+    ///
+    /// A single-line prompt is a live [`TextInput`], which owns `backspace`, `ctrl-w`, `ctrl-u`
+    /// and the motion keys through its own `FleetTextInput` rows: those bindings sit deeper in
+    /// the dispatch chain than this overlay's, so none of them reach here.
+    fn edit_prompt(&mut self, edit: PromptEdit<'_>) {
         self.with_buffer(|buffer| match edit {
             PromptEdit::Backspace => {
                 buffer.backspace();
@@ -332,85 +306,92 @@ impl Lazygit {
     pub(super) fn prompt_backspace(
         &mut self,
         _: &prompt::Backspace,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.edit_prompt(PromptEdit::Backspace, window, cx);
+        self.edit_prompt(PromptEdit::Backspace);
         cx.notify();
     }
 
     pub(super) fn prompt_delete_word(
         &mut self,
         _: &prompt::DeleteWord,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.edit_prompt(PromptEdit::DeleteWord, window, cx);
+        self.edit_prompt(PromptEdit::DeleteWord);
         cx.notify();
     }
 
     pub(super) fn prompt_delete_to_start(
         &mut self,
         _: &prompt::DeleteToStart,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.edit_prompt(PromptEdit::DeleteToStart, window, cx);
+        self.edit_prompt(PromptEdit::DeleteToStart);
         cx.notify();
     }
 
     pub(super) fn prompt_left(
         &mut self,
         _: &prompt::Left,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.edit_prompt(PromptEdit::Left, window, cx);
+        self.edit_prompt(PromptEdit::Left);
         cx.notify();
     }
 
     pub(super) fn prompt_right(
         &mut self,
         _: &prompt::Right,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.edit_prompt(PromptEdit::Right, window, cx);
+        self.edit_prompt(PromptEdit::Right);
         cx.notify();
     }
 
     pub(super) fn prompt_home(
         &mut self,
         _: &prompt::Home,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.edit_prompt(PromptEdit::Home, window, cx);
+        self.edit_prompt(PromptEdit::Home);
         cx.notify();
     }
 
     pub(super) fn prompt_end(
         &mut self,
         _: &prompt::End,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.edit_prompt(PromptEdit::End, window, cx);
+        self.edit_prompt(PromptEdit::End);
         cx.notify();
     }
 
     pub(super) fn prompt_paste(
         &mut self,
         _: &prompt::Paste,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let text = cx
             .read_from_clipboard()
             .and_then(|item| item.text())
             .unwrap_or_default();
-        if !text.is_empty() {
-            self.edit_prompt(PromptEdit::Insert(&text), window, cx);
+        if text.is_empty() {
+            return;
+        }
+        // `cmd-v` belongs to the editor's own rows; `ctrl-v` is lazygit's and lands here even
+        // while the live single-line prompt owns the keyboard.
+        if let Some(input) = self.prompt_input.clone() {
+            input.update(cx, |input, cx| input.insert(&text, cx));
+        } else {
+            self.edit_prompt(PromptEdit::Insert(&text));
         }
         cx.notify();
     }

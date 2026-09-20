@@ -69,6 +69,123 @@ async fn ensure_is_idempotent_persists_and_emits_once() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn worktree_board_materialization_waits_for_the_worktree_lifecycle_claim() {
+    let (_temp, services, _receiver) = fixture().await;
+    let worktree: WorktreeId = "acme/api#feature".parse().unwrap();
+    services
+        .state
+        .transaction({
+            let worktree = worktree.clone();
+            move |state| {
+                state.repos.push(
+                    serde_json::from_value(serde_json::json!({
+                        "id": "acme/api", "owner": "acme", "name": "api",
+                        "url": "https://example.invalid/acme/api.git", "contextId": "work",
+                        "defaultBranch": "main", "path": "/tmp/acme-api", "clonedAt": "now"
+                    }))
+                    .unwrap(),
+                );
+                state.worktrees.push(
+                    serde_json::from_value(serde_json::json!({
+                        "id": worktree, "repoId": "acme/api", "slug": "feature",
+                        "branch": "feature", "baseRef": "main", "path": "/tmp/acme-api-feature",
+                        "session": "api/feature", "createdAt": "now"
+                    }))
+                    .unwrap(),
+                );
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+
+    let lifecycle = services.worktrees.claim_lifecycle(worktree.clone()).await;
+    let boards = Arc::clone(&services.boards);
+    let request_worktree = worktree.clone();
+    let request = tokio::spawn(async move { boards.ensure_for_worktree(&request_worktree).await });
+    tokio::task::yield_now().await;
+    assert!(
+        !request.is_finished(),
+        "board creation cannot pass an in-flight delete or restore"
+    );
+
+    drop(lifecycle);
+    let view = request.await.unwrap().unwrap();
+    assert_eq!(view.board.worktree_id.as_ref(), Some(&worktree));
+}
+
+#[tokio::test]
+async fn differently_based_boards_reserve_colliding_suffixes_through_save() {
+    let (_temp, services, _receiver) = fixture().await;
+    let first: WorktreeId = "acme/api#feature".parse().unwrap();
+    let second: WorktreeId = "acme/api#feature-2".parse().unwrap();
+    services
+        .state
+        .transaction({
+            let first = first.clone();
+            let second = second.clone();
+            move |state| {
+                state.repos.push(
+                    serde_json::from_value(serde_json::json!({
+                        "id": "acme/api", "owner": "acme", "name": "api",
+                        "url": "https://example.invalid/acme/api.git", "contextId": "work",
+                        "defaultBranch": "main", "path": "/tmp/acme-api", "clonedAt": "now"
+                    }))
+                    .unwrap(),
+                );
+                for (id, slug) in [(first, "feature"), (second, "feature-2")] {
+                    state.worktrees.push(
+                        serde_json::from_value(serde_json::json!({
+                            "id": id, "repoId": "acme/api", "slug": slug,
+                            "branch": slug, "baseRef": "main", "path": format!("/tmp/{slug}"),
+                            "session": format!("api/{slug}"), "createdAt": "now"
+                        }))
+                        .unwrap(),
+                    );
+                }
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    let mut blocker = services
+        .boards
+        .ensure(&"work".parse().unwrap())
+        .await
+        .unwrap();
+    blocker.board.id = "wt-acme-api-feature".parse().unwrap();
+    services
+        .boards
+        .store
+        .save(&BoardDocument {
+            version: BOARD_DOCUMENT_VERSION,
+            board: blocker.board,
+            cards: Vec::new(),
+        })
+        .unwrap();
+
+    let allocation = Arc::clone(&services.boards.allocation).lock_owned().await;
+    let boards = Arc::clone(&services.boards);
+    let first_request = tokio::spawn({
+        let boards = Arc::clone(&boards);
+        let first = first.clone();
+        async move { boards.ensure_for_worktree(&first).await }
+    });
+    let second_request = tokio::spawn(async move { boards.ensure_for_worktree(&second).await });
+    tokio::task::yield_now().await;
+    assert!(!first_request.is_finished());
+    assert!(!second_request.is_finished());
+
+    drop(allocation);
+    let (first_view, second_view) = tokio::join!(first_request, second_request);
+    let first_view = first_view.unwrap().unwrap();
+    let second_view = second_view.unwrap().unwrap();
+    assert_ne!(first_view.board.id, second_view.board.id);
+    assert_eq!(first_view.board.worktree_id.as_ref(), Some(&first));
+}
+
 #[tokio::test]
 async fn stale_worktree_links_are_only_cleared_in_views_and_orphans_are_hidden() {
     let (_temp, services, _receiver) = fixture().await;

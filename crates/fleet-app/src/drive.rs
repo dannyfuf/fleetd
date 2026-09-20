@@ -601,18 +601,24 @@ impl Harness {
         }))
     }
 
-    /// Copies the painted frame's window metrics and target table into `AppState`, then projects.
+    /// Copies the painted frame's window metrics, target table and dialog editors into
+    /// `AppState`, then projects.
     ///
-    /// The builder holds `&AppState` and cannot reach either — the window belongs to gpui and the
-    /// target table to `fleet_ui_kit`'s paint-time recorder — so the command that is about to
-    /// answer brings them across here, in an update path. Both writers compare before they store,
-    /// so an identical frame does not invalidate the memo and does not wake a waiting `await`.
+    /// The builder holds `&AppState` and cannot reach any of the three — the window belongs to
+    /// gpui, the target table to `fleet_ui_kit`'s paint-time recorder, and a dialog's live text
+    /// to the `DialogHost` entity — so the command that is about to answer brings them across
+    /// here, in an update path. The window and target writers compare before they store, so an
+    /// identical frame does not invalidate the memo and does not wake a waiting `await`; the
+    /// dialog fields ride inside the projection key's `DialogSnapshot`, which does the same.
     fn project(
         &self,
         state: &Entity<AppState>,
         cx: &mut AsyncWindowContext,
     ) -> anyhow::Result<crate::state::HarnessProjection> {
         cx.update(|window, cx| {
+            // Read before the update below: the editors live on another entity, so they cannot
+            // be read from inside `state.update`.
+            let dialog_fields = crate::dialogs::dialog_fields(state, cx);
             let frame = fleet_ui_kit::harness::frame(window);
             // Paint order is back to front, so a name painted twice keeps its topmost rectangle.
             let targets: BTreeMap<String, TargetSnapshot> = fleet_ui_kit::harness::painted(window)
@@ -641,6 +647,7 @@ impl Harness {
             let title = self.title.to_string();
             state.update(cx, |state, _| {
                 state.harness.set_targets(targets);
+                state.harness.set_dialog_fields(dialog_fields);
                 state.harness.set_window(bounds, scale_factor, title, frame);
                 state.harness_projection()
             })

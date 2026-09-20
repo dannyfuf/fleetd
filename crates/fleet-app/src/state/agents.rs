@@ -1180,6 +1180,18 @@ impl AppState {
         ])
     }
 
+    /// Whether §12's composer — a live `TextInput` — owns the keyboard on an agent tab.
+    ///
+    /// `AgentThreadView::focus_composer` gives the tab's keyboard to the composer in every mode
+    /// but a frozen tail and an unanswered gate, which is exactly when
+    /// [`Self::agent_context_chain`] publishes `AgentIdle` or `AgentWorking`. Reading it back
+    /// off the chain keeps one answer rather than two that can drift apart.
+    #[must_use]
+    pub fn agent_composer_owns_keys(&self) -> bool {
+        self.agent_context_chain()
+            .is_some_and(|chain| matches!(chain.last(), Some(&"AgentIdle" | &"AgentWorking")))
+    }
+
     /// Applies one native-agent event to the mirror and returns its continuity and damage.
     pub fn apply_agent_event(&mut self, thread: ThreadId, event: &SeqEvent) -> MirrorOutcome {
         let outcome = self.agents.apply_event(thread, event);

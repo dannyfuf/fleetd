@@ -202,6 +202,97 @@ fn context_chain_follows_the_screen_the_overlay_and_the_daemon() {
     assert_eq!(state.context_chain(), vec!["Daemon", "Down"]);
 }
 
+/// Key ownership (`docs/APP-CONTRACTS.md` §3): the banner binds bare `r` and `l`, so it may
+/// never be an ancestor of a live editor — those two letters have to type.
+#[test]
+fn the_daemon_banner_leaves_the_chain_while_an_editor_owns_the_keyboard() {
+    let mut state = AppState::new("/tmp/fleet-banner-ownership", Instant::now());
+    state.daemon = DaemonLink::Lost {
+        attempt: 1,
+        dismissed: false,
+        reason: DaemonLossReason::ConnectionLost,
+    };
+    assert_eq!(
+        state.context_chain(),
+        vec!["Hub", "Worktrees", "Daemon", "Banner"],
+        "a browsing surface keeps the banner's r / l / Esc"
+    );
+
+    // §3.10 on the board: the filter input owns the keyboard, so nothing may shadow letters.
+    state.screen = Screen::Hub { tab: HubTab::Board };
+    state.board.filter_editing = true;
+    assert_eq!(state.context_chain(), vec!["Filter", "BoardFilter"]);
+    state.board.filter_editing = false;
+    assert_eq!(
+        state.context_chain(),
+        vec!["Hub", "Board", "Daemon", "Banner"],
+        "leaving the filter hands the banner's keys straight back"
+    );
+
+    // §3.10's Hub filter and every dialog or palette editor publish their own chain, which the
+    // banner is never appended to either.
+    state.screen = Screen::Hub {
+        tab: HubTab::Worktrees,
+    };
+    state.filter.editing = true;
+    state.open_overlay(Overlay::Filter);
+    assert!(state.hub_filter_owns_keys());
+    assert_eq!(state.context_chain(), vec!["Filter"]);
+    state.open_overlay(Overlay::Palette);
+    assert_eq!(state.context_chain(), vec!["Palette"]);
+    state.open_overlay(Overlay::Dialog(Dialogs::CardCreate));
+    assert_eq!(state.context_chain(), vec!["Dialog", "CardCreate"]);
+}
+
+/// §3.10's Hub filter editor is mounted by `screens::hub::composition` and focused by
+/// `shell::root::focus`; one predicate answers both, or the keyboard goes to an editor that is
+/// not on screen.
+#[test]
+fn the_hub_filter_owns_keys_only_where_its_editor_is_mounted() {
+    let mut state = AppState::new("/tmp/fleet-hub-filter-owner", Instant::now());
+    state.daemon = DaemonLink::Connected;
+    state.filter.editing = true;
+    state.open_overlay(Overlay::Filter);
+    for tab in [HubTab::Worktrees, HubTab::Prs] {
+        state.screen = Screen::Hub { tab };
+        assert!(state.hub_filter_owns_keys(), "{tab:?} mounts the editor");
+    }
+
+    // The board replaces the Hub's panes with its own body and its own filter (BOARD §8).
+    state.screen = Screen::Hub { tab: HubTab::Board };
+    assert!(!state.hub_filter_owns_keys());
+    state.screen = Screen::Hub {
+        tab: HubTab::Worktrees,
+    };
+
+    // §3.12's splash and doctor report, and §3.13's first-run card, each replace the body.
+    state.daemon = DaemonLink::Starting;
+    assert!(state.shows_daemon_splash());
+    assert!(!state.hub_filter_owns_keys());
+    state.daemon = DaemonLink::Connected;
+    assert!(state.hub_filter_owns_keys());
+
+    state.doctor = Some(Default::default());
+    assert!(!state.hub_filter_owns_keys());
+    state.doctor = None;
+
+    // Leaving the input, whichever stage of `Esc` did it, gives the keys back to the list.
+    state.filter.editing = false;
+    assert!(!state.hub_filter_owns_keys());
+}
+
+#[test]
+fn a_dialog_uses_only_the_derived_editing_word() {
+    let mut state = AppState::new("/tmp/fleet-dialog-context", Instant::now());
+    state.open_overlay(Overlay::Dialog(Dialogs::CardDetail));
+    assert!(state.set_dialog_key_context(Some(Dialogs::CardDetail), Some("CardDetailEditing")));
+    assert_eq!(state.context_chain(), vec!["Dialog", "CardDetailEditing"]);
+    assert!(
+        !state.context_chain().contains(&"CardDetail"),
+        "the browsing word must be absent while text owns the keyboard"
+    );
+}
+
 #[test]
 fn agent_popup_open_switch_hide_preserves_the_underlying_focus_state() {
     let now = Instant::now();
@@ -597,4 +688,78 @@ fn selecting_another_worktrees_child_switches_session_then_attaches() {
     ));
     assert!(state.agents.is_attached(other.thread));
     assert_eq!(state.active_agent_thread(), Some(other.thread));
+}
+
+/// A Workspace whose active tab is the session's `fleet://board` terminal (BOARD §8).
+fn board_pane_state() -> AppState {
+    let now = Instant::now();
+    let mut state = AppState::new("/tmp/fleet-board-pane", now);
+    let mut session = session_with("payroll/feat", &[1, 2]);
+    session.terminals[1].kind = fleet_core::sessions::TerminalKind::Native;
+    session.terminals[1].command = fleet_core::config::NATIVE_BOARD.to_owned();
+    session.terminals[1].name = "board".to_owned();
+    session.active_terminal = Some(TerminalId(2));
+    let mut snapshot = snapshot();
+    snapshot.contexts = vec![fleet_core::model::Context {
+        id: "work".parse().unwrap_or_else(|error| panic!("{error}")),
+        name: "Fleet".into(),
+        owners: Vec::new(),
+        created_at: "2026-09-19T12:00:00Z".into(),
+    }];
+    snapshot.active_context = Some(snapshot.contexts[0].id.clone());
+    snapshot.sessions = vec![session.clone()];
+    state.apply_bridge_event(BridgeEvent::Connected(Box::new(snapshot)), now);
+    state.screen = Screen::Workspace {
+        session: session.id.clone(),
+    };
+    state.terminal_mode = TerminalMode::Native;
+    state
+}
+
+/// The pane names itself a third word deep, so every `Hub > Board` row is bound over it while
+/// `ctrl-s` stays `Workspace > Native`'s.
+#[test]
+fn the_board_pane_publishes_its_own_key_context() {
+    let mut state = board_pane_state();
+    assert!(state.board_pane_is_active());
+    assert_eq!(state.context_chain(), vec!["Workspace", "Native", "Board"]);
+    assert_eq!(state.mode(), Mode::Native);
+
+    // §3.10: the filter input owns the letters, and the whole word leaves the chain for it.
+    state.board.filter_editing = true;
+    assert!(state.board_filter_owns_keys());
+    assert_eq!(state.context_chain(), vec!["Filter", "BoardFilter"]);
+    assert_eq!(state.mode(), Mode::Filter);
+    state.board.filter_editing = false;
+
+    // The prefix is a Workspace mode, not a board one: `ctrl-s b` is never a bare `b`.
+    state.enter_prefix();
+    assert_eq!(state.context_chain(), vec!["Workspace", "Prefix"]);
+}
+
+/// The reserved command decides it, and only while that tab is the one the daemon selected.
+#[test]
+fn only_the_board_tab_publishes_the_board_word() {
+    let mut state = board_pane_state();
+    let session = state
+        .active_session()
+        .unwrap_or_else(|| panic!("the fixture installs a session"))
+        .id
+        .clone();
+
+    state.touch_terminal(&session, TerminalId(1));
+    let mut snapshot = state
+        .snapshot
+        .clone()
+        .unwrap_or_else(|| panic!("the fixture installs a snapshot"));
+    snapshot.sessions[0].active_terminal = Some(TerminalId(1));
+    state.apply_snapshot(snapshot, Instant::now());
+    assert!(!state.board_pane_is_active());
+    assert_eq!(state.context_chain(), vec!["Workspace", "Terminal"]);
+
+    // A board tab the Hub is showing over is not a board pane either.
+    state.screen = Screen::Hub {
+        tab: HubTab::Worktrees,
+    };
+    assert!(!state.board_pane_is_active());
 }

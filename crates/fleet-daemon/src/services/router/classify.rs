@@ -108,7 +108,9 @@ pub fn classify(body: &RequestBody, resolver: &dyn Resolver) -> Target {
         ListBoards { .. }
         | GetBoard { .. }
         | EnsureBoard { .. }
+        | EnsureWorktreeBoard { .. }
         | CreateBoard { .. }
+        | CreateWorktreeBoard { .. }
         | UpdateBoard { .. }
         | DeleteBoard { .. }
         | CreateCard { .. }
@@ -313,7 +315,9 @@ pub(crate) fn local_fanout_part(
         | RequestBody::ListBoards { .. }
         | RequestBody::GetBoard { .. }
         | RequestBody::EnsureBoard { .. }
+        | RequestBody::EnsureWorktreeBoard { .. }
         | RequestBody::CreateBoard { .. }
+        | RequestBody::CreateWorktreeBoard { .. }
         | RequestBody::UpdateBoard { .. }
         | RequestBody::DeleteBoard { .. }
         | RequestBody::CreateCard { .. }

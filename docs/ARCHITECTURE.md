@@ -133,9 +133,20 @@ system, the native git UI and the diff pipeline — are recorded in `docs/decisi
   proxied session degrades a process-backed native command to the program it stands for
   (`fleet://lazygit` → `lazygit`), because the embedded implementation would run `git` on the
   client machine. Structured native-agent tabs are explicitly exempt: clients draw them from
-  routed protocol events, so their provider still runs on the worktree's owning daemon. The only
-  reserved process-backed command today is `fleet://lazygit`, drawn by `crates/fleet-lazygit`
-  embedded in `fleet-app` (see that crate's README, "Embedding").
+  routed protocol events, so their provider still runs on the worktree's owning daemon.
+
+  Two reserved commands exist, and only the first is process-backed:
+  - `fleet://lazygit` — the git UI, drawn by `crates/fleet-lazygit` embedded in `fleet-app` (see
+    that crate's README, "Embedding"). It degrades to `lazygit` when proxied.
+  - `fleet://board` — the worktree board tab. `fleet-app` draws it with its own board screen,
+    the one the Hub's `Board` tab uses, pointed at that worktree's board rather than the active
+    context's (`EnsureWorktreeBoard`, `docs/BOARD.md` §8): nothing is embedded and no second
+    implementation exists. Its content is the board the owning daemon already serves over the
+    wire, so it is daemon-data-driven rather than process-backed and, like a structured agent
+    tab, it stays native on a proxied session. Fleet never puts it in the default `windows[]`;
+    `ctrl-s b` creates it on demand.
+
+  `fleet_core::config::proxied_degradation` is the single place that rule lives.
 
 The native Git pane still executes mutations locally rather than as daemon jobs. Safety-sensitive
 operations carry the identity the user reviewed: partial staging carries the displayed diff
@@ -538,11 +549,15 @@ subscription are unchanged, and `Event` itself decodes an unknown family to `Eve
 instead of dropping the frame. A client must never send a window field to a daemon that did not
 advertise the capability, and capabilities reset on disconnect.
 
-The board and native-agent request names introduced by version 6 remain unchanged. `Snapshot`'s
-`agent_threads` and `boards` are both `#[serde(default)]`, so an older snapshot payload still
-deserializes; new request names are rejected rather than misread. `PruneWorktrees.ids` also remains
-defaulted and omitted when `None`; `Some(ids)` is the exact reviewed allowlist, which locked
-reinspection may shrink but never expand. Exact-set support is advertised as
+The original board request names introduced by version 6 remain unchanged. Worktree-scoped boards
+add `EnsureWorktreeBoard` and `CreateWorktreeBoard` under the `board.worktree` capability without
+bumping protocol version 8; consumers must not send those requests when the capability is absent.
+The client connection actor rechecks that capability at dispatch, after any reconnect, rather than
+trusting only the connection metadata observed when the typed request was enqueued.
+`Snapshot`'s `agent_threads` and `boards` are both `#[serde(default)]`, so an older snapshot payload
+still deserializes; new request names are rejected rather than misread. `PruneWorktrees.ids` also
+remains defaulted and omitted when `None`; `Some(ids)` is the exact reviewed allowlist, which
+locked reinspection may shrink but never expand. Exact-set support is advertised as
 `prune.reviewed_ids` in Hello capabilities.
 
 Delete, inspect, and prune responses preserve per-worktree results across host fanout:
@@ -638,14 +653,25 @@ never obtains a process-control handle.
 
 ## Boards
 
-The daemon `Boards` service owns one versioned board document per context. It applies
+The daemon `Boards` service owns one versioned document per board: one unscoped board per context
+and, on demand, one additional board per published worktree. It applies
 `fleet-core::board` operations, validates the resulting cards, atomically saves the
 whole document, updates its card-to-board index, and publishes `BoardChanged` plus a
 snapshot refresh request. The index is rebuilt lazily from disk after restart. A
-shared mutation gate serializes edits, worktree linking, and sync jobs so remote I/O
-cannot overwrite an intervening local edit. Snapshot reads skip damaged documents
-and boards whose contexts have disappeared; full views clear missing worktree links
-in memory without changing their stored history.
+per-board mutation gate serializes edits, worktree linking, and sync jobs so remote I/O
+cannot overwrite an intervening local edit without blocking an unrelated board. Snapshot reads
+skip damaged documents, boards whose contexts have disappeared, and scoped boards whose worktrees
+have disappeared; full views clear missing card worktree links in memory without changing their
+stored history. Context lookup excludes scoped boards. Worktree lookup treats its derived board id
+as a fast path and falls back to the persisted `worktree_id`, so collisions and future derivation
+changes remain safe. After any worktree deletion moves it to trash, the late-bound
+`WorktreeCascade` bundles its board into the same trash entry; restore and trash expiry therefore
+apply to the worktree and board together. A failure is warned but cannot roll back the worktree
+move. Restore validation is non-mutating: an unreadable bundled board stays restored in place for
+a newer build or manual repair instead of being quarantined again. Deletion cascades likewise
+preserve unreadable live documents, because the shared board id cannot establish whether their
+persisted scope belongs to the context or worktree being deleted. Quarantined remains are
+preserved for the same reason: their derived filename is not proof of ownership across scopes.
 
 `BoardBackends` resolves the `BoardBackend` adapter by `BackendRef.kind`. Each adapter
 validates its own settings, describes statuses and properties, and maps pull/push

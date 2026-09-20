@@ -18,6 +18,12 @@ pub(super) const NO_REMOTE_URL: &str =
 const NO_DELETE_MIRRORED: &str = "Mirrored card \u{2014} delete it in the backend";
 /// What `w` answers when the context holds no repository the picker could offer.
 pub(crate) const NO_REPO_IN_CONTEXT: &str = "No repository in this context";
+/// What `o` answers on a card linked to the worktree whose Workspace the board is drawn in.
+///
+/// The Hub's board is always somewhere else, so `o` there is always a move. In the board pane
+/// it can be a card pointing at the session already on screen, and `EnsureSession` on it would
+/// sleep and re-open the very worktree the user is standing in.
+pub(crate) const ALREADY_IN_WORKTREE: &str = "Already in this worktree";
 
 /// Opens a board dialog with a fresh draft.
 pub(crate) fn open_dialog(state: &Entity<AppState>, dialog: Dialogs, cx: &mut App) {
@@ -289,6 +295,13 @@ pub(crate) fn open_worktree(state: &Entity<AppState>, bridge: &Bridge, cx: &mut 
         needs(state, "No worktree yet \u{2014} w creates one", cx);
         return;
     };
+    // Only the board pane can be standing in the worktree a card names; from the Hub `o` is
+    // always a move to somewhere else.
+    let app = state.read(cx);
+    if app.board_pane_is_active() && app.active_worktree() == Some(&worktree) {
+        needs(state, ALREADY_IN_WORKTREE, cx);
+        return;
+    }
     open_session(worktree, Refusal::Sticky, state, bridge, cx);
 }
 

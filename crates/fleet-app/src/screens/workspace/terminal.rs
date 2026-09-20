@@ -8,15 +8,20 @@ impl WorkspaceScreen {
     pub(super) fn terminal_area(
         &self,
         model: &Model,
-        bridge: &Bridge,
-        state: &Entity<AppState>,
-        focus: &FocusHandle,
+        pane: PaneCtx<'_>,
         focused: bool,
-        cx: &App,
+        window: &mut Window,
+        cx: &mut App,
     ) -> AnyElement {
-        if model.native {
-            return self.pane_area(model, cx);
+        if model.native.is_some() {
+            return self.pane_area(model, pane, window, cx);
         }
+        let PaneCtx {
+            bridge,
+            state,
+            focus,
+            ..
+        } = pane;
         let theme = cx.theme();
         let app = state.read(cx);
         let mirror = app.active_grid();

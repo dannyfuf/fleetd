@@ -5,15 +5,22 @@ its persistence, its wire messages and its surface. The signatures below are the
 crate is written against; changing one is a deliberate, workspace-wide change, and this document
 changes in the same pass. Where the code and this file disagree, the code is the bug.
 
-The decisions behind the shape — a backend-agnostic core with a pure reconciliation engine, no
-markdown crate, and the protocol bump the board's messages needed — are recorded in
-`docs/decisions/0008-board-model-and-sync.md`.
+## Decision records
+
+- [ADR 0008](decisions/0008-board-model-and-sync.md) establishes the backend-agnostic core, pure
+  reconciliation engine, and original board wire family.
+- [ADR 0019](decisions/0019-worktree-scoped-boards.md) adds the optional worktree scope, field-based
+  lookup, deletion cascade, and capability-gated requests.
 
 ## 0. What we are building
 
-A Linear-style kanban **board of cards**, one board per **context** (`fleet_core::Context`). Cards
-are the unit of project tracking: identifier (`FLT-12`), title, markdown description, status
-column, priority, labels, assignee, estimate, due date, parent, custom properties, comments,
+A Linear-style kanban **board of cards**, one board per **context** (`fleet_core::Context`) and,
+optionally, one additional board per **worktree**. A worktree board remains associated with the
+worktree's context and repository while keeping that worktree's cards separate from the context
+board. Moving the repository to another context rehomes every one of its worktree boards before
+the state move is published, so deleting the old context cannot remove their cards. Cards are the
+unit of project tracking: identifier (`FLT-12`), title, markdown description,
+status column, priority, labels, assignee, estimate, due date, parent, custom properties, comments,
 activity. A card can **spawn a worktree** (the existing prepared-copy pipeline) and remembers it.
 
 The **core is backend-agnostic and reusable**. A `BoardBackend` adapter (daemon side) plus a
@@ -22,8 +29,9 @@ Notion, anything — without the core knowing their shape. Backend-specific fiel
 `Card.properties`, described by `PropertySchema` so the generic UI can render/edit them. The first
 backend is `local` (no remote). Jira is the second (separate contract, later).
 
-Non-goals for v1: multiple boards per context in the UI (the model allows it, the UI shows the
-context's first board), cycles/projects/milestones, attachments, rich-text editing beyond a plain
+Non-goals for v1: multiple boards per scope in the UI (the model allows it; the Hub shows the
+context's first board and a worktree's Workspace tab shows that worktree's, and no surface shows
+two at once), cycles/projects/milestones, attachments, rich-text editing beyond a plain
 multi-line editor with a read-mode markdown renderer.
 
 ## 1. Crate placement
@@ -37,7 +45,7 @@ multi-line editor with a read-mode markdown renderer.
 | Backend trait + registry + local backend | `crates/fleet-daemon/src/adapters/board.rs` and `adapters/board/local.rs` |
 | Board store (per-board JSON document) | `crates/fleet-daemon/src/stores/board.rs` |
 | `Boards` service + sync job + worktree-from-card | `crates/fleet-daemon/src/services/boards.rs` and `services/boards/{cards,documents,lifecycle,sync,worktree}.rs` |
-| Dispatch arms | `crates/fleet-daemon/src/services/mod.rs` |
+| Dispatch arms | `crates/fleet-daemon/src/services/dispatch.rs` |
 | Client API | `crates/fleet-client/src/api/boards.rs` |
 | CLI `fleet board …` | `crates/fleet-cli/src/{args.rs,commands.rs,envelope.rs,human.rs,commands/board.rs}` |
 | UI-kit components | `crates/fleet-ui-kit/src/components/{card_tile,kanban_column,markdown_text,priority_glyph,text_area}.rs` |
@@ -66,6 +74,8 @@ string_id!(LabelId,  "label",  validate_slug);        // "bug"
 pub struct Board {
     pub id: BoardId,
     pub context_id: ContextId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_id: Option<WorktreeId>,
     pub name: String,
     /// Identifier prefix; `FLT` → `FLT-12`. Uppercase, 1..=8 chars, [A-Z0-9].
     pub prefix: String,
@@ -199,7 +209,9 @@ pub struct StatusMap { pub remote_to_local: BTreeMap<String, StatusId>, pub loca
 /// Lightweight row for `Snapshot.boards`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BoardSummary { pub id: BoardId, pub context_id: ContextId, pub name: String, pub prefix: String,
+pub struct BoardSummary { pub id: BoardId, pub context_id: ContextId,
+                          #[serde(default, skip_serializing_if = "Option::is_none")] pub worktree_id: Option<WorktreeId>,
+                          pub name: String, pub prefix: String,
                           pub backend_kind: String, pub card_count: usize, pub open_count: usize,
                           pub dirty_count: usize, pub conflict_count: usize,
                           pub last_synced_at: Option<String>, pub last_error: Option<String> }
@@ -243,9 +255,12 @@ impl PropertyValue { pub fn display(&self) -> String; pub fn matches_kind(&self,
 
 ```rust
 // crates/fleet-core/src/board/defaults.rs
+pub const BOARD_ID_MAX_LEN: usize = 64;
 pub fn default_statuses() -> Vec<Status>;   // backlog/Backlog, todo/Unstarted, in-progress/Started, done/Completed, canceled/Canceled
 pub fn default_prefix(context: &Context) -> String;   // first 3 alnum chars of context name uppercased, fallback "FLT"
 pub fn new_board(context: &Context, now: &str) -> Board; // id = context.id as BoardId, name = context.name, default statuses, next_number = 1
+pub fn worktree_board_id(worktree: &WorktreeId) -> BoardId; // wt-<owner>-<repo>-<slug>, slugified and capped at 64 bytes
+pub fn new_worktree_board(context: &Context, worktree: &Worktree, now: &str) -> Board; // worktree scope, slug name/prefix, worktree repo default
 ```
 
 ```rust
@@ -282,7 +297,7 @@ pub enum BoardError {
     #[error("unknown status: {0}")] UnknownStatus(String),
     #[error("unknown label: {0}")] UnknownLabel(String),
     #[error("invalid {field}: {reason}")] Invalid { field: String, reason: String },
-    #[error("board already exists for context {0}")] Duplicate(String),
+    #[error("board already exists for scope {0}")] Duplicate(String),
     #[error("backend `{0}` is not registered")] UnknownBackend(String),
     #[error("backend does not support {0}")] Unsupported(&'static str),
     #[error("backend error: {0}")] Backend(String),
@@ -483,6 +498,7 @@ impl BoardStore {
     /// would let the `ensure` that scanned for a board create an empty one in its place.
     pub fn peek(&self, id: &BoardId) -> DaemonResult<Option<BoardDocument>>;
     pub fn quarantined(&self, id: &BoardId) -> DaemonResult<Vec<PathBuf>>;   // `<id>.json.broken-*`
+    pub(crate) fn quarantined_documents(&self) -> DaemonResult<BTreeMap<BoardId, Vec<PathBuf>>>; // one directory scan for id lookup
     pub fn stamp(&self, id: &BoardId) -> Option<(u64, SystemTime)>;          // size+mtime; memoizes summaries
     pub fn save(&self, doc: &BoardDocument) -> DaemonResult<()>;
     pub fn delete(&self, id: &BoardId) -> DaemonResult<()>;   // board and its quarantined remains to trash_dir
@@ -498,16 +514,26 @@ impl Boards {
     /// Skips a document this build cannot read; a `context` that does not exist is `NotFound`.
     pub async fn list(&self, context: Option<&ContextId>) -> DaemonResult<Vec<BoardSummary>>;
     pub async fn get(&self, id: &BoardId) -> DaemonResult<BoardView>;
-    /// Get-or-create the context's board (`defaults::new_board`). Errors if the context does not exist.
+    /// Get-or-create the context's unscoped board (`defaults::new_board`). Errors if the context does not exist.
     pub async fn ensure(&self, context: &ContextId) -> DaemonResult<BoardView>;
     pub async fn create(&self, context: &ContextId, name: Option<String>, prefix: Option<String>, backend: Option<BackendRef>) -> DaemonResult<BoardView>;
+    /// Finds the board whose persisted scope names this worktree; the derived id is only a fast path.
+    pub(super) fn worktree_board(&self, worktree: &WorktreeId) -> DaemonResult<Option<BoardId>>;
+    /// Get-or-create the board scoped to one published worktree (`defaults::new_worktree_board`).
+    pub async fn ensure_for_worktree(&self, worktree: &WorktreeId) -> DaemonResult<BoardView>;
+    /// Create the worktree's only board; a second board is `BoardError::Duplicate`.
+    pub async fn create_for_worktree(&self, worktree: &WorktreeId, name: Option<String>, prefix: Option<String>, backend: Option<BackendRef>) -> DaemonResult<BoardView>;
     /// A patch that changes nothing writes nothing and emits nothing, as an empty card patch does.
     pub async fn update(&self, id: &BoardId, patch: BoardPatch) -> DaemonResult<BoardView>;   // validates+normalizes backend settings via the registry, and only when the patch changed the BackendRef: a rename or a label must not wait on (or fail with) a backend it never mentioned
     pub async fn delete(&self, id: &BoardId) -> DaemonResult<()>;
     /// Deletes every board of a context; the `DeleteContext` cascade calls it before the context goes.
-    /// A document this build cannot read goes to trash with its context rather than blocking it:
-    /// the cascade has already deleted the context's repositories by then.
+    /// An unreadable document is preserved because its persisted scope cannot be verified from
+    /// the filename in the board id space shared by contexts and worktrees.
     pub async fn delete_for_context(&self, context: &ContextId) -> DaemonResult<()>;
+    /// Bundles the scoped board into the worktree's trash entry after the worktree moves there.
+    pub async fn delete_for_worktree(&self, worktree: &WorktreeId, trash: &Path) -> DaemonResult<()>;
+    /// Restores a scoped board bundled inside a restored worktree directory.
+    pub async fn restore_for_worktree(&self, worktree: &WorktreeId, destination: &Path) -> DaemonResult<()>;
     pub async fn create_card(&self, board: &BoardId, draft: CardDraft) -> DaemonResult<Card>;
     /// A patch that changes `status_id` appends the card to its new column, as `move_card` would —
     /// including its refusals: an archived card cannot be moved through the patch path either.
@@ -536,27 +562,70 @@ impl Boards {
     pub async fn summaries(&self) -> Vec<BoardSummary>;   // for Snapshot.boards
 }
 ```
+The late-bound deletion seam keeps `Worktrees` independent of `Boards`, which already depends on
+`Worktrees` for card-to-worktree creation. `Worktrees` stores the observer weakly so composing the
+two services does not keep either allocation alive:
+
+```rust
+#[async_trait::async_trait]
+pub(super) trait WorktreeCascade: Send + Sync {
+    async fn delete_for_worktree(&self, worktree: &WorktreeId, trash: &Path) -> DaemonResult<()>;
+    async fn restore_for_worktree(&self, worktree: &WorktreeId, destination: &Path) -> DaemonResult<()>;
+}
+impl Worktrees {
+    pub(super) fn set_cascade(&self, cascade: Arc<dyn WorktreeCascade>);
+}
+```
 Every mutation: load doc → apply pure op → `validate_card` → save → emit `Event::BoardChanged`.
 Cards whose `worktree_id` no longer exists in `State.worktrees` are reported with `worktree_id:
 None` (not persisted), and a `repo_id` — on a card or as `Board.default_repo_id` — naming a
 repository the state no longer has in the board's context is reported the same way and skipped
 when `create_worktree_from_card` picks a repository. `ensure`/`create` refuse a context whose
-board document is quarantined rather than creating an empty board over it; `delete_for_context`
-takes the quarantined remains with it. `summaries` reparses a board document only when its `stamp`
-changed or this daemon rewrote it. Boards whose context no longer exists are skipped by
-`list`/`summaries`, and deleting a context deletes its board in the same cascade
-(`delete_for_context`) so a later context deriving the same id cannot adopt it. Board locks are
-per board: no board's clone, sync or hook run blocks another board's requests, and `ensure` reads
-an existing board without taking one.
+board document is quarantined rather than creating an empty board over it. Cascades preserve both
+a live document this build cannot read and any quarantined remains, because their persisted
+context/worktree scope cannot be inferred safely from the shared board id. Explicit board deletion
+can remove quarantined remains because the caller supplies the authoritative board identity.
+`context_board` accepts only a board with the requested `context_id` and no `worktree_id`, on both
+its derived-id fast path and its fallback scan;
+`worktree_board` similarly treats the derived id only as a fast path and falls back to the
+persisted `worktree_id`. Creating either scope appends `-2` through `-99` when another scope
+already occupies its default id, and refuses creation if all candidates are occupied. `summaries`
+reparses a board document only when its `stamp` changed or
+this daemon rewrote it. Boards whose context no longer exists are skipped by `list`/`summaries`;
+a worktree board whose worktree no longer exists is skipped as well. Deleting a context deletes
+its boards in the same cascade (`delete_for_context`) so a later context deriving the same id
+cannot adopt one. After any worktree deletion moves the worktree to trash, the late-bound
+`WorktreeCascade` bundles the board document inside that same trash entry. Restoring the worktree
+restores its board and cards; expiry removes both together. A cascade failure is warned and
+swallowed because the lifecycle move has already committed. An unreadable restored board stays in
+place without being quarantined again, so a newer build or manual repair can recover it. Board
+locks are per board: no board's clone, sync or hook run blocks another board's requests. Creating a
+missing worktree board also takes that worktree's lifecycle claim through its save, so deletion and
+restore cannot pass its missing-board read. Board creation additionally holds one short allocator
+claim from suffix selection through the document save, preventing distinct base ids from reserving
+the same suffix; backend validation stays outside that claim. Reads of existing boards remain
+lock-free. Repository moves use the context lifecycle gate and every affected worktree lifecycle
+claim while rewriting the scoped board documents and repository state; a failed state publication
+rolls those documents back to their prior context.
 
-## 5. Protocol (`fleet-proto`, version 6)
+## 5. Protocol (`fleet-proto`, version 8)
+
+Worktree-board requests are an additive protocol-8 extension advertised through the
+`board.worktree` capability. The capability lets clients avoid sending variants an older daemon
+cannot decode without forcing every local and remote daemon to upgrade in lockstep.
+
+```rust
+pub const BOARD_WORKTREE_CAPABILITY: &str = "board.worktree";
+```
 
 ```rust
 // RequestBody discriminants and fields use snake_case, like their siblings; domain payloads use camelCase.
 ListBoards { context_id: Option<ContextId> }                       → ResponseBody::Boards(Vec<BoardSummary>)
 GetBoard { board_id: BoardId }                                      → Board(BoardView)
 EnsureBoard { context_id: ContextId }                               → Board(BoardView)
+EnsureWorktreeBoard { worktree_id: WorktreeId }                    → Board(BoardView)
 CreateBoard { context_id, name: Option<String>, prefix: Option<String>, backend: Option<BackendRef> } → Board
+CreateWorktreeBoard { worktree_id, name: Option<String>, prefix: Option<String>, backend: Option<BackendRef> } → Board
 UpdateBoard { board_id, patch: BoardPatch }                         → Board
 DeleteBoard { board_id }                                            → Ack
 CreateCard { board_id, draft: CardDraft }                           → Card(Card)
@@ -578,20 +647,42 @@ enum BoardChangeReason { Created, Updated, Deleted, CardChanged, Synced, SyncFai
 ## 6. Client and CLI
 
 `Client::create_worktree_from_card` returns `(Card, Worktree, bool /* created */)`.
-`fleet_client::Client` gains one typed method per request above (`list_boards`, `get_board`,
+`fleet_client::Client` has one typed method per request above (`list_boards`, `get_board`,
 `ensure_board`, `create_board`, `update_board`, `delete_board`, `create_card`, `update_card`,
 `move_card`, `delete_card`, `add_card_comment`, `create_worktree_from_card`, `sync_board`,
-`resolve_card_conflict`, `describe_board_backend`).
+`resolve_card_conflict`, `describe_board_backend`) plus these worktree-scope additions:
+
+```rust
+pub async fn ensure_worktree_board(&self, worktree_id: WorktreeId) -> Result<BoardView>;
+pub async fn create_worktree_board(
+    &self,
+    worktree_id: WorktreeId,
+    name: Option<String>,
+    prefix: Option<String>,
+    backend: Option<BackendRef>,
+) -> Result<BoardView>;
+```
+Both typed worktree methods check `board.worktree` before enqueueing a request, and the connection
+actor checks again against the currently negotiated connection immediately before writing it. A
+request queued across reconnect therefore cannot send a new variant to an older replacement
+daemon; every consumer gets the same restart guidance.
 
 CLI (`fleet board …`, JSON envelopes v1 with `--json`, human tables otherwise; board resolved from
-`--board <id>` else `--context <id>` else the active context via `EnsureBoard`):
+`--board <id>` else `--worktree[=<owner/name#slug>]` else `--context <id>` else the active context
+via `EnsureBoard`; a bare `--worktree` resolves `FLEET_SESSION` to a worktree session, while an
+explicit id requires `=` so a subcommand name is never consumed as the optional value):
+
+```rust
+pub enum BoardWorktreeSelector { Explicit(WorktreeId), FromSession }
 ```
-fleet board show [--context C|--board B]                          # columns + cards
-fleet board list                                                  # summaries
-fleet board create [--context C] [--name N] [--prefix P] [--backend local|jira] [--setting k=v]...
+
+```
+fleet board show [--context C|--worktree[=W]|--board B]           # columns + cards
+fleet board list                                                  # summaries with context/worktree scope
+fleet board create [--context C|--worktree[=W]] [--name N] [--prefix P] [--backend local|jira] [--setting k=v]...
 fleet board set [--name] [--prefix] [--default-repo owner/name] [--clear-default-repo] [--start-on-worktree [true|false]] [--conflict-policy manual|remote_wins|local_wins] [--push-new-cards [true|false]] [--branch-template "{key}-{slug}"] [--add-label NAME]... [--remove-label L]... [--backend KIND] [--setting k=v]...
 fleet board backends                                              # registered kinds, capabilities, setting keys
-fleet board describe [--context C|--board B]                      # what this board's backend reports about itself
+fleet board describe [--context C|--worktree[=W]|--board B]       # what this board's backend reports about itself
 fleet board sync [--wait] [--full]                                # --full ignores the incremental cursor
 fleet board card new <title> [--desc] [--status S] [--priority urgent|high|medium|low|none] [--label L]... [--assignee] [--estimate] [--due YYYY-MM-DD] [--repo]
 fleet board card show <key|id>
@@ -602,6 +693,8 @@ fleet board card delete <key|id>
 fleet board card worktree <key|id> [--repo owner/name] [--base REF] [--host H]   # prints the created worktree like `fleet create`
 fleet board card resolve <key|id> keep-local|take-remote
 ```
+`board list` accepts `--board` to narrow the table and `--context` to restrict the daemon query;
+it rejects `--worktree` because listing does not ensure or resolve a board.
 `<key|id>` accepts a display key (`FLT-12`, `PROJ-123`) or a CardId, and the local key of a card
 with no remote link — a mirrored card's local key is not a selector, because a board mirroring the
 Jira project its own prefix names would have two namespaces of the same shape overlapping. `board
@@ -610,22 +703,16 @@ card show` prints `Local key:` for exactly the cards that answer to one.
 ## 7. UI-kit components (`fleet-ui-kit`, gpui only, tokens only)
 
 ```rust
-// text_area.rs — multi-line sibling of text_field.rs, same three layers
-pub struct TextAreaState { /* text: String, cursor: byte offset, preferred_col, scroll_row */ }
-impl TextAreaState {
-    pub fn new() -> Self; pub fn from_text(text: impl Into<String>) -> Self;
-    pub fn text(&self) -> &str; pub fn set_text(&mut self, text: impl Into<String>); pub fn cursor(&self) -> usize;
-    pub fn line_col(&self) -> (usize, usize);
-    /// Handles insert, backspace/delete, word ops, left/right/up/down, home/end, ctrl-a/e, enter (newline), tab (2 spaces). Returns true if consumed.
-    pub fn handle_keystroke(&mut self, keystroke: &Keystroke) -> bool;
-    pub fn insert(&mut self, s: &str);
-}
-pub struct TextArea { /* RenderOnce, presentational */ }
-impl TextArea {
-    pub fn new(value: impl Into<SharedString>) -> Self;
-    pub fn cursor(self, byte_offset: usize) -> Self; pub fn focused(self, bool) -> Self;
-    pub fn placeholder(self, impl Into<SharedString>) -> Self; pub fn label(self, impl Into<SharedString>) -> Self;
-    pub fn rows(self, u32) -> Self /* min visible rows, default 6 */; pub fn mono(self, bool) -> Self; pub fn invalid(self, bool) -> Self;
+// input.rs — the one text editor, single-line and multi-line modes of the same entity (ADR 0020).
+// A description or a comment is an `Entity<TextInput>` the dialog owns; DESIGN-SYSTEM §6.4 is its contract.
+pub struct TextInput { /* focus handle, InputBuffer, selection, undo, IME bridge, layout cache, scroll */ }
+impl TextInput {
+    pub fn new(mode: InputMode, cx: &mut Context<Self>) -> Self;   // InputMode::Multiline { min_rows, max_rows }
+    pub fn text(&self) -> &str; pub fn set_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>);
+    pub fn set_label(&mut self, label: Option<SharedString>, cx: &mut Context<Self>);
+    pub fn set_placeholder(&mut self, value: impl Into<SharedString>, cx: &mut Context<Self>);
+    pub fn set_mono(&mut self, mono: bool, cx: &mut Context<Self>); pub fn set_invalid(&mut self, message: Option<SharedString>, cx: &mut Context<Self>);
+    pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>);
 }
 
 // markdown_text.rs — read-mode renderer, no dependency; supports #/##/### headings, paragraphs, `-`/`*`/`1.` lists,
@@ -681,15 +768,43 @@ Property rows in the card detail reuse `KeyValueList`/`FactRow`; pickers reuse
 - **Screen**: the board is a hub tab: `HubTab::Board`, key `g b`, tab label "Board", rendered by
   `screens/board.rs::BoardScreen` with the frozen screen signature (`docs/APP-CONTRACTS.md` §2).
   The hub context bar scopes it: the board shown is `EnsureBoard(active_context)`.
-- **State** (`state.rs`): `AppState.board: BoardState { view: Option<BoardView>, loading: bool,
+  A worktree Workspace's `fleet://board` tab (`ctrl-s b`) is the board's second surface and
+  shows `EnsureWorktreeBoard(worktree)`. It builds nothing of its own: `Shell` owns the one
+  `BoardScreen` and lends it to whichever surface is drawing, since the two are never visible
+  together. `WorkspaceScreen::sync_board_scope` points the mirror when that tab is the session's
+  active one and gives it back when it is not, and the Hub's own observation takes the context
+  scope back, so a worktree scope never outlives the pane that asked for it.
+  The tab is created on demand — `prefix::OpenBoard` (`ctrl-s b`) selects the session's terminal
+  whose command is `fleet://board`, or asks for one with
+  `NewTerminal { name: "board", command: "fleet://board", cwd }` and selects the reply — and is
+  never written into `windows[]` by Fleet, so a slept session loses it and `ctrl-s b` brings it
+  back. A user may add the `windows[]` entry themselves; the tab is matched by its reserved
+  command, never by its name, so a renamed or user-configured one is still the board tab.
+- **State** (`state.rs`): `AppState.board: BoardState { scope: Option<BoardScope>,
+  view: Option<BoardView>, loading: bool,
   error: Option<String>, focus: BoardFocus { column: usize, row: usize }, filter: String,
   filter_editing: bool, group_secondary: Option<GroupBy> }`. Loaded on tab open / context switch
   (`EnsureBoard`), refreshed on `Event::BoardChanged` for the shown board id.
-  `AppState.snapshot.boards` summaries drive the tab badge (open count, conflict dot).
+  The active context's unscoped `AppState.snapshot.boards` summary drives the tab badge (open
+  count, conflict dot); worktree-scoped summaries never contribute to the Hub tab.
+  `BoardScope` is `Context(ContextId) | Worktree(WorktreeId)`: one mirror holds either the
+  active context's board or one worktree's, since the Hub and the Workspace are never visible
+  together. `None` means the Hub's default, the active context. A view is applied only when the
+  scope admits it — a worktree's board carries that worktree, a context's board carries that
+  context and **no** worktree — while `apply_card` and `board_stale` keep keying on the board id
+  that is on screen.
 - **Bridge**: board requests use `Bridge::request` reply receivers, with no new `BridgeEvent`
   variants. Responses land in `AppState` reducers (`apply_board_view`, `apply_card`); board loads
-  use context/generation guards.
-- **Dialogs** (`Dialogs` variants; state in `DialogHost`): `CardDetail` (`dialogs/card_detail.rs`,
+  use scope/generation guards, and the scope picks the request:
+  `EnsureBoard { context_id }` or `EnsureWorktreeBoard { worktree_id }`. The app never derives a
+  board id of its own from a context or a worktree (§0). A scope change strands the previous
+  scope's replies through the same generation counter a context switch uses.
+  `screens::board::{enter_context_scope, enter_worktree_scope}` point the mirror and load;
+  entering a worktree scope is refused on a daemon that does not advertise `board.worktree`,
+  with the CLI's own sentence as a toast — "this daemon does not support worktree boards; run
+  `fleet daemon restart`" — and no change to the scope or the shown board.
+- **Dialogs** (`Dialogs` variants; serializable drafts and live `Entity<TextInput>` owners in
+  `DialogHost`): `CardDetail` (`dialogs/card_detail.rs`,
   `CardDetailState`), `CardCreate` (`dialogs/card_create.rs`), `CardPicker`
   (`dialogs/card_picker.rs`, `PickerKind { Status, Priority, Assignee, Labels, Estimate, DueDate,
   Repo, Property(key) }`), `BoardSettings` (`dialogs/board_settings.rs`: name, prefix, default
@@ -697,14 +812,18 @@ Property rows in the card detail reuse `KeyValueList`/`FactRow`; pickers reuse
   `ListBoardBackends` plus one generic row per `settings_schema` entry; see `docs/BOARD-JIRA.md`
   §6).
 - **Card detail layout** (UX-SPEC §board): two panes. Left: key + title (editable, `i`),
-  description (`MarkdownText`; `d` toggles `TextArea` edit; `ctrl-s`/`esc` saves/cancels),
-  comments (list + `c` to add via a `TextArea`), activity (last 10). Right: property list —
+  description (`MarkdownText`; `d` opens the shared multi-line `TextInput`;
+  `ctrl-s`/`esc` saves/cancels), comments (list + `c` to add through that input), activity
+  (last 10). Right: property list —
   Status, Priority, Assignee, Labels, Estimate, Due, Parent, Repo, Worktree (enter = open its
   session), Remote (key/url/synced/dirty), then custom properties from `board.properties`; `j/k`
   select row, `enter` opens the matching picker. Conflict banner with `K` keep-local / `R`
   take-remote when `card.conflict` is set.
 - **Keymap** (`docs/KEYMAP.md` rows, contexts `Hub > Board` and `Dialog > CardDetail` etc., one
-  action per row):
+  action per row). Every `Hub > Board` row below is bound a second time, verbatim and against
+  the same action, on `Workspace > Native > Board` — the board pane's key context — and
+  `Filter > BoardFilter` serves both surfaces. `o` answers "Already in this worktree" instead of
+  re-opening the session when the card names the worktree the pane is standing in:
 
 | Key | Context | Action |
 |---|---|---|
@@ -768,14 +887,16 @@ drafts: a remote field the board cannot hold leaves the local card untouched and
 and only a real status change dirties the card that moved. A card's `parent_id` must name another
 card of the same board and may not close a cycle.
 
-The app refreshes through `EnsureBoard(active_context)` after BoardChanged. `filter_editing`
+The app refreshes through the request its scope names (`EnsureBoard(active_context)` on the Hub)
+after BoardChanged. `filter_editing`
 selects the Filter key context while typing, with two-stage Escape. `group_secondary` is reserved;
 Parent is read-only in this milestone. Card detail is an 880 px two-pane dialog. `ctrl-enter` in
 CardCreate creates and opens detail; label pickers use Space for multi-select; BoardSettings
 reuses the settings row keys. Delete uses `ConfirmRequest::DeleteCard`. These supplemental dialog
-keys are listed in KEYMAP; context-only create-and-open has no palette command.
-Description/comment editors compose presentational TextArea with its state and key handling; a
-separate live input entity is not required. Card tiles suppress None priority, while standalone
+keys are listed in KEYMAP; create-and-open exists only as that chord inside the dialog and has no
+palette command.
+Description/comment editors are multi-line `TextInput` entities the dialog creates when an edit
+begins and drops when it ends; no surface decodes editing keys (ADR 0020). Card tiles suppress None priority, while standalone
 PriorityGlyph still renders it. Label colors remain token names.
 
 ## 9. What the tests hold
@@ -786,15 +907,60 @@ thing so a failure names the layer that broke.
 - **Core** (`crates/fleet-core/src/board/`) covers the pure rules: create, patch, move and the
   fractional positions they produce; validation and `worktree_slug`; and the reconciliation engine
   — `adopt_schema`'s status mapping, `reconcile`'s create/update/delete/conflict decisions under
-  each `ConflictPolicy`, the push operations it emits, and `apply_push_result`.
+  each `ConflictPolicy`, the push operations it emits, and `apply_push_result`. Worktree-board
+  cases pin legacy JSON without `worktreeId`, scoped JSON round trips, derived ids (including
+  normalization and length), and the scoped board's name, prefix, context, and default repository.
 - **Daemon** (`crates/fleet-daemon/tests/boards_*.rs`) covers the service against a real store: the
   ensure/create/patch/move/delete/comment round trip, persistence and quarantine, worktree-from-card
   over a fake git, a full sync against `FakeBackend` including a conflict and its resolution, and
-  the events each mutation emits.
-- **CLI and client** cover the JSON envelopes and one socket round trip per typed method.
+  the events each mutation emits. Worktree-board cases pin scope-aware context lookup and listing,
+  orphan filtering, id-collision suffixes, idempotent ensure, duplicate and missing-worktree errors,
+  and deletion through both direct and prune paths without touching the context board.
+- **Protocol** (`crates/fleet-proto/tests/compatibility.rs`) pins byte-exact frames for both new
+  requests, the `board.worktree` handshake capability, and old/new `Board` and `BoardSummary`
+  payload compatibility.
+- **Client** covers one daemon-socket round trip for each new typed method.
+- **CLI** covers bare and explicit `--worktree` parsing, selector conflicts, `FLEET_SESSION`
+  resolution and refusal cases, capability gating, worktree creation, and the scope column/header.
 - **App** covers the reducers rather than rendered strings: the board mirror's staleness and
   generation rules, the focus clamp under a filter, and the two-stage filter `Esc`. The keymap
   drift test keeps `docs/KEYMAP.md` and `keymap.rs` in agreement.
+  The scope is held by `state/board/tests.rs`:
+  `a_view_from_the_other_scope_never_lands_in_the_board_slot` (a context board and a worktree
+  board name the same context, and only `worktree_id` tells them apart),
+  `a_scope_switched_away_from_and_back_rejects_the_answer_it_left_behind` (A → B → A through the
+  one generation counter), `a_board_changed_event_only_makes_the_board_on_screen_stale`, and
+  `a_daemon_without_worktree_boards_refuses_the_scope_and_keeps_the_board_it_shows`.
+  The pane's key context is held by `state/navigation/tests.rs`
+  (`the_board_pane_publishes_its_own_key_context`, `only_the_board_tab_publishes_the_board_word`),
+  and `ctrl-s b` itself by `screens/workspace/tests.rs`
+  (`the_board_key_selects_the_tab_the_session_already_has`,
+  `the_board_key_creates_the_tab_and_selects_the_reply`,
+  `the_board_tab_is_recognised_by_its_command_not_its_name`,
+  `the_board_key_says_why_a_session_without_a_worktree_opens_nothing`,
+  `the_board_band_needs_a_worktree_to_be_the_board_of`,
+  `selecting_another_tab_ends_a_pending_board_claim`,
+  `the_reserved_command_decides_the_native_tab_kind`).
+  Five `shell/root/tests.rs` tests drive the real shell end to end — the refusal on an old daemon,
+  the palette row reaching the same handler, the pane binding every board key while `ctrl-s` stays
+  the prefix, the scope going back to the context on the way out, and `o` refusing the worktree
+  the pane is standing in
+  (`real_shell_board_key_refuses_a_daemon_without_worktree_boards`,
+  `real_shell_board_palette_row_reaches_the_same_handler`,
+  `real_shell_board_pane_binds_the_board_keys_and_keeps_the_prefix`,
+  `real_shell_board_pane_gives_the_prefix_and_the_scope_back`,
+  `real_shell_board_pane_refuses_to_reopen_its_own_worktree`). The palette row's own gate is
+  `the_board_tab_row_needs_a_worktree_session_on_screen`, and the reserved command is pinned in
+  `fleet-core` by `only_the_process_backed_reserved_command_degrades_when_proxied` and in the
+  settings dialog by `every_reserved_window_command_reads_as_built_in`.
+- **Harness** drives the tab as a user does: `scenarios/workspace/board-tab.scenario` opens a
+  worktree session, presses `ctrl-s b`, and asserts the new tab, its `native` badge, the
+  `Workspace > Native > Board` key context, this worktree's own cards, a `]` that reaches the
+  pane, a second `ctrl-s b` that creates no fourth tab, and — after `ctrl-s s` and `g b` — the
+  Hub still showing the **context** board, unmoved. The `board` fixture preset is what makes that
+  last part an oracle: it seeds a context board of `FLT-…` cards and the worktree's own `FEA-…`
+  board under the same context, so the card set alone says which of the two a surface is drawing.
+  The Hub's `scenarios/board/*` keep covering the context board on its own.
 
 The board's own surfaces answer the same standing rule the rest of the kit does: a state that is
 not in `cargo run -p fleet-ui-kit --example gallery_board` is not implemented.

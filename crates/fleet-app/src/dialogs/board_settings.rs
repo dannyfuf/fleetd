@@ -29,8 +29,7 @@ use crate::{
     actions::{dialog, settings as settings_actions},
     bridge::Bridge,
     dialogs::{
-        DialogHost, Dialogs, host::complete_request, notify, read_host, root, step, typed_char,
-        with_host,
+        DialogHost, Dialogs, host::complete_request, notify, read_host, root, step, with_host,
     },
     state::AppState,
 };
@@ -41,6 +40,17 @@ const LABEL_WIDTH: f32 = 150.0;
 const MAX_PREFIX: usize = 8;
 /// What a multi-select settings row is typed as, and split back on.
 const MULTI_SEPARATOR: char = ',';
+
+/// What an empty backend text row suggests.
+#[must_use]
+fn input_placeholder(row: &BackendRow) -> &'static str {
+    match row.kind {
+        PropertyKind::MultiSelect => "comma, separated, values",
+        PropertyKind::Date => "YYYY-MM-DD",
+        _ if row.required => "required",
+        _ => "optional",
+    }
+}
 
 mod draft;
 mod persistence;

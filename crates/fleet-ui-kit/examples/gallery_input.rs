@@ -1,10 +1,10 @@
 //! The visual and behavioural test bench for the **input** group of `fleet-ui-kit`.
 //!
-//! `TextField` · `TextFieldState` · `TextInput` · `FuzzyList` · `FilterBar` · `Cycler` ·
-//! `Toggle` · `NumberField` · `SegmentedTabs` · `Select` · `ConfirmDialog` · `Palette`.
+//! `TextInput` · `FuzzyList` · `FilterBar` · `Cycler` · `Toggle` · `NumberField` ·
+//! `SegmentedTabs` · `Select` · `ConfirmDialog` · `Palette`.
 //!
 //! Every component appears in every state it can be in, in both themes, and the interactive
-//! ones are *live*: the text field really edits, the palette really filters and highlights, the
+//! ones are *live*: the inputs really edit, the palette really filters and highlights, the
 //! lists really move. If a state is not visible or not operable here, it is not implemented.
 //!
 //! ```sh
@@ -14,7 +14,7 @@
 //! | Key | What |
 //! | --- | --- |
 //! | `ctrl-t` | toggle light / dark |
-//! | `ctrl-i` | focus the live editor · `esc` leaves it |
+//! | `ctrl-i` | focus the branch field · `esc` leaves it |
 //! | `/` | focus the filter bar · `esc` leaves it, `esc` again clears it |
 //! | `:` | open the palette · `esc` closes it |
 //! | `d` / `D` | the compact / expanded confirm · `y` `Y` `n` `esc` answer it |
@@ -39,8 +39,8 @@ const LAYOUT: support::layout::GalleryLayout = support::layout::GalleryLayout {
 };
 use fleet_ui_kit::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Entity, FocusHandle, Focusable, KeyBinding, KeyDownEvent,
-    SharedString, Window, actions, div, px,
+    AnyElement, App, Context, Entity, EntityInputHandler, FocusHandle, Focusable, KeyBinding,
+    SharedString, Subscription, Window, actions, div, px,
 };
 
 actions!(
@@ -153,9 +153,26 @@ fn branch_error(value: &str) -> Option<SharedString> {
 
 struct InputGallery {
     focus_handle: FocusHandle,
-    editor: Entity<TextInput>,
-    filter: TextFieldState,
-    palette_query: TextFieldState,
+    /// The branch field whose preview line turns into a validation line in the same slot.
+    branch: Entity<TextInput>,
+    live_empty: Entity<TextInput>,
+    live_filled: Entity<TextInput>,
+    live_focused: Entity<TextInput>,
+    live_selection: Entity<TextInput>,
+    live_marked: Entity<TextInput>,
+    live_invalid: Entity<TextInput>,
+    live_read_only: Entity<TextInput>,
+    live_numeric: Entity<TextInput>,
+    /// The editor a settings number row hands to `NumberField` while it is being typed into.
+    number_row_editor: Entity<TextInput>,
+    live_labeled: Entity<TextInput>,
+    live_multiline_min: Entity<TextInput>,
+    live_multiline_grown: Entity<TextInput>,
+    filter: Entity<TextInput>,
+    filter_no_match: Entity<TextInput>,
+    palette_query: Entity<TextInput>,
+    /// Re-ranking on every keystroke: a list that re-ranked must not keep a stale cursor.
+    _query_subscriptions: Vec<Subscription>,
     capture: Capture,
     filter_focused: bool,
     fuzzy_cursor: usize,
@@ -173,21 +190,167 @@ struct InputGallery {
 const HOSTS: &[&str] = &["local", "devbox", "ci-runner"];
 
 impl InputGallery {
-    fn new(cx: &mut Context<Self>) -> Self {
-        let editor = cx.new(|cx| {
-            TextInput::new(cx)
-                .with_label("branch")
-                .with_placeholder("feat/rut-validator")
-                .with_icon(Icon::GitBranchPlus)
-                .with_mono(true)
-                .with_text("feat/rut-validator")
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let branch = cx.new(|cx| {
+            let mut input = TextInput::new(InputMode::SingleLine, cx);
+            input.set_label(Some("branch".into()), cx);
+            input.set_placeholder("feat/rut-validator", cx);
+            input.set_icon(Some(Icon::GitBranchPlus), cx);
+            input.set_mono(true, cx);
+            input.set_text("feat/rut-validator", cx);
+            input
         });
-        cx.subscribe(&editor, Self::on_editor_event).detach();
+        let live_empty = cx.new(|cx| {
+            let mut input = TextInput::new(InputMode::SingleLine, cx);
+            input.set_placeholder("empty with placeholder", cx);
+            input
+        });
+        let live_filled = cx.new(|cx| {
+            let mut input = TextInput::new(InputMode::SingleLine, cx);
+            input.set_text("feat/worktree-boards", cx);
+            input
+        });
+        let live_focused = cx.new(|cx| {
+            let mut input = TextInput::new(InputMode::SingleLine, cx);
+            input.set_text("caret lives here", cx);
+            input.move_to_end(cx);
+            input
+        });
+        let live_selection = cx.new(|cx| {
+            let mut input = TextInput::new(InputMode::SingleLine, cx);
+            input.set_text("selected value", cx);
+            input.select_all(cx);
+            input
+        });
+        let live_marked = cx.new(|cx| TextInput::new(InputMode::SingleLine, cx));
+        live_marked.update(cx, |input, cx| {
+            input.replace_and_mark_text_in_range(None, "IME marked text", None, window, cx);
+        });
+        let live_invalid = cx.new(|cx| {
+            let mut input = TextInput::new(InputMode::SingleLine, cx);
+            input.set_text("feat/../boards", cx);
+            input.set_invalid(Some("branch cannot contain \"..\"".into()), cx);
+            input
+        });
+        let live_read_only = cx.new(|cx| {
+            let mut input = TextInput::new(InputMode::SingleLine, cx);
+            input.set_text("generated by config", cx);
+            input.set_read_only(true, cx);
+            input
+        });
+        let live_numeric = cx.new(|cx| {
+            let mut input = TextInput::new(InputMode::SingleLine, cx);
+            input.set_text("2000", cx);
+            input.set_filter(Some(|character| character.is_ascii_digit()), cx);
+            input
+        });
+        let number_row_editor = cx.new(|cx| {
+            let mut input = TextInput::new(InputMode::SingleLine, cx);
+            input.set_mono(true, cx);
+            input.set_hide_status_line(true, cx);
+            input.set_filter(Some(|character| character.is_ascii_digit()), cx);
+            input.set_text("2500", cx);
+            input
+        });
+        let live_labeled = cx.new(|cx| {
+            let mut input = TextInput::new(InputMode::SingleLine, cx);
+            input.set_label(Some("branch".into()), cx);
+            input.set_icon(Some(Icon::GitBranchPlus), cx);
+            input.set_mono(true, cx);
+            input.set_text("feat/worktree-boards", cx);
+            input
+        });
+        let live_multiline_min = cx.new(|cx| {
+            let mut input = TextInput::new(
+                InputMode::Multiline {
+                    min_rows: 3,
+                    max_rows: 6,
+                },
+                cx,
+            );
+            input.set_text(
+                "A focused description can stay one logical paragraph while it wraps naturally across the editor's available width.",
+                cx,
+            );
+            input
+        });
+        let live_multiline_grown = cx.new(|cx| {
+            let mut input = TextInput::new(
+                InputMode::Multiline {
+                    min_rows: 3,
+                    max_rows: 6,
+                },
+                cx,
+            );
+            input.set_text(
+                "The first paragraph is deliberately long enough to wrap without a hard break, so selection geometry crosses a soft boundary.\nA second explicit line also wraps inside the same box and pushes the editor past its visual-row cap.\nThird line.\nFourth line.",
+                cx,
+            );
+            input.select_all(cx);
+            input
+        });
+        let filter = cx.new(|cx| {
+            let mut input = TextInput::new(InputMode::SingleLine, cx);
+            // The bar lives in a 30 px pane header, so the editor brings no box of its own.
+            input.set_embedded(true, cx);
+            input.set_placeholder("filter branches", cx);
+            input.set_text("rut", cx);
+            input
+        });
+        let filter_no_match = cx.new(|cx| {
+            let mut input = TextInput::new(InputMode::SingleLine, cx);
+            input.set_embedded(true, cx);
+            input.set_text("zzz", cx);
+            input
+        });
+        let palette_query = cx.new(|cx| {
+            let mut input = TextInput::new(InputMode::SingleLine, cx);
+            input.set_embedded(true, cx);
+            input.set_placeholder("go to, or do", cx);
+            input.set_text("pay", cx);
+            input
+        });
+        // A re-ranked list must never leave the cursor past its end, and the branch field's
+        // preview and validation line are derived from what was just typed into it.
+        let query_subscriptions = vec![
+            cx.subscribe(&branch, |gallery, _, event, cx| {
+                if *event == TextInputEvent::Changed {
+                    gallery.refresh_branch_status(cx);
+                    cx.notify();
+                }
+            }),
+            cx.subscribe(&filter, |gallery, _, event, cx| {
+                if *event == TextInputEvent::Changed {
+                    gallery.fuzzy_cursor = 0;
+                    cx.notify();
+                }
+            }),
+            cx.subscribe(&palette_query, |gallery, _, event, cx| {
+                if *event == TextInputEvent::Changed {
+                    gallery.palette_cursor = 0;
+                    cx.notify();
+                }
+            }),
+        ];
         let mut gallery = Self {
             focus_handle: cx.focus_handle(),
-            editor,
-            filter: TextFieldState::from_text("rut"),
-            palette_query: TextFieldState::from_text("pay"),
+            branch,
+            live_empty,
+            live_filled,
+            live_focused,
+            live_selection,
+            live_marked,
+            live_invalid,
+            live_read_only,
+            live_numeric,
+            live_labeled,
+            live_multiline_min,
+            live_multiline_grown,
+            number_row_editor,
+            filter,
+            filter_no_match,
+            palette_query,
+            _query_subscriptions: query_subscriptions,
             capture: Capture::None,
             filter_focused: true,
             fuzzy_cursor: 0,
@@ -201,47 +364,67 @@ impl InputGallery {
             confirm: ConfirmDemo::None,
             answer: None,
         };
-        gallery.refresh_editor_status(cx);
+        gallery.refresh_branch_status(cx);
         gallery
     }
 
-    /// Keep the preview and the validation line in step with the value.
-    fn on_editor_event(
-        &mut self,
-        _editor: Entity<TextInput>,
-        event: &TextInputEvent,
-        cx: &mut Context<Self>,
-    ) {
-        if *event == TextInputEvent::Changed {
-            self.refresh_editor_status(cx);
-            cx.notify();
-        }
-    }
-
-    fn refresh_editor_status(&mut self, cx: &mut Context<Self>) {
-        let value = self.editor.read(cx).text().to_string();
+    /// Keep the preview and the validation line in step with the value (§3.8.1).
+    fn refresh_branch_status(&mut self, cx: &mut Context<Self>) {
+        let value = self.branch.read(cx).text().to_string();
         let error = branch_error(&value);
         let preview = (!value.is_empty() && error.is_none())
             .then(|| SharedString::from(format!("\u{2192} buk/payroll#{value}")));
-        self.editor.update(cx, |editor, cx| {
-            editor.set_invalid(error, cx);
-            editor.set_preview(preview, cx);
+        self.branch.update(cx, |input, cx| {
+            input.set_invalid(error, cx);
+            input.set_preview(preview, cx);
         });
     }
 
+    fn live_input_focused(&self, window: &Window, cx: &App) -> bool {
+        self.branch.read(cx).focus_handle().is_focused(window)
+            || self.live_empty.read(cx).focus_handle().is_focused(window)
+            || self.live_filled.read(cx).focus_handle().is_focused(window)
+            || self.live_focused.read(cx).focus_handle().is_focused(window)
+            || self
+                .live_selection
+                .read(cx)
+                .focus_handle()
+                .is_focused(window)
+            || self.live_marked.read(cx).focus_handle().is_focused(window)
+            || self.live_invalid.read(cx).focus_handle().is_focused(window)
+            || self
+                .live_read_only
+                .read(cx)
+                .focus_handle()
+                .is_focused(window)
+            || self.live_numeric.read(cx).focus_handle().is_focused(window)
+            || self.live_labeled.read(cx).focus_handle().is_focused(window)
+            || self
+                .live_multiline_min
+                .read(cx)
+                .focus_handle()
+                .is_focused(window)
+            || self
+                .live_multiline_grown
+                .read(cx)
+                .focus_handle()
+                .is_focused(window)
+    }
+
     /// The rows the fuzzy list shows for the current filter query.
-    fn ranked_branches(&self) -> Vec<(&'static str, &'static str, Vec<usize>)> {
+    fn ranked_branches(&self, cx: &App) -> Vec<(&'static str, &'static str, Vec<usize>)> {
+        let query = self.filter.read(cx).text().to_owned();
         BRANCHES
             .iter()
             .filter_map(|(name, detail)| {
-                subsequence(name, self.filter.text()).map(|hits| (*name, *detail, hits))
+                subsequence(name, &query).map(|hits| (*name, *detail, hits))
             })
             .collect()
     }
 
     /// The palette's three sections for the current query, already ranked.
-    fn palette_sections(&self) -> (Vec<PaletteSection>, usize, usize) {
-        let query = self.palette_query.text();
+    fn palette_sections(&self, cx: &App) -> (Vec<PaletteSection>, usize, usize) {
+        let query = self.palette_query.read(cx).text();
         let go: Vec<PaletteRow> = GO_ROWS
             .iter()
             .filter_map(|(label, detail)| {
@@ -301,14 +484,24 @@ impl InputGallery {
         (sections, matched, total)
     }
 
+    /// How many palette rows the current query matches, without building any of them.
+    fn palette_matches(&self, cx: &App) -> usize {
+        let query = self.palette_query.read(cx).text();
+        GO_ROWS
+            .iter()
+            .map(|(label, _)| *label)
+            .chain(DO_ROWS.iter().map(|(label, _, _)| *label))
+            .chain(CONTEXT_ROWS.iter().map(|(label, _)| *label))
+            .filter(|label| subsequence(label, query).is_some())
+            .count()
+    }
+
     /// How many rows the cursor may land on right now.
-    fn cursor_len(&self) -> usize {
+    fn cursor_len(&self, cx: &App) -> usize {
         if self.palette_open {
-            let (sections, matched, _) = self.palette_sections();
-            let _ = sections;
-            matched.min(10)
+            self.palette_matches(cx).min(10)
         } else {
-            self.ranked_branches().len()
+            self.ranked_branches(cx).len()
         }
     }
 
@@ -323,15 +516,14 @@ impl InputGallery {
 
     fn focus_editor(&mut self, _: &FocusEditor, window: &mut Window, cx: &mut Context<Self>) {
         self.capture = Capture::None;
-        let handle = self.editor.focus_handle(cx);
-        window.focus(&handle, cx);
+        self.branch.update(cx, |input, cx| input.focus(window, cx));
         cx.notify();
     }
 
     fn focus_filter(&mut self, _: &FocusFilter, window: &mut Window, cx: &mut Context<Self>) {
         self.capture = Capture::Filter;
         self.filter_focused = true;
-        window.focus(&self.focus_handle, cx);
+        self.filter.update(cx, |input, cx| input.focus(window, cx));
         cx.notify();
     }
 
@@ -339,7 +531,8 @@ impl InputGallery {
         self.palette_open = true;
         self.capture = Capture::Palette;
         self.palette_cursor = 0;
-        window.focus(&self.focus_handle, cx);
+        self.palette_query
+            .update(cx, |input, cx| input.focus(window, cx));
         cx.notify();
     }
 
@@ -351,13 +544,15 @@ impl InputGallery {
         } else if self.palette_open {
             self.palette_open = false;
             self.capture = Capture::None;
+            window.focus(&self.focus_handle, cx);
         } else if self.capture == Capture::Filter {
             // Stage one: leave the input, keep the filter.
             self.capture = Capture::None;
             self.filter_focused = false;
-        } else if !self.filter_focused && !self.filter.is_empty() {
+            window.focus(&self.focus_handle, cx);
+        } else if !self.filter_focused && !self.filter.read(cx).is_empty() {
             // Stage two: clear it.
-            self.filter.clear();
+            self.filter.update(cx, |input, cx| input.clear(cx));
             self.filter_focused = true;
         } else {
             window.focus(&self.focus_handle, cx);
@@ -379,7 +574,7 @@ impl InputGallery {
     }
 
     fn cursor_next(&mut self, _: &CursorNext, _window: &mut Window, cx: &mut Context<Self>) {
-        let len = self.cursor_len();
+        let len = self.cursor_len(cx);
         if self.palette_open {
             self.palette_cursor = FuzzyList::next_cursor(self.palette_cursor, len);
         } else {
@@ -389,7 +584,7 @@ impl InputGallery {
     }
 
     fn cursor_prev(&mut self, _: &CursorPrev, _window: &mut Window, cx: &mut Context<Self>) {
-        let len = self.cursor_len();
+        let len = self.cursor_len(cx);
         if self.palette_open {
             self.palette_cursor = FuzzyList::prev_cursor(self.palette_cursor, len);
         } else {
@@ -486,30 +681,11 @@ impl InputGallery {
         }
         cx.notify();
     }
-
-    /// Feed keystrokes to whichever presentational field owns the keyboard.
-    ///
-    /// This is the pattern §3.10 describes for the real Hub: `FilterBar` and `Palette` render
-    /// the caret, and the view owns a [`TextFieldState`] that implements the edit set.
-    fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        let target = match self.capture {
-            Capture::Filter => &mut self.filter,
-            Capture::Palette => &mut self.palette_query,
-            Capture::None => return,
-        };
-        if target.handle_keystroke(&event.keystroke) {
-            cx.stop_propagation();
-            // A re-ranked list must never leave the cursor past its end.
-            self.fuzzy_cursor = 0;
-            self.palette_cursor = 0;
-            cx.notify();
-        }
-    }
 }
 
 impl Focusable for InputGallery {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus_handle.clone()
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.live_focused.read(cx).focus_handle()
     }
 }
 
@@ -526,87 +702,24 @@ fn card(theme: &Theme, width: gpui::Pixels, child: impl IntoElement) -> AnyEleme
         .into_any_element()
 }
 
-fn text_field_section(theme: &Theme) -> AnyElement {
-    let width = px(380.0);
+fn branch_section(gallery: &InputGallery, theme: &Theme, cx: &App) -> AnyElement {
+    let input = gallery.branch.read(cx);
+    let caret = input.buffer().caret();
+    let value_len = input.text().len();
     LAYOUT.section(
-        "text field \u{b7} presentational",
+        "text input \u{b7} preview and validation (^i to focus)",
         theme,
         vec![
             LAYOUT.labeled(
-                "focused + preview",
+                "branch field",
                 theme,
-                div().w(width).child(
-                    TextField::new("feat/rut-validator")
-                        .label("branch")
-                        .mono(true)
-                        .focused(true)
-                        .caret(4)
-                        .preview("\u{2192} buk/payroll#feat-rut-validator"),
-                ),
-            ),
-            LAYOUT.labeled(
-                "invalid (same slot)",
-                theme,
-                div().w(width).child(
-                    TextField::new("feat/../rut")
-                        .label("branch")
-                        .mono(true)
-                        .focused(true)
-                        .caret(7)
-                        .preview("\u{2192} never shown while invalid")
-                        .invalid("branch cannot contain \"..\""),
-                ),
-            ),
-            LAYOUT.labeled(
-                "unfocused",
-                theme,
-                div()
-                    .w(width)
-                    .child(TextField::new("origin/main").label("base").mono(true)),
-            ),
-            LAYOUT.labeled(
-                "placeholder + icon",
-                theme,
-                div().w(width).child(
-                    TextField::new("")
-                        .placeholder("Type to search GitHub repos in buk's owners.")
-                        .icon(Icon::Search)
-                        .focused(true),
-                ),
-            ),
-            LAYOUT.labeled(
-                "44 px, no status slot",
-                theme,
-                div().w(width).child(
-                    TextField::new("pay fix")
-                        .icon(Icon::Command)
-                        .focused(true)
-                        .height(px(44.0))
-                        .hide_status_line(true),
-                ),
-            ),
-        ],
-    )
-}
-
-fn live_editor_section(gallery: &InputGallery, theme: &Theme, cx: &App) -> AnyElement {
-    let state = gallery.editor.read(cx);
-    let caret = state.state().caret_chars();
-    let value_len = state.text().chars().count();
-    LAYOUT.section(
-        "text input \u{b7} live (ctrl-i to focus)",
-        theme,
-        vec![
-            LAYOUT.labeled(
-                "real editor",
-                theme,
-                div().w(px(380.0)).child(gallery.editor.clone()),
+                div().w(px(380.0)).child(gallery.branch.clone()),
             ),
             LAYOUT.labeled(
                 "state",
                 theme,
                 Text::hint(format!(
-                    "caret {caret} of {value_len} \u{b7} printable \u{b7} backspace \u{b7} delete \u{b7} ^w \u{b7} ^u \u{b7} ^k \u{b7} ^a \u{b7} ^e \u{b7} \u{2190} \u{2192} \u{b7} IME-composed text is underlined"
+                    "caret {caret} of {value_len} bytes \u{b7} the validation line replaces the preview in the same 18 px slot, so a failing name costs zero layout shift"
                 ))
                 .faint(),
             ),
@@ -614,8 +727,73 @@ fn live_editor_section(gallery: &InputGallery, theme: &Theme, cx: &App) -> AnyEl
     )
 }
 
-fn fuzzy_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
-    let ranked = gallery.ranked_branches();
+fn text_input_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
+    let width = px(420.0);
+    LAYOUT.section(
+        "text input · live entity",
+        theme,
+        vec![
+            LAYOUT.labeled(
+                "single · empty + placeholder",
+                theme,
+                div().w(width).child(gallery.live_empty.clone()),
+            ),
+            LAYOUT.labeled(
+                "single · filled",
+                theme,
+                div().w(width).child(gallery.live_filled.clone()),
+            ),
+            LAYOUT.labeled(
+                "single · focused + caret",
+                theme,
+                div().w(width).child(gallery.live_focused.clone()),
+            ),
+            LAYOUT.labeled(
+                "single · selection",
+                theme,
+                div().w(width).child(gallery.live_selection.clone()),
+            ),
+            LAYOUT.labeled(
+                "single · marked (IME)",
+                theme,
+                div().w(width).child(gallery.live_marked.clone()),
+            ),
+            LAYOUT.labeled(
+                "single · invalid + message",
+                theme,
+                div().w(width).child(gallery.live_invalid.clone()),
+            ),
+            LAYOUT.labeled(
+                "single · read-only",
+                theme,
+                div().w(width).child(gallery.live_read_only.clone()),
+            ),
+            LAYOUT.labeled(
+                "single · numeric filter",
+                theme,
+                div().w(width).child(gallery.live_numeric.clone()),
+            ),
+            LAYOUT.labeled(
+                "single · label + leading icon",
+                theme,
+                div().w(width).child(gallery.live_labeled.clone()),
+            ),
+            LAYOUT.labeled(
+                "multi · minimum rows",
+                theme,
+                div().w(width).child(gallery.live_multiline_min.clone()),
+            ),
+            LAYOUT.labeled(
+                "multi · max rows + scroll + selection",
+                theme,
+                div().w(width).child(gallery.live_multiline_grown.clone()),
+            ),
+        ],
+    )
+}
+
+fn fuzzy_section(gallery: &InputGallery, theme: &Theme, cx: &App) -> AnyElement {
+    let ranked = gallery.ranked_branches(cx);
     let items = ranked.iter().map(|(name, detail, hits)| {
         let mut item = FuzzyItem::new(*name).matches(hits.clone());
         if !detail.is_empty() {
@@ -640,7 +818,7 @@ fn fuzzy_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
                         .under_text_field(true)
                         .empty(EmptyState::new(format!(
                             "Nothing matches \"{}\".",
-                            gallery.filter.text()
+                            gallery.filter.read(cx).text()
                         ))),
                 ),
             ),
@@ -677,8 +855,8 @@ fn fuzzy_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
     )
 }
 
-fn filter_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
-    let shown = gallery.ranked_branches().len();
+fn filter_section(gallery: &InputGallery, theme: &Theme, cx: &App) -> AnyElement {
+    let shown = gallery.ranked_branches(cx).len();
     let total = BRANCHES.len();
     LAYOUT.section(
         "filter bar",
@@ -690,25 +868,19 @@ fn filter_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
                 card(
                     theme,
                     px(460.0),
-                    FilterBar::new(gallery.filter.shared_text(), shown, total)
-                        .caret(gallery.filter.caret_chars())
-                        .focused(gallery.capture == Capture::Filter)
-                        .placeholder("filter branches"),
+                    FilterBar::new(gallery.filter.clone(), shown, total),
                 ),
             ),
+            // Stage two of the two-stage `Esc` is the retained chip, which belongs to
+            // `PaneHeader`; the bar itself exists only while the input owns the keyboard.
             LAYOUT.labeled(
-                "retained (input exited)",
+                "no match",
                 theme,
                 card(
                     theme,
                     px(460.0),
-                    FilterBar::new("rut", 2, 12).focused(false),
+                    FilterBar::new(gallery.filter_no_match.clone(), 0, 12),
                 ),
-            ),
-            LAYOUT.labeled(
-                "no match",
-                theme,
-                card(theme, px(460.0), FilterBar::new("zzz", 0, 12)),
             ),
         ],
     )
@@ -819,6 +991,15 @@ fn choice_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
                                 .label_width(px(150.0))
                                 .unit("s")
                                 .invalid("the daemon refused this value"),
+                        )
+                        // Editing: the row hands the field its live editor, and the label,
+                        // the unit and the row chrome stay exactly where they were.
+                        .child(
+                            NumberField::labeled("grace", 2_000)
+                                .label_width(px(150.0))
+                                .unit("ms")
+                                .min(0)
+                                .editor(gallery.number_row_editor.clone()),
                         ),
                 ),
             ),
@@ -969,22 +1150,20 @@ fn expanded_confirm() -> ConfirmDialog {
 impl Render for InputGallery {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let editor_focused = self.editor.focus_handle(cx).is_focused(window);
-        let typing = editor_focused || self.capture != Capture::None;
+        let typing = self.live_input_focused(window, cx) || self.capture != Capture::None;
 
         let sections = vec![
-            text_field_section(&theme),
-            live_editor_section(self, &theme, cx),
-            fuzzy_section(self, &theme),
-            filter_section(self, &theme),
+            branch_section(self, &theme, cx),
+            text_input_section(self, &theme),
+            fuzzy_section(self, &theme, cx),
+            filter_section(self, &theme, cx),
             choice_section(self, &theme),
             tabs_and_select_section(self, &theme),
             confirm_hint_section(self, &theme),
         ];
 
-        let (palette_sections, matched, total) = self.palette_sections();
-        let palette_query = self.palette_query.shared_text();
-        let palette_caret = self.palette_query.caret_chars();
+        let (palette_sections, matched, total) = self.palette_sections(cx);
+        let palette_query = self.palette_query.clone();
         let palette_cursor = self.palette_cursor;
 
         div()
@@ -1016,7 +1195,6 @@ impl Render for InputGallery {
             .on_action(cx.listener(Self::confirm_expanded))
             .on_action(cx.listener(Self::confirm_yes))
             .on_action(cx.listener(Self::confirm_no))
-            .on_key_down(cx.listener(Self::on_key_down))
             .relative()
             .size_full()
             .flex()
@@ -1091,7 +1269,6 @@ impl Render for InputGallery {
                     Overlay::new().content(
                         palette_sections.into_iter().fold(
                             Palette::new(palette_query)
-                                .caret(palette_caret)
                                 .cursor(palette_cursor)
                                 .total(total)
                                 .empty("Nothing matches that query."),
@@ -1110,11 +1287,12 @@ impl Render for InputGallery {
 }
 
 fn main() {
-    support::runtime::run(
+    support::runtime::run_with_window(
         "fleet-ui-kit · input gallery",
         (1180.0, 880.0),
         Quit,
         |cx| {
+            cx.bind_keys(support::input::bindings());
             cx.bind_keys([
                 // Always available, in both modes.
                 KeyBinding::new("ctrl-t", ToggleTheme, None),

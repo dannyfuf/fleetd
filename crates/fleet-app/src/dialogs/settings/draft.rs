@@ -13,8 +13,11 @@ pub struct SettingsState {
     pub(crate) row: usize,
     /// The live keep-alive match counts.
     pub(crate) matches: Vec<KeepAliveRuleMatch>,
-    /// The buffer backing the focused text or number row.
-    pub(crate) editing: Option<TextFieldState>,
+    /// The raw text of the row being edited, mirrored from `DialogHost.settings_input`.
+    ///
+    /// It is `Some` exactly while that editor exists, which is what publishes
+    /// `Dialog > SettingsEditing`.
+    pub(crate) editing: Option<String>,
     /// The exact error from a refused write.
     pub(crate) error: Option<String>,
     /// Config load failure; `Enter` retries it.
@@ -78,11 +81,9 @@ impl SettingsState {
         };
         match self.focused_row().map(|row| row.kind) {
             Some(RowKind::Text(_)) => true,
-            Some(RowKind::Number { min, .. }) => input
-                .text()
-                .trim()
-                .parse::<i64>()
-                .is_ok_and(|value| value >= min),
+            Some(RowKind::Number { min, .. }) => {
+                input.trim().parse::<i64>().is_ok_and(|value| value >= min)
+            }
             _ => false,
         }
     }
@@ -418,30 +419,30 @@ fn mode_choice(kind: AgentKind, mode: PermissionMode) -> RowKind {
     choice(current, &labels, current)
 }
 
-/// `j` / `k` move the cursor — unless a text input has it, where they type (§3.8.6).
+/// `j` / `k` move the cursor (§3.8.6).
 ///
-/// Landing on a row deliberately does **not** focus its input: §3.8.6 surrenders `j`/`k` only
-/// "while a text input has focus", and a row that grabbed the keyboard on arrival would make
-/// the next `j` type into the value instead of moving on. Typing (or `Backspace` / `ctrl-u` /
-/// `ctrl-w`) is what focuses an input; moving away drops it again.
-pub(super) fn move_row(state: &Entity<AppState>, delta: isize, literal: &str, cx: &mut App) {
-    if !literal.is_empty() && insert_literal(state, literal, cx) {
-        return;
-    }
+/// Landing on a row deliberately does **not** focus its input: §3.8.6 surrenders `j` / `k`
+/// only while a text input has focus, and a row that grabbed the keyboard on arrival would
+/// make the next `j` type into the value instead of moving on. `Enter` is what opens a row for
+/// editing; moving away closes it again.
+pub(super) fn move_row(
+    state: &Entity<AppState>,
+    delta: isize,
+    focus: &FocusHandle,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let len = focused_len(state, cx);
     with_host(state, cx, |host| {
         host.settings.row = step(host.settings.row, delta, len);
-        host.settings.editing = None;
         host.settings.scroll.scroll_to_item(host.settings.row);
     });
+    end_editing(state, focus, window, cx);
     notify(state, cx);
 }
 
-/// `←` / `→` cycle a choice — or type, for the same reason.
-pub(super) fn cycle_row(state: &Entity<AppState>, delta: isize, literal: &str, cx: &mut App) {
-    if insert_literal(state, literal, cx) {
-        return;
-    }
+/// `h` / `l` and `\u{2190}` / `\u{2192}` cycle a closed choice while no row owns the keyboard.
+pub(super) fn cycle_row(state: &Entity<AppState>, delta: isize, cx: &mut App) {
     let Some(row) = focused_row(state, cx) else {
         return;
     };
@@ -456,9 +457,6 @@ pub(super) fn cycle_row(state: &Entity<AppState>, delta: isize, literal: &str, c
 
 /// `Space` toggles the switch under the cursor.
 pub(super) fn toggle_row(state: &Entity<AppState>, cx: &mut App) {
-    if insert_literal(state, " ", cx) {
-        return;
-    }
     let Some(row) = focused_row(state, cx) else {
         return;
     };
@@ -471,130 +469,113 @@ pub(super) fn toggle_row(state: &Entity<AppState>, cx: &mut App) {
     notify(state, cx);
 }
 
-/// Applies an edit to the focused row's input, focusing it first if it is not focused yet.
-pub(super) fn edit_focused(
+/// `Enter` while browsing: open the focused text or number row for editing.
+///
+/// Returns whether it did. Every other row — a toggle, a cycler, a read-only fact — leaves
+/// `Enter` its ordinary meaning, which in this dialog is Save.
+pub(super) fn confirm_opens_editing(
     state: &Entity<AppState>,
+    window: &mut Window,
     cx: &mut App,
-    edit: fn(&mut TextFieldState) -> bool,
-) {
-    if !begin_editing(state, cx) {
-        return;
-    }
-    let changed = with_host(state, cx, |host| {
-        host.settings.editing.as_mut().is_some_and(edit)
-    });
-    if changed {
-        flush(state, cx);
-    }
-}
-
-/// Moves the caret of an **already focused** input. Returns whether there was one.
-pub(super) fn move_caret(
-    state: &Entity<AppState>,
-    cx: &mut App,
-    move_to: fn(&mut TextFieldState) -> bool,
 ) -> bool {
-    let moved = with_host(state, cx, |host| match host.settings.editing.as_mut() {
-        Some(input) => {
-            move_to(input);
-            true
-        }
-        None => false,
-    });
-    if moved {
-        notify(state, cx);
+    if read_host(state, cx, |host, _| host.settings_input.is_some()) {
+        return false;
     }
-    moved
+    begin_editing(state, window, cx)
 }
 
-/// Whether the focused row's input would take this text at all.
+/// Materializes the focused row's editor and hands it the keyboard.
 ///
-/// A number row is not a free-text field. Letting a `j` from the `move down` binding into its
-/// buffer makes `commit_value` fail to parse the result and clamp the setting to its minimum —
-/// which is how `j` on `Sleep › Grace` used to wipe `2000` to `0`. Rejecting the character here
-/// is also what lets the key fall through to row navigation.
-pub(super) fn accepts(kind: &RowKind, text: &str) -> bool {
-    match kind {
-        RowKind::Text(_) => true,
-        RowKind::Number { .. } => !text.is_empty() && text.chars().all(|c| c.is_ascii_digit()),
-        RowKind::Toggle(_) | RowKind::Choice { .. } | RowKind::Fact(_) => false,
-    }
-}
-
-/// Inserts a bound key's literal character when a text input owns the keyboard.
-///
-/// §3.8.6 surrenders `j`, `k`, `h`, `l` and `Space` to a **focused** input. gpui dispatches
-/// those bindings before any key listener, so the surrender has to happen inside the action
-/// handler: there is no other place that sees the key. Returning `false` hands the key back to
-/// its normal meaning, which is why an unfocused row — or a number row facing a letter — still
-/// navigates.
-pub(super) fn insert_literal(state: &Entity<AppState>, literal: &str, cx: &mut App) -> bool {
-    if literal.is_empty() {
-        return false;
-    }
-    if !with_host(state, cx, |host| host.settings.editing.is_some()) {
-        return false;
-    }
-    let Some(row) = focused_row(state, cx) else {
-        return false;
-    };
-    if !accepts(&row.kind, literal) {
-        return false;
-    }
-    with_host(state, cx, |host| {
-        if let Some(input) = host.settings.editing.as_mut() {
-            input.insert(literal);
-        }
-    });
-    flush(state, cx);
-    true
-}
-
-/// Types a printable key into the focused text or number row.
-pub(super) fn type_into_row(state: &Entity<AppState>, event: &KeyDownEvent, cx: &mut App) -> bool {
-    let Some(text) = typed_char(event) else {
-        return false;
-    };
-    let Some(row) = focused_row(state, cx) else {
-        return false;
-    };
-    if !accepts(&row.kind, text) {
-        return false;
-    }
-    if !begin_editing(state, cx) {
-        return false;
-    }
-    with_host(state, cx, |host| {
-        if let Some(input) = host.settings.editing.as_mut() {
-            input.insert(text);
-        }
-    });
-    flush(state, cx);
-    true
-}
-
-/// Seeds the edit buffer from the focused row. Returns whether that row accepts typing.
-pub(super) fn begin_editing(state: &Entity<AppState>, cx: &mut App) -> bool {
-    if with_host(state, cx, |host| host.settings.editing.is_some()) {
+/// Returns whether the row takes typing at all; a toggle, a cycler and a read-only fact do
+/// not, which is what lets `Enter` keep its ordinary meaning on them.
+pub(super) fn begin_editing(state: &Entity<AppState>, window: &mut Window, cx: &mut App) -> bool {
+    if read_host(state, cx, |host, _| host.settings_input.is_some()) {
         return true;
     }
-    let Some(row) = focused_row(state, cx) else {
+    let Some(focused) = focused_row(state, cx) else {
         return false;
     };
-    let seed = match row.kind {
-        RowKind::Text(value) => value,
-        RowKind::Number { value, .. } => value.to_string(),
-        _ => {
-            with_host(state, cx, |host| host.settings.editing = None);
-            return false;
-        }
+    let (text, min) = match &focused.kind {
+        RowKind::Text(value) => (value.clone(), None),
+        RowKind::Number { value, min, .. } => (value.to_string(), Some(*min)),
+        RowKind::Toggle(_) | RowKind::Choice { .. } | RowKind::Fact(_) => return false,
     };
-    with_host(state, cx, |host| {
-        if host.settings.editing.is_none() {
-            host.settings.editing = Some(TextFieldState::from_text(seed));
-        }
+    // A number row is drawn by `NumberField`, which keeps the label and the unit around the
+    // editor; a text row's editor carries its own label.
+    let label = min.is_none().then(|| {
+        read_host(state, cx, |host, _| {
+            host.settings
+                .prepared
+                .get(host.settings.row)
+                .map(|row| row.label.clone())
+        })
     });
+    let seed = text.clone();
+    let input = cx.new(|cx| {
+        let mut input = TextInput::new(InputMode::SingleLine, cx);
+        input.set_mono(true, cx);
+        input.set_hide_status_line(true, cx);
+        if let Some(label) = label.flatten() {
+            input.set_label(Some(label.into()), cx);
+        }
+        if min.is_some() {
+            // A number row is not a free-text field: a letter that reached the buffer would
+            // make `commit_value` fail to parse it and clamp the setting to its minimum.
+            input.set_filter(Some(|character: char| character.is_ascii_digit()), cx);
+        }
+        input.set_text(seed, cx);
+        input
+    });
+    let host = crate::dialogs::host::host_for(state, cx);
+    host.update(cx, |host, _| {
+        host.settings.editing = Some(text);
+        host.settings_input = Some(input.clone());
+    });
+    let weak_state = state.downgrade();
+    let subscription = cx.subscribe(&input, move |input, event, cx| {
+        if !matches!(event, TextInputEvent::Changed) {
+            return;
+        }
+        let Some(state) = weak_state.upgrade() else {
+            return;
+        };
+        let typed = input.read(cx).text().to_owned();
+        with_host(&state, cx, |host| host.settings.editing = Some(typed));
+        if let Some(min) = min {
+            let invalid = (!read_host(&state, cx, |host, _| host.settings.editing_is_valid()))
+                .then(|| format!("must be an integer of at least {min}"));
+            let input = input.clone();
+            cx.defer(move |cx| {
+                input.update(cx, |input, cx| {
+                    input.set_invalid(invalid.map(Into::into), cx)
+                })
+            });
+        }
+        flush(&state, cx);
+    });
+    host.update(cx, |host, _| {
+        host.settings_input_subscription = Some(subscription)
+    });
+    input.update(cx, |input, cx| input.focus(window, cx));
+    notify(state, cx);
     true
+}
+
+/// Drops the row editor and hands the keyboard back to the dialog.
+pub(super) fn end_editing(
+    state: &Entity<AppState>,
+    focus: &FocusHandle,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let had_input = with_host(state, cx, |host| {
+        host.settings.editing = None;
+        host.settings_input_subscription = None;
+        host.settings_input.take().is_some()
+    });
+    if had_input {
+        window.focus(focus, cx);
+    }
 }
 
 /// Writes the edit buffer into the draft configuration.
@@ -605,7 +586,7 @@ pub(super) fn flush(state: &Entity<AppState>, cx: &mut App) {
             return;
         };
         if let (Some(config), Some(input)) = (&mut draft.config, &draft.editing) {
-            let _valid = commit_value(config, &id, input.text());
+            let _valid = commit_value(config, &id, input);
         }
         draft.update_selected();
     });
@@ -630,13 +611,19 @@ pub(super) fn focused_len(state: &Entity<AppState>, cx: &mut App) -> usize {
     })
 }
 
-pub(super) fn move_section(state: &Entity<AppState>, delta: isize, cx: &mut App) {
+pub(super) fn move_section(
+    state: &Entity<AppState>,
+    delta: isize,
+    focus: &FocusHandle,
+    window: &mut Window,
+    cx: &mut App,
+) {
     with_host(state, cx, |host| {
         host.settings.section = step(host.settings.section, delta, Section::ALL.len());
         host.settings.row = 0;
-        host.settings.editing = None;
         host.settings.scroll.scroll_to_item(host.settings.row);
     });
+    end_editing(state, focus, window, cx);
     refresh_rows(state, cx);
     notify(state, cx);
 }

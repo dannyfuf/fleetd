@@ -10,22 +10,83 @@ impl Drop for Dropped {
 }
 
 #[gpui::test]
+fn editing_context_words_follow_the_existing_dialog_drafts(cx: &mut TestAppContext) {
+    let mut host = DialogHost::default();
+
+    assert_eq!(
+        dialog_key_context(&Dialogs::CreateWorktree, &host),
+        "CreateEditing"
+    );
+    host.create.field = create_worktree::Field::Host;
+    assert_eq!(
+        dialog_key_context(&Dialogs::CreateWorktree, &host),
+        "Create"
+    );
+
+    assert_eq!(dialog_key_context(&Dialogs::Settings, &host), "Settings");
+    host.settings.editing = Some("claude".to_owned());
+    assert_eq!(
+        dialog_key_context(&Dialogs::Settings, &host),
+        "SettingsEditing"
+    );
+
+    assert_eq!(
+        dialog_key_context(&Dialogs::BoardSettings, &host),
+        "BoardSettings"
+    );
+    host.board_settings_input =
+        Some(cx.new(|cx| TextInput::new(fleet_ui_kit::InputMode::SingleLine, cx)));
+    assert_eq!(
+        dialog_key_context(&Dialogs::BoardSettings, &host),
+        "BoardSettingsEditing"
+    );
+    assert_eq!(
+        dialog_key_context(&Dialogs::CardPicker, &host),
+        "CardPicker"
+    );
+    assert_eq!(
+        dialog_key_context(&Dialogs::CardDetail, &host),
+        "CardDetail"
+    );
+}
+
+#[gpui::test]
+fn derived_dialog_word_is_mirrored_into_the_app_context_chain(cx: &mut TestAppContext) {
+    let state = cx.new(|_| {
+        let mut state = AppState::new("/tmp/dialog-context", Instant::now());
+        state.open_overlay(Overlay::Dialog(Dialogs::Settings));
+        state
+    });
+    cx.update(|cx| {
+        let host = host_for(&state, cx);
+        host.update(cx, |host, _| {
+            host.settings.editing = Some("claude".to_owned());
+        });
+        sync_dialog_key_context(&state, &host, cx);
+        assert_eq!(
+            state.read(cx).context_chain(),
+            vec!["Dialog", "SettingsEditing"]
+        );
+    });
+}
+
+#[gpui::test]
 fn drafts_are_isolated_and_released_with_their_window_model(cx: &mut TestAppContext) {
     let first = cx.new(|_| AppState::new("/tmp/first", Instant::now()));
     let second = cx.new(|_| AppState::new("/tmp/second", Instant::now()));
     let weak = cx.update(|cx| {
         with_host(&first, cx, |host| {
             host.open = Some(Dialogs::NewContext);
-            host.context.name = TextFieldState::from_text("first");
+            host.context.name = "first".to_owned();
         });
         with_host(&second, cx, |host| {
             host.open = Some(Dialogs::NewContext);
-            host.context.name = TextFieldState::from_text("second");
+            host.context.name = "second".to_owned();
         });
         close(&first, cx);
         assert!(with_host(&first, cx, |host| host.context.name.is_empty()));
         assert_eq!(
-            with_host(&second, cx, |host| host.context.name.text().to_owned()),
+            with_host(&second, cx, |host| host.context.name.clone()),
             "second"
         );
         host_for(&first, cx).downgrade()

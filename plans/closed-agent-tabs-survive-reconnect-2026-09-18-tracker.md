@@ -92,7 +92,7 @@
   `relaunch_seeds_closed_threads_before_the_first_snapshot` (the path-A relaunch test),
   `reopening_a_closed_caller_from_the_picker_sends_agent_thread_reopen`,
   `agent_closed_fetch_is_sent_only_after_capability_negotiation`.
-- 2026-09-19 — T09 done: NATIVE-AGENTS §2/§8/§10/§13, APP-CONTRACTS, UX-SPEC, ADR 0018, README
+- 2026-09-19 — T09 done: NATIVE-AGENTS §2/§8/§10/§13, APP-CONTRACTS, UX-SPEC, ADR 0019, README
   index. Orchestrator review pass in T10 tightens the ADR's claim about what the harness scenario
   proves (it is a guard for path B; it passed before the fix too).
 - 2026-09-19 — `make restart` is deliberately NOT run by the orchestrator: this very session is a

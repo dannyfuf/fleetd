@@ -254,7 +254,7 @@ stacked; oldest evicted first.
 | Scroll | `SCROLL` | `Workspace > Scroll` |
 | Filter | `FILTER` | `Filter` |
 | Palette | `PALETTE` | `Palette` |
-| Dialog | `DIALOG` | `Dialog > <name>` |
+| Dialog | `DIALOG` | browsing `Dialog > <name>`; text ownership `Dialog > <name>Editing > FleetTextInput` |
 | Jobs overlay | `JOBS` | `Jobs` |
 
 The word is 84 px wide, centered in the status bar, present on **every** screen including the
@@ -640,7 +640,7 @@ because they are cross-screen rules:
 - **The board owns the body and its own keys.** While it is up, the Hub's rail and list are not
   composed at all, and the board's bindings shadow the inherited `Hub` ones (`docs/KEYMAP.md`
   "Board and card detail").
-- **`/` is not the Hub's filter overlay.** The board's rows are cards in columns, not worktrees, so
+- **`/` is not the Hub's filter.** The board's rows are cards in columns, not worktrees, so
   it keeps its own query in `BoardState.filter` and publishes the `Filter` key context while the
   input has the keyboard — which is what makes bare letters type instead of fire (§3.10's two-stage
   `Esc` still applies: leave the input, then clear the filter).
@@ -721,7 +721,7 @@ close buttons, a breadcrumb (the session name in the status bar is the breadcrum
 | Terminal agent hook attention | the PTY tab keeps the same static amber `NeedsYou` dot used by native tabs, including while selected; each session edge into permission, question, plan, or finished uses the configured toast/sound channels once |
 | Terminal exited | grid frozen at the last frame + the exit strip |
 | Alt-screen app running | the scroll pill is **suppressed**; `ctrl-s [` shows the 1.6 s toast `no scrollback in alt-screen` |
-| Non-agent native pane selected (`fleet://`, currently `lg`) | the grid, the scroll pill and the exit strip are all absent — there is no PTY. `ctrl-s [` toasts `no scrollback in this tab`; every key except `ctrl-s` belongs to the pane. The mode word stays `TERMINAL`: §2.8 has eight words and this is still "the Workspace has the keyboard". A native **agent thread** is the separate §3.6.0 surface and `ctrl-s [` enters its transcript scroll mode. |
+| Non-agent native pane selected (`fleet://`: `lg`, or the `board` tab of `ctrl-s b`) | the grid, the scroll pill and the exit strip are all absent — there is no PTY. `ctrl-s [` toasts `no scrollback in this tab`; every key except `ctrl-s` belongs to the pane. The mode word stays `TERMINAL`: §2.8 has eight words and this is still "the Workspace has the keyboard". A native **agent thread** is the separate §3.6.0 surface and `ctrl-s [` enters its transcript scroll mode. |
 | Job running for this worktree | `⟳n` in the header and the status-bar ticker; **never** an overlay on the grid |
 | Daemon lost | grid dims to 55 %, keys are dropped (not buffered), and the §3.12 C banner replaces the header |
 
@@ -741,12 +741,34 @@ until the daemon stops listing that worktree. Its own keys are documented in
 Fleet. **[D-8] still holds**: the pane's key-hint bar lives *inside* the pane, which is its own
 key context, so its bare keys are not "drawn over Terminal mode".
 
+The `board` tab `ctrl-s b` opens is the other native tab, and it is Fleet's own board rather
+than an embedded app: it draws **this worktree's** board — `EnsureWorktreeBoard(worktree)`, not
+the active context's — with the same columns, cards, dialogs and keys the Hub's board tab has,
+under the key context `Fleet > Workspace > Native > Board` (`docs/KEYMAP.md`). It builds
+nothing per worktree: the Hub tab and this one share one board mirror behind a scope, and
+selecting the tab is what points that mirror at the worktree. Selecting any other tab, closing
+the tab or leaving the Workspace points it back at the active context. `o` on a card linked to
+the worktree you are already standing in answers `Already in this worktree` rather than
+re-opening the session.
+
+**The board tab is not in `windows[]`.** `ctrl-s b` asks fleetd for it the first time and
+selects it every time after, so it is a tab the session acquired rather than one it was born
+with: sleeping the session closes it with every other non-kept tab, and waking does not bring
+it back. That is one keystroke to undo — `ctrl-s b` again — and it is the reason the key is
+worth memorising rather than the tab position. A user who wants it permanent adds
+`{"name":"board","command":"fleet://board"}` to `windows[]` in `config.json` (§3.8.6); it is
+then created with every new session and rebuilt on wake like `lg`, and `ctrl-s b` still selects
+it instead of adding a second one, because the tab is recognised by its reserved command and
+never by its name — rename it with `ctrl-s ,` and the key still finds it.
+
 **Keyboard:** all keys → PTY except `cmd-c` copy selection and `cmd-v` paste — or, on a native
 tab, every key except `ctrl-s` → the pane; `ctrl-s` then
 `ctrl-s` (literal) · `s` hub · `1`–`9` tab ·
 `h`/`l`, `p`/`n` prev/next tab · `Tab` last terminal tab (KEYMAP A2) · `w` last session (KEYMAP A3) ·
 `W` session switcher (KEYMAP A4) · `u` select this child's caller · `d` `AGENTS` picker ·
 `S` sleep this session and return to Hub (KEYMAP A5) · `c` new tab ·
+`b` this worktree's board tab — created the first time, selected every time; on a session with
+no worktree it toasts `boards belong to worktrees` ·
 `x` close tab (confirm if a keep-alive process runs) · `,` rename · `[` scroll · `]` paste ·
 `a`/`A` new native Claude/Codex agent thread · `F` the agent PTY popup (the terminal fallback) · `r` restart the exited command (KEYMAP A10) · `y` copy worktree path (KEYMAP A11)
 · `z` zoom · `!` sticky error slot (prefixed: `^s !`, KEYMAP A18) · `J` jobs · `?` help · `Esc` cancel
@@ -1011,9 +1033,11 @@ anywhere** — the hint row states the keys, and this is a keyboard app.
 | Quit (`ctrl-q`) | 520 × auto | `circle-question` |
 | Quit + stop daemon | 560 × auto | `power` |
 
-Dialog text inputs follow KEYMAP exactly: printable keys, `Backspace`, `ctrl-w`, `ctrl-u`,
-`ctrl-a`/`ctrl-e`, `←`/`→`; lists **under a text field** use `ctrl-n`/`ctrl-p` or `↓`/`↑` and
-never `j`/`k`. **A dialog with no text field (Assign, Settings list, Confirm) does bind `j`/`k`.**
+Every dialog field is a live `TextInput`, and editing is the whole `FleetTextInput` table of
+KEYMAP — printable keys, `Backspace`, `ctrl-w`, `ctrl-u`, `ctrl-a`/`ctrl-e`, motion, selection
+and undo. Lists **under a text field** use `ctrl-n`/`ctrl-p` or `↓`/`↑` and never `j`/`k`.
+**A dialog row with no editor open (Assign, the Settings list while browsing, Confirm) does bind
+`j`/`k`.**
 
 ---
 
@@ -1268,9 +1292,9 @@ its one-line explainer is the **only** teaching copy in the app, because `owners
 field whose purpose is not guessable.
 
 **Edit variant** (`E`, KEYMAP A15): title `⬚ Edit context "buk"`, the id shown read-only and faint
-(read-only outright once repos exist), and **context delete lives here** as `ctrl-d` → the
+(read-only outright once repos exist), and **context delete lives here** as `ctrl-shift-d` → the
 expanded confirm. **[D-11]** `D` therefore keeps its KEYMAP-defined meaning as *delete active
-context* but is **routed through the same expanded confirm with `Y`**; `E` + `ctrl-d` is the
+context* but is **routed through the same expanded confirm with `Y`**; `E` + `ctrl-shift-d` is the
 discoverable path. Rationale for not unbinding `D`: KEYMAP is authoritative and a spec must not
 silently retire a documented binding; the risk is handled by `Y` escalation, the fact list and
 the trash undo (`u`), not by hiding the key.
@@ -1313,10 +1337,12 @@ The footer sentence is mandatory: the action *sounds* destructive and is not.
 
 #### 3.8.6 Settings (`,`)
 
-720 × 560, two columns: a 180 px section rail and a 540 px pane. Editable fields carry a
-normal-contrast value in an input box; read-only facts are `fg.muted` **with no input chrome** —
-the absence of a box is how "you cannot edit this here" is said, instead of a disabled style.
-Each section shows a faint trailing `edit in config.json` **once**, not per row.
+720 × 560, two columns: a 180 px section rail and a 540 px pane. A value is in an input box
+**only while it is being edited**: browsing draws every text value as a `label   value` fact
+line, an editable one in the data face and an unset one as `—`, and `Enter` is what opens a box
+on the row under the cursor. Nothing here is ever drawn in a disabled style. A row that cannot be
+edited here has nothing behind `Enter`, and its section says where its editor is with a faint
+trailing `edit in config.json` **once**, not per row.
 
 | Section | Rows |
 | --- | --- |
@@ -1341,8 +1367,16 @@ mechanism that makes KEYMAP's `ctrl-q` clause implementable at all (§3.8.9).
 footer line with the exact error and keeps the dialog open. Dirty state marks the title
 `⚙ Settings ·` in accent and the footer becomes `⏎ save · esc discard changes`.
 
-**Keyboard:** `j`/`k`, `↓`/`↑`, `ctrl-n`/`ctrl-p` move (`j`/`k` are surrendered while a text input
-has focus) · `Space` toggles · `←`/`→` cycles a choice · `Enter` saves · `Esc` cancels.
+**Keyboard:** while browsing, `j`/`k`, `↓`/`↑`, `ctrl-n`/`ctrl-p` move · `Space` toggles ·
+`h`/`l` and `←`/`→` cycle a choice · `Enter` **opens** the focused text or number row for
+editing, and saves on every other row · `Esc` discards.
+
+Landing on a row deliberately does not open it: a row that grabbed the keyboard on arrival would
+make the next `j` type into the value instead of moving on. `Enter` is the gesture that opens it,
+and the row then materializes a live `TextInput` — a number row keeps its `NumberField` chrome
+around that editor and filters to ASCII digits, so `j` can never become part of a number. While
+that editor owns the keyboard every printable key types, `Enter` saves, and `↓`/`↑` or
+`ctrl-n`/`ctrl-p` move to the next row and close it.
 
 ---
 
@@ -1520,9 +1554,11 @@ The filter **replaces the pane header in place** — 30 px, same row, no overlay
 | `esc` hint | faint, right of the count | right | the two-stage `Esc` is non-obvious |
 | Retained chip | `⌕rut` in accent inside the restored header, with a blue dot | same row | a hidden active filter is the classic "where did my rows go" bug |
 
-**Keyboard:** printable · `Backspace` · `ctrl-w` · `ctrl-u` · `ctrl-n`/`↓` and `ctrl-p`/`↑` move
-the list cursor **while still typing** · `Enter` opens the selected row (so `/rut⏎` is a complete
-open in 5 keys) · first `Esc` leaves the input keeping the filter · second `Esc` clears it.
+**Keyboard:** the query is a live `TextInput`, so editing is the whole `FleetTextInput` table
+(KEYMAP) — printable, `Backspace`, `ctrl-w`, `ctrl-u`, motion, selection, undo. `ctrl-n`/`↓` and
+`ctrl-p`/`↑` move the list cursor **while still typing** · `Enter` opens the selected row (so
+`/rut⏎` is a complete open in 5 keys) · first `Esc` leaves the input keeping the filter · second
+`Esc` clears it. Typing narrows the list and returns the cursor to its top row.
 **[D-15]** `Esc` in the Hub **never quits the app** — swarm's "clear filter, else quit" is
 retired (KEYMAP A13).
 
@@ -1736,7 +1772,7 @@ all applied there; cite `docs/KEYMAP.md` rather than restating a binding here.
 | D-8 | Bare-key affordances drawn over Terminal mode | §3.6: every Workspace affordance is prefixed |
 | D-9 | Completed/failed jobs decayed on a timer | §3.7: failures never auto-dismiss; successes obey a user-set retention |
 | D-10 | Uniform `y` for everything up to a context cascade | §3.8.3: `Y` escalation on unknown facts, and for repo/context delete |
-| D-11 | `D` (context delete) adjacency risk | §3.8.4: `D` kept, routed through the expanded `Y` confirm; `E` + `ctrl-d` is the discoverable path |
+| D-11 | `D` (context delete) adjacency risk | §3.8.4: `D` kept, routed through the expanded `Y` confirm; `E` + `ctrl-shift-d` is the discoverable path |
 | D-12 | Assign dialog bound only `⌃n`/`⌃p` | §3.8.5: `j`/`k` restored — the dialog has no text field |
 | D-13 | Settings could not edit grace / pool / TTLs / intervals | §3.8.6: all editable; `windows`/`hosts` read-only with a 1-key `E` escape to `config.json` |
 | D-14 | `ctrl-q` rule contradicted KEYMAP in **both** rival proposals | §3.8.8: opt-in warning implemented exactly as KEYMAP words it |
@@ -1814,8 +1850,8 @@ each component's full API. `Modal` is an alias of `Dialog` and `TabBar` an alias
 
 | Component | Responsibility | Used by |
 | --- | --- | --- |
-| `TextField` | Printable + `Backspace` + `ctrl-w`/`ctrl-u`/`ctrl-a`/`ctrl-e`, blue caret, inline validation line that replaces the preview slot with zero layout shift | Create, Clone, Context, Settings, Filter, Palette |
-| `FuzzyList` | Debounced query → ranked rows, capped, `ctrl-n`/`ctrl-p` + arrows (and `j`/`k` **only** when no text field is present) | Clone results, Create base list, Palette, Assign |
+| `TextInput` | The one editor (ADR 0020): the whole editing vocabulary, selection, undo, IME and clipboard, in single-line and multi-line modes | every text surface — Create, Clone, Context, Rename, Hooks, Settings, board dialogs, Filter, Palette, agent composer, lazygit prompt |
+| `FuzzyList` | Debounced query → ranked rows, capped, `ctrl-n`/`ctrl-p` + arrows (and `j`/`k` **only** when no text input is present) | Clone results, Create base list, Palette, Assign |
 | `FilterBar` | In-place pane-header replacement with live `shown/total`, two-stage `Esc`, retained chip | every list (§3.10) |
 | `Cycler` | `◂ value ▸`, `←`/`→` | host selector, Settings choices |
 | `Toggle` | `[x]` / `[ ]`, `Space` | Settings |
@@ -1910,18 +1946,37 @@ limits when an already-completed watch is first discovered.
 
 ## Board
 
-*One board per context, one column per status, one key per edit* (BOARD §8).
+*One unscoped board per context and, on demand, one per worktree; one column per status, one key
+per edit* (BOARD §8).
 
 ### Placement
 
-The board is the Hub's third screen tab (`g b`, tab label `Board`), rendered by
-`screens::board::BoardScreen` in the Hub's body. It replaces the worktrees list and the repos
-rail in place; the context bar above it is what scopes it, because the board shown is always
-`EnsureBoard(active_context)`. Switching context clears the board and re-ensures the new one.
+The board has **two surfaces and one pane**. The Hub's third screen tab (`g b`, tab label
+`Board`) shows the active context's board; a worktree Workspace's `fleet://board` tab (`ctrl-s b`,
+§3.6) shows that worktree's. Both are drawn by the same `screens::board::BoardScreen` — the two
+are never on screen at once, so there is one of it, one filter editor and one mirror behind them.
 
-The `Board` tab carries the active context's `Snapshot.boards` summary: `open_count` as the tab
-count, and a `•` appended to the label when `conflict_count > 0`. The tab spins while a load is
-in flight.
+On the Hub the board replaces the worktrees list and the repos rail in place, and the context bar
+above it is what scopes it: the board shown is always `EnsureBoard(active_context)`. Switching
+context clears the board and re-ensures the new one.
+
+Inside a worktree session the `fleet://board` tab shows `EnsureWorktreeBoard(worktree)` instead —
+the board of the worktree whose Workspace you are standing in, whatever the active context's
+board holds. Selecting the tab is what asks for it; selecting another tab, leaving the Workspace
+or closing the tab hands the pane back to the context board. **The Hub never shows a worktree
+board's cards**, and the worktree tab never shows the context board's: a board belongs to exactly
+one scope, so `g b` and `ctrl-s b` answer different questions and neither inherits the other's
+answer. A daemon too old to serve worktree boards refuses the tab and says so
+(`this daemon does not support worktree boards; run fleet daemon restart`, §2.7) rather than
+opening a tab it could never fill.
+
+The `Board` tab carries the active context's **unscoped** `Snapshot.boards` summary: `open_count`
+as the tab count, and a `•` appended to the label when `conflict_count > 0`. Worktree-scoped
+summaries from that context are ignored — the Hub's count is the context board's count, not the
+sum of everything in the context. The tab spins while a load is in flight. The Workspace's board
+tab carries no open count and no conflict dot: its only chrome is the native-tab glyph every
+`fleet://` tab has, because the tab strip is a strip of terminals and a count there would be the
+one number in it that is not about a terminal.
 
 ### The pane
 
@@ -1952,12 +2007,14 @@ the app never invents an order the daemon does not agree with.
 
 ### States
 
-* **cold** — skeleton columns while the first `EnsureBoard` is in flight;
+* **cold** — skeleton columns while the first load is in flight, whichever request the scope
+  named (`EnsureBoard` on the Hub, `EnsureWorktreeBoard` in the worktree tab);
 * **failed** — the message verbatim in a sticky row plus `The board could not be loaded. · r reload`;
-* **no context, no daemon** — the two states where a load can never go out take the failed
-  shape rather than cold columns, because skeletons promise a request that was never sent:
-  `fleetd is not reachable`, and `No active context — pick one with 1–9 or gt / gT`.
-  Activating a context clears the board, which drops the message and asks again;
+* **no context, no daemon, no worktree boards** — the three states where a load can never go out
+  take the failed shape rather than cold columns, because skeletons promise a request that was
+  never sent: `fleetd is not reachable`, `No active context — pick one with 1–9 or gt / gT`, and
+  — in a worktree's board tab on a daemon that serves no worktree boards — the same sentence the
+  refusal toasts. Activating a context clears the board, which drops the message and asks again;
 * **empty board** — `No cards yet. · c new card`;
 * **empty column** — `No cards here.` inside the column;
 * **no match** — `Nothing matches "<query>". · esc clear`.
@@ -1971,12 +2028,17 @@ wrap (§5.11), and the focused column and card are always scrolled into view. Ev
 1. **The selection follows the card, not the index.** After any mutation the reducer applies the
    `Card` the daemon returned and the focus moves to wherever that card now is — including the
    column it was just moved to by `[` / `]`.
-2. **`/` publishes the `Filter` key context.** The board's filter is not the Hub's `FilterState`
+2. **`/` publishes the `Filter` key context.** The board's filter is a live single-line
+   `TextInput`, not the Hub's `FilterState`
    (its rows are cards in columns, and `Overlay::Filter`'s `Enter` opens a worktree), so the board
-   owns `BoardState.filter`. While the input has the keyboard, `AppState::context_chain` returns
-   `["Filter", "BoardFilter"]` instead of `["Hub", "Board"]`: that is the only thing that makes `c`, `d`, `s` and
+   mirrors into `BoardState.filter` on `Changed`. While the input has the keyboard,
+   `AppState::context_chain` returns
+   `["Filter", "BoardFilter"]` instead of `["Hub", "Board"]` — or instead of
+   `["Workspace", "Native", "Board"]` in the worktree tab, where the same editor and the same
+   two-stage `Esc` serve: that is the only thing that makes `c`, `d`, `s` and
    `w` type instead of fire. `Esc` is the two-stage §3.10 one — leave the input keeping the filter,
-   then clear it — and never quits.
+   then clear it — and never quits. `Tab` / `Shift-Tab` move columns while left/right and
+   ctrl-b/ctrl-f move the filter caret.
 
 The filter is a case-insensitive substring over the six things a card is looked up by: title,
 display key, local key, label names, label ids and assignee. It is deliberately wider than
@@ -1990,13 +2052,15 @@ column without moving the card selection.
 
 ### Card detail
 
-An 880 px dialog, two panes, `Dialog > CardDetail`.
+An 880 px dialog, two panes. It publishes browsing `Dialog > CardDetail`, then switches to
+`Dialog > CardDetailEditing` while the title, description or comment owns the keyboard; the
+migrated live editor adds `FleetTextInput` beneath that word.
 
 *Left* — the card as prose: key, priority glyph and title; the conflict banner when the card has
-one (`K` keep local / `R` take remote); the description as `MarkdownText`, or a `TextArea` while
-`d` is editing it; the comments, each with author and age; a `TextArea` for the comment `c` is
-writing; and the last ten activity entries, newest first. The left pane scrolls; the right does
-not.
+one (`K` keep local / `R` take remote); the description as `MarkdownText`, or the shared
+multi-line `TextInput` while `d` is editing it; the comments, each with author and age; that same
+input for the comment `c` is writing; and the last ten activity entries, newest first. The left
+pane scrolls; the right does not.
 
 *Right* — the card as facts: `Status, Priority, Assignee, Labels, Estimate, Due, Parent, Repo,
 Worktree`, then `Remote` / `URL` / `Synced` when the card is linked, then the board's custom
@@ -2011,10 +2075,12 @@ the secondary tone with a trailing lock glyph, and keeps its picker target: `Ent
 with the sentence `<field> is read-only on <backend label> boards` on the dialog's error line. A
 row that silently did nothing would be indistinguishable from a broken key.
 
-The three text surfaces — title, description, comment — share **one** buffer, because at most one
-of them is ever open: `i`, `d`, `c` start an edit, `ctrl-s` saves it, `Esc` throws it away and a
-second `Esc` closes the dialog. While an edit is open the bare letters type, exactly as §3.8.6's
-text rows do.
+The three text surfaces — title, description, comment — share **one live `TextInput` entity**,
+created when `i`, `d` or `c` starts an edit and dropped when `ctrl-s` saves or `Esc` cancels it.
+Selection, paste, word/line deletion and undo/redo are available uniformly; Tab inserts a hard
+tab in the multi-line description/comment editor. A second `Esc` closes the dialog. While an edit
+is open `CardDetail` is absent from the context chain, so its bare browsing letters cannot steal
+input; `CardDetailEditing` carries only the container commands.
 
 Nothing on this surface is optimistic. Every save sends its request and waits; the reducer applies
 the `Card` that comes back, and a refusal becomes a sticky line inside the dialog rather than a
@@ -2022,8 +2088,8 @@ change the user believes happened.
 
 ### The other three dialogs
 
-* **New card** (560 px) — a title `TextField` and an optional description `TextArea`. `Enter`
-  creates and closes; `ctrl-Enter` creates and opens the card it made. Nothing else is asked for,
+* **New card** (560 px) — a single-line title `TextInput` and an optional multi-line one for
+  the description. `Enter` creates and closes; `ctrl-Enter` creates and opens the card it made. Nothing else is asked for,
   because every other field has a one-letter picker on the board.
 * **Card property** (560 px) — one surface for every field: a query input over a `FuzzyList` of
   the values that field can take. The open-ended kinds (assignee, estimate, due date, and `Text` /

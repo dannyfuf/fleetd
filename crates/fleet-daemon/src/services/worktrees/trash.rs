@@ -108,6 +108,15 @@ impl Worktrees {
             return Err(error);
         }
 
+        if let Some(cascade) = self.cascade.get().and_then(std::sync::Weak::upgrade)
+            && let Err(error) = cascade
+                .restore_for_worktree(&marker.worktree.id, &destination)
+                .await
+        {
+            // The worktree is already restored, so its successful move cannot be rolled back.
+            tracing::warn!(worktree = %marker.worktree.id, %error, "worktree restored but its cascade failed");
+        }
+
         if let Err(error) = self.files.remove_file(&trash_marker_path(&destination)) {
             tracing::warn!(%error, path = %destination.display(), "restored worktree but failed to remove trash marker");
         }
@@ -247,6 +256,12 @@ impl Worktrees {
             .and_then(|name| name.to_str())
             .ok_or_else(|| DaemonError::Validation("trash entry is not valid UTF-8".to_owned()))?
             .to_owned();
+        if let Some(cascade) = self.cascade.get().and_then(std::sync::Weak::upgrade)
+            && let Err(error) = cascade.delete_for_worktree(&id, &trash).await
+        {
+            // The worktree is already gone, so its successful deletion cannot be rolled back.
+            tracing::warn!(%id, %error, "worktree deleted but its cascade failed");
+        }
         self.schedule_trash_cleanup(
             trash,
             worktree.id,

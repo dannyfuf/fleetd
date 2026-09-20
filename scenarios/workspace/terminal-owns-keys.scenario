@@ -33,10 +33,10 @@ assert agents.popup absent && dialog absent && focused == tabs.tab[3]
 shot terminal-owns-keys
 dump terminal-owns-keys
 
-# The prefix is the exception, and it is one-shot: `b` is bound to nothing in the table, so
-# it is swallowed rather than forwarded. The `Z` that follows lands directly after the `N`,
-# which is only true if no `b` reached the PTY.
-key ctrl-s b
+# The prefix is the exception, and it is one-shot: `o` is bound to nothing in the table —
+# KEYMAP "Explicitly rejected" keeps it free — so it is swallowed rather than forwarded. The
+# `Z` that follows lands directly after the `N`, which is only true if no `o` reached the PTY.
+key ctrl-s o
 await mode == Terminal 10000
 key Z
 await terminal.text ~= "jkJ\?:/q!iHaApn1yNZ" 20000

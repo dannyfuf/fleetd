@@ -30,6 +30,7 @@ mod fact_row;
 mod filter_bar;
 mod freshness_stamp;
 mod fuzzy_list;
+mod input;
 mod job_row;
 mod job_ticker;
 mod kanban_column;
@@ -67,8 +68,6 @@ mod sticky_error_slot;
 mod terminal_grid;
 mod terminal_modes;
 mod terminal_tab_strip;
-mod text_area;
-mod text_field;
 mod toast_stack;
 mod toggle;
 mod veil;
@@ -100,6 +99,11 @@ pub use filter_bar::FilterBar;
 pub use freshness_stamp::{AGING_SECS, FRESH_SECS};
 pub use freshness_stamp::{Freshness, FreshnessStamp};
 pub use fuzzy_list::{FuzzyItem, FuzzyList};
+pub use input::actions as text_input;
+pub use input::{
+    HISTORY_CAP, InputBuffer, InputMode, TEXT_INPUT_KEY_CONTEXT, TYPING_GROUP_WINDOW, TextInput,
+    TextInputEvent,
+};
 pub use job_row::{JobRow, JobStatus};
 pub use job_ticker::JobTicker;
 pub use kanban_column::{COLUMN_WIDTH_CH, KanbanBoard, KanbanColumn};
@@ -122,8 +126,8 @@ pub use markdown_text::{
 };
 pub use mode_word::{Mode, ModeWord};
 pub use multiline_input::{
-    HISTORY_LIMIT, MULTILINE_INPUT_KEY_CONTEXT, MultilineBuffer, MultilineInput,
-    MultilineInputEvent, PromptHistory, Trigger,
+    HISTORY_LIMIT, MULTILINE_INPUT_KEY_CONTEXT, MultilineInput, MultilineInputEvent, PromptHistory,
+    Trigger,
 };
 pub use number_field::NumberField;
 pub use overlay::{Overlay, OverlayLayer};
@@ -153,10 +157,6 @@ pub use terminal_grid::{
 };
 pub use terminal_modes::{TerminalMode, TerminalModes};
 pub use terminal_tab_strip::{TerminalAgentState, TerminalTab, TerminalTabKind, TerminalTabStrip};
-pub use text_area::{TAB_WIDTH, TEXT_AREA_ROWS, TextArea, TextAreaState};
-pub use text_field::{
-    EditEffect, TEXT_FIELD_KEY_CONTEXT, TextField, TextFieldState, TextInput, TextInputEvent,
-};
 pub use toast_stack::{COALESCE_WINDOW_MS, Toast, ToastDuration, ToastStack};
 pub use toggle::Toggle;
 pub use veil::Veil;

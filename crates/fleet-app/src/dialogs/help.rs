@@ -206,11 +206,17 @@ const GROUPS: &[(&str, &[&str])] = &[
         "Board",
         &[
             "Hub > Board",
+            // The same table twice over, because it really is bound twice: the Hub's board tab
+            // and the Workspace's `fleet://board` tab draw the same board and the reader has to
+            // find the keys under whichever one they are standing on.
+            "Workspace > Native > Board",
             "Filter > BoardFilter",
             "Dialog > CardDetail",
+            "Dialog > CardDetailEditing",
             "Dialog > CardCreate",
             "Dialog > CardPicker",
             "Dialog > BoardSettings",
+            "Dialog > BoardSettingsEditing",
         ],
     ),
     (
@@ -222,13 +228,18 @@ const GROUPS: &[(&str, &[&str])] = &[
             "Jobs > Log",
             "Dialog",
             "Dialog > Create",
+            "Dialog > CreateEditing",
             "Dialog > Confirm",
             "Dialog > Context",
             "Dialog > Assign",
             "Dialog > Settings",
+            "Dialog > SettingsEditing",
             "Dialog > Help",
             "Dialog > Quit",
             "Dialog > QuitDaemon",
+            "FleetTextInput",
+            "FleetTextInput && mode == multiline",
+            "FleetTextInput && mode == multiline && enter == newline",
         ],
     ),
 ];

@@ -1,31 +1,35 @@
 //! Editor for repository prepare and post-create hook commands.
+//!
+//! Every row is a live [`TextInput`] owned by the [`DialogHost`]: the prepare commands first,
+//! the post-create commands after them, and one blank row at the end of each list. Typing into
+//! a trailing blank row appends the next one, so the list grows as it is filled and a save
+//! simply drops whatever stayed empty.
 
 use fleet_core::{ids::RepoId, model::RepoHooks};
 use fleet_proto::request::RequestBody;
 use fleet_ui_kit::{Dialog, Icon, KeyHintRow, prelude::*};
-use gpui::{AnyElement, App, Entity, FocusHandle, Window, div};
+use gpui::{AnyElement, App, AppContext, Entity, FocusHandle, Window, div};
 
 use crate::{
     actions::dialog,
     bridge::Bridge,
-    dialogs::{DialogHost, field, notify, root, typed_char, with_host},
+    dialogs::{DialogHost, notify, read_host, root, with_host},
     state::AppState,
 };
 
 #[derive(Debug, Clone)]
 pub struct EditHooksState {
     repo: Option<RepoId>,
-    prepare: Vec<TextFieldState>,
-    post_create: Vec<TextFieldState>,
-    field: usize,
+    /// How many of `DialogHost.hook_inputs` are prepare commands; the rest are post-create.
+    pub(super) prepare_len: usize,
+    pub(super) field: usize,
 }
 
 impl Default for EditHooksState {
     fn default() -> Self {
         Self {
             repo: None,
-            prepare: vec![TextFieldState::default()],
-            post_create: vec![TextFieldState::default()],
+            prepare_len: 1,
             field: 0,
         }
     }
@@ -43,57 +47,158 @@ pub(crate) fn seed(state: &Entity<AppState>, cx: &mut App) {
             .find(|repo| &repo.id == id)
             .cloned()
     });
-    with_host(state, cx, |host| {
-        host.edit_hooks = source.map_or_else(EditHooksState::default, |source| EditHooksState {
-            repo: Some(source.id),
-            prepare: command_fields(source.hooks.prepare),
-            post_create: command_fields(source.hooks.post_create),
-            field: 0,
-        });
-    });
-}
-
-fn command_fields(commands: Vec<String>) -> Vec<TextFieldState> {
-    commands
+    let (repo, prepare, post_create) = source.map_or_else(
+        || (None, Vec::new(), Vec::new()),
+        |source| {
+            (
+                Some(source.id),
+                source.hooks.prepare,
+                source.hooks.post_create,
+            )
+        },
+    );
+    // Each list always ends in a blank row, which is where the next command is typed.
+    let prepare_len = prepare.len() + 1;
+    let inputs: Vec<Entity<TextInput>> = prepare
         .into_iter()
-        .map(TextFieldState::from_text)
-        .chain(std::iter::once(TextFieldState::default()))
-        .collect()
+        .chain(std::iter::once(String::new()))
+        .chain(post_create)
+        .chain(std::iter::once(String::new()))
+        .map(|command| new_row(command, cx))
+        .collect();
+    let host = crate::dialogs::host::host_for(state, cx);
+    host.update(cx, |host, _| {
+        host.edit_hooks = EditHooksState {
+            repo,
+            prepare_len,
+            field: 0,
+        };
+        host.hook_inputs = inputs.clone();
+    });
+    let subscriptions = inputs
+        .iter()
+        .map(|input| watch_row(state, input, cx))
+        .collect();
+    host.update(cx, |host, _| host.hook_input_subscriptions = subscriptions);
+    relabel(state, cx);
 }
 
-fn commands(fields: &[TextFieldState]) -> Vec<String> {
-    fields
+/// One command row, seeded with the command it already holds.
+fn new_row(command: String, cx: &mut App) -> Entity<TextInput> {
+    cx.new(|cx| {
+        let mut input = TextInput::new(InputMode::SingleLine, cx);
+        input.set_text(command, cx);
+        input
+    })
+}
+
+/// Grows the list when the row that was typed into is the trailing blank of its section.
+fn watch_row(
+    state: &Entity<AppState>,
+    input: &Entity<TextInput>,
+    cx: &mut App,
+) -> gpui::Subscription {
+    let weak_state = state.downgrade();
+    cx.subscribe(input, move |input, event, cx| {
+        let Some(state) = weak_state.upgrade() else {
+            return;
+        };
+        if matches!(event, TextInputEvent::Focused) {
+            claim_row(&state, &input, cx);
+            return;
+        }
+        if !matches!(event, TextInputEvent::Changed) {
+            return;
+        }
+        append_blank_rows(&state, cx);
+    })
+}
+
+/// Mirrors the row that just took focus into the marker the shell reconciles against.
+///
+/// `dialogs::focused_input` names the editor from `field`, and a click focuses a row without
+/// asking the dialog, so without this the next `AppState` notify would move the caret back.
+/// Rows are inserted as the list grows, so the index is resolved at event time.
+fn claim_row(state: &Entity<AppState>, input: &Entity<TextInput>, cx: &mut App) {
+    let Some(changed) = with_host(state, cx, |host| {
+        let index = host
+            .hook_inputs
+            .iter()
+            .position(|row| row.entity_id() == input.entity_id())?;
+        let changed = host.edit_hooks.field != index;
+        host.edit_hooks.field = index;
+        Some(changed)
+    }) else {
+        return;
+    };
+    if changed {
+        notify(state, cx);
+    }
+}
+
+/// Restores the "one trailing blank row per section" rule after an edit.
+fn append_blank_rows(state: &Entity<AppState>, cx: &mut App) {
+    let (prepare_len, texts) = read_host(state, cx, |host, cx| {
+        (
+            host.edit_hooks.prepare_len,
+            host.hook_inputs
+                .iter()
+                .map(|input| input.read(cx).text().to_owned())
+                .collect::<Vec<_>>(),
+        )
+    });
+    let prepare_full = prepare_len > 0 && !texts[prepare_len - 1].trim().is_empty();
+    let post_full = texts.last().is_some_and(|last| !last.trim().is_empty());
+    if !prepare_full && !post_full {
+        return;
+    }
+    if prepare_full {
+        let row = new_row(String::new(), cx);
+        let subscription = watch_row(state, &row, cx);
+        with_host(state, cx, |host| {
+            host.hook_inputs.insert(prepare_len, row);
+            host.hook_input_subscriptions.push(subscription);
+            host.edit_hooks.prepare_len += 1;
+            if host.edit_hooks.field >= prepare_len {
+                host.edit_hooks.field += 1;
+            }
+        });
+    }
+    if post_full {
+        let row = new_row(String::new(), cx);
+        let subscription = watch_row(state, &row, cx);
+        with_host(state, cx, |host| {
+            host.hook_inputs.push(row);
+            host.hook_input_subscriptions.push(subscription);
+        });
+    }
+    relabel(state, cx);
+    notify(state, cx);
+}
+
+/// Numbers every row from its position, so an inserted row renumbers the ones under it.
+fn relabel(state: &Entity<AppState>, cx: &mut App) {
+    let (prepare_len, inputs) = read_host(state, cx, |host, _| {
+        (host.edit_hooks.prepare_len, host.hook_inputs.clone())
+    });
+    for (index, input) in inputs.into_iter().enumerate() {
+        let label = if index < prepare_len {
+            format!("Prepare command {}", index + 1)
+        } else {
+            format!("Post-create command {}", index - prepare_len + 1)
+        };
+        input.update(cx, |input, cx| input.set_label(Some(label.into()), cx));
+    }
+}
+
+/// The commands one section would save: every non-empty row, in order.
+fn commands(texts: &[String]) -> Vec<String> {
+    texts
         .iter()
-        .map(TextFieldState::text)
+        .map(|command| command.trim_end_matches('\n'))
         .filter(|command| !command.is_empty())
         .map(str::to_owned)
         .collect()
-}
-
-fn edit_input(state: &mut EditHooksState) -> &mut TextFieldState {
-    let prepare_len = state.prepare.len();
-    if state.field < prepare_len {
-        &mut state.prepare[state.field]
-    } else {
-        let index = state
-            .field
-            .saturating_sub(prepare_len)
-            .min(state.post_create.len().saturating_sub(1));
-        &mut state.post_create[index]
-    }
-}
-
-fn append_blank_after_edit(state: &mut EditHooksState) {
-    if state.prepare.last().is_some_and(|field| !field.is_empty()) {
-        state.prepare.push(TextFieldState::default());
-    }
-    if state
-        .post_create
-        .last()
-        .is_some_and(|field| !field.is_empty())
-    {
-        state.post_create.push(TextFieldState::default());
-    }
 }
 
 pub(crate) fn render(
@@ -104,98 +209,70 @@ pub(crate) fn render(
     _window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let draft = &host.read(cx).edit_hooks;
+    let inputs = host.read(cx).hook_inputs.clone();
     let confirm_state = state.clone();
     let confirm_bridge = bridge.clone();
-    super::input::actions(
-        root(focus),
-        state,
-        |host| edit_input(&mut host.edit_hooks),
-        notify,
-    )
-    .on_key_down({
-        let state = state.clone();
-        move |event, _window, cx| {
-            if let Some(text) = typed_char(event) {
-                with_host(&state, cx, |host| {
-                    edit_input(&mut host.edit_hooks).insert(text);
-                    append_blank_after_edit(&mut host.edit_hooks);
-                });
-                notify(&state, cx);
-            }
-        }
-    })
-    .on_action({
-        let state = state.clone();
-        move |_: &dialog::NextField, _window, cx| {
-            with_host(&state, cx, |host| {
-                let count = host.edit_hooks.prepare.len() + host.edit_hooks.post_create.len();
-                host.edit_hooks.field = (host.edit_hooks.field + 1) % count.max(1);
+    root(focus)
+        .on_action({
+            let state = state.clone();
+            move |_: &dialog::NextField, window, cx| move_field(&state, 1, window, cx)
+        })
+        .on_action({
+            let state = state.clone();
+            move |_: &dialog::PrevField, window, cx| move_field(&state, -1, window, cx)
+        })
+        .on_action(move |_: &dialog::Confirm, _window, cx| {
+            let (repo, prepare_len, texts) = read_host(&confirm_state, cx, |host, cx| {
+                (
+                    host.edit_hooks.repo.clone(),
+                    host.edit_hooks.prepare_len,
+                    host.hook_inputs
+                        .iter()
+                        .map(|input| input.read(cx).text().to_owned())
+                        .collect::<Vec<_>>(),
+                )
             });
-            notify(&state, cx);
-        }
-    })
-    .on_action({
-        let state = state.clone();
-        move |_: &dialog::PrevField, _window, cx| {
-            with_host(&state, cx, |host| {
-                let count = host.edit_hooks.prepare.len() + host.edit_hooks.post_create.len();
-                host.edit_hooks.field = host
-                    .edit_hooks
-                    .field
-                    .checked_sub(1)
-                    .unwrap_or_else(|| count.saturating_sub(1));
+            let Some(repo) = repo else { return };
+            let (prepare, post_create) = texts.split_at(prepare_len.min(texts.len()));
+            confirm_bridge.send(RequestBody::SetRepoHooks {
+                repo,
+                hooks: RepoHooks {
+                    prepare: commands(prepare),
+                    post_create: commands(post_create),
+                },
             });
-            notify(&state, cx);
-        }
-    })
-    .on_action(move |_: &dialog::Confirm, _window, cx| {
-        let draft = with_host(&confirm_state, cx, |host| host.edit_hooks.clone());
-        let Some(repo) = draft.repo else { return };
-        confirm_bridge.send(RequestBody::SetRepoHooks {
-            repo,
-            hooks: RepoHooks {
-                prepare: commands(&draft.prepare),
-                post_create: commands(&draft.post_create),
-            },
-        });
-        confirm_state.update(cx, |app, cx| {
-            app.close_overlay();
-            cx.notify();
-        });
-    })
-    .child(
-        Dialog::new("Repository hooks")
-            .icon(Icon::FilePen)
-            .body(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(cx.theme().space.md)
-                    .children(draft.prepare.iter().enumerate().map(|(index, command)| {
-                        field(command)
-                            .label(format!("Prepare command {}", index + 1))
-                            .focused(draft.field == index)
-                            .harness_target_indexed("dialog.field", index)
-                    }))
-                    .children(
-                        draft
-                            .post_create
-                            .iter()
-                            .enumerate()
-                            .map(|(index, command)| {
-                                let field_index = draft.prepare.len() + index;
-                                field(command)
-                                    .label(format!("Post-create command {}", index + 1))
-                                    .focused(draft.field == field_index)
-                                    .harness_target_indexed("dialog.field", field_index)
-                            }),
+            confirm_state.update(cx, |app, cx| {
+                app.close_overlay();
+                cx.notify();
+            });
+        })
+        .child(
+            Dialog::new("Repository hooks")
+                .icon(Icon::FilePen)
+                .body(
+                    div().flex().flex_col().gap(cx.theme().space.md).children(
+                        inputs.into_iter().enumerate().map(|(index, input)| {
+                            input.harness_target_indexed("dialog.field", index)
+                        }),
                     ),
-            )
-            .hint_row(KeyHintRow::new().key("tab", "next").key("esc", "cancel"))
-            .primary("enter  save"),
-    )
-    .into_any_element()
+                )
+                .hint_row(KeyHintRow::new().key("tab", "next").key("esc", "cancel"))
+                .primary("enter  save"),
+        )
+        .into_any_element()
+}
+
+/// `Tab` / `S-Tab`: hand the keyboard to the next row, wrapping at both ends.
+fn move_field(state: &Entity<AppState>, delta: isize, window: &mut Window, cx: &mut App) {
+    let input = with_host(state, cx, |host| {
+        let count = host.hook_inputs.len();
+        host.edit_hooks.field = crate::dialogs::step(host.edit_hooks.field, delta, count);
+        host.hook_inputs.get(host.edit_hooks.field).cloned()
+    });
+    if let Some(input) = input {
+        input.update(cx, |input, cx| input.focus(window, cx));
+    }
+    notify(state, cx);
 }
 
 #[cfg(test)]
@@ -208,7 +285,38 @@ mod tests {
             "printf '%s; still one command' value".to_owned(),
             "if test -f Gemfile; then bundle install; fi".to_owned(),
         ];
-        let fields = command_fields(original.clone());
-        assert_eq!(commands(&fields), original);
+        let rows: Vec<String> = original
+            .iter()
+            .cloned()
+            .chain(std::iter::once(String::new()))
+            .collect();
+        assert_eq!(commands(&rows), original);
+    }
+
+    #[gpui::test]
+    fn typing_into_the_trailing_blank_row_appends_the_next_one(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| AppState::new("/tmp/hooks", std::time::Instant::now()));
+        cx.update(|cx| seed(&state, cx));
+        let rows = cx.update(|cx| read_host(&state, cx, |host, _| host.hook_inputs.clone()));
+        assert_eq!(
+            rows.len(),
+            2,
+            "one blank prepare row and one blank post row"
+        );
+
+        cx.update(|cx| {
+            rows[0].update(cx, |input, cx| input.set_text("bundle install", cx));
+        });
+        let (prepare_len, rows) = cx.update(|cx| {
+            read_host(&state, cx, |host, _| {
+                (host.edit_hooks.prepare_len, host.hook_inputs.clone())
+            })
+        });
+        assert_eq!(prepare_len, 2, "the filled row grew a blank under it");
+        assert_eq!(rows.len(), 3);
+        cx.update(|cx| {
+            assert_eq!(rows[1].read(cx).text(), "");
+            assert_eq!(rows[2].read(cx).text(), "");
+        });
     }
 }

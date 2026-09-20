@@ -167,11 +167,7 @@ pub(super) fn open_delegation_cancel_confirm(
 
 /// The worktree of the session the workspace is showing.
 fn active_worktree(app: &AppState) -> Option<WorktreeId> {
-    let session = app.active_session()?;
-    match &session.kind {
-        SessionKind::Worktree(worktree) => Some(worktree.clone()),
-        SessionKind::Agent { .. } => None,
-    }
+    app.active_worktree().cloned()
 }
 
 trait AgentThreadRequester: Clone + 'static {

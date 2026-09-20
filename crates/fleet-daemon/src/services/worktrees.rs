@@ -4,7 +4,7 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock, Weak,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -57,6 +57,19 @@ mod trash;
 
 const TRASH_MARKER_FILE: &str = "fleet-trash.json";
 
+/// Late-bound cleanup invoked after a worktree has been moved to trash.
+#[async_trait::async_trait]
+pub(super) trait WorktreeCascade: Send + Sync {
+    /// Deletes records whose lifetime is bounded by `worktree`.
+    async fn delete_for_worktree(&self, worktree: &WorktreeId, trash: &Path) -> DaemonResult<()>;
+    /// Restores records bundled into a worktree's restored directory.
+    async fn restore_for_worktree(
+        &self,
+        worktree: &WorktreeId,
+        destination: &Path,
+    ) -> DaemonResult<()>;
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PostCreateIntent {
@@ -84,9 +97,15 @@ pub struct Worktrees {
     trash_jobs: Arc<Mutex<HashMap<String, JobId>>>,
     startup_ready: Arc<AtomicBool>,
     startup_notify: Arc<tokio::sync::Notify>,
+    cascade: Arc<OnceLock<Weak<dyn WorktreeCascade>>>,
 }
 
 impl Worktrees {
+    /// Claims exclusive ownership of one worktree's create/delete/restore boundary.
+    pub(super) async fn claim_lifecycle(&self, id: WorktreeId) -> TransitionLockClaim {
+        self.sessions.claim_worktree_lifecycle(id).await
+    }
+
     /// Creates the worktree service and schedules startup intent recovery. Creation drives
     /// files, Git, the shell, and GitHub, so it takes the shared adapter bundle.
     #[must_use]
@@ -117,9 +136,17 @@ impl Worktrees {
             trash_jobs: Arc::new(Mutex::new(HashMap::new())),
             startup_ready: Arc::new(AtomicBool::new(false)),
             startup_notify: Arc::new(tokio::sync::Notify::new()),
+            cascade: Arc::new(OnceLock::new()),
         };
         service.schedule_startup_recovery();
         service
+    }
+
+    /// Installs the one cascade observer after dependent services have been composed.
+    pub(super) fn set_cascade(&self, cascade: Arc<dyn WorktreeCascade>) {
+        if self.cascade.set(Arc::downgrade(&cascade)).is_err() {
+            tracing::warn!("worktree cascade observer was already installed");
+        }
     }
 
     /// Hard-kills the session associated with a worktree.
@@ -474,6 +501,7 @@ mod tests {
             trash_jobs: Arc::new(Mutex::new(HashMap::new())),
             startup_ready: Arc::new(AtomicBool::new(true)),
             startup_notify: Arc::new(tokio::sync::Notify::new()),
+            cascade: Arc::new(OnceLock::new()),
         };
         Fixture {
             _temp: temp,

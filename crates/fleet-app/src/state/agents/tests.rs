@@ -458,6 +458,57 @@ fn an_open_gate_routes_the_keyboard_to_its_decision_context() {
     );
 }
 
+/// Key ownership (`docs/APP-CONTRACTS.md` §3): §3.12 C's banner binds bare `r` and `l`, and
+/// §12's composer is a live `TextInput` on the base chain, so the banner has to stand down for
+/// it — and only for it. A frozen tail and an open decision own their bare keys themselves.
+#[test]
+fn the_daemon_banner_never_wraps_the_agent_composer() {
+    let thread = summary("feat", Attention::Idle, 1);
+    let mut state = state_with(vec![thread.clone()]);
+    state.daemon = crate::state::DaemonLink::Lost {
+        attempt: 1,
+        dismissed: false,
+        reason: crate::state::DaemonLossReason::ConnectionLost,
+    };
+    state.screen = crate::state::Screen::Workspace {
+        session: "buk/payroll/feat"
+            .parse()
+            .unwrap_or_else(|error| panic!("{error}")),
+    };
+    state.agents.activate(worktree("feat"), thread.thread);
+
+    assert!(state.agent_composer_owns_keys());
+    assert_eq!(
+        state.context_chain(),
+        vec!["Agent", "AgentIdle"],
+        "`r` and `l` have to reach the composer"
+    );
+
+    let mut projection = ThreadProjection::new(thread.thread, worktree("feat"), AgentKind::Claude);
+    projection.session = AgentSessionState::Running;
+    projection.turn = TurnState::Running(TurnId::new());
+    state.agents.install_snapshot(projection.clone(), &[]);
+    assert_eq!(state.context_chain(), vec!["Agent", "AgentWorking"]);
+
+    // A frozen tail has no editor: the transcript owns `j`/`k` and the banner is welcome back.
+    state.agents.set_scrolling(thread.thread, true);
+    assert!(!state.agent_composer_owns_keys());
+    assert_eq!(
+        state.context_chain(),
+        vec!["Agent", "AgentNativeScroll", "Daemon", "Banner"]
+    );
+    state.agents.set_scrolling(thread.thread, false);
+    assert_eq!(state.context_chain(), vec!["Agent", "AgentWorking"]);
+
+    // The floating popup is a terminal on top of the tab, not an editor, and it publishes a
+    // chain of its own: the composer is no longer the thing holding the keyboard.
+    state.toggle_agent_popup(Agent::Claude, None);
+    assert_eq!(
+        state.context_chain(),
+        vec!["Agent", "Terminal", "Daemon", "Banner"]
+    );
+}
+
 #[test]
 fn a_snapshot_forgets_threads_the_daemon_no_longer_lists() {
     let thread = summary("feat", Attention::Idle, 1);

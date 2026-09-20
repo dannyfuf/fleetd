@@ -180,15 +180,16 @@ pub(super) struct PreparedKey {
 pub(super) fn prepare(
     state: &AppState,
     draft: &mut CardPickerState,
+    query: &str,
 ) -> std::rc::Rc<[PickerOption]> {
     let key = PreparedKey {
         snapshot: state.snapshot_revision,
         board: state.board.revision,
         kind: draft.kind.clone(),
-        query: draft.query.clone(),
+        query: query.to_owned(),
     };
     if draft.prepared.as_ref() != Some(&key) {
-        let rows = candidates(state, draft);
+        let rows = candidates(state, draft, query);
         draft.rows = rows.into();
         draft.prepared = Some(key);
     }
@@ -197,9 +198,13 @@ pub(super) fn prepare(
 
 /// The offered values the query keeps, plus the typed value when the kind accepts one.
 #[must_use]
-pub(super) fn candidates(state: &AppState, draft: &CardPickerState) -> Vec<PickerOption> {
+pub(super) fn candidates(
+    state: &AppState,
+    draft: &CardPickerState,
+    query: &str,
+) -> Vec<PickerOption> {
     let schema = property_kind(state, &draft.kind);
-    let query = draft.query.trim();
+    let query = query.trim();
     // Folded once, not once per offered value: this runs on every keystroke and every draw.
     let needle = query.to_lowercase();
     let mut rows: Vec<PickerOption> = options(state, &draft.kind)

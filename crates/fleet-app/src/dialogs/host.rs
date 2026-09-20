@@ -8,7 +8,7 @@ use fleet_core::{
 use fleet_proto::{error::ProtoError, request::RequestBody, response::ResponseBody};
 
 use super::*;
-use crate::state::Overlay;
+use crate::state::{FieldSnapshot, Overlay};
 use gpui::{
     App, Context, Entity, EntityId, FocusHandle, Global, Render, Subscription, Task, WeakEntity,
     Window,
@@ -32,20 +32,56 @@ pub(crate) struct DialogHost {
     pub card_picker: card_picker::CardPickerState,
     /// New card draft (BOARD §8).
     pub card_create: card_create::CardCreateState,
+    /// Live title editor for the open new-card dialog.
+    pub(super) card_create_title: Option<Entity<TextInput>>,
+    /// Live description editor for the open new-card dialog.
+    pub(super) card_create_description: Option<Entity<TextInput>>,
+    pub(super) card_create_input_subscriptions: Vec<Subscription>,
     /// Card detail draft (BOARD §8).
     pub card_detail: card_detail::CardDetailState,
+    /// The one live editor shared by card-detail title, description and comment edits.
+    pub(super) card_detail_input: Option<Entity<TextInput>>,
+    pub(super) card_detail_input_subscription: Option<Subscription>,
+    /// The card-picker query editor, alive for the picker's whole lifetime.
+    pub(super) card_picker_input: Option<Entity<TextInput>>,
+    pub(super) card_picker_input_subscription: Option<Subscription>,
+    /// The input materialized for the focused board-settings text row.
+    pub(super) board_settings_input: Option<Entity<TextInput>>,
+    pub(super) board_settings_input_subscription: Option<Subscription>,
     /// Whether the palette's draft has been seeded for the currently open palette.
     pub palette_open: bool,
+    /// The palette's query editor, alive for exactly as long as the palette is open.
+    pub(super) palette_input: Option<Entity<TextInput>>,
+    pub(super) palette_input_subscription: Option<Subscription>,
     pub create: create_worktree::CreateState,
+    /// The branch editor, alive for the whole life of the create-worktree dialog.
+    pub(super) create_branch: Option<Entity<TextInput>>,
+    pub(super) create_branch_subscription: Option<Subscription>,
     pub clone: clone_repo::CloneState,
+    /// The clone dialog's search editor, alive for its whole lifetime.
+    pub(super) clone_query: Option<Entity<TextInput>>,
+    pub(super) clone_query_subscription: Option<Subscription>,
     pub confirm: confirm::ConfirmState,
     pub context: context::ContextState,
+    /// The context dialog's name and owners editors.
+    pub(super) context_name: Option<Entity<TextInput>>,
+    pub(super) context_owners: Option<Entity<TextInput>>,
+    pub(super) context_input_subscriptions: Vec<Subscription>,
     pub assign: assign_repo::AssignState,
     /// Repository hook editor.
     pub edit_hooks: edit_hooks::EditHooksState,
+    /// One editor per hook row, prepare commands first and post-create after them.
+    pub(super) hook_inputs: Vec<Entity<TextInput>>,
+    pub(super) hook_input_subscriptions: Vec<Subscription>,
     pub settings: settings::SettingsState,
+    /// The input materialized for the settings row that entered editing.
+    pub(super) settings_input: Option<Entity<TextInput>>,
+    pub(super) settings_input_subscription: Option<Subscription>,
     /// Rename-terminal draft.
     pub rename_terminal: rename_terminal::RenameState,
+    /// The rename dialog's one editor, alive for its whole lifetime.
+    pub(super) rename_input: Option<Entity<TextInput>>,
+    pub(super) rename_input_subscription: Option<Subscription>,
     pub palette: palette::PaletteState,
     /// What the next Confirm dialog asks about, published by whoever opens it.
     pub pending_confirm: Option<ConfirmRequest>,
@@ -347,6 +383,21 @@ fn watch(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
         }
         if matches!(
             state.read(cx).overlay,
+            Some(Overlay::Dialog(Dialogs::CardPicker))
+        ) {
+            card_picker::refresh(&state, cx);
+        }
+        // The branch preview names the worktree the create would produce, and whether that
+        // worktree already exists is a snapshot fact: a create that landed elsewhere has to
+        // turn this dialog's `Create` into `Open` without a keystroke.
+        if matches!(
+            state.read(cx).overlay,
+            Some(Overlay::Dialog(Dialogs::CreateWorktree))
+        ) {
+            create_worktree::refresh_status(&state, cx);
+        }
+        if matches!(
+            state.read(cx).overlay,
             Some(Overlay::Dialog(Dialogs::Settings))
         ) && with_host(&state, cx, |host| {
             matches!(
@@ -356,8 +407,149 @@ fn watch(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
         }) {
             settings::refresh_rows(&state, cx);
         }
+        let host = host_for(&state, cx);
+        sync_dialog_key_context(&state, &host, cx);
     });
     with_host(state, cx, |host| host.subscription = Some(subscription));
+}
+
+/// The context word selected by the dialog's existing keyboard-owner state.
+fn dialog_key_context(dialog: &Dialogs, host: &DialogHost) -> &'static str {
+    match dialog {
+        Dialogs::CardDetail if host.card_detail.is_editing() => "CardDetailEditing",
+        Dialogs::BoardSettings if host.board_settings_input.is_some() => "BoardSettingsEditing",
+        Dialogs::Settings if host.settings.editing.is_some() => "SettingsEditing",
+        Dialogs::CreateWorktree if host.create.field == create_worktree::Field::Branch => {
+            "CreateEditing"
+        }
+        _ => dialog.context_name(),
+    }
+}
+
+fn focused_input_entity(state: &Entity<AppState>, cx: &mut App) -> Option<Entity<TextInput>> {
+    let dialog = match state.read(cx).overlay.as_ref() {
+        Some(Overlay::Dialog(dialog)) => dialog.clone(),
+        // §3.9's query owns the keyboard for the whole life of the palette.
+        Some(Overlay::Palette) => {
+            return read_host(state, cx, |host, _| host.palette_input.clone());
+        }
+        _ => return None,
+    };
+    read_host(state, cx, |host, _| {
+        let input = match dialog {
+            Dialogs::CardCreate => match host.card_create.field {
+                card_create::Field::Title => host.card_create_title.as_ref(),
+                card_create::Field::Description => host.card_create_description.as_ref(),
+            },
+            Dialogs::CardDetail => host.card_detail_input.as_ref(),
+            Dialogs::CardPicker => host.card_picker_input.as_ref(),
+            Dialogs::BoardSettings => host.board_settings_input.as_ref(),
+            // §3.8.1 gives the arrows to the host cycler while the branch field is not the
+            // focused one, so the branch editor owns the keyboard only then.
+            Dialogs::CreateWorktree => (host.create.field == create_worktree::Field::Branch)
+                .then_some(host.create_branch.as_ref())
+                .flatten(),
+            Dialogs::CloneRepo => host.clone_query.as_ref(),
+            Dialogs::NewContext | Dialogs::EditContext => match host.context.field {
+                context::Field::Name => host.context_name.as_ref(),
+                context::Field::Owners => host.context_owners.as_ref(),
+            },
+            Dialogs::EditHooks => host.hook_inputs.get(host.edit_hooks.field),
+            Dialogs::RenameTerminal => host.rename_input.as_ref(),
+            Dialogs::Settings => host.settings_input.as_ref(),
+            _ => None,
+        }?;
+        Some(input.clone())
+    })
+}
+
+/// The live input that should receive focus for the current dialog or the palette.
+pub(crate) fn focused_input(state: &Entity<AppState>, cx: &mut App) -> Option<FocusHandle> {
+    focused_input_entity(state, cx).map(|input| input.read(cx).focus_handle())
+}
+
+/// The open dialog's live text editors, in the order `dialog.field[N]` numbers them.
+///
+/// Only the dialogs whose whole tab cycle is made of editors are reported, so that
+/// `dialog.fields[N]` and the painted `targets["dialog.field[N]"]` always name the same field
+/// (`docs/TESTING-HARNESS.md` §3). Create-worktree's base list and host cycler and Settings'
+/// switch rows are not editors, so those dialogs report nothing rather than a partial numbering
+/// that would not line up with their targets.
+pub(crate) fn dialog_fields(state: &Entity<AppState>, cx: &mut App) -> Vec<FieldSnapshot> {
+    let Some(Overlay::Dialog(dialog)) = state.read(cx).overlay.as_ref().cloned() else {
+        return Vec::new();
+    };
+    let focused = focused_input_entity(state, cx).map(|input| input.entity_id());
+    let inputs: Vec<(String, Entity<TextInput>)> = read_host(state, cx, |host, _| match dialog {
+        Dialogs::CardCreate => named(&[
+            ("title", host.card_create_title.as_ref()),
+            ("description", host.card_create_description.as_ref()),
+        ]),
+        Dialogs::NewContext | Dialogs::EditContext => named(&[
+            ("name", host.context_name.as_ref()),
+            ("owners", host.context_owners.as_ref()),
+        ]),
+        Dialogs::RenameTerminal => named(&[("name", host.rename_input.as_ref())]),
+        Dialogs::CloneRepo => named(&[("search", host.clone_query.as_ref())]),
+        Dialogs::EditHooks => host
+            .hook_inputs
+            .iter()
+            .enumerate()
+            .map(|(index, input)| {
+                let name = if index < host.edit_hooks.prepare_len {
+                    "prepare"
+                } else {
+                    "post-create"
+                };
+                (name.to_owned(), input.clone())
+            })
+            .collect(),
+        _ => Vec::new(),
+    });
+    inputs
+        .into_iter()
+        .map(|(name, input)| FieldSnapshot {
+            name,
+            value: input.read(cx).text().to_owned(),
+            focused: focused == Some(input.entity_id()),
+        })
+        .collect()
+}
+
+/// Pairs each present editor with its field name, dropping the ones this opening never made.
+fn named(fields: &[(&str, Option<&Entity<TextInput>>)]) -> Vec<(String, Entity<TextInput>)> {
+    fields
+        .iter()
+        .filter_map(|(name, input)| Some(((*name).to_owned(), (*input)?.clone())))
+        .collect()
+}
+
+#[cfg(test)]
+/// How many hook rows the open editor holds, for the blank-row regression.
+pub(crate) fn hook_row_count(state: &Entity<AppState>, cx: &mut App) -> usize {
+    read_host(state, cx, |host, _| host.hook_inputs.len())
+}
+
+#[cfg(test)]
+/// The current migrated dialog input's text, for root-level focus regressions.
+pub(crate) fn focused_input_text(state: &Entity<AppState>, cx: &mut App) -> Option<String> {
+    focused_input_entity(state, cx).map(|input| input.read(cx).text().to_owned())
+}
+
+/// Mirrors only the derived word into `AppState`; the dialog draft remains the source of truth.
+fn sync_dialog_key_context(state: &Entity<AppState>, host: &Entity<DialogHost>, cx: &mut App) {
+    let dialog = match state.read(cx).overlay.as_ref() {
+        Some(Overlay::Dialog(dialog)) => Some(dialog.clone()),
+        _ => None,
+    };
+    let context = dialog
+        .as_ref()
+        .map(|dialog| dialog_key_context(dialog, host.read(cx)));
+    state.update(cx, |state, cx| {
+        if state.set_dialog_key_context(dialog, context) {
+            cx.notify();
+        }
+    });
 }
 
 fn synchronize(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
@@ -387,7 +579,7 @@ fn synchronize(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
                 // Read before closing: `close` is what makes the host forget which dialog the
                 // palette replaced, and the `Card detail:` rows are judged against it.
                 let behind = with_host(state, cx, |host| host.open.clone());
-                close(state, cx);
+                close_with(state, true, cx);
                 with_host(state, cx, |host| host.behind_palette = behind);
                 palette::seed(state, cx);
             }
@@ -400,6 +592,10 @@ fn synchronize(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
 }
 
 pub(crate) fn close(state: &Entity<AppState>, cx: &mut App) {
+    close_with(state, false, cx);
+}
+
+fn close_with(state: &Entity<AppState>, preserve_card_detail: bool, cx: &mut App) {
     with_host(state, cx, |host| {
         if host.open.is_none() && !host.palette_open {
             return;
@@ -429,6 +625,32 @@ pub(crate) fn close(state: &Entity<AppState>, cx: &mut App) {
         host.edit_hooks = Default::default();
         host.rename_terminal = Default::default();
         host.palette = Default::default();
+        host.card_create_title = None;
+        host.card_create_description = None;
+        host.card_create_input_subscriptions.clear();
+        host.card_picker_input = None;
+        host.card_picker_input_subscription = None;
+        host.board_settings_input = None;
+        host.board_settings_input_subscription = None;
+        host.palette_input = None;
+        host.palette_input_subscription = None;
+        host.create_branch = None;
+        host.create_branch_subscription = None;
+        host.clone_query = None;
+        host.clone_query_subscription = None;
+        host.context_name = None;
+        host.context_owners = None;
+        host.context_input_subscriptions.clear();
+        host.hook_inputs.clear();
+        host.hook_input_subscriptions.clear();
+        host.settings_input = None;
+        host.settings_input_subscription = None;
+        host.rename_input = None;
+        host.rename_input_subscription = None;
+        if !preserve_card_detail {
+            host.card_detail_input = None;
+            host.card_detail_input_subscription = None;
+        }
     });
 }
 
@@ -454,9 +676,13 @@ impl ActiveDialog {
         let host = host_for(&state, cx);
         watch(&state, &bridge, cx);
         synchronize(&state, &bridge, cx);
+        sync_dialog_key_context(&state, &host, cx);
         let subscriptions = vec![
             cx.on_release(|this, cx| close(&this.state, cx)),
-            cx.observe(&host, |_, _, cx| cx.notify()),
+            cx.observe(&host, |this, _, cx| {
+                sync_dialog_key_context(&this.state, &this.host, cx);
+                cx.notify();
+            }),
             cx.observe(&state, |_, _, cx| cx.notify()),
         ];
         Self {

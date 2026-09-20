@@ -13,7 +13,8 @@ scenarios/agents/expected-to-fail/run.sh                              # the TODO
 ```
 
 Keyboard input reaches the focused view in both lanes. Scenarios with `shot` lines remain in the
-`virtual` lane; `scroll-wheel.scenario` deliberately has no shot and also runs headless.
+`virtual` lane; `scroll-wheel.scenario` and `composer-editing.scenario` deliberately have no shot
+and also run headless.
 
 ## What is here
 
@@ -34,6 +35,7 @@ Keyboard input reaches the focused view in both lanes. Scenarios with `shot` lin
 | `prefix-inside-a-thread.scenario` | agent controls plus `^s 1`–`9`, `^s Tab`, `^s w`, and `^s s` are bound in an agent tab while an unknown second key is swallowed | `KEYMAP.md` §Shadowing, §Native agent thread |
 | `turn-cut-by-a-daemon-restart.scenario` | a gated running turn is cut off and settled after restart, then resumes lazily on the next send | `NATIVE-AGENTS.md` §3.3, §8, §9.2 |
 | `scroll-wheel.scenario` | two fixture turns complete; wheel input moves up and back through the transcript without crashing | `NATIVE-AGENTS.md` §5 |
+| `composer-editing.scenario` | the composer's `alt-backspace`, its `Shift-Enter` newline and the plain `Enter` its owner claims, read back from the prompt the tab label carries | `KEYMAP.md` §Dialogs and text inputs, §Native agent thread |
 | `subagent-attach-from-picker.scenario` | `^s d` lists a hidden delegated child as `attach`; accepting it adds the child tab and focuses its composer | `NATIVE-AGENTS.md` §15; `KEYMAP.md` §Native agent thread |
 | `subagent-reopen-closed-caller.scenario` | a locally closed caller remains in `AGENTS`; accepting it reopens the caller tab | `NATIVE-AGENTS.md` §15; `KEYMAP.md` §Native agent thread |
 | `subagent-other-worktree-child.scenario` | the picker labels an other-worktree child and switches to its session before attaching it | `NATIVE-AGENTS.md` §15; `KEYMAP.md` §Native agent thread |

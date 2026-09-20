@@ -7,7 +7,7 @@ use super::{
 use crate::ids::{BoardId, CardId, ContextId, LabelId, RepoId, StatusId, WorktreeId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-/// A context-scoped board and its backend configuration.
+/// A context-scoped board and its optional worktree scope.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Board {
@@ -15,6 +15,9 @@ pub struct Board {
     pub id: BoardId,
     /// Context id.
     pub context_id: ContextId,
+    /// Worktree id when this board is scoped to one worktree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_id: Option<WorktreeId>,
     /// Name.
     pub name: String,
     /// Identifier prefix; `FLT` → `FLT-12`. Uppercase, 1..=8 chars, [A-Z0-9].
@@ -436,6 +439,9 @@ pub struct BoardSummary {
     pub id: BoardId,
     /// Context id.
     pub context_id: ContextId,
+    /// Worktree id when this board is scoped to one worktree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_id: Option<WorktreeId>,
     /// Name.
     pub name: String,
     /// Prefix.

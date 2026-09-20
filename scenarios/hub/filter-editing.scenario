@@ -1,0 +1,81 @@
+# docs/KEYMAP.md §Dialogs and text inputs — the filter overlay's query is a live `TextInput`,
+# so `ctrl-w`, `ctrl-u`, `home`, `end` and `alt-left` / `alt-right` are its rows, not the Hub's.
+# docs/KEYMAP.md §Filter mode (`/`) [A13] — `ctrl-n` / `ctrl-p` and `down` / `up` stay container
+# keys while the input owns the keyboard, and the two-stage `Esc` still holds afterwards.
+#
+# The oracle is `lists.worktrees.filter`, which the overlay mirrors into `AppState` on every
+# keystroke — so unlike a dialog editor this one can be waited on. A caret motion changes no
+# text, so where the next character lands is the proof that the caret moved.
+#
+# Paste is deliberately not exercised: `clipboard set` and `clipboard get` fail in every lane by
+# design (`docs/TESTING-HARNESS.md` §1); the kit's own gpui tests cover `cmd-v`.
+#
+# No `shot`: this is a keyboard scenario, so it belongs in the headless subset too (§7).
+fixture: busy
+await idle 30000
+assert screen == Hub && hub_pane == List && focused == worktrees.row[0]
+
+key /
+await overlay == Filter 10000
+assert mode == Filter && focused == filter.input && lists.worktrees.filter == ""
+
+# `ctrl-w` deletes the previous word run; `ctrl-u` deletes to the line start.
+type hot fix
+await lists.worktrees.filter == "hot fix" 10000
+key ctrl-w
+await lists.worktrees.filter == "hot " 10000
+key ctrl-u
+await lists.worktrees.filter == "" 10000
+
+# `home` and `end` put the next character at the two ends of the row.
+type eat
+await lists.worktrees.filter == eat 10000
+key home
+type f
+await lists.worktrees.filter == feat 10000
+key end
+type u
+await lists.worktrees.filter == featu 10000
+
+# `alt-left` and `alt-right` step whole word boundaries inside the query.
+key ctrl-u
+await lists.worktrees.filter == "" 10000
+type one two
+key alt-left
+type X
+await lists.worktrees.filter == "one Xtwo" 10000
+key alt-right
+type Y
+await lists.worktrees.filter == "one XtwoY" 10000
+
+# The list underneath is still a list: `o` keeps the two worktrees whose ids carry one, and the
+# cursor keys reach them while every printable key still goes to the query.
+key ctrl-u
+type o
+await lists.worktrees.filter == o 10000
+await lists.worktrees.selected.label == broken 10000
+assert lists.worktrees.rows[0].label == broken && lists.worktrees.rows[1].label == hotfix
+assert lists.worktrees.rows[2] absent && focused == filter.input
+
+key ctrl-n
+await lists.worktrees.selected.label == hotfix 10000
+assert focused == filter.input && lists.worktrees.filter == o
+key ctrl-p
+await lists.worktrees.selected.label == broken 10000
+key down
+await lists.worktrees.selected.label == hotfix 10000
+key up
+await lists.worktrees.selected.label == broken 10000
+assert overlay == Filter && focused == filter.input
+dump edited
+
+# [A13] is unchanged by any of the above: the first `Esc` leaves the input keeping the query,
+# the second clears it, and neither quits.
+key escape
+await overlay absent 10000
+assert screen == Hub && mode == Normal && lists.worktrees.filter == o
+key escape
+await lists.worktrees.filter == "" 10000
+assert screen == Hub && mode == Normal && lists.worktrees.rows[3] exists
+dump cleared
+quit

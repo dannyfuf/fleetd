@@ -298,17 +298,94 @@ pub const fn filter_escape(editing: bool) -> FilterEscape {
 }
 
 impl AppState {
+    /// Mirrors the context word derived from the open dialog's own draft.
+    ///
+    /// Returns whether the authoritative key chain changed.
+    pub(crate) fn set_dialog_key_context(
+        &mut self,
+        dialog: Option<Dialogs>,
+        context: Option<&'static str>,
+    ) -> bool {
+        let next = dialog.zip(context);
+        if self.dialog_key_context == next {
+            return false;
+        }
+        self.dialog_key_context = next;
+        true
+    }
+
+    /// Whether §3.12's cold-start or "will not start" surface replaces the body.
+    ///
+    /// `shell::daemon::splash` draws exactly these two states, and the doctor report outranks
+    /// both, so this is the one answer to "is the Hub body on screen at all".
+    #[must_use]
+    pub fn shows_daemon_splash(&self) -> bool {
+        self.doctor.is_none()
+            && matches!(
+                self.daemon,
+                DaemonLink::Starting | DaemonLink::Failed { .. }
+            )
+    }
+
+    /// Whether §3.10's Hub filter editor is mounted and owns the keyboard.
+    ///
+    /// The editor is drawn in the pane header of whichever Hub pane has focus — there is no
+    /// overlay layer — so it exists only while the Hub's panes are what the frame is showing:
+    /// a splash, the first-run card, the doctor report and the board tab each replace them.
+    /// The Hub body's mount condition (`screens::hub::composition`) and the shell's focus
+    /// reconciliation (`shell::root::focus`) are the same question and must stay one function:
+    /// an editor mounted without the keyboard, or the keyboard handed to an editor that is not
+    /// mounted, is a dead keyboard either way.
+    #[must_use]
+    pub fn hub_filter_owns_keys(&self) -> bool {
+        self.filter.editing
+            && matches!(self.overlay, Some(Overlay::Filter))
+            && matches!(self.screen, Screen::Hub { tab } if tab != HubTab::Board)
+            && !self.shows_daemon_splash()
+            && self.doctor.is_none()
+            && !self.is_first_run()
+    }
+
+    /// Whether a live editor, rather than the surface itself, owns the keyboard on a base
+    /// screen.
+    ///
+    /// The chain-side half of the key-ownership rule (`docs/APP-CONTRACTS.md` §3): a container
+    /// context that binds bare printable keys may not join a chain an editor is being typed
+    /// into. Only the base screens need to ask — a dialog, the palette and §3.10's filter each
+    /// return their own chain above, and `dialogs::focused_input` is what focuses the editor
+    /// inside them — so what is left to name here is the board's filter and §12's composer.
+    #[must_use]
+    fn base_editor_owns_keys(&self) -> bool {
+        // A base screen is what is left once neither an overlay nor the floating agent is
+        // topmost; both publish a chain of their own that never reaches a container append.
+        if self.overlay.is_some() || self.agent_popup.is_some() {
+            return false;
+        }
+        self.board_filter_owns_keys() || self.agent_composer_owns_keys()
+    }
+
     /// The nested key contexts of the focused element, outermost first.
     ///
     /// [`crate::keymap`] predicates are written against exactly this chain, which is why the
     /// Hub's panes are `Hub > Repos` and a dialog is `Dialog > <name>`. The daemon banner is
     /// appended **innermost** so its `r` / `l` / `Esc` outrank the Hub's while it is showing,
-    /// and dismissing it (`Esc`) gives them straight back.
+    /// and dismissing it (`Esc`) gives them straight back — but never while a live editor owns
+    /// the keyboard, because `r` and `l` are the two letters a banner would otherwise steal
+    /// from typing.
     #[must_use]
     pub fn context_chain(&self) -> Vec<&'static str> {
         // Overlays also own keys above first-run and daemon-failure surfaces.
         if let Some(overlay) = &self.overlay {
-            return overlay.context_chain();
+            return match overlay {
+                Overlay::Dialog(dialog) => vec![
+                    "Dialog",
+                    self.dialog_key_context
+                        .as_ref()
+                        .filter(|(owner, _)| owner == dialog)
+                        .map_or_else(|| dialog.context_name(), |(_, context)| *context),
+                ],
+                _ => overlay.context_chain(),
+            };
         }
         // §3.12 B replaces the whole window, so its keys outrank every base surface's.
         if matches!(self.daemon, DaemonLink::Failed { .. }) {
@@ -344,7 +421,7 @@ impl AppState {
             // An agent tab owns the whole `Agent > …` chain of §9; the terminal sub-modes
             // belong to the tabs that really are terminals.
             (None, Screen::Workspace { .. }) => self.agent_context_chain().unwrap_or_else(|| {
-                vec![
+                let mut chain = vec![
                     "Workspace",
                     match self.terminal_mode {
                         TerminalMode::Terminal => "Terminal",
@@ -352,12 +429,26 @@ impl AppState {
                         TerminalMode::Prefix => "Prefix",
                         TerminalMode::Scroll => "Scroll",
                     },
-                ]
+                ];
+                // BOARD §8: a `fleet://board` tab draws the board itself rather than handing
+                // its keys to an embedded view, so it names the surface a third word deep and
+                // the whole `Hub > Board` table is repeated there. `ctrl-s` stays the prefix
+                // because the word is appended *under* `Native`, which still binds it — and it
+                // is dropped while the prefix is armed, so `ctrl-s b` is never `b`.
+                if self.terminal_mode == TerminalMode::Native && self.board_pane_is_active() {
+                    chain.push("Board");
+                }
+                chain
             }),
         };
+        // Key ownership (`docs/KEYMAP.md`, `docs/APP-CONTRACTS.md` §3): the banner binds bare
+        // `r` and `l`, so its context may not wrap a live editor — those two letters have to
+        // type. The whole word leaves the chain while an editor owns the keyboard, `Esc`
+        // included: the banner is still dismissible from every surface that is not typing.
         if let DaemonLink::Lost {
             dismissed: false, ..
         } = self.daemon
+            && !self.base_editor_owns_keys()
         {
             chain.extend_from_slice(&["Daemon", "Banner"]);
         }
@@ -554,6 +645,15 @@ impl AppState {
     pub fn active_terminal_is_native(&self) -> bool {
         self.active_terminal_record()
             .is_some_and(fleet_core::sessions::Terminal::is_native)
+    }
+
+    /// The worktree the open session belongs to, when it is a worktree session.
+    #[must_use]
+    pub fn active_worktree(&self) -> Option<&WorktreeId> {
+        match &self.active_session()?.kind {
+            SessionKind::Worktree(worktree) => Some(worktree),
+            SessionKind::Agent(_) => None,
+        }
     }
 
     /// The active session's active terminal record, straight from the snapshot.

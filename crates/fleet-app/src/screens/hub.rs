@@ -8,6 +8,7 @@ use std::{
 };
 
 use fleet_core::{
+    board::BoardSummary,
     github::{PrTab, PullRequest, worktree_matches_pr},
     ids::{ContextId, RepoId, WorktreeId},
     model::{CloneJob, Context, Repo, Worktree},
@@ -19,7 +20,8 @@ use fleet_proto::{
     response::{PrSlice, ResponseBody},
 };
 use fleet_ui_kit::{
-    ActiveTheme, HarnessTargetExt, Icon, SplitLayout, StatusKind, Toast, ToastDuration,
+    ActiveTheme, HarnessTargetExt, Icon, InputMode, SplitLayout, StatusKind, TextInput,
+    TextInputEvent, Toast, ToastDuration,
 };
 use gpui::{
     AnyElement, App, ClipboardItem, Entity, FocusHandle, IntoElement, ScrollHandle, SharedString,
@@ -316,13 +318,18 @@ struct SelectionAnchors {
 
 /// The Hub screen.
 pub struct HubScreen {
-    board: super::board::BoardScreen,
     hub: Entity<HubState>,
     rail_scroll: UniformListScrollHandle,
     list_scroll: UniformListScrollHandle,
     pr_scroll: UniformListScrollHandle,
     detail_scroll: ScrollHandle,
     observation: Option<Subscription>,
+    /// One live filter editor for the lifetime of the Hub, shared by the rail and the list:
+    /// §3.10 opens the filter over whichever pane has focus, and only ever one of them.
+    filter_input: Entity<TextInput>,
+    /// Mirrors the editor into `FilterState.query`, which every projection and the harness
+    /// dump read.
+    filter_subscription: Option<Subscription>,
     home: Option<std::path::PathBuf>,
 }
 
@@ -330,14 +337,22 @@ impl HubScreen {
     /// Builds the screen. Called once, while the shell is being built.
     #[must_use]
     pub fn new(cx: &mut App) -> Self {
+        let filter_input = cx.new(|cx| {
+            let mut input = TextInput::new(InputMode::SingleLine, cx);
+            // §3.10 replaces the 30 px pane header in place, so the editor brings no box of
+            // its own: one line of text and a caret, sized by the header.
+            input.set_embedded(true, cx);
+            input
+        });
         Self {
-            board: super::board::BoardScreen::new(cx),
             hub: cx.new(|_| HubState::default()),
             rail_scroll: UniformListScrollHandle::new(),
             list_scroll: UniformListScrollHandle::new(),
             pr_scroll: UniformListScrollHandle::new(),
             detail_scroll: ScrollHandle::new(),
             observation: None,
+            filter_input,
+            filter_subscription: None,
             home: crate::presentation::home_dir(),
         }
     }
@@ -347,9 +362,46 @@ impl HubScreen {
         if self.observation.is_some() {
             return;
         }
+        let weak_state = state.downgrade();
+        let hub = self.hub.clone();
+        self.filter_subscription = Some(cx.subscribe(
+            &self.filter_input,
+            move |input, event: &TextInputEvent, cx| {
+                if !matches!(event, TextInputEvent::Changed) {
+                    return;
+                }
+                let Some(state) = weak_state.upgrade() else {
+                    return;
+                };
+                let query = input.read(cx).text().to_owned();
+                let pane = FilteredPane::of(state.read(cx));
+                let narrowed = state.update(cx, |app, cx| {
+                    if app.filter.query == query {
+                        return false;
+                    }
+                    app.filter.query = query;
+                    // §3.10: a narrower list starts again at its top row.
+                    pane.reset_cursor(&mut app.cursors);
+                    cx.notify();
+                    true
+                });
+                if narrowed {
+                    hub.update(cx, |hub, _| pane.forget_anchor(&mut hub.selection));
+                }
+            },
+        ));
         let ctx = self.context(state, bridge);
         let observed = ctx.clone();
-        self.observation = Some(cx.observe(state, move |_, cx| observed.synchronize(cx)));
+        let filter_input = self.filter_input.clone();
+        self.observation = Some(cx.observe(state, move |state, cx| {
+            observed.synchronize(cx);
+            // The two-stage `Esc`, `Enter` and every screen change reset the query in state;
+            // the editor follows it rather than the other way round.
+            let query = state.read(cx).filter.query.clone();
+            if filter_input.read(cx).text() != query {
+                filter_input.update(cx, |input, cx| input.set_text(query, cx));
+            }
+        }));
         cx.defer(move |cx| ctx.synchronize(cx));
     }
 
@@ -361,6 +413,74 @@ impl HubScreen {
             rail_scroll: self.rail_scroll.clone(),
             list_scroll: self.list_scroll.clone(),
             pr_scroll: self.pr_scroll.clone(),
+        }
+    }
+
+    /// Focus the Hub filter after `/` opens it.
+    pub(crate) fn focus_filter(&self, window: &mut Window, cx: &mut App) {
+        self.filter_input
+            .update(cx, |input, cx| input.focus(window, cx));
+    }
+
+    /// The Hub filter's live input handle, for the shell's focus reconciliation.
+    pub(crate) fn filter_focus_handle(&self, cx: &App) -> FocusHandle {
+        self.filter_input.read(cx).focus_handle()
+    }
+}
+
+/// Which list §3.10's filter is narrowing.
+#[derive(Clone, Copy)]
+enum FilteredPane {
+    Rail,
+    Worktrees,
+    PrsMine,
+    PrsReview,
+    /// The board owns its own filter, and the Workspace has no Hub list to narrow.
+    None,
+}
+
+impl FilteredPane {
+    fn of(app: &AppState) -> Self {
+        match (app.hub_pane, &app.screen) {
+            (HubPane::Repos, _) => Self::Rail,
+            (
+                HubPane::List,
+                Screen::Hub {
+                    tab: HubTab::Worktrees,
+                },
+            ) => Self::Worktrees,
+            (HubPane::List, Screen::Hub { tab: HubTab::Prs }) => match app.pr_tab {
+                PrTab::Mine => Self::PrsMine,
+                PrTab::Review => Self::PrsReview,
+            },
+            (HubPane::List, Screen::Hub { tab: HubTab::Board } | Screen::Workspace { .. }) => {
+                Self::None
+            }
+        }
+    }
+
+    /// Puts the cursor back on the top row, because §3.10 says the top match is what `Enter`
+    /// opens once the query has narrowed the list.
+    fn reset_cursor(self, cursors: &mut crate::state::Cursors) {
+        match self {
+            Self::Rail => cursors.repos = 0,
+            Self::Worktrees => cursors.worktrees = 0,
+            Self::PrsMine => cursors.prs_mine = 0,
+            Self::PrsReview => cursors.prs_review = 0,
+            Self::None => {}
+        }
+    }
+
+    /// Drops the anchored row, so the reset above survives the next projection: the pane
+    /// anchors the row it is showing so a refresh keeps the selection under the user, and a
+    /// narrowed list is not a refresh.
+    fn forget_anchor(self, selection: &mut SelectionAnchors) {
+        match self {
+            Self::Rail => selection.rail = None,
+            Self::Worktrees => selection.worktree = None,
+            Self::PrsMine => selection.prs_mine = None,
+            Self::PrsReview => selection.prs_review = None,
+            Self::None => {}
         }
     }
 }
@@ -416,12 +536,10 @@ fn row_capacity(window_height: f32, metrics: fleet_ui_kit::theme::Metrics) -> us
 /// The Hub's screen tabs; summary counts are context scoped, independent of repo scope.
 fn hub_tabs(state: &AppState) -> fleet_ui_kit::SegmentedTabs {
     use fleet_ui_kit::{SegmentedTab, SegmentedTabs};
-    let summary = state.snapshot.as_ref().and_then(|snapshot| {
-        snapshot
-            .boards
-            .iter()
-            .find(|board| Some(&board.context_id) == state.active_context())
-    });
+    let summary = state
+        .snapshot
+        .as_ref()
+        .and_then(|snapshot| context_board_summary(&snapshot.boards, state.active_context()));
     let label = if summary.is_some_and(|board| board.conflict_count > 0) {
         "Board •"
     } else {
@@ -454,4 +572,13 @@ fn hub_tabs(state: &AppState) -> fleet_ui_kit::SegmentedTabs {
         };
         window.dispatch_action(action, cx);
     })
+}
+
+fn context_board_summary<'a>(
+    boards: &'a [BoardSummary],
+    context: Option<&ContextId>,
+) -> Option<&'a BoardSummary> {
+    boards
+        .iter()
+        .find(|board| board.worktree_id.is_none() && Some(&board.context_id) == context)
 }

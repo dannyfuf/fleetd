@@ -191,6 +191,7 @@ struct BoardHarness {
     model: BoardModel,
     lists: Vec<ListState>,
     scroll: ScrollHandle,
+    filter_input: Entity<fleet_ui_kit::TextInput>,
 }
 
 impl gpui::Render for BoardHarness {
@@ -202,6 +203,7 @@ impl gpui::Render for BoardHarness {
                 error: None,
                 filter: "",
                 filter_editing: false,
+                filter_input: self.filter_input.clone(),
                 focus: (0, 0),
                 syncing: false,
             },
@@ -223,10 +225,13 @@ fn draw_board(cx: &mut gpui::TestAppContext) -> Vec<String> {
         .iter()
         .map(|column| ListState::new(column.rows.len(), gpui::ListAlignment::Top, gpui::px(0.0)))
         .collect();
+    let filter_input =
+        cx.new(|cx| fleet_ui_kit::TextInput::new(fleet_ui_kit::InputMode::SingleLine, cx));
     let harness = cx.new(|_| BoardHarness {
         model,
         lists,
         scroll: ScrollHandle::new(),
+        filter_input,
     });
     let element = harness.clone();
     cx.draw(

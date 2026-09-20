@@ -32,12 +32,7 @@ pub(crate) struct CardDetailState {
     pub(super) scroll: gpui::ScrollHandle,
     /// Selected row in the property pane.
     pub(super) property_row: usize,
-    /// Pending title, description or comment text.
-    pub(super) area: TextAreaState,
-    /// Pixel scroll of the text editor, which owns what `area.scroll_row` cannot: how tall the
-    /// box made the lines it wrapped.
-    pub(super) area_scroll: gpui::ScrollHandle,
-    /// Which surface `area` belongs to, when one is being edited.
+    /// Which surface the host's one live input belongs to, when one is being edited.
     pub(super) edit: Option<CardEdit>,
     /// Revision guarding asynchronous save replies against a newer edit.
     pub(super) revision: u64,
@@ -50,7 +45,7 @@ pub(crate) struct CardDetailState {
 impl CardDetailState {
     /// Whether a text surface currently owns the keyboard.
     #[must_use]
-    pub(super) const fn is_editing(&self) -> bool {
+    pub(crate) const fn is_editing(&self) -> bool {
         self.edit.is_some()
     }
 
@@ -59,11 +54,7 @@ impl CardDetailState {
     /// `comment_item` is the comment editor's index among the left pane's children, which the
     /// optional conflict banner shifts: scrolling to a fixed index lands on Activity instead
     /// of the editor on every card that is not conflicted, which is nearly all of them.
-    pub(super) fn begin(&mut self, surface: CardEdit, text: String, comment_item: usize) {
-        self.area = TextAreaState::from_text(text);
-        self.area_scroll = gpui::ScrollHandle::new();
-        self.area
-            .reveal_cursor(if surface == CardEdit::Comment { 4 } else { 8 });
+    pub(super) fn begin(&mut self, surface: CardEdit, comment_item: usize) {
         self.scroll.scroll_to_item(if surface == CardEdit::Comment {
             comment_item
         } else {
@@ -77,7 +68,6 @@ impl CardDetailState {
     /// Throws the buffer away.
     pub(super) fn cancel(&mut self) {
         self.edit = None;
-        self.area.clear();
         self.revision = self.revision.wrapping_add(1);
         self.saving = None;
     }
@@ -93,18 +83,6 @@ impl CardDetailState {
         }
         self.error = error;
     }
-
-    /// Runs `edit` against the buffer, keeping the caret in range.
-    pub(super) fn apply(&mut self, edit: impl FnOnce(&mut TextAreaState)) {
-        edit(&mut self.area);
-        self.area
-            .reveal_cursor(if self.edit == Some(CardEdit::Comment) {
-                4
-            } else {
-                8
-            });
-        self.revision = self.revision.wrapping_add(1);
-    }
 }
 
 /// The card this dialog is showing, resolved against the loaded board.
@@ -115,52 +93,68 @@ pub(super) fn card<'a>(state: &'a AppState, draft: &CardDetailState) -> Option<&
     view.cards.iter().find(|card| &card.id == id)
 }
 
-/// Types into the open buffer. Returns whether there was one to type into.
-pub(super) fn type_text(state: &Entity<AppState>, text: &str, cx: &mut App) -> bool {
-    let typed = with_host(state, cx, |host| {
-        if !host.card_detail.is_editing() {
-            return false;
-        }
-        host.card_detail.apply(|area| area.insert(text));
-        true
-    });
-    if typed {
-        notify(state, cx);
-        cx.stop_propagation();
-    }
-    typed
-}
-
-/// Runs an edit against the open buffer. Returns whether there was one.
-pub(super) fn edit_buffer(
-    state: &Entity<AppState>,
-    cx: &mut App,
-    edit: impl FnOnce(&mut TextAreaState),
-) -> bool {
-    let edited = with_host(state, cx, |host| {
-        if !host.card_detail.is_editing() {
-            return false;
-        }
-        host.card_detail.apply(edit);
-        true
-    });
-    if edited {
-        notify(state, cx);
-        cx.stop_propagation();
-    }
-    edited
-}
-
 /// Opens a text surface.
-pub(super) fn begin(state: &Entity<AppState>, surface: CardEdit, text: String, cx: &mut App) {
+pub(super) fn begin(
+    state: &Entity<AppState>,
+    surface: CardEdit,
+    text: String,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let draft = read_host(state, cx, |host, _| host.card_detail.clone());
     // `render` builds the left pane as: conflict banner (only when there is one), title,
     // description, comments, comment editor.
     let comment_item =
         3 + usize::from(card(state.read(cx), &draft).is_some_and(|card| card.conflict.is_some()));
-    with_host(state, cx, |host| {
-        host.card_detail.begin(surface, text, comment_item);
+    let input = cx.new(|cx| {
+        let mode = match surface {
+            CardEdit::Title => InputMode::SingleLine,
+            CardEdit::Description => InputMode::Multiline {
+                min_rows: 8,
+                max_rows: 8,
+            },
+            CardEdit::Comment => InputMode::Multiline {
+                min_rows: 4,
+                max_rows: 4,
+            },
+        };
+        let mut input = TextInput::new(mode, cx);
+        input.set_label(
+            Some(
+                match surface {
+                    CardEdit::Title => "Title",
+                    CardEdit::Description => "Description",
+                    CardEdit::Comment => "New comment",
+                }
+                .into(),
+            ),
+            cx,
+        );
+        if surface != CardEdit::Title {
+            input.set_placeholder("Markdown.", cx);
+        }
+        input.set_text(text, cx);
+        input
     });
+    let host = crate::dialogs::host::host_for(state, cx);
+    let weak_host = host.downgrade();
+    let subscription = cx.subscribe(&input, move |_, event, cx| {
+        if matches!(event, TextInputEvent::Changed)
+            && let Some(host) = weak_host.upgrade()
+        {
+            host.update(cx, |host, cx| {
+                host.card_detail.revision = host.card_detail.revision.wrapping_add(1);
+                host.card_detail.error = None;
+                cx.notify();
+            });
+        }
+    });
+    host.update(cx, |host, _| {
+        host.card_detail.begin(surface, comment_item);
+        host.card_detail_input = Some(input.clone());
+        host.card_detail_input_subscription = Some(subscription);
+    });
+    input.update(cx, |input, cx| input.focus(window, cx));
     notify(state, cx);
     cx.stop_propagation();
 }

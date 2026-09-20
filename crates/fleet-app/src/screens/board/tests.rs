@@ -1,5 +1,53 @@
 use super::actions::{NO_REMOTE, NO_REMOTE_URL, adjacent_status, picker_target};
 use super::*;
+
+#[gpui::test]
+fn live_board_filter_deletes_words_while_ctrl_n_moves_the_list(cx: &mut gpui::TestAppContext) {
+    use std::{cell::Cell, rc::Rc};
+
+    struct FilterInputHarness {
+        input: Entity<TextInput>,
+        moves: Rc<Cell<usize>>,
+    }
+
+    impl gpui::Render for FilterInputHarness {
+        fn render(
+            &mut self,
+            _: &mut Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            let moves = self.moves.clone();
+            gpui::div().key_context("Filter").child(
+                gpui::div()
+                    .key_context("BoardFilter")
+                    .on_action(move |_: &filter_actions::CursorDown, _, cx| {
+                        moves.set(moves.get() + 1);
+                        cx.stop_propagation();
+                    })
+                    .child(self.input.clone()),
+            )
+        }
+    }
+
+    cx.update(|cx| {
+        cx.set_global(fleet_ui_kit::Theme::dark());
+        crate::keymap::init(cx);
+    });
+    let screen = cx.update(BoardScreen::new);
+    let input = screen.filter_input.clone();
+    let moves = Rc::new(Cell::new(0));
+    let window = cx.add_window(|_, _| FilterInputHarness {
+        input: input.clone(),
+        moves: moves.clone(),
+    });
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    visual.update(|window, cx| input.update(cx, |input, cx| input.focus(window, cx)));
+    visual.simulate_input("alpha beta");
+    visual.simulate_keystrokes("ctrl-w");
+    input.read_with(&visual, |input, _| assert_eq!(input.text(), "alpha "));
+    visual.simulate_keystrokes("ctrl-n");
+    assert_eq!(moves.get(), 1);
+}
 use crate::state::BoardFocus;
 use fleet_core::board::{BoardView, CardDraft, create_card, new_board};
 

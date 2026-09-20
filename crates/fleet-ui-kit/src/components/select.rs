@@ -1,7 +1,7 @@
 //! `Select` — a labelled value that opens a [`super::FuzzyList`] of options.
 //!
 //! Fleet prefers a [`super::Cycler`] for two-to-five options and a [`super::FuzzyList`] under a
-//! [`super::TextField`] for a searchable set; `Select` is the closed-list case in between (the
+//! [`super::TextInput`] for a searchable set; `Select` is the closed-list case in between (the
 //! Create dialog's base list, the Assign dialog's context list).
 //!
 //! The caller owns `open`, the cursor and the option data. The open list is a **popover on the

@@ -1,0 +1,91 @@
+# Worktree-scoped boards — Phase 2: the `fleet://board` Workspace tab — Tracker
+> Plan: ./worktree-boards-2026-09-18-phase-2-plan.md
+> READ ME FIRST. Update this file as you work. The plan is reference; this tracker is the source of truth for state. If reality diverges from the plan, update both.
+
+## Working agreement
+- Check the kickoff box below before starting.
+- Move tasks through: [ ] todo → [~] in progress → [x] done. One task in progress at a time.
+- After each task: tick its box, paste the verification command output (or a one-line "verified: <how>"), and commit.
+- If you discover work the plan missed, add a new task with the next ID. Never silently expand an existing task.
+- Definition of done is not met until every box is ticked and this tracker matches reality.
+
+## Kickoff
+- [x] I have read the plan end to end.
+- [x] Phase 1 is merged and `fleet board --worktree show` works against the running daemon.
+  - phase 1 is on this branch (all phases ship together per the 2026-09-19 decision); the CLI
+    check was done in P1-T07 against a private daemon, not the user's live one.
+- [x] I have run the project-wide verification commands once on a clean tree to confirm a green baseline (`make lint && make test && make harness`).
+  - verified 2026-09-19 on `e5ee8d7` (phase 3 gate): `make lint` clean, `make test` 3272 passed,
+    `make harness` 64 of 64.
+- [x] I am ready to start.
+
+## Tasks
+- [x] P2-T01 — Reserve `fleet://board` as a native command
+  - verified: `cargo test -p fleet-core config` (18), `cargo test -p fleet-daemon` (771 lib + 11
+    sessions_lifecycle), `cargo test -p fleet-app settings`, workspace clippy clean. The only
+    degradation site is `fleet-core::sessions::default_terminals`, now routed through
+    `config::proxied_degradation` (lazygit degrades, board never does); the settings schema already
+    keyed on `is_native_command`, so a test pins the display instead.
+- [x] P2-T02 — Give `BoardState` a scope and make the loader scope-aware
+  - verified: `cargo test -p fleet-app` (900 passed; 13 in `state::board`), `make lint`, `make harness`
+    64 of 64 (Hub board scenarios unchanged). `BoardScope::{Context, Worktree}` on `BoardState.scope`;
+    invalidation reuses `board_generation`; `enter_context_scope`/`enter_worktree_scope` are the
+    triggers P2-T04 wires (two `#[allow]`s parked until then). Capability refusal is a one-line toast.
+- [x] P2-T03 — Add `ctrl-s b` to open or select the board tab
+  - verified: `cargo test -p fleet-app` (909 passed), `make lint`, `make harness` 64 of 64 (agent run
+    `20260920-000429` and an independent run). The listener lives on the shell root so the palette
+    row reaches it; the tab is matched by command, never by name; `Model.native` became
+    `Option<NativeTab::{Lazygit, Board, Unknown}>` and a board tab draws an empty native band until
+    P2-T04. Two workspace scenarios that used `ctrl-s b` as the unbound example now use `ctrl-s o`.
+- [x] P2-T04 — Render the board pane inside the Workspace
+  - verified: `cargo test -p fleet-app` (916 passed), `make lint`, `make harness` 64 of 64 (agent run
+    `20260920-004914` and an independent run). Shape: no pane entity; the one `BoardScreen` moved
+    from `HubScreen` to `Shell` and is lent per frame to whichever surface draws; lazygit's
+    `sync_panes` untouched. Scope entered/released from `WorkspaceScreen::synchronize` through a
+    `BoardClaim` carrying worktree and board generation; 26 `Workspace > Native > Board` rows.
+- [x] P2-T05 — Drive the tab with a harness scenario
+  - verified: `scenarios/workspace/board-tab.scenario` (43 steps) green three times alone; `make harness`
+    65 of 65 (`20260920-011333`); `make harness-headless` 25 of 25; `cargo test -p fleet-harness`
+    (152); `make lint`. The `board` fixture now seeds a worktree board through
+    `ensure_worktree_board` (FEA-* cards, disjoint from the context board's FLT-*); no
+    projection change; TESTING-HARNESS §4 fixture prose only.
+- [x] P2-T06 — Reconcile the UX, keymap and contract docs
+  - verified: `cargo test -p fleet-app keymap` (32) after the KEYMAP edits; docs-only change. The
+    review found the findings fixed in P2-T07.
+- [x] P2-T07 — Fix the phase-review findings (dead `Requested` claim; refused scope draws cold columns)
+  - added 2026-09-20 from the P2-T06 review: both `release_board_scope` callers pass
+    `drop_pending = true`, so the claim `ctrl-s b` records never survives the notify it raises and
+    the keystroke cancels its own `EnsureWorktreeBoard`; a capability refusal while a board tab is
+    active leaves `board_is_shown` false with no error, so the pane draws skeleton columns forever
+    (or the context board's cards). Also: clone of `model.worktree` before the claim check; seven
+    bare `unwrap`s in new root tests.
+  - verified: `make lint` clean; `make test` 79 suites, 3302 passed, 0 failed; `make harness` 65 of 65
+    (`20260920-030044`, `board-tab.scenario` 43 steps). A pending claim now survives every notify in
+    the session that made it (`pending_claim_survives`), dies on a refused create, another tab, another
+    session or leaving the Workspace; `release_board_scope` returns a worktree scope whether or not a
+    claim is left to drop; a refusal under an active board pane clears the mirror and writes
+    `WORKTREE_BOARDS_UNSUPPORTED` to `BoardState::error` (UX-SPEC failed shape, APP-CONTRACTS).
+
+## Notes / decisions log
+(Append-only. Date-stamp entries. Capture anything that surprised you or that future-you will want.)
+
+- 2026-09-20 — The session died with P2-T07 stashed after a fmt-only lint failure and a killed
+  `make test`; resumed from `stash@{0}`. The killed build left `target/debug/incremental` (67 GB)
+  referencing stale dependency symbols, so every test binary failed to link with
+  `undefined hidden symbol … .llvm.…` until that directory was removed. `cargo clean -p` made it worse.
+- 2026-09-19 — Executor: Opus agents on the host (Codex out of credits until Sep 22). P2-T01 and
+  P2-T02 run in parallel on disjoint files; the harness runs only from the orchestrator.
+- 2026-09-18 — Plan written. Decisions fixed at planning time: the surface is a `fleet://board`
+  native tab in the Workspace (not a Hub scope switcher); one `BoardState` with a scope; the tab
+  is created on demand by `ctrl-s b` and not added to the default `windows[]`; no new ui-kit
+  components; no tab badge.
+
+## Follow-ups
+(Things discovered mid-flight that are out of scope for this plan. Each gets a one-line description.)
+
+- Card detail's Worktree property row still calls `open_session` unconditionally, so `Enter` on the
+  current worktree from the pane re-ensures the session on screen instead of answering
+  "already in this worktree" as `o` does.
+
+- Consider a worktree-board open count on the Workspace tab and in the Hub worktrees list, mirroring the Hub Board tab badge.
+- Consider adding `fleet://board` to the default `windows[]` if users want the tab to survive sleep/wake without `ctrl-s b`.

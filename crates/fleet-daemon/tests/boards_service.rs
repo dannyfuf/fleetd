@@ -1,12 +1,12 @@
 //! Board service persistence, worktree, synchronization, and event contracts.
 
-use std::{sync::Arc, time::Duration};
+use std::{path::Path, sync::Arc, time::Duration};
 
 use chrono::{TimeZone, Utc};
 use fleet_core::{
     board::*,
-    ids::BoardId,
-    model::{Context, Repo, RepoHooks},
+    ids::{BoardId, WorktreeId},
+    model::{Context, Repo, RepoHooks, Worktree},
     paths::FleetHome,
     state::default_state,
 };
@@ -22,13 +22,15 @@ use fleet_daemon::{
     },
     jobs::JobManager,
     server::BroadcastBus,
-    services::{boards::Boards, sessions::Sessions, worktrees::Worktrees},
+    services::{Services, boards::Boards, prune::WorktreeDeleter, worktrees::Worktrees},
     stores::{board::BoardStore, config::ConfigStore, state::StateStore},
     testing::fakes::{FakeBackend, FakeBackendCall, FakeGit, FakeShell, FakeShellCall, FixedClock},
 };
 use fleet_proto::{
     event::{BoardChangeReason, Event},
     job::{JobKind, JobStatus},
+    request::RequestBody,
+    response::ResponseBody,
 };
 use tokio::sync::broadcast;
 
@@ -45,6 +47,17 @@ struct Fixture {
     events: BroadcastBus,
     receiver: broadcast::Receiver<Event>,
     boards: Boards,
+    services: Arc<Services>,
+}
+
+#[tokio::test]
+async fn composed_board_and_worktree_services_do_not_retain_each_other() {
+    let boards = {
+        let fixture = Fixture::new(BackendCapabilities::default()).await;
+        Arc::downgrade(&fixture.services.boards)
+    };
+
+    assert!(boards.upgrade().is_none());
 }
 
 impl Fixture {
@@ -116,8 +129,9 @@ impl Fixture {
             },
         );
         let real_shell: Arc<dyn Shell> = shell.clone();
+        let backend = Arc::new(FakeBackend::new("fake", caps));
         let adapters = Adapters {
-            board_backends: BoardBackends::system(Arc::clone(&real_shell), clock.clone()),
+            board_backends: BoardBackends::new(vec![Arc::new(LocalBackend), backend.clone()]),
             git: Arc::new(FakeGit::new(shell.clone())),
             github: Arc::new(GhCli::new(Arc::clone(&real_shell))),
             process: Arc::new(RealProcess::new(Arc::clone(&real_shell))),
@@ -125,27 +139,19 @@ impl Fixture {
             shell: real_shell,
             clock: clock.clone(),
         };
-        let sessions = Sessions::new(Arc::clone(&config), Arc::clone(&state));
-        let worktrees = Arc::new(Worktrees::new(
+        let store = Arc::new(BoardStore::new(home.clone(), files));
+        let events = BroadcastBus::default();
+        let receiver = events.subscribe();
+        let services = Services::new_with_events(
+            temp.path().join("fleet"),
             config,
             state.clone(),
             jobs.clone(),
-            &adapters,
-            sessions,
-        ));
-        let store = Arc::new(BoardStore::new(home.clone(), files));
-        let backend = Arc::new(FakeBackend::new("fake", caps));
-        let events = BroadcastBus::default();
-        let receiver = events.subscribe();
-        let boards = Boards::new(
-            store.clone(),
-            state.clone(),
-            BoardBackends::new(vec![Arc::new(LocalBackend), backend.clone()]),
-            clock.clone(),
-            jobs.clone(),
-            worktrees.clone(),
+            adapters,
             events.clone(),
         );
+        let worktrees = Arc::new(services.worktrees.clone());
+        let boards = services.boards.as_ref().clone();
         Self {
             _temp: temp,
             home,
@@ -159,6 +165,7 @@ impl Fixture {
             events,
             receiver,
             boards,
+            services,
         }
     }
 
@@ -176,6 +183,40 @@ impl Fixture {
 
     async fn local(&self) -> BoardView {
         self.boards.ensure(&"work".parse().unwrap()).await.unwrap()
+    }
+
+    async fn publish_worktree(&self, id: &str) -> Worktree {
+        let id: WorktreeId = id.parse().unwrap();
+        let path = self.home.worktrees_dir().join(id.repo()).join(id.slug());
+        std::fs::create_dir_all(&path).unwrap();
+        let repo_name = id.repo().split_once('/').unwrap().1.to_owned();
+        let worktree = Worktree {
+            repo_id: id.repo().parse().unwrap(),
+            slug: id.slug().into(),
+            id,
+            branch: "feature".into(),
+            base_ref: "origin/main".into(),
+            path: path.display().to_string(),
+            session: format!(
+                "{repo_name}/{}",
+                path.file_name().unwrap().to_string_lossy()
+            ),
+            host: None,
+            created_at: "2026-09-06T12:00:00Z".into(),
+            last_opened_at: None,
+            degraded: None,
+        };
+        self.state
+            .transaction({
+                let worktree = worktree.clone();
+                move |state| {
+                    state.worktrees.push(worktree);
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+        worktree
     }
 
     async fn remote(&self) -> BoardView {
@@ -232,13 +273,20 @@ impl Fixture {
     }
 
     fn reasons(&mut self) -> Vec<BoardChangeReason> {
-        let mut reasons = Vec::new();
+        self.board_events()
+            .into_iter()
+            .map(|(_, reason)| reason)
+            .collect()
+    }
+
+    fn board_events(&mut self) -> Vec<(BoardId, BoardChangeReason)> {
+        let mut events = Vec::new();
         while let Ok(event) = self.receiver.try_recv() {
-            if let Event::BoardChanged { reason, .. } = event {
-                reasons.push(reason);
+            if let Event::BoardChanged { board_id, reason } = event {
+                events.push((board_id, reason));
             }
         }
-        reasons
+        events
     }
 }
 
@@ -313,6 +361,543 @@ async fn ensure_is_idempotent_and_missing_context_is_not_found() {
         Err(DaemonError::Conflict(_))
     ));
     assert_eq!(f.boards.list(Some(&context)).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn context_lookup_and_listing_keep_worktree_boards_in_their_scope() {
+    let f = Fixture::new(pull_caps()).await;
+    let context = f.state.load().await.unwrap().contexts[0].clone();
+    let worktree = Worktree {
+        id: "acme/api#feature".parse().unwrap(),
+        repo_id: "acme/api".parse().unwrap(),
+        slug: "feature".into(),
+        branch: "feature".into(),
+        base_ref: "origin/main".into(),
+        path: f
+            .home
+            .worktrees_dir()
+            .join("acme/api/feature")
+            .display()
+            .to_string(),
+        session: "api/feature".into(),
+        host: None,
+        created_at: "2026-09-06T12:00:00Z".into(),
+        last_opened_at: None,
+        degraded: None,
+    };
+    f.state
+        .transaction({
+            let worktree = worktree.clone();
+            move |state| {
+                state.worktrees.push(worktree);
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+
+    // Poison the context-id fast path with a worktree board, while the real context board uses
+    // a non-derived id so the fallback scan is the only correct answer.
+    let mut scoped = new_worktree_board(&context, &worktree, "2026-09-06T12:00:00Z");
+    scoped.id = "work".parse().unwrap();
+    f.store
+        .save(&BoardDocument {
+            version: BOARD_DOCUMENT_VERSION,
+            board: scoped,
+            cards: Vec::new(),
+        })
+        .unwrap();
+    let mut context_board = new_board(&context, "2026-09-06T12:00:00Z");
+    context_board.id = "context-board".parse().unwrap();
+    f.store
+        .save(&BoardDocument {
+            version: BOARD_DOCUMENT_VERSION,
+            board: context_board.clone(),
+            cards: Vec::new(),
+        })
+        .unwrap();
+
+    assert_eq!(
+        f.boards.ensure(&context.id).await.unwrap().board.id,
+        context_board.id
+    );
+    let listed = f.boards.list(None).await.unwrap();
+    assert_eq!(listed.len(), 2);
+    assert_eq!(
+        listed
+            .iter()
+            .find(|summary| summary.id.as_str() == "work")
+            .and_then(|summary| summary.worktree_id.as_ref())
+            .map(|id| id.as_str()),
+        Some("acme/api#feature")
+    );
+    assert_eq!(f.boards.summaries().await.len(), 2);
+
+    f.state
+        .transaction(|state| {
+            state.worktrees.clear();
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(f.boards.list(None).await.unwrap().len(), 1);
+    assert_eq!(f.boards.summaries().await.len(), 1);
+}
+
+#[tokio::test]
+async fn worktree_board_ensure_is_idempotent_and_create_refuses_a_second_board() {
+    let mut f = Fixture::new(pull_caps()).await;
+    let worktree = f.publish_worktree("acme/api#feature").await;
+    let (first, second) = tokio::join!(
+        f.boards.ensure_for_worktree(&worktree.id),
+        f.boards.ensure_for_worktree(&worktree.id)
+    );
+    let first = first.unwrap();
+    assert_eq!(first, second.unwrap());
+    assert_eq!(f.store.list().unwrap().len(), 1);
+    assert_eq!(first.board.id, worktree_board_id(&worktree.id));
+    assert_eq!(first.board.worktree_id.as_ref(), Some(&worktree.id));
+    assert_eq!(first.board.context_id.as_str(), "work");
+    assert_eq!(
+        first.board.default_repo_id.as_ref(),
+        Some(&worktree.repo_id)
+    );
+    assert_eq!(first.board.prefix, "FEA");
+    assert_eq!(f.reasons(), vec![BoardChangeReason::Created]);
+
+    assert!(matches!(
+        f.boards
+            .create_for_worktree(&worktree.id, None, None, None)
+            .await,
+        Err(DaemonError::Conflict(_))
+    ));
+    assert!(matches!(
+        f.boards
+            .ensure_for_worktree(&"acme/api#missing".parse().unwrap())
+            .await,
+        Err(DaemonError::NotFound(_))
+    ));
+}
+
+#[tokio::test]
+async fn moving_a_repo_rehomes_its_worktree_board_before_old_context_deletion() {
+    let f = Fixture::new(pull_caps()).await;
+    let worktree = f.publish_worktree("acme/api#feature").await;
+    let view = f.boards.ensure_for_worktree(&worktree.id).await.unwrap();
+    let card = f.card(&view.board.id, "Keep me").await;
+    f.state
+        .transaction(|state| {
+            state.contexts.push(Context {
+                id: "next".parse().unwrap(),
+                name: "Next".into(),
+                owners: vec!["acme".into()],
+                created_at: "2026-09-06T12:00:00Z".into(),
+            });
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    f.services
+        .dispatch(RequestBody::MoveRepoToContext {
+            repo: worktree.repo_id.clone(),
+            context: "next".parse().unwrap(),
+        })
+        .await
+        .unwrap();
+    f.services
+        .dispatch(RequestBody::DeleteContext {
+            id: "work".parse().unwrap(),
+        })
+        .await
+        .unwrap();
+
+    let preserved = f.boards.get(&view.board.id).await.unwrap();
+    assert_eq!(preserved.board.context_id.as_str(), "next");
+    assert_eq!(preserved.cards.len(), 1);
+    assert_eq!(preserved.cards[0].id, card.id);
+}
+
+#[tokio::test]
+async fn worktree_board_creation_suffixes_an_id_owned_by_another_board() {
+    let f = Fixture::new(pull_caps()).await;
+    let worktree = f.publish_worktree("acme/api#feature").await;
+    let context = f.state.load().await.unwrap().contexts[0].clone();
+    let mut blocker = new_board(&context, "2026-09-06T12:00:00Z");
+    blocker.id = worktree_board_id(&worktree.id);
+    f.store
+        .save(&BoardDocument {
+            version: BOARD_DOCUMENT_VERSION,
+            board: blocker,
+            cards: Vec::new(),
+        })
+        .unwrap();
+
+    let created = f
+        .boards
+        .create_for_worktree(
+            &worktree.id,
+            Some("Feature plan".into()),
+            Some("PLAN".into()),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.board.id.as_str(), "wt-acme-api-feature-2");
+    assert_eq!(created.board.name, "Feature plan");
+    assert_eq!(created.board.prefix, "PLAN");
+    assert_eq!(
+        f.boards.ensure_for_worktree(&worktree.id).await.unwrap(),
+        created
+    );
+    assert_eq!(f.store.list().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn context_board_creation_suffixes_an_id_owned_by_a_worktree_board() {
+    let f = Fixture::new(pull_caps()).await;
+    let worktree = f.publish_worktree("acme/api#feature").await;
+    let worktree_board = f
+        .boards
+        .ensure_for_worktree(&worktree.id)
+        .await
+        .unwrap()
+        .board;
+    let context_id = fleet_core::ids::ContextId::try_from(worktree_board.id.as_str()).unwrap();
+    f.state
+        .transaction({
+            let context_id = context_id.clone();
+            move |state| {
+                state.contexts.push(Context {
+                    id: context_id,
+                    name: "Collision".into(),
+                    owners: vec![],
+                    created_at: "2026-09-06T12:00:00Z".into(),
+                });
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+
+    let ensured = f.boards.ensure(&context_id).await.unwrap();
+    assert_eq!(ensured.board.id.as_str(), "wt-acme-api-feature-2");
+    assert_eq!(ensured.board.context_id, context_id);
+    assert!(ensured.board.worktree_id.is_none());
+    assert_eq!(f.boards.ensure(&context_id).await.unwrap(), ensured);
+}
+
+#[tokio::test]
+async fn explicit_context_board_creation_suffixes_an_id_owned_by_a_worktree_board() {
+    let f = Fixture::new(pull_caps()).await;
+    let worktree = f.publish_worktree("acme/api#feature").await;
+    let worktree_board = f
+        .boards
+        .ensure_for_worktree(&worktree.id)
+        .await
+        .unwrap()
+        .board;
+    let context_id = fleet_core::ids::ContextId::try_from(worktree_board.id.as_str()).unwrap();
+    f.state
+        .transaction({
+            let context_id = context_id.clone();
+            move |state| {
+                state.contexts.push(Context {
+                    id: context_id,
+                    name: "Collision".into(),
+                    owners: vec![],
+                    created_at: "2026-09-06T12:00:00Z".into(),
+                });
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+
+    let created = f
+        .boards
+        .create(&context_id, Some("Context plan".into()), None, None)
+        .await
+        .unwrap();
+    assert_eq!(created.board.id.as_str(), "wt-acme-api-feature-2");
+    assert_eq!(created.board.name, "Context plan");
+    assert!(created.board.worktree_id.is_none());
+}
+
+#[tokio::test]
+async fn delete_worktrees_dispatch_cascades_only_the_worktree_board() {
+    let mut f = Fixture::new(pull_caps()).await;
+    let context_board = f.local().await.board;
+    let worktree = f.publish_worktree("acme/api#feature").await;
+    let worktree_board = f
+        .boards
+        .ensure_for_worktree(&worktree.id)
+        .await
+        .unwrap()
+        .board;
+    f.reasons();
+
+    let response = f
+        .services
+        .dispatch(RequestBody::DeleteWorktrees {
+            ids: vec![worktree.id.clone()],
+        })
+        .await
+        .unwrap();
+    let ResponseBody::WorktreesDeleted(results) = response else {
+        panic!("expected worktree deletion response");
+    };
+    assert_eq!(results.len(), 1);
+    assert!(results[0].ok);
+    assert!(f.store.load(&worktree_board.id).unwrap().is_none());
+    assert!(f.store.load(&context_board.id).unwrap().is_some());
+    assert_eq!(
+        f.board_events(),
+        vec![(worktree_board.id, BoardChangeReason::Deleted)]
+    );
+}
+
+#[tokio::test]
+async fn restoring_worktree_trash_restores_its_board_and_cards() {
+    let f = Fixture::new(pull_caps()).await;
+    let worktree = f.publish_worktree("acme/api#feature").await;
+    let board = f
+        .boards
+        .ensure_for_worktree(&worktree.id)
+        .await
+        .unwrap()
+        .board;
+    let card = f.card(&board.id, "Keep this plan").await;
+
+    let response = f
+        .services
+        .dispatch(RequestBody::DeleteWorktrees {
+            ids: vec![worktree.id.clone()],
+        })
+        .await
+        .unwrap();
+    let ResponseBody::WorktreesDeleted(results) = response else {
+        panic!("expected worktree deletion response");
+    };
+    let entry = results[0]
+        .trash_entry
+        .clone()
+        .expect("successful deletion returns its trash entry");
+    assert!(f.store.load(&board.id).unwrap().is_none());
+
+    f.services.worktrees.restore_trash(entry).await.unwrap();
+
+    let restored = f.boards.ensure_for_worktree(&worktree.id).await.unwrap();
+    assert_eq!(restored.board.id, board.id);
+    assert_eq!(restored.cards, vec![card]);
+}
+
+#[tokio::test]
+async fn a_board_restore_conflict_does_not_fail_the_restored_worktree() {
+    let f = Fixture::new(pull_caps()).await;
+    let original = f.publish_worktree("acme/api#feature.one").await;
+    let original_board = f
+        .boards
+        .ensure_for_worktree(&original.id)
+        .await
+        .unwrap()
+        .board;
+    let response = f
+        .services
+        .dispatch(RequestBody::DeleteWorktrees {
+            ids: vec![original.id.clone()],
+        })
+        .await
+        .unwrap();
+    let ResponseBody::WorktreesDeleted(results) = response else {
+        panic!("expected worktree deletion response");
+    };
+    let entry = results[0]
+        .trash_entry
+        .clone()
+        .expect("successful deletion returns its trash entry");
+
+    let replacement = f.publish_worktree("acme/api#feature-one").await;
+    let replacement_board = f
+        .boards
+        .ensure_for_worktree(&replacement.id)
+        .await
+        .unwrap()
+        .board;
+    assert_eq!(replacement_board.id, original_board.id);
+
+    f.services.worktrees.restore_trash(entry).await.unwrap();
+
+    let state = f.state.load().await.unwrap();
+    assert!(state.worktrees.iter().any(|item| item.id == original.id));
+    assert!(
+        !Path::new(&original.path)
+            .join(".git/fleet-trash.json")
+            .exists()
+    );
+    assert!(Path::new(&original.path).join(".fleet-boards").exists());
+}
+
+#[tokio::test]
+async fn restoring_an_unreadable_board_preserves_it_without_quarantine() {
+    let f = Fixture::new(pull_caps()).await;
+    let worktree = f.publish_worktree("acme/api#feature").await;
+    let board = f
+        .boards
+        .ensure_for_worktree(&worktree.id)
+        .await
+        .unwrap()
+        .board;
+    let response = f
+        .services
+        .dispatch(RequestBody::DeleteWorktrees {
+            ids: vec![worktree.id.clone()],
+        })
+        .await
+        .unwrap();
+    let ResponseBody::WorktreesDeleted(results) = response else {
+        panic!("expected worktree deletion response");
+    };
+    let entry = results[0]
+        .trash_entry
+        .clone()
+        .expect("successful deletion returns its trash entry");
+    let bundled = f
+        .home
+        .trash_dir()
+        .join(&entry)
+        .join(".fleet-boards")
+        .join(format!("{}.json", board.id));
+    std::fs::write(&bundled, "not json").unwrap();
+
+    f.services.worktrees.restore_trash(entry).await.unwrap();
+
+    assert!(f.home.board_path(&board.id).exists());
+    assert!(f.store.quarantined(&board.id).unwrap().is_empty());
+    assert!(
+        !Path::new(&worktree.path)
+            .join(".git/fleet-trash.json")
+            .exists()
+    );
+}
+
+#[tokio::test]
+async fn deleting_a_worktree_does_not_claim_an_unreadable_context_board_by_filename() {
+    let f = Fixture::new(pull_caps()).await;
+    let worktree = f.publish_worktree("acme/api#feature").await;
+    let context = f.state.load().await.unwrap().contexts[0].clone();
+    let mut board = new_board(&context, "2026-09-06T12:00:00Z");
+    board.id = "wt-acme-api-feature-2".parse().unwrap();
+    let mut document = BoardDocument {
+        version: BOARD_DOCUMENT_VERSION,
+        board,
+        cards: Vec::new(),
+    };
+    f.store.save(&document).unwrap();
+    document.version += 1;
+    std::fs::write(
+        f.home.board_path(&document.board.id),
+        serde_json::to_string(&document).unwrap(),
+    )
+    .unwrap();
+
+    let response = f
+        .services
+        .dispatch(RequestBody::DeleteWorktrees {
+            ids: vec![worktree.id],
+        })
+        .await
+        .unwrap();
+    let ResponseBody::WorktreesDeleted(results) = response else {
+        panic!("expected worktree deletion response");
+    };
+
+    assert!(results[0].ok);
+    assert!(f.home.board_path(&document.board.id).exists());
+}
+
+#[tokio::test]
+async fn deleting_a_worktree_preserves_an_unverifiable_cross_scope_quarantine() {
+    let f = Fixture::new(pull_caps()).await;
+    let worktree = f.publish_worktree("acme/api#feature").await;
+    let context = f.state.load().await.unwrap().contexts[0].clone();
+    let mut blocker = new_board(&context, "2026-09-06T12:00:00Z");
+    blocker.id = worktree_board_id(&worktree.id);
+    f.store
+        .save(&BoardDocument {
+            version: BOARD_DOCUMENT_VERSION,
+            board: blocker,
+            cards: Vec::new(),
+        })
+        .unwrap();
+    let mut colliding_context_board = new_board(&context, "2026-09-06T12:00:00Z");
+    colliding_context_board.id = "wt-acme-api-feature-2".parse().unwrap();
+    f.store
+        .save(&BoardDocument {
+            version: BOARD_DOCUMENT_VERSION,
+            board: colliding_context_board.clone(),
+            cards: Vec::new(),
+        })
+        .unwrap();
+    std::fs::write(f.home.board_path(&colliding_context_board.id), "not json").unwrap();
+    assert!(f.store.load(&colliding_context_board.id).is_err());
+    assert_eq!(
+        f.store
+            .quarantined(&colliding_context_board.id)
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let response = f
+        .services
+        .dispatch(RequestBody::DeleteWorktrees {
+            ids: vec![worktree.id.clone()],
+        })
+        .await
+        .unwrap();
+    let ResponseBody::WorktreesDeleted(results) = response else {
+        panic!("expected worktree deletion response");
+    };
+    assert!(results[0].ok);
+    assert_eq!(
+        f.store
+            .quarantined(&colliding_context_board.id)
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let recreated = f.publish_worktree("acme/api#feature").await;
+    assert!(f.boards.ensure_for_worktree(&recreated.id).await.is_err());
+}
+
+#[tokio::test]
+async fn prune_deleter_cascades_a_board_and_a_missing_board_is_a_noop() {
+    let mut f = Fixture::new(pull_caps()).await;
+    let worktree = f.publish_worktree("acme/api#feature").await;
+    let board = f
+        .boards
+        .ensure_for_worktree(&worktree.id)
+        .await
+        .unwrap()
+        .board;
+    f.reasons();
+
+    <Worktrees as WorktreeDeleter>::delete(&f.services.worktrees, worktree.id.clone(), None)
+        .await
+        .unwrap();
+    assert!(f.store.load(&board.id).unwrap().is_none());
+    assert_eq!(
+        f.board_events(),
+        vec![(board.id, BoardChangeReason::Deleted)]
+    );
+
+    let without_board = f.publish_worktree("acme/api#without-board").await;
+    <Worktrees as WorktreeDeleter>::delete(&f.services.worktrees, without_board.id, None)
+        .await
+        .unwrap();
+    assert!(f.board_events().is_empty());
 }
 
 #[tokio::test]
@@ -2137,7 +2722,7 @@ async fn an_unreadable_document_hides_only_its_own_board() {
 }
 
 #[tokio::test]
-async fn a_context_stays_deletable_when_its_board_document_is_unreadable() {
+async fn deleting_a_context_does_not_claim_an_unreadable_board_by_filename() {
     let f = Fixture::new(BackendCapabilities::default()).await;
     let board = f.local().await.board;
     std::fs::write(
@@ -2145,15 +2730,14 @@ async fn a_context_stays_deletable_when_its_board_document_is_unreadable() {
         serde_json::json!({"version": 99, "board": {}, "cards": []}).to_string(),
     )
     .unwrap();
-    // `DeleteContext` has already cascaded the context's repositories by the time it reaches
-    // the board: refusing here leaves a context nobody can delete and repositories that are
-    // already gone. The document goes to trash unread, exactly as the warning promises.
+    // Context and worktree boards share the id space, so an unreadable document's filename
+    // cannot prove which scope owns it.
     f.boards
         .delete_for_context(&"work".parse().unwrap())
         .await
         .unwrap();
-    assert!(!f.home.board_path(&board.id).exists());
-    assert!(f.store.list().unwrap().is_empty());
+    assert!(f.home.board_path(&board.id).exists());
+    assert_eq!(f.store.list().unwrap(), vec![board.id]);
 }
 
 #[tokio::test]
@@ -2316,10 +2900,14 @@ async fn a_damaged_document_is_reported_instead_of_replaced_by_an_empty_board() 
         Err(DaemonError::Conflict(_))
     ));
     assert!(f.boards.summaries().await.is_empty());
-    // Deleting the context takes the remains with it, so a new one is not refused forever.
+    // A lifecycle cascade cannot recover the persisted scope from a quarantine, so it preserves
+    // the remains rather than claiming them from the filename alone.
     f.boards.delete_for_context(&context).await.unwrap();
-    assert!(f.store.quarantined(&board.id).unwrap().is_empty());
-    assert_eq!(f.boards.ensure(&context).await.unwrap().cards.len(), 0);
+    assert_eq!(f.store.quarantined(&board.id).unwrap().len(), 1);
+    assert!(matches!(
+        f.boards.ensure(&context).await,
+        Err(DaemonError::Conflict(_))
+    ));
 }
 
 #[tokio::test]

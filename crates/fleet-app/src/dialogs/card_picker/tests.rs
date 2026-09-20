@@ -1,5 +1,56 @@
 use super::*;
 
+#[gpui::test]
+fn query_rejects_spaces_while_space_remains_the_picker_toggle(cx: &mut gpui::TestAppContext) {
+    use std::{cell::Cell, rc::Rc};
+
+    struct PickerInputHarness {
+        input: Entity<TextInput>,
+        toggles: Rc<Cell<usize>>,
+    }
+
+    impl gpui::Render for PickerInputHarness {
+        fn render(
+            &mut self,
+            _: &mut Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            let toggles = self.toggles.clone();
+            div().key_context("Dialog").child(
+                div()
+                    .key_context("CardPicker")
+                    .on_action(move |_: &settings_actions::Toggle, _, cx| {
+                        toggles.set(toggles.get() + 1);
+                        cx.stop_propagation();
+                    })
+                    .child(self.input.clone()),
+            )
+        }
+    }
+
+    cx.update(|cx| {
+        cx.set_global(fleet_ui_kit::Theme::dark());
+        crate::keymap::init(cx);
+    });
+    let input = cx.new(|cx| {
+        let mut input = TextInput::new(InputMode::SingleLine, cx);
+        input.set_filter(Some(|character| character != ' '), cx);
+        input
+    });
+    let toggles = Rc::new(Cell::new(0));
+    let window = cx.add_window(|_, _| PickerInputHarness {
+        input: input.clone(),
+        toggles: toggles.clone(),
+    });
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    visual.update(|window, cx| input.update(cx, |input, cx| input.focus(window, cx)));
+    visual.simulate_input("a b");
+    input.read_with(&visual, |input, _| assert_eq!(input.text(), "ab"));
+    visual.simulate_keystrokes("space");
+    input.read_with(&visual, |input, _| assert_eq!(input.text(), "ab"));
+    assert_eq!(toggles.get(), 1);
+}
+
 #[test]
 fn closing_a_detail_picker_returns_to_detail_without_reseeding() {
     let draft = CardPickerState {
@@ -293,7 +344,7 @@ fn candidates_are_prepared_once_per_query() {
         ..CardPickerState::default()
     };
     assert_eq!(
-        labels(&prepare(&state, &mut draft)),
+        labels(&prepare(&state, &mut draft, "")),
         ["Unassigned", "Ana Rojas", "Bo Vang"]
     );
 
@@ -301,14 +352,16 @@ fn candidates_are_prepared_once_per_query() {
     // the rows the draft already holds instead of walking the cards again.
     draft.rows = std::rc::Rc::from(vec![PickerOption::new("sentinel", "sentinel")]);
     assert_eq!(
-        labels(&prepare(&state, &mut draft)),
+        labels(&prepare(&state, &mut draft, "")),
         ["sentinel"],
         "an unchanged draft derived its candidates again"
     );
 
     // Typing derives them again — an assignee takes a typed value, so the query leads.
-    draft.query = "bo".into();
-    assert_eq!(labels(&prepare(&state, &mut draft)), ["bo", "Bo Vang"]);
+    assert_eq!(
+        labels(&prepare(&state, &mut draft, "bo")),
+        ["bo", "Bo Vang"]
+    );
 
     // and so does a card that changed under the open picker.
     let mut card = state
@@ -321,7 +374,7 @@ fn candidates_are_prepared_once_per_query() {
     card.assignee = Some("Bobby Tables".into());
     state.apply_card(card);
     assert_eq!(
-        labels(&prepare(&state, &mut draft)),
+        labels(&prepare(&state, &mut draft, "bo")),
         ["bo", "Bo Vang", "Bobby Tables"],
         "a card edit under the open picker left the rows it derived before"
     );
@@ -354,9 +407,12 @@ fn a_redraw_composes_the_rows_it_already_prepared(cx: &mut gpui::TestAppContext)
 
     let state = cx.new(|_| board_with_assignees());
     cx.update(|cx| {
-        with_host(&state, cx, |host| {
-            host.card_picker.kind = PickerKind::Assignee;
-        });
+        let mut draft = CardPickerState {
+            kind: PickerKind::Assignee,
+            ..Default::default()
+        };
+        prepare(state.read(cx), &mut draft, "");
+        with_host(&state, cx, |host| host.card_picker = draft);
     });
     let rows = Rc::new(Cell::new(0));
     let draws = Rc::new(Cell::new(0));
@@ -366,7 +422,11 @@ fn a_redraw_composes_the_rows_it_already_prepared(cx: &mut gpui::TestAppContext)
         draws: draws.clone(),
     });
     cx.run_until_parked();
-    assert_eq!(rows.get(), 3, "the first draw prepares the offered values");
+    assert_eq!(
+        rows.get(),
+        3,
+        "the draw did not compose the prepared values"
+    );
     let drawn = draws.get();
     assert!(drawn > 0, "the fixture never drew");
 

@@ -1,7 +1,7 @@
 use fleet_ui_kit::{KitAssets, Theme, ThemeMode};
 use gpui::{
     Action, App, AppContext, Bounds, Context, Focusable, Menu, MenuItem, Render, TitlebarOptions,
-    WindowBounds, WindowOptions, px, size,
+    Window, WindowBounds, WindowOptions, px, size,
 };
 
 pub fn run<V: Render + Focusable + 'static, A: Action>(
@@ -10,6 +10,18 @@ pub fn run<V: Render + Focusable + 'static, A: Action>(
     quit: A,
     configure: impl FnOnce(&mut App) + 'static,
     build: impl FnOnce(&mut Context<V>) -> V + 'static,
+) {
+    run_with_window(title, dimensions, quit, configure, move |_window, cx| {
+        build(cx)
+    });
+}
+
+pub fn run_with_window<V: Render + Focusable + 'static, A: Action>(
+    title: &'static str,
+    dimensions: (f32, f32),
+    quit: A,
+    configure: impl FnOnce(&mut App) + 'static,
+    build: impl FnOnce(&mut Window, &mut Context<V>) -> V + 'static,
 ) {
     gpui_platform::application()
         .with_assets(KitAssets)
@@ -38,7 +50,7 @@ pub fn run<V: Render + Focusable + 'static, A: Action>(
                     }),
                     ..Default::default()
                 },
-                |_, cx| cx.new(build),
+                |window, cx| cx.new(|cx| build(window, cx)),
             ) {
                 Ok(window) => {
                     if let Err(error) = window.update(cx, |view, window, cx| {

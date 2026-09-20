@@ -97,12 +97,8 @@ pub(crate) struct CardPickerState {
     pub(crate) kind: PickerKind,
     /// Target card.
     pub(crate) card_id: Option<CardId>,
-    /// Search text, and — for the open-ended kinds — the value itself.
-    pub(super) query: String,
     /// Selected option.
     pub(super) cursor: usize,
-    /// Caret inside `query`, as a character offset.
-    pub(super) caret: usize,
     /// The chosen values of a multi-select.
     pub(super) selected: Vec<String>,
     /// Whether applying this pick should go on to create the card's worktree.
@@ -133,34 +129,14 @@ impl CardPickerState {
     pub(super) fn return_dialog(&self) -> Option<Dialogs> {
         self.then_detail.then_some(Dialogs::CardDetail)
     }
-
-    /// The query as an editable buffer.
-    #[must_use]
-    pub(super) fn input(&self) -> TextFieldState {
-        let mut input = TextFieldState::from_text(self.query.clone());
-        for _ in self.caret..input.caret_chars() {
-            input.move_left();
-        }
-        input
-    }
-
-    pub(super) fn set_input(&mut self, input: &TextFieldState) {
-        self.query = input.text().to_owned();
-        self.caret = input.caret_chars();
-    }
 }
 
-/// The offered rows for the open picker's draft, derived only when an input changed.
+/// The offered rows already prepared by an input or backing-state change.
 ///
-/// Every caller — the renderer included — reads the rows through here, so deriving them stays
-/// a per-change cost and never a per-frame one (`docs/APP-CONTRACTS.md`, "render prepares
-/// nothing"): on a board of any size `options` walks every card and `candidates` folds every
-/// label.
+/// This accessor is intentionally read-only: on a board of any size `options` walks every card
+/// and `candidates` folds every label, while render prepares nothing.
 pub(super) fn prepared(state: &Entity<AppState>, cx: &mut App) -> std::rc::Rc<[PickerOption]> {
-    let host = crate::dialogs::host::host_for(state, cx);
-    host.update(cx, |host, cx| {
-        prepare(state.read(cx), &mut host.card_picker)
-    })
+    read_host(state, cx, |host, _| host.card_picker.rows.clone())
 }
 
 /// `j` / `k`: move the highlight, clamped to the candidates the query left.
@@ -173,26 +149,6 @@ pub(super) fn move_cursor(state: &Entity<AppState>, delta: isize, cx: &mut App) 
     cx.stop_propagation();
 }
 
-/// Runs a text edit against the query and re-aims the highlight at the first candidate.
-///
-/// The cursor resets because the row it was on is not the row that index names once the query
-/// narrowed the list — keeping it would apply a value the user is no longer looking at.
-pub(super) fn edit_query(
-    state: &Entity<AppState>,
-    cx: &mut App,
-    edit: impl FnOnce(&mut TextFieldState),
-) {
-    with_host(state, cx, |host| {
-        let mut input = host.card_picker.input();
-        edit(&mut input);
-        host.card_picker.set_input(&input);
-        host.card_picker.cursor = 0;
-        host.card_picker.error = None;
-    });
-    notify(state, cx);
-    cx.stop_propagation();
-}
-
 /// `space`: toggle the highlighted value of a multi-select.
 pub(super) fn toggle(state: &Entity<AppState>, cx: &mut App) {
     let draft = read_host(state, cx, |host, _| host.card_picker.clone());
@@ -200,8 +156,8 @@ pub(super) fn toggle(state: &Entity<AppState>, cx: &mut App) {
         .kind
         .is_multi_select(property_kind(state.read(cx), &draft.kind))
     {
-        // Everything else is a single choice, so `space` is just a space.
-        edit_query(state, cx, |input| input.insert(" "));
+        // The query deliberately rejects spaces so this documented exception can own the key.
+        cx.stop_propagation();
         return;
     }
     let Some(option) = prepared(state, cx).get(draft.cursor).cloned() else {

@@ -1,13 +1,14 @@
 use super::Shell;
 use crate::{
     keymap,
-    state::{AppState, DaemonLink, Screen},
+    state::{AppState, Screen},
 };
 use fleet_ui_kit::Icon;
 use gpui::{
-    Action, AnyElement, Context, DispatchPhase, Div, Entity, IntoElement, KeyDownEvent, Keystroke,
-    MouseDownEvent, MouseEvent, MouseExitEvent, MouseMoveEvent, MousePressureEvent, MouseUpEvent,
-    PinchEvent, PlatformInput, ScrollWheelEvent, Window, canvas, deferred, div, prelude::*,
+    Action, AnyElement, App, Context, DispatchPhase, Div, Entity, FocusHandle, IntoElement,
+    KeyDownEvent, Keystroke, MouseDownEvent, MouseEvent, MouseExitEvent, MouseMoveEvent,
+    MousePressureEvent, MouseUpEvent, PinchEvent, PlatformInput, ScrollWheelEvent, Window, canvas,
+    deferred, div, prelude::*,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -499,6 +500,12 @@ impl Shell {
             FocusTarget::Native if !self.workspace.pane_owns_keyboard() => FocusTarget::Body,
             target => target,
         };
+        if let Some(input) = self.wanted_input(cx) {
+            if !input.is_focused(window) {
+                window.focus(&input, cx);
+            }
+            return;
+        }
         focus_surface(
             target,
             &self.body_focus,
@@ -507,6 +514,26 @@ impl Shell {
             window,
             cx,
         );
+    }
+
+    /// The live editor that currently owns keyboard input, independent of its coarse surface.
+    fn wanted_input(&self, cx: &mut App) -> Option<FocusHandle> {
+        if let Some(input) = crate::dialogs::focused_input(&self.state, cx) {
+            return Some(input);
+        }
+        if self.state.read(cx).hub_filter_owns_keys() {
+            // §3.10's filter is drawn in the pane header of whichever Hub pane has focus, so
+            // one editor serves the rail, the worktrees list and the PR screen.
+            return Some(self.hub.filter_focus_handle(cx));
+        }
+        if self.state.read(cx).board_filter_owns_keys() {
+            // One editor for both surfaces that draw the board: the Hub's tab and the
+            // Workspace's `fleet://board` pane (BOARD §8).
+            return Some(self.board.filter_focus_handle(cx));
+        }
+        // `None` is not "no input on screen": it means no live editor owns the keyboard on this
+        // surface, so the coarse focus handle keeps it.
+        None
     }
 }
 
@@ -521,12 +548,10 @@ enum FocusTarget {
 }
 
 fn focus_target(state: &AppState) -> FocusTarget {
-    let splash = state.doctor.is_none()
-        && matches!(
-            state.daemon,
-            DaemonLink::Starting | DaemonLink::Failed { .. }
-        );
-    if state.overlay.is_some() {
+    let splash = state.shows_daemon_splash();
+    // §3.10's filter has no overlay layer of its own: its editor is part of the Hub body, and
+    // when that body is not showing the surface behind it keeps the keyboard.
+    if state.overlay.is_some() && !matches!(state.overlay, Some(crate::state::Overlay::Filter)) {
         FocusTarget::Overlay
     } else if !splash && state.agent_popup.is_some() {
         FocusTarget::Agent
@@ -567,7 +592,7 @@ fn focus_surface(
         // Native panes and agent tabs restore their own descendant focus on activation.
         FocusTarget::Native | FocusTarget::AgentThread => return,
     };
-    if !wanted.is_focused(window) {
+    if !wanted.contains_focused(window, cx) {
         window.focus(wanted, cx);
     }
 }
@@ -638,6 +663,7 @@ fn replay_stale_keys(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::DaemonLink;
     use gpui::{FocusHandle, Render, Subscription, TestAppContext};
     use std::time::Instant;
 

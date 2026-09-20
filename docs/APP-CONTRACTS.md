@@ -65,6 +65,7 @@ impl HubScreen {
     pub fn new(cx: &mut App) -> Self;
     pub fn render(
         &mut self,
+        board: &mut BoardScreen,          // the shell's one board screen, lent for the frame
         state: &Entity<AppState>,
         bridge: &Bridge,
         focus: &FocusHandle,
@@ -73,7 +74,10 @@ impl HubScreen {
     ) -> AnyElement;
 }
 
-// screens/board.rs — same frozen constructor/render signature as HubScreen
+// screens/board.rs — same frozen constructor/render signature as HubScreen, minus the loan:
+// `Shell` owns the one BoardScreen and passes it to whichever surface draws the board this
+// frame (the Hub's `Board` tab, or a Workspace's `fleet://board` tab). Its root tracks the
+// `focus` it is handed, so the surface's own root must not track it a second time.
 impl BoardScreen { pub fn new(cx: &mut App) -> Self; pub fn render(/* … */) -> AnyElement; }
 
 // screens/jobs.rs — same shape, rendered into the overlay layer
@@ -85,6 +89,8 @@ impl WorkspaceScreen {
     pub(crate) fn synchronize(&mut self, state: &Entity<AppState>, bridge: &Bridge,
                               window: &mut Window, cx: &mut App);
     /// Composes what `synchronize` prepared. Issues no request, reconciles no resource.
+    /// Takes the same lent `board: &mut BoardScreen` first argument as `HubScreen::render`,
+    /// for the frames where the session's active tab is the `fleet://board` one.
     pub(crate) fn render_prepared(/* same arguments as `render` */) -> AnyElement;
 }
 
@@ -177,17 +183,47 @@ is always `Fleet`.
 | Hub, board tab (independent of repo pane selection) | `Fleet > Hub > Board` |
 | Workspace, PTY tab | `Fleet > Workspace > Terminal` \| `Prefix` \| `Scroll` |
 | Workspace, `fleet://` tab | `Fleet > Workspace > Native`, then the embedded view's own chain (`> Lazygit > Panels > Files`, …) |
+| Workspace, `fleet://board` tab | `Fleet > Workspace > Native > Board` — the board is Fleet-drawn, so the word is Fleet's own and every `Hub > Board` row is repeated on it |
 | Workspace, native agent tab | `Fleet > Agent > AgentIdle` \| `AgentWorking` \| `AgentNativeScroll`, or `Fleet > Agent > AgentDecision > AgentPermission` \| `AgentQuestion` \| `AgentPlan` while a gate is open |
 | Floating agent terminal | `Fleet > Agent > Terminal` \| `Prefix` \| `Scroll` |
-| Filter / Palette / Jobs | `Fleet > Filter` \| `Palette` \| `Jobs` |
-| Any dialog | `Fleet > Dialog > <name>` |
-| Daemon banner showing (§3.12 C) | the base chain **plus** `Daemon > Banner`, innermost |
+| Filter / Palette / Jobs | `Fleet > Filter` (`> BoardFilter` on the board) \| `Palette` \| `Jobs`, then the focused editor's `FleetTextInput` context for the first two |
+| Dialog browsing | `Fleet > Dialog > CardDetail` \| `BoardSettings` \| `CardPicker` \| `Settings` \| `Create` (or the dialog's other stable name) |
+| Dialog text editing | `Fleet > Dialog > CardDetailEditing` \| `BoardSettingsEditing` \| `SettingsEditing` \| `CreateEditing`, then the focused component's `FleetTextInput` context |
+| Daemon banner showing (§3.12 C) | the base chain **plus** `Daemon > Banner`, innermost — unless a live editor owns the keyboard on that base chain, when the word is absent |
 | fleetd will not start (§3.12 B) | `Fleet > Daemon > Down` |
 | First run (§3.13) | `Fleet > FirstRun` |
 
 Two consequences worth knowing:
 
 * A deeper context wins, so `Hub > Prs`'s `l` (next PR tab) beats `Hub`'s `l` (next pane).
+* **`Overlay::Filter` mounts no overlay layer.** §3.10 replaces the pane header in place, so the
+  Hub's filter editor is part of the Hub body and the `Filter` key context wraps that body
+  rather than a layer above it — the arrangement the board filter already had. The shell's
+  focus reconciliation hands the keyboard to that editor, and the container keys the editor does
+  not own (`ctrl-n` / `ctrl-p`, `Enter`) are listeners on the Hub body; `Esc` is the shell's,
+  and it names `body_focus` explicitly because the editor is *inside* that handle's subtree.
+  "Is that editor mounted" and "does it own the keyboard" are the same question, so the Hub's
+  composition and the shell's focus reconciliation both call `AppState::hub_filter_owns_keys()`
+  rather than each testing their own fields; two predicates that drift apart mount an editor
+  nothing focuses, or focus one nothing mounted, and either way the keyboard dies.
+* **Except for the card picker, a browsing word never remains in the chain while that dialog is
+  editing text.** Bare-letter and caret-collision rows live only on `CardDetail`, `BoardSettings`,
+  `Settings` and `Create`; their `*Editing` partners carry only container actions such as confirm, cancel,
+  field/list navigation, save and palette entry. `DialogHost` owns the real draft predicate and
+  mirrors only its derived word into `AppState`, so `context_chain()` remains authoritative:
+  card detail uses `edit.is_some()`, board settings uses whether its focused row has a text
+  buffer, settings uses `editing.is_some()`, and create-worktree uses `field == Branch`. A
+  dialog with more than one editor also names the one that owns the keyboard — new card,
+  new/edit context, repository hooks — and that marker is a **mirror** of focus, not a second
+  opinion about it: each such dialog subscribes to `TextInputEvent::Focused` and writes the
+  field a click landed on, because a pointer focuses an editor without asking the dialog and the
+  next reconciliation would otherwise pull the caret back. A live
+  input then appends `FleetTextInput`; its
+  `mode` attribute is `single_line` or `multiline`, and only the latter satisfies
+  `FleetTextInput && mode == multiline` for `Enter`. `CardPicker` is the documented exception: its
+  query is a filter that never contains a space, so it keeps the browsing word and `space` toggles
+  the highlighted card. The rule is now complete: the `Dialog` container binds no editing key of
+  its own, so there is no legacy editor row left for a dialog to fall back on.
 * Inside a native agent tab, `^s` never reaches gpui's two-key matcher. The shell's keystroke
   interceptor consumes it, resolves the second key against the *live* chain through
   `keymap::chord_action_for_chain`, and consumes that key too — running its row, or toasting
@@ -203,7 +239,12 @@ Two consequences worth knowing:
   duplicate, so the pane's colliding namespaces are `lg_confirm` and `lg_help`.
 * While the §3.12 C banner is undismissed it is the **innermost** context, so `r`, `l` and
   `Esc` belong to it, exactly as `KEYMAP.md` says. `Esc` dismisses the banner and hands those
-  keys straight back.
+  keys straight back. The banner is a container with two bare letters, so the ownership rule
+  above applies to it as it does to a dialog's browsing word: `context_chain()` does not append
+  `Daemon > Banner` while a live editor owns the keyboard on that base chain, which today means
+  §3.10's board filter and §12's agent composer — every other editor sits under an overlay that
+  publishes its own chain and never reaches the append. The whole word leaves, `Esc` with it;
+  the banner stays dismissible from every surface that is not typing.
 
 The floating agent is persistent state beside the ordinary `overlay` slot, not another member of
 that mutually-exclusive enum. When it is topmost, `Agent` owns focus and the Hub/Workspace remains
@@ -727,45 +768,108 @@ harness in this crate; actual pointer delivery still needs a host GUI smoke test
 
 ## Board app extension points (BOARD §8)
 
-`HubTab::Board` is selected by `board::GoBoard` (`g b`). `HubScreen` owns
-`screens::board::BoardScreen` and renders it with the frozen signature. The Hub's
-screen strip includes `Board`, the active context's summary `open_count`, and a
+`HubTab::Board` is selected by `board::GoBoard` (`g b`). `Shell` owns the one
+`screens::board::BoardScreen` and lends it for the frame to whichever surface is drawing the
+board — `HubScreen::render` on the board tab, `WorkspaceScreen::render_prepared` on a
+`fleet://board` tab — which is what keeps one filter editor, one set of column lists and one
+projection cache behind the one `BoardState`. The board pane is not an entity and is not keyed
+by worktree: the tab is a place to draw the shared mirror, not a thing to build and evict. The
+Hub's screen strip includes `Board`, the active context's summary `open_count`, and a
 conflict dot when `conflict_count > 0`. `BoardScreen` owns one horizontal
 `ScrollHandle` for the columns and one per column for its cards, and reveals the
 focused column and card when their selection changes. Only the inner Board root tracks the
-Hub focus handle on that tab. `views::board_screen` holds the pure model
+body focus handle on either surface — the Hub's screen root and the Workspace's both skip
+`track_focus` while the board is drawing, because two dispatch nodes for one focus id is one
+node too many. `views::board_screen` holds the pure model
 (filter predicate, visible slice of a column, priority and category mappings, header
 facts) and the rendering; `views::board_card_detail` holds the property-row model and
 the detail panes. Placement and content decisions are in `UX-SPEC.md` § Board.
 
-`BoardState` has `view: Option<BoardView>`, `loading: bool`,
+`BoardState` has `scope: Option<BoardScope>`, `view: Option<BoardView>`, `loading: bool`,
 `error: Option<String>`, `focus: BoardFocus`, `filter: String`,
 `filter_editing: bool` and `group_secondary: Option<GroupBy>`.
+`BoardScope` is `Context(ContextId) | Worktree(WorktreeId)`: one mirror serves both the Hub
+tab and the Workspace's board pane, because the two are never visible at once. `None` resolves
+to the active context — the Hub's board — and the first load records that resolution.
 `filter_editing` records whether the board filter owns text input. It is what
-`AppState::board_filter_owns_keys` reads, and while it is set `context_chain()`
+`AppState::board_filter_owns_keys` reads on both surfaces — `Screen::Hub { tab: Board }` or
+`AppState::board_pane_is_active()`, which is a Workspace whose active tab is a native terminal
+whose command is `fleet://board` — and while it is set `context_chain()`
 returns `["Filter", "BoardFilter"]` (and `mode()` returns `Mode::Filter`) instead of
-`["Hub", "Board"]`, so the board's bare letters type instead of firing.
+`["Hub", "Board"]` or `["Workspace", "Native", "Board"]`, so the board's bare letters type
+instead of firing.
 `AppState::board_filter_escape()` is the §3.10 two-stage `Esc` for it; base Cancel
-calls its second stage. `Filter > BoardFilter` adds left/right and ctrl-b/ctrl-f
-column navigation to the inherited Filter editing bindings.
+calls its second stage. The focused board `TextInput` adds `FleetTextInput` beneath
+`Filter > BoardFilter`; its `Changed` event mirrors text into `BoardState.filter`.
+`Tab` / `Shift-Tab` move columns, while left/right and ctrl-b/ctrl-f belong to the deeper input
+context and move its caret.
 `clamp_board_focus` is `pub(crate)` and clamps against the **filtered** column, so the
 selection can never point at a hidden card. `BoardFocus` has `column: usize` and `row: usize`;
 `GroupBy` is `Priority | Assignee | Labels`. `AppState::board() -> Option<&BoardView>`
 returns the current view. Reducers are `apply_board_view(BoardView)`,
-`apply_card(Card)`, and `clear_board()`. Card upserts reject another board, sort by status and position, and clamp
-focus. Unknown-status responses request a full refresh instead of inserting an invisible card; board views reject another active context. Clear resets the draft and
-invalidates pending responses. `apply_daemon_event(Event, Instant)` handles
+`apply_card(Card)`, `clear_board()`, `enter_context_board_scope() -> bool` and
+`enter_worktree_board_scope(WorktreeId, Instant) -> bool`; both scope reducers answer whether
+the mirror moved, so an observation that runs on every notify only notifies when it did. Card
+upserts reject another board, sort by status and position, and clamp
+focus. Unknown-status responses request a full refresh instead of inserting an invisible card;
+board views are admitted by the scope alone — a worktree's board must carry that worktree, a
+context's board that context and **no** worktree — so the app never derives a board id from
+either. Clear resets the draft and
+invalidates pending responses; a scope change does the same through that one generation
+counter, so a reply from the scope just left can never land. Clear also resets the scope to
+`None`, which is the Hub's board: a reconnect, a link change or a context switch takes a
+worktree scope with it, and the surface that wanted one enters it again.
+`enter_worktree_board_scope` refuses, toasts `WORKTREE_BOARDS_UNSUPPORTED`
+(§2.7, 3.2 s, `info`) and leaves the scope untouched when the
+connected daemon does not advertise `board.worktree`. Refused with the board pane already on
+screen — a `fleet://board` tab in `windows[]`, a daemon downgraded under a live one — it also
+drops the mirror and writes that same sentence to `BoardState::error`, because the pane draws
+what the mirror holds and what it holds is never that tab's board: the failed shape says so,
+where skeleton columns would promise a load that can never go out.
+`apply_daemon_event(Event, Instant)` handles
 `Event::BoardChanged` by setting `board_stale` only for the displayed board.
 
 There are **no new `BridgeEvent` variants**: like PR/worktree response consumers,
 `screens::board::ensure_current` awaits the receiver returned by
-`Bridge::request(RequestBody::EnsureBoard { context_id })`. It applies
-`ResponseBody::Board` via `finish_board_load` and `apply_board_view`. Card
+`Bridge::request`, sending `RequestBody::EnsureBoard { context_id }` or
+`RequestBody::EnsureWorktreeBoard { worktree_id }` — whichever the scope names. It applies
+`ResponseBody::Board` via `finish_board_load(&BoardScope, generation, result)` and
+`apply_board_view`. Card
 request consumers apply `ResponseBody::Card` through `apply_card`.
-The board loader runs on tab entry, active-context change, reconnect, or a stale
-board's next render. Only one request is in flight per generation. Context switches
-(including A → B → A) and link changes reject old responses. Errors remain visible
-in state until reload; an event arriving during a refresh schedules one more load.
+The board loader runs on tab entry, active-context change, reconnect, a stale
+board's next render, a Workspace board-tab activation, and a Workspace session change while
+that tab is active; `screens::board::{enter_context_scope, enter_worktree_scope}` are the two
+triggers that point the mirror and load it, the second answering `false` when the daemon
+refuses.
+
+`WorkspaceScreen::sync_board_scope` is where the pane's half of that runs, from
+`WorkspaceScreen::synchronize` and therefore on the update path, never from a paint. It enters
+the worktree scope whenever the session's active tab is the `fleet://board` one — whichever key
+or click selected it — and `release_board_scope` hands the mirror back to
+`enter_context_scope` as soon as it is not, including when the Workspace itself goes away, so
+the Hub never inherits a worktree scope. Both are idempotent against a claim the screen keeps:
+`BoardClaim::Drawing { worktree, generation }` records `AppState::board_generation()` alongside
+the worktree, so a `clear_board` makes the claim stale and the scope is entered again, while a
+daemon that refused once is not asked again on every notify. `BoardClaim::Requested` is the
+other half: `ctrl-s b` points the mirror before the tab exists so its load is in flight by the
+time the pane first paints, and the frames until fleetd lists and selects that tab still show
+the previous one — releasing there would cancel the load the keystroke started. Selecting any
+other tab drops the pending claim, as does a create the daemon refused, a move to another
+worktree's session, and leaving the Workspace. A claim dropped where it died leaves the worktree
+scope behind, and `release_board_scope` returns it to the context on the next notify whether or
+not a claim is still there to drop.
+
+`prefix::OpenBoard` (`ctrl-s b`, `Workspace > Prefix`) is the Workspace's way in: on a
+session with no worktree it toasts `boards belong to worktrees` and stops, otherwise it enters
+the worktree scope and then selects the session's `fleet://board` terminal — or asks for one
+with `NewTerminal { name: "board", command: "fleet://board", cwd }` and selects the reply, the
+same path `ctrl-s c` takes. The tab is created on demand and never written to `windows[]`, so
+pressing the key twice is one tab, selected twice. Its listener is the shell root's, because the
+palette's `Workspace: Open board tab` row dispatches the same action from a sibling branch of
+the element tree.
+Only one request is in flight per generation. Context switches
+(including A → B → A), scope switches and link changes reject old responses. Errors remain
+visible in state until reload; an event arriving during a refresh schedules one more load.
 
 The payload-free `Dialogs` variants and `context_name()` values are `CardDetail`,
 `CardCreate`, `CardPicker`, and `BoardSettings`. Their titles are `Card detail`,
@@ -775,18 +879,37 @@ Escape. `DialogHost` owns these public fields:
 
 | Field | Type | Initial draft |
 | --- | --- | --- |
-| `card_detail` | `card_detail::CardDetailState` | `card_id`, `property_row`, `area: TextAreaState`, `edit: Option<CardEdit>`, `revision`, `saving: Option<u64>` and `error` |
-| `card_create` | `card_create::CardCreateState` | `board_id`, `draft: CardDraft`, plus `field`, `title_caret` (chars), `description_area: TextAreaState` and `error` |
-| `card_picker` | `card_picker::CardPickerState` | `kind`, `card_id`, `query`, `cursor`, plus `caret`, `selected: Vec<String>`, `then_worktree`, `then_detail` and `error` |
-| `board_settings` | `board_settings::BoardSettingsState` | `board_id`, `name`, `prefix`, `default_repo_id`, `start_on_worktree`, `push_new_cards`, `conflict_policy`, `backend_kind`, `original_kind`, `original_settings`, `rows: Vec<BackendRow>`, plus `row`, `caret` and `error` |
+| `card_detail` + `card_detail_input` | `card_detail::CardDetailState` + `Option<Entity<TextInput>>` | `card_id`, `property_row`, `edit: Option<CardEdit>`, revision, saving and error; one input is created at edit start and dropped at save/cancel |
+| `card_create` + `card_create_title` / `card_create_description` | `card_create::CardCreateState` + two `Option<Entity<TextInput>>` fields | board id, focused field, save generation and error; submit reads both live inputs |
+| `card_picker` + `card_picker_input` | `card_picker::CardPickerState` + `Option<Entity<TextInput>>` | kind, card id, row cursor, selected values, return flags and error; `Changed` prepares filtered rows |
+| `board_settings` + `board_settings_input` | `board_settings::BoardSettingsState` + `Option<Entity<TextInput>>` | serializable board values, backend rows, focused row and error; a text-row input is materialized on focus and mirrors through `Changed` |
+
+The §3.8 dialogs own their editors the same way. Each is created by that dialog's `seed` and
+dropped by `close_with`, and every one of them is reported by `dialogs::focused_input`, so the
+shell's focus reconciliation hands the keyboard to whichever editor the draft says owns it:
+
+| Field | Type | What the editor owns |
+| --- | --- | --- |
+| `create` + `create_branch` | `create_worktree::CreateState` + `Option<Entity<TextInput>>` | the branch text; `CreateState.branch` is its `String` mirror, and `Changed` republishes the validation message and the worktree-id preview through `set_invalid` / `set_preview`. It owns the keyboard only while `field == Branch`, which is what leaves `←` / `→` to the host cycler while browsing |
+| `clone` + `clone_query` | `clone_repo::CloneState` + `Option<Entity<TextInput>>` | the search query; `Changed` mirrors it into `CloneState.query` and re-arms the 150 ms debounce, and the leading glyph swaps between `search` and `loader-circle` in the same update paths |
+| `context` + `context_name` / `context_owners` | `context::ContextState` + two `Option<Entity<TextInput>>` fields | the display name and the comma-separated owners; `Changed` mirrors both and republishes the collision message or the id preview on the name editor |
+| `edit_hooks` + `hook_inputs` | `edit_hooks::EditHooksState` + `Vec<Entity<TextInput>>` | one editor per command row, prepare commands first and post-create after them, split by `prepare_len`. Each list always ends in a blank row; typing into that row appends the next one and renumbers the labels below it |
+| `rename_terminal` + `rename_input` | `rename_terminal::RenameState` + `Option<Entity<TextInput>>` | the terminal name; the draft keeps only the target terminal, the refusal and the in-flight flag |
+| `settings` + `settings_input` | `settings::SettingsState` + `Option<Entity<TextInput>>` | the row `Enter` opened; `SettingsState.editing` is its `String` mirror and the `SettingsEditing` predicate, `Changed` commits through `commit_value`, and a number row filters to ASCII digits |
+
+`DialogHost.palette + palette_input` is the §3.9 query: `PaletteState.query` is a `String`
+mirrored from a live single-line `TextInput` created when the palette opens and dropped with the
+rest of the drafts when it closes, and its `Changed` event re-ranks the `GO` / `DO` / `CONTEXT`
+rows and returns the flat cursor to the top. `dialogs::focused_input` reports it, so the shell's
+focus reconciliation treats the palette exactly like a migrated dialog.
 
 `DialogHost.behind_palette` names the dialog the open palette replaced — the palette does not
 stack on a dialog, and a `Card detail:` palette row reopens that dialog instead of reseeding it
 over the text the user already typed. `:` is therefore bound in `Dialog > CardDetail` as well as
 in `Hub`: without a way in from the detail, `Card detail: Close` and `Card detail: Save text edit`
 are rows no state could ever list and the whole `behind_palette` path is unreachable. The added fields are all local editing state; the BOARD §8
-fields keep their names and meanings. `CardDetailState` holds **one** buffer for the three text surfaces
-(title, description, comment), because at most one of them is ever open.
+fields keep their names and meanings. `DialogHost.card_detail_input` is the **one** live editor
+used by the three text surfaces (title, description, comment), because at most one is open.
 `Dialogs::CardDetail.width()` is 880 px — it is a two-pane surface, not a form — and
 the other three board dialogs are 560 px.
 
@@ -810,11 +933,11 @@ Three additions outside the skeleton's list:
 * `actions::board::CreateAndOpen` (`ctrl-enter` in `Dialog > CardCreate`) creates the
   card and opens its detail. It has no palette command: it only means anything inside
   that dialog.
-* `Dialog > CardPicker` binds `space` to `settings::Toggle` (multi-select) and
-  `Dialog > BoardSettings` binds `j`/`k`/`h`/`l`/`space` to the `settings::*` actions,
-  reusing §3.8.6's row model — including its rule that a bare letter types when a text
-  row owns the keyboard. Everything else these dialogs answer is inherited from the
-  generic `Dialog` context.
+* `Dialog > CardPicker` always binds `space` to `settings::Toggle` (multi-select); its
+  always-focused query is a filter that intentionally never contains a space. Browsing
+  `Dialog > BoardSettings` binds `j`/`k`/`h`/`l`/`space` to the `settings::*` actions, and a
+  focused text or number row publishes `Dialog > BoardSettingsEditing`. Everything else these
+  dialogs answer is inherited from the generic `Dialog` context.
 * `ConfirmRequest::DeleteCard { card, key, title }` routes `d` on the board through
   §3.8.3, like every other destructive key. A card with a `remote` link never reaches the
   dialog: the daemon refuses that deletion (the sync would file the issue again as a new
@@ -843,9 +966,11 @@ land on a different fleetd) but keeps the descriptors, so the header's label nev
   `backend_rows(schema, settings)` → `Vec<BackendRow>`, `rows_to_settings(base, rows)` →
   settings JSON (keeping keys the schema never names, removing the ones a row emptied, writing
   numbers as numbers), and `rows_error(rows)` for the required and numeric rules.
-  `PropertyKind` picks the control: `Bool` → `Toggle`, `Select` → `Cycler` over the schema's
-  options, `Number` → `NumberField` that takes digits only (so `h`/`l` keep stepping it),
-  everything else → `TextField`; `MultiSelect` is typed comma-separated. `PropertySchema` has
+  `PropertyKind` picks the browsing control: `Bool` → `Toggle`, `Select` → `Cycler` over the
+  schema's options, `Number` → `NumberField`, everything else → a read-only `FactRow` (an empty
+  value reads `—`, never a blank box). A focused free-text or number row materializes a
+  single-line `TextInput` (numbers filter to ASCII digits), and `MultiSelect` is typed
+  comma-separated. `PropertySchema` has
   no `required` flag, so a name ending in `fleet_core::board::REQUIRED_MARKER` (`(required)`,
   re-exported as `board_settings::REQUIRED_MARKER`) is the signal; the marker is stripped from
   the label and shown as `∗`. It lives in the core because the daemon reads it the same way: a
@@ -871,6 +996,7 @@ land on a different fleetd) but keeps the descriptors, so the header's label nev
 
 Detail text saves keep the editor until a matching successful reply. Revision guards prevent
 older replies from clearing newer drafts; failures retain text and display the daemon error.
-Both detail and CardCreate description editors retain `TextAreaState` across keystrokes.
-In CardCreate, Enter in the description inserts a newline, Tab indents, Shift-Tab returns
-to the title, and Ctrl-Enter creates and opens the card.
+`DialogHost` retains the detail editor and both CardCreate inputs across keystrokes; none of
+those dialogs owns a parallel string/caret buffer. In CardCreate, Enter in the description
+inserts a newline, Tab and Shift-Tab switch fields, and Ctrl-Enter creates and opens the card.
+In a detail description or comment, Tab inserts a hard tab through `TextInput::insert`.

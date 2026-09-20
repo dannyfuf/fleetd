@@ -331,8 +331,8 @@ the scenario that hits them:
   session's wallpaper, bar and window-opacity rules are inside every baseline recorded from it.
 
 Fixture presets are `empty` (first run), `one-repo` (one clean repository and worktree), `busy`
-(several repositories, worktrees and pull requests, one worktree degraded), `board` (cards plus
-fake `acli`), and `agents` (native-agent configuration plus scripted transcripts). Each gets a
+(several repositories, worktrees and pull requests, one worktree degraded), `board` (two boards
+with cards, plus fake `acli`), and `agents` (native-agent configuration plus scripted transcripts). Each gets a
 private `FLEET_HOME`, child-only `HOME`, real local Git repositories, and fake `gh`/`acli`; it
 never reads the developer's Fleet home. Every child also starts with the variables an *outer*
 fleetd exports — `FLEET_DELEGATION`, `FLEET_DELEGATION_TOKEN`, `FLEET_SESSION`, `FLEET_TERMINAL`,
@@ -340,7 +340,7 @@ fleetd exports — `FLEET_DELEGATION`, `FLEET_DELEGATION_TOKEN`, `FLEET_SESSION`
 from inside a delegation sees the same environment as a run launched from a bare shell.
 
 A preset is applied by driving a private `fleetd` through `fleet-client`'s own typed operations
-before the run's daemon starts, so nothing is written to a Fleet file by hand. Three consequences
+before the run's daemon starts, so nothing is written to a Fleet file by hand. Four consequences
 follow:
 
 - **Jobs and toasts are not part of any preset.** The daemon's job registry is in memory, so a job
@@ -350,6 +350,12 @@ follow:
   unrequested jobs, directories or timing into a run.
 - **The `board` preset uses Fleet's local board backend.** The fake `acli` exists to keep a
   Jira-backed board off the network, not to serve the fixture's cards.
+- **The `board` preset seeds two boards, and they are tellable apart in a dump.** The context
+  board holds five cards across three columns and numbers them `FLT-…`; `acme/api#feature`'s own
+  board — asked for with `EnsureWorktreeBoard`, the request `ctrl-s b` sends, so its id, name and
+  prefix are the daemon's derivation — holds three disjoint cards in two columns and numbers them
+  `FEA-…` after the slug. `lists["board.cards"]` therefore says which of the two a surface is
+  drawing, which is what `scenarios/workspace/board-tab.scenario` reads.
 
 ## 5. Scripted-agent transcripts
 
@@ -657,10 +663,17 @@ still short of it, so no other document has to claim a capability that does not 
   and `fleet-drive/src/{input.rs, predicate.rs}`.
   Each is one coherent subject rather than an accumulation, so splitting them is a deliberate
   refactor, not a drive-by.
-- **`dialog.fields` and `dialog.message` are always empty.** Their live content belongs to the
-  dialog host entity and is not mirrored into `AppState`, so the snapshot deliberately reports
-  `[]` and `null`. Use `targets["dialog.field[N]"]` to assert and reach a field, then exercise its
-  content with keystrokes.
+- **`dialog.message` is always empty, and `dialog.fields` is empty for the dialogs whose tab
+  cycle is not all text.** The dialog host entity, not `AppState`, owns both. `fields` is carried
+  for the dialogs whose whole cycle is live editors — new-card, new/edit context,
+  rename-terminal, clone-repo and edit-hooks — where `fields[N]` is exactly the field
+  `targets["dialog.field[N]"]` paints; the command about to answer a `dump`, an `assert` or an
+  `await` poll reads them across in its update path the same way it brings the target table
+  across. A dialog with a non-editor in its cycle (create-worktree's base list and host cycler,
+  Settings' switch rows) reports `[]` rather than a partial numbering that would not line up with
+  its targets, and `message` stays `null` everywhere. Typing into a field does not itself notify
+  `AppState`, so a scenario reads a field with `assert` or `dump`, which project on demand, and
+  not with `await`.
 - **A headless `await` does not repaint, so `window.frame` freezes for the duration of the wait.**
   The await loop reprojects update-path state but does not draw another headless frame. Use
   `assert` or `dump`, which paint before projecting, when current frame geometry matters.

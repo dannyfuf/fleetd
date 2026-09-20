@@ -1,5 +1,7 @@
 use super::*;
 
+const MAX_BOARD_ID_SUFFIX: u32 = 99;
+
 impl Boards {
     /// Lists healthy boards belonging to existing contexts, optionally restricted to one context.
     pub async fn list(&self, context: Option<&ContextId>) -> DaemonResult<Vec<BoardSummary>> {
@@ -17,6 +19,9 @@ impl Boards {
             };
             if context.is_some_and(|id| *id != doc.board.context_id)
                 || !state.contexts.iter().any(|c| c.id == doc.board.context_id)
+                || doc.board.worktree_id.as_ref().is_some_and(|worktree| {
+                    !state.worktrees.iter().any(|item| item.id == *worktree)
+                })
             {
                 continue;
             }
@@ -76,13 +81,51 @@ impl Boards {
         if let Some(id) = self.context_board(context)? {
             return self.get(&id).await;
         }
-        self.refuse_over_quarantine(&board.id)?;
-        if self.store.load(&board.id)?.is_some() {
-            return Err(BoardError::Duplicate(context.to_string()).into());
-        }
         let backend = self.backends.get(&board.backend.kind)?;
         backend.validate(&board.backend.settings).await?;
         board.backend.settings = backend.normalize(&board.backend.settings).await?;
+        let _allocation = self.allocation.lock().await;
+        board.id = self.available_board_id(&board.id)?;
+        let doc = BoardDocument {
+            version: BOARD_DOCUMENT_VERSION,
+            board,
+            cards: Vec::new(),
+        };
+        self.save(&doc, BoardChangeReason::Created).await?;
+        Ok(BoardView {
+            board: doc.board,
+            cards: doc.cards,
+        })
+    }
+
+    /// Gets or creates the board scoped to one published worktree.
+    pub async fn ensure_for_worktree(&self, worktree: &WorktreeId) -> DaemonResult<BoardView> {
+        let state = self.state_store.load().await?;
+        worktree_context(&state, worktree)?;
+        // Existing-board refreshes stay lock-free, as context-board refreshes do.
+        if let Some(id) = self.worktree_board(worktree)? {
+            return self.get(&id).await;
+        }
+        // Materialization shares the lifecycle claim used by delete and restore. Otherwise a
+        // missing-board read can race past a completed cascade and save an orphan, or create an
+        // empty document before restore has returned the archived board and its cards.
+        let _lifecycle = self.worktrees.claim_lifecycle(worktree.clone()).await;
+        let state = self.state_store.load().await?;
+        let (worktree_record, context) = worktree_context(&state, worktree)?;
+        if let Some(id) = self.worktree_board(worktree)? {
+            return self.get(&id).await;
+        }
+        let base = worktree_board_id(worktree);
+        let _guard = self.gate(&base).await;
+        if let Some(id) = self.worktree_board(worktree)? {
+            return self.get(&id).await;
+        }
+        let mut board = new_worktree_board(&context, &worktree_record, &self.now());
+        let backend = self.backends.get(&board.backend.kind)?;
+        backend.validate(&board.backend.settings).await?;
+        board.backend.settings = backend.normalize(&board.backend.settings).await?;
+        let _allocation = self.allocation.lock().await;
+        board.id = self.available_board_id(&base)?;
         let doc = BoardDocument {
             version: BOARD_DOCUMENT_VERSION,
             board,
@@ -151,6 +194,10 @@ impl Boards {
                 .contexts
                 .iter()
                 .any(|context| context.id == summary.context_id)
+                && summary
+                    .worktree_id
+                    .as_ref()
+                    .is_none_or(|worktree| state.worktrees.iter().any(|item| item.id == *worktree))
             {
                 summaries.push(summary);
             }
@@ -188,9 +235,47 @@ impl Boards {
         if self.context_board(context)?.is_some() {
             return Err(BoardError::Duplicate(context.to_string()).into());
         }
-        self.refuse_over_quarantine(&board.id)?;
-        if self.store.load(&board.id)?.is_some() {
-            return Err(BoardError::Duplicate(context.to_string()).into());
+        apply_board_patch(
+            &mut board,
+            BoardPatch {
+                name,
+                prefix,
+                backend,
+                ..Default::default()
+            },
+            &now,
+        )?;
+        let backend = self.backends.get(&board.backend.kind)?;
+        backend.validate(&board.backend.settings).await?;
+        board.backend.settings = backend.normalize(&board.backend.settings).await?;
+        let _allocation = self.allocation.lock().await;
+        board.id = self.available_board_id(&board.id)?;
+        let doc = BoardDocument {
+            version: BOARD_DOCUMENT_VERSION,
+            board,
+            cards: Vec::new(),
+        };
+        self.save(&doc, BoardChangeReason::Created).await?;
+        self.get(&doc.board.id).await
+    }
+
+    /// Creates the worktree's only board after validating its backend configuration.
+    pub async fn create_for_worktree(
+        &self,
+        worktree: &WorktreeId,
+        name: Option<String>,
+        prefix: Option<String>,
+        backend: Option<BackendRef>,
+    ) -> DaemonResult<BoardView> {
+        let _lifecycle = self.worktrees.claim_lifecycle(worktree.clone()).await;
+        let state = self.state_store.load().await?;
+        let (worktree_record, context) = worktree_context(&state, worktree)?;
+        let now = self.now();
+        let mut board = new_worktree_board(&context, &worktree_record, &now);
+        let base = board.id.clone();
+        let _guard = self.gate(&base).await;
+        if self.worktree_board(worktree)?.is_some() {
+            return Err(BoardError::Duplicate(worktree.to_string()).into());
         }
         apply_board_patch(
             &mut board,
@@ -205,6 +290,8 @@ impl Boards {
         let backend = self.backends.get(&board.backend.kind)?;
         backend.validate(&board.backend.settings).await?;
         board.backend.settings = backend.normalize(&board.backend.settings).await?;
+        let _allocation = self.allocation.lock().await;
+        board.id = self.available_board_id(&base)?;
         let doc = BoardDocument {
             version: BOARD_DOCUMENT_VERSION,
             board,
@@ -212,6 +299,131 @@ impl Boards {
         };
         self.save(&doc, BoardChangeReason::Created).await?;
         self.get(&doc.board.id).await
+    }
+
+    fn available_board_id(&self, base: &BoardId) -> DaemonResult<BoardId> {
+        if self.board_id_is_available(base)? {
+            return Ok(base.clone());
+        }
+        for suffix in 2..=MAX_BOARD_ID_SUFFIX {
+            let candidate = suffixed_board_id(base, suffix);
+            if self.board_id_is_available(&candidate)? {
+                return Ok(candidate);
+            }
+        }
+        Err(DaemonError::Conflict(format!(
+            "no board id is available for {base}"
+        )))
+    }
+
+    fn board_id_is_available(&self, id: &BoardId) -> DaemonResult<bool> {
+        self.refuse_over_quarantine(id)?;
+        Ok(self.store.load(id)?.is_none())
+    }
+
+    /// Moves every board scoped through `repo` before publishing its new context in state.
+    async fn move_repo_to_context(
+        &self,
+        repo: RepoId,
+        context: ContextId,
+    ) -> DaemonResult<fleet_core::model::Repo> {
+        let initial = self.state_store.load().await?;
+        if !initial.contexts.iter().any(|item| item.id == context) {
+            return Err(DaemonError::NotFound(format!("context {context}")));
+        }
+        initial
+            .repos
+            .iter()
+            .find(|item| item.id == repo)
+            .ok_or_else(|| DaemonError::NotFound(format!("repository {repo}")))?;
+
+        // Worktree-board creation uses the same claims. Re-read until every worktree published
+        // for this repository is covered, then no scoped board can appear during the move.
+        let mut claimed_ids = Vec::<WorktreeId>::new();
+        let mut lifecycle_claims = Vec::new();
+        loop {
+            let state = self.state_store.load().await?;
+            let mut unclaimed = state
+                .worktrees
+                .iter()
+                .filter(|worktree| worktree.repo_id == repo && !claimed_ids.contains(&worktree.id))
+                .map(|worktree| worktree.id.clone())
+                .collect::<Vec<_>>();
+            unclaimed.sort();
+            if unclaimed.is_empty() {
+                break;
+            }
+            for worktree in unclaimed {
+                lifecycle_claims.push(self.worktrees.claim_lifecycle(worktree.clone()).await);
+                claimed_ids.push(worktree);
+            }
+        }
+
+        let ids = self.store.list()?;
+        let mut gates = Vec::with_capacity(ids.len());
+        for id in &ids {
+            gates.push(self.gate(id).await);
+        }
+        let mut originals = Vec::new();
+        for id in ids {
+            let Some(mut doc) = self.store.peek(&id)? else {
+                continue;
+            };
+            if doc
+                .board
+                .worktree_id
+                .as_ref()
+                .is_some_and(|worktree| claimed_ids.contains(worktree))
+            {
+                originals.push(doc.clone());
+                doc.board.context_id = context.clone();
+                doc.board.updated_at = self.now();
+                if let Err(error) = self.save(&doc, BoardChangeReason::Updated).await {
+                    self.rollback_context_moves(&originals).await?;
+                    return Err(error);
+                }
+            }
+        }
+
+        let repo_for_transaction = repo.clone();
+        let context_for_transaction = context.clone();
+        let moved = self
+            .state_store
+            .transaction(move |state| {
+                if !state
+                    .contexts
+                    .iter()
+                    .any(|item| item.id == context_for_transaction)
+                {
+                    return Err(DaemonError::NotFound(format!(
+                        "context {context_for_transaction}"
+                    )));
+                }
+                let item = state
+                    .repos
+                    .iter_mut()
+                    .find(|item| item.id == repo_for_transaction)
+                    .ok_or_else(|| {
+                        DaemonError::NotFound(format!("repository {repo_for_transaction}"))
+                    })?;
+                item.context_id = context_for_transaction;
+                Ok(item.clone())
+            })
+            .await;
+        match moved {
+            Ok(repo) => Ok(repo),
+            Err(error) => {
+                self.rollback_context_moves(&originals).await?;
+                Err(error)
+            }
+        }
+    }
+
+    async fn rollback_context_moves(&self, originals: &[BoardDocument]) -> DaemonResult<()> {
+        for doc in originals.iter().rev() {
+            self.save(doc, BoardChangeReason::Updated).await?;
+        }
+        Ok(())
     }
 
     /// Updates board configuration, rejecting removal of referenced statuses or labels.
@@ -367,10 +579,11 @@ impl Boards {
             let owned = match self.store.peek(&id) {
                 Ok(Some(doc)) => doc.board.context_id == *context,
                 Ok(None) => false,
-                // An unreadable document still belongs to the context by its file name.
                 Err(error) => {
-                    tracing::warn!(%id, %error, "deleting unreadable board with its context");
-                    id.as_str() == context.as_str()
+                    // Board ids are shared across context and worktree scopes, so a filename
+                    // cannot prove ownership when the persisted scope is unreadable.
+                    tracing::warn!(%context, %id, %error, "preserving unreadable board whose context ownership cannot be verified");
+                    false
                 }
             };
             if owned {
@@ -384,14 +597,129 @@ impl Boards {
                 self.changed(&id, BoardChangeReason::Deleted);
             }
         }
-        // A board whose only remains are quarantined is in no listing, and leaving them behind
-        // would refuse a board to every later context that derives the same id.
-        if let Ok(id) = BoardId::try_from(context.as_str())
-            && !self.store.quarantined(&id)?.is_empty()
-        {
-            let _guard = self.gate(&id).await;
-            self.store.delete(&id)?;
+        Ok(())
+    }
+
+    /// Deletes every board scoped to `worktree` after that worktree is removed.
+    pub async fn delete_for_worktree(
+        &self,
+        worktree: &WorktreeId,
+        trash: &std::path::Path,
+    ) -> DaemonResult<()> {
+        for id in self.store.list()? {
+            let owned = match self.store.peek(&id) {
+                Ok(Some(doc)) => doc.board.worktree_id.as_ref() == Some(worktree),
+                Ok(None) => false,
+                Err(error) => {
+                    // Derived ids are shared with context boards, so the filename cannot prove
+                    // ownership when the persisted worktree scope is unreadable.
+                    tracing::warn!(%worktree, %id, %error, "preserving unreadable board whose worktree ownership cannot be verified");
+                    false
+                }
+            };
+            if owned {
+                // Not `delete`: an unreadable board must not block deletion of a worktree that
+                // has already left state and disk.
+                let _guard = self.gate(&id).await;
+                self.store.delete_with_worktree(&id, trash)?;
+                self.summaries.write().await.remove(&id);
+                self.index.write().await.retain(|_, board| *board != id);
+                self.changed(&id, BoardChangeReason::Deleted);
+            }
         }
         Ok(())
     }
+
+    /// Restores a worktree board bundled into the restored worktree directory.
+    pub async fn restore_for_worktree(
+        &self,
+        worktree: &WorktreeId,
+        destination: &std::path::Path,
+    ) -> DaemonResult<()> {
+        for id in self.store.restore_with_worktree(destination)? {
+            let doc = match self.store.peek(&id) {
+                Ok(Some(doc)) => doc,
+                Ok(None) => continue,
+                Err(error) => {
+                    // Recovery is a read: preserve an unreadable document in place for a build
+                    // that can read it or for manual repair instead of quarantining it again.
+                    tracing::warn!(%worktree, %id, %error, "restored unreadable board without validating its scope");
+                    continue;
+                }
+            };
+            if doc.board.worktree_id.as_ref() != Some(worktree) {
+                return Err(DaemonError::Conflict(format!(
+                    "restored board {id} does not belong to worktree {worktree}"
+                )));
+            }
+            self.summaries.write().await.remove(&id);
+            self.index
+                .write()
+                .await
+                .extend(doc.cards.iter().map(|card| (card.id.clone(), id.clone())));
+            self.changed(&id, BoardChangeReason::Created);
+        }
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl WorktreeCascade for Boards {
+    async fn delete_for_worktree(
+        &self,
+        worktree: &WorktreeId,
+        trash: &std::path::Path,
+    ) -> DaemonResult<()> {
+        Boards::delete_for_worktree(self, worktree, trash).await
+    }
+
+    async fn restore_for_worktree(
+        &self,
+        worktree: &WorktreeId,
+        destination: &std::path::Path,
+    ) -> DaemonResult<()> {
+        Boards::restore_for_worktree(self, worktree, destination).await
+    }
+}
+
+#[async_trait::async_trait]
+impl RepoContextMover for Boards {
+    async fn move_repo_to_context(
+        &self,
+        repo: RepoId,
+        context: ContextId,
+    ) -> DaemonResult<fleet_core::model::Repo> {
+        Boards::move_repo_to_context(self, repo, context).await
+    }
+}
+
+fn worktree_context(state: &State, id: &WorktreeId) -> DaemonResult<(Worktree, Context)> {
+    let worktree = state
+        .worktrees
+        .iter()
+        .find(|worktree| worktree.id == *id)
+        .cloned()
+        .ok_or_else(|| DaemonError::NotFound(format!("worktree {id}")))?;
+    let repo = state
+        .repos
+        .iter()
+        .find(|repo| repo.id == worktree.repo_id)
+        .ok_or_else(|| DaemonError::NotFound(format!("repository {}", worktree.repo_id)))?;
+    let context = state
+        .contexts
+        .iter()
+        .find(|context| context.id == repo.context_id)
+        .cloned()
+        .ok_or_else(|| DaemonError::NotFound(format!("context {}", repo.context_id)))?;
+    Ok((worktree, context))
+}
+
+fn suffixed_board_id(base: &BoardId, suffix: u32) -> BoardId {
+    let suffix = format!("-{suffix}");
+    let keep = BOARD_ID_MAX_LEN
+        .saturating_sub(suffix.len())
+        .min(base.as_str().len());
+    let mut stem = base.as_str()[..keep].trim_end_matches('-').to_owned();
+    stem.push_str(&suffix);
+    BoardId::try_from(stem).expect("a suffixed worktree board id is always a valid board slug")
 }

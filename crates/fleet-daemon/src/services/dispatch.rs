@@ -191,6 +191,9 @@ impl Services {
             RequestBody::EnsureBoard { context_id } => {
                 Ok(ResponseBody::Board(self.boards.ensure(&context_id).await?))
             }
+            RequestBody::EnsureWorktreeBoard { worktree_id } => Ok(ResponseBody::Board(
+                self.boards.ensure_for_worktree(&worktree_id).await?,
+            )),
             RequestBody::CreateBoard {
                 context_id,
                 name,
@@ -199,6 +202,16 @@ impl Services {
             } => Ok(ResponseBody::Board(
                 self.boards
                     .create(&context_id, name, prefix, backend)
+                    .await?,
+            )),
+            RequestBody::CreateWorktreeBoard {
+                worktree_id,
+                name,
+                prefix,
+                backend,
+            } => Ok(ResponseBody::Board(
+                self.boards
+                    .create_for_worktree(&worktree_id, name, prefix, backend)
                     .await?,
             )),
             RequestBody::UpdateBoard { board_id, patch } => Ok(ResponseBody::Board(

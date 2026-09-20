@@ -17,7 +17,7 @@ const LAYOUT: support::layout::GalleryLayout = support::layout::GalleryLayout {
 };
 use fleet_ui_kit::prelude::*;
 use gpui::{
-    AnyElement, App, Context, FocusHandle, Focusable, KeyBinding, SharedString,
+    AnyElement, App, Context, Entity, FocusHandle, Focusable, KeyBinding, SharedString,
     UniformListScrollHandle, Window, actions, div, px,
 };
 
@@ -27,6 +27,13 @@ struct Gallery {
     focus_handle: FocusHandle,
     list_scroll: UniformListScrollHandle,
     cursor: usize,
+    /// The filter bar and the palette both edit a live input, so the gallery owns one each.
+    filter_query: Entity<TextInput>,
+    palette_query: Entity<TextInput>,
+    /// Every other input the gallery shows is live too: `(label, entity)` in display order.
+    fields: Vec<(&'static str, Entity<TextInput>)>,
+    areas: Vec<Entity<TextInput>>,
+    dialog_branch: Entity<TextInput>,
 }
 
 impl Gallery {
@@ -35,6 +42,11 @@ impl Gallery {
             focus_handle: cx.focus_handle(),
             list_scroll: UniformListScrollHandle::new(),
             cursor: 1,
+            filter_query: demo_query(cx, "rut"),
+            palette_query: demo_query(cx, "pay fix"),
+            fields: demo_fields(cx),
+            areas: demo_areas(cx),
+            dialog_branch: demo_branch(cx, "feat/rut-validator"),
         }
     }
 
@@ -678,7 +690,115 @@ fn rows_section(cx: &mut App, cursor: usize, scroll: &UniformListScrollHandle) -
     LAYOUT.section("rows and lists", &t, children)
 }
 
-fn structure_section(cx: &mut App) -> AnyElement {
+/// An embedded single-line editor seeded with the text a static demo card shows.
+fn demo_query(cx: &mut Context<Gallery>, text: &str) -> Entity<TextInput> {
+    let text = text.to_owned();
+    cx.new(|cx| {
+        let mut input = TextInput::new(InputMode::SingleLine, cx);
+        input.set_embedded(true, cx);
+        input.set_text(text, cx);
+        input
+    })
+}
+
+/// The branch field a dialog body carries, with its derived preview line.
+fn demo_branch(cx: &mut Context<Gallery>, text: &str) -> Entity<TextInput> {
+    let text = text.to_owned();
+    cx.new(|cx| {
+        let mut input = TextInput::new(InputMode::SingleLine, cx);
+        input.set_label(Some("branch".into()), cx);
+        input.set_preview(Some("\u{2192} buk/payroll#feat-rut-validator".into()), cx);
+        input.set_text(text, cx);
+        input
+    })
+}
+
+/// The single-line states the input group shows, in display order.
+fn demo_fields(cx: &mut Context<Gallery>) -> Vec<(&'static str, Entity<TextInput>)> {
+    vec![
+        ("text input", demo_branch(cx, "feat/rut-validator")),
+        (
+            "text input \u{b7} invalid",
+            cx.new(|cx| {
+                let mut input = TextInput::new(InputMode::SingleLine, cx);
+                input.set_label(Some("branch".into()), cx);
+                input.set_invalid(Some("branch cannot contain \"..\"".into()), cx);
+                input.set_text("feat/../rut", cx);
+                input
+            }),
+        ),
+        (
+            "text input \u{b7} placeholder",
+            cx.new(|cx| {
+                let mut input = TextInput::new(InputMode::SingleLine, cx);
+                input.set_placeholder("Type to search GitHub repos in buk's owners.", cx);
+                input.set_icon(Some(Icon::Search), cx);
+                input
+            }),
+        ),
+    ]
+}
+
+/// The multi-line states the board group shows.
+fn demo_areas(cx: &mut Context<Gallery>) -> Vec<Entity<TextInput>> {
+    let build = |cx: &mut Context<Gallery>,
+                 label: &'static str,
+                 rows: usize,
+                 text: &str,
+                 placeholder: Option<&'static str>,
+                 mono: bool,
+                 invalid: Option<&'static str>| {
+        let text = text.to_owned();
+        cx.new(|cx| {
+            let mut input = TextInput::new(
+                InputMode::Multiline {
+                    min_rows: rows,
+                    max_rows: rows,
+                },
+                cx,
+            );
+            input.set_label(Some(label.into()), cx);
+            if let Some(placeholder) = placeholder {
+                input.set_placeholder(placeholder, cx);
+            }
+            input.set_mono(mono, cx);
+            input.set_invalid(invalid.map(Into::into), cx);
+            input.set_text(text, cx);
+            input
+        })
+    };
+    vec![
+        build(
+            cx,
+            "description",
+            5,
+            "Reproduce with `fleet board sync`.\nThe second line wraps as soon as the box is narrower than the sentence it holds.",
+            None,
+            false,
+            None,
+        ),
+        build(
+            cx,
+            "comment",
+            3,
+            "",
+            Some("Leave a comment. ctrl-s saves, esc cancels."),
+            false,
+            None,
+        ),
+        build(
+            cx,
+            "mono \u{b7} invalid",
+            3,
+            "fleet board move FLT-12 done\nfleet worktree new --card FLT-12",
+            None,
+            true,
+            Some("the second command names no board"),
+        ),
+    ]
+}
+
+fn structure_section(cx: &mut App, filter_query: Entity<TextInput>) -> AnyElement {
     let t = cx.theme().clone();
     let pane = box_of(
         &t,
@@ -738,7 +858,7 @@ fn structure_section(cx: &mut App) -> AnyElement {
         PaneHeader::new("worktrees")
             .shown(2)
             .total(12)
-            .query_slot(FilterBar::new("rut", 2, 12).query_slot()),
+            .query_slot(FilterBar::new(filter_query, 2, 12).query_slot()),
     );
     let retained = box_of(
         &t,
@@ -1095,37 +1215,19 @@ fn terminal_section(cx: &mut App) -> AnyElement {
     LAYOUT.section("terminal", &t, children)
 }
 
-fn input_section(cx: &mut App) -> AnyElement {
+fn input_section(cx: &mut App, fields: &[(&'static str, Entity<TextInput>)]) -> AnyElement {
     let t = cx.theme().clone();
-    let children = vec![
-        LAYOUT.labeled(
-            "text field",
-            &t,
-            div().flex().flex_col().w(px(360.0)).child(
-                TextField::new("feat/rut-validator")
-                    .label("branch")
-                    .focused(true)
-                    .preview("→ buk/payroll#feat-rut-validator"),
-            ),
-        ),
-        LAYOUT.labeled(
-            "text field · invalid",
-            &t,
-            div().flex().flex_col().w(px(360.0)).child(
-                TextField::new("feat/../rut")
-                    .label("branch")
-                    .invalid("branch cannot contain \"..\""),
-            ),
-        ),
-        LAYOUT.labeled(
-            "text field · placeholder",
-            &t,
-            div().flex().flex_col().w(px(360.0)).child(
-                TextField::new("")
-                    .placeholder("Type to search GitHub repos in buk's owners.")
-                    .icon(Icon::Search),
-            ),
-        ),
+    let mut children: Vec<AnyElement> = fields
+        .iter()
+        .map(|(label, input)| {
+            LAYOUT.labeled(
+                label,
+                &t,
+                div().flex().flex_col().w(px(360.0)).child(input.clone()),
+            )
+        })
+        .collect();
+    children.extend([
         LAYOUT.labeled(
             "cycler",
             &t,
@@ -1229,11 +1331,15 @@ fn input_section(cx: &mut App) -> AnyElement {
                 .cursor(0),
             ),
         ),
-    ];
+    ]);
     LAYOUT.section("input", &t, children)
 }
 
-fn overlays_section(cx: &mut App) -> AnyElement {
+fn overlays_section(
+    cx: &mut App,
+    dialog_branch: Entity<TextInput>,
+    palette_query: Entity<TextInput>,
+) -> AnyElement {
     let t = cx.theme().clone();
     let dialog = box_of(
         &t,
@@ -1247,12 +1353,7 @@ fn overlays_section(cx: &mut App) -> AnyElement {
                     .flex()
                     .flex_col()
                     .gap(px(8.0))
-                    .child(
-                        TextField::new("feat/rut-validator")
-                            .label("branch")
-                            .focused(true)
-                            .preview("→ buk/payroll#feat-rut-validator"),
-                    )
+                    .child(dialog_branch)
                     .child(Text::hint("⚡ prepared copy ready — create takes ~2 s").faint()),
             )
             .hints(KeyHintRow::new().key("⇥", "field").key("esc", "cancel"))
@@ -1295,7 +1396,7 @@ fn overlays_section(cx: &mut App) -> AnyElement {
         &t,
         px(320.0),
         Overlay::new().top(px(12.0)).width(px(560.0)).content(
-            Palette::new("pay fix")
+            Palette::new(palette_query)
                 .total(63)
                 .section(PaletteSection::new(
                     PaletteSectionKind::Go,
@@ -1429,7 +1530,7 @@ fleet board sync --board work
 /// The width one card panel is measured at; a real column is `COLUMN_WIDTH_CH` wide.
 const TILE_W: f32 = 260.0;
 
-fn board_section(cx: &mut App) -> AnyElement {
+fn board_section(cx: &mut App, areas: &[Entity<TextInput>]) -> AnyElement {
     let t = cx.theme().clone();
 
     let board = KanbanBoard::new("gallery-board").columns([
@@ -1556,34 +1657,10 @@ fn board_section(cx: &mut App) -> AnyElement {
         .flex_row()
         .flex_wrap()
         .gap(t.space.md)
-        .child(
-            div().w(px(320.0)).child(
-                TextArea::new(
-                    "Reproduce with `fleet board sync`.\nThe second line wraps as soon as the box is narrower than the sentence it holds.",
-                )
-                .label("description")
-                .cursor(34)
-                .focused(true)
-                .rows(5),
-            ),
-        )
-        .child(
-            div().w(px(320.0)).child(
-                TextArea::new("")
-                    .label("comment")
-                    .placeholder("Leave a comment. ctrl-s saves, esc cancels.")
-                    .focused(true)
-                    .rows(3),
-            ),
-        )
-        .child(
-            div().w(px(320.0)).child(
-                TextArea::new("fleet board move FLT-12 done\nfleet worktree new --card FLT-12")
-                    .label("mono · invalid")
-                    .mono(true)
-                    .invalid(true)
-                    .rows(3),
-            ),
+        .children(
+            areas
+                .iter()
+                .map(|input| div().w(px(320.0)).child(input.clone())),
         );
 
     let children = vec![
@@ -1591,7 +1668,7 @@ fn board_section(cx: &mut App) -> AnyElement {
         LAYOUT.labeled("card tiles", &t, tiles),
         LAYOUT.labeled("priority glyphs", &t, priorities),
         LAYOUT.labeled("markdown", &t, markdown),
-        LAYOUT.labeled("text areas", &t, text_areas),
+        LAYOUT.labeled("multi-line text inputs", &t, text_areas),
     ];
     LAYOUT.section("board", &t, children)
 }
@@ -1602,6 +1679,11 @@ impl Render for Gallery {
         let pad = cx.theme().space.xl;
         let cursor = self.cursor;
         let scroll = self.list_scroll.clone();
+        let filter_query = self.filter_query.clone();
+        let palette_query = self.palette_query.clone();
+        let dialog_branch = self.dialog_branch.clone();
+        let fields = self.fields.clone();
+        let areas = self.areas.clone();
 
         let sections = vec![
             colors_section(cx),
@@ -1610,11 +1692,11 @@ impl Render for Gallery {
             glyphs_section(cx),
             facts_section(cx),
             rows_section(cx, cursor, &scroll),
-            structure_section(cx),
+            structure_section(cx, filter_query),
             terminal_section(cx),
-            input_section(cx),
-            board_section(cx),
-            overlays_section(cx),
+            input_section(cx, &fields),
+            board_section(cx, &areas),
+            overlays_section(cx, dialog_branch, palette_query),
         ];
 
         AppFrame::new()

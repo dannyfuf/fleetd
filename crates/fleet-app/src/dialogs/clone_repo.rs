@@ -5,12 +5,12 @@ use std::time::Duration;
 use fleet_core::{cache::RepoCache, config::CloneProtocol, github::RemoteRepo, ids::ContextId};
 use fleet_proto::{request::RequestBody, response::ResponseBody};
 use fleet_ui_kit::{Icon, prelude::*};
-use gpui::{AnyElement, App, Entity, FocusHandle, Window, div};
+use gpui::{AnyElement, App, AppContext, Entity, FocusHandle, Window, div};
 
 use crate::{
     actions::dialog,
     bridge::Bridge,
-    dialogs::{DialogHost, field, notify, root, step, type_into, with_host},
+    dialogs::{DialogHost, notify, read_host, root, step, with_host},
     presentation::{age_label, now_unix},
     state::AppState,
 };
@@ -46,8 +46,8 @@ pub struct CloneState {
     pub(crate) context_name: String,
     /// The owners the search is scoped to.
     pub(crate) owners: Vec<String>,
-    /// The search input.
-    pub(crate) query: TextFieldState,
+    /// The search input, mirrored from the live editor on every `Changed`.
+    pub(crate) query: String,
     /// The ranked results, capped at [`RESULT_ROWS`].
     pub(crate) results: Vec<RemoteRepo>,
     /// Which result carries the cursor.
@@ -72,7 +72,7 @@ impl Default for CloneState {
             context: None,
             context_name: String::new(),
             owners: Vec::new(),
-            query: TextFieldState::default(),
+            query: String::new(),
             results: Vec::new(),
             cursor: 0,
             searching: false,
@@ -91,7 +91,7 @@ impl CloneState {
     #[must_use]
     pub fn rows(&self) -> Vec<RemoteRepo> {
         let mut rows = Vec::with_capacity(RESULT_ROWS);
-        if let Some(manual) = manual_entry(self.query.text())
+        if let Some(manual) = manual_entry(&self.query)
             && !self
                 .results
                 .iter()
@@ -218,10 +218,35 @@ pub(crate) fn seed(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
             }
         }
     }
-    let seq = with_host(state, cx, |host| {
+    let input = cx.new(|cx| {
+        // \u{00a7}3.8.2: the field carries a search affordance (the magnifier), not a sentence.
+        // The one instruction is the *idle* body line below, which also names the context.
+        let mut input = TextInput::new(InputMode::SingleLine, cx);
+        input.set_icon(Some(Icon::Search), cx);
+        input
+    });
+    let host = crate::dialogs::host::host_for(state, cx);
+    let seq = host.update(cx, |host, _| {
         draft.seq = host.clone.seq.wrapping_add(1);
         host.clone = draft;
+        host.clone_query = Some(input.clone());
         host.clone.seq
+    });
+    let weak_state = state.downgrade();
+    let search_bridge = bridge.clone();
+    let subscription = cx.subscribe(&input, move |input, event, cx| {
+        if !matches!(event, TextInputEvent::Changed) {
+            return;
+        }
+        let Some(state) = weak_state.upgrade() else {
+            return;
+        };
+        let typed = input.read(cx).text().to_owned();
+        with_host(&state, cx, |host| host.clone.query = typed);
+        schedule_search(&state, &search_bridge, cx);
+    });
+    with_host(state, cx, |host| {
+        host.clone_query_subscription = Some(subscription)
     });
     // §SWARM-INVENTORY `github.cloneProtocol` decides the URL, so the dialog reads the
     // effective configuration rather than assuming SSH. The answer lands before the user can
@@ -251,6 +276,23 @@ pub(crate) fn seed(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
     crate::dialogs::retain_task(state, cx, "clone-config", task);
 }
 
+/// Mirrors the in-flight flag onto the editor's leading glyph.
+///
+/// `searching` only ever changes in an update path, so the spinner is swapped there rather
+/// than derived inside `render`.
+fn sync_search_icon(state: &Entity<AppState>, cx: &mut App) {
+    let (searching, input) = read_host(state, cx, |host, _| {
+        (host.clone.searching, host.clone_query.clone())
+    });
+    let Some(input) = input else { return };
+    let icon = if searching {
+        Icon::LoaderCircle
+    } else {
+        Icon::Search
+    };
+    cx.defer(move |cx| input.update(cx, |input, cx| input.set_icon(Some(icon), cx)));
+}
+
 /// Issues the debounced search for the current query.
 fn schedule_search<T: CloneTransport>(state: &Entity<AppState>, transport: &T, cx: &mut App) {
     let (opening_seq, search_seq, query, owners) = with_host(state, cx, |host| {
@@ -258,7 +300,7 @@ fn schedule_search<T: CloneTransport>(state: &Entity<AppState>, transport: &T, c
         (
             host.clone.seq,
             search_seq,
-            host.clone.query.text().to_owned(),
+            host.clone.query.clone(),
             host.clone.owners.clone(),
         )
     });
@@ -270,9 +312,11 @@ fn schedule_search<T: CloneTransport>(state: &Entity<AppState>, transport: &T, c
                 host.clone.searching = false;
             }
         });
+        sync_search_icon(state, cx);
         notify(state, cx);
         return;
     }
+    sync_search_icon(state, cx);
     notify(state, cx);
     let weak_state = state.downgrade();
     let transport = transport.clone();
@@ -315,6 +359,7 @@ fn schedule_search<T: CloneTransport>(state: &Entity<AppState>, transport: &T, c
                 true
             });
             if live {
+                sync_search_icon(&state, cx);
                 notify(&state, cx);
             }
         });
@@ -399,7 +444,7 @@ fn no_results(draft: &CloneState) -> AnyElement {
     if draft.searching {
         return Text::ui("Searching\u{2026}").muted().into_any_element();
     }
-    Text::ui(format!("Nothing matches \"{}\".", draft.query.text()))
+    Text::ui(format!("Nothing matches \"{}\".", draft.query))
         .muted()
         .into_any_element()
 }
@@ -446,17 +491,10 @@ pub(crate) fn render(
     let now = now_unix();
     let rows = draft.rows();
 
-    // §3.8.2: the field carries a search affordance (the magnifier), not a sentence. The one
-    // instruction is the *idle* body line below, which also names the context; printing it
-    // twice, once with `this context` and once with the real name, says nothing extra.
-    let search_field = field(&draft.query)
-        .icon(if draft.searching {
-            Icon::LoaderCircle
-        } else {
-            Icon::Search
-        })
-        .focused(true)
-        .harness_target_indexed("dialog.field", 0);
+    let Some(search_field) = host.read(cx).clone_query.clone() else {
+        return root(focus).into_any_element();
+    };
+    let search_field = search_field.harness_target_indexed("dialog.field", 0);
 
     let list = results_list(draft, &rows, now);
 
@@ -485,41 +523,30 @@ pub(crate) fn render(
     let confirm_state = state.clone();
     let confirm_bridge = bridge.clone();
 
-    super::input::actions(root(focus), state, |host| &mut host.clone.query, {
-        let bridge = bridge.clone();
-        move |state, cx| schedule_search(state, &bridge, cx)
-    })
-    .on_key_down({
-        let state = state.clone();
-        let bridge = bridge.clone();
-        move |event, _window, cx| {
-            if with_host(&state, cx, |host| type_into(&mut host.clone.query, event)) {
-                schedule_search(&state, &bridge, cx);
-            }
-        }
-    })
-    .on_action({
-        let state = state.clone();
-        move |_: &dialog::CursorDown, _window, cx| move_cursor(&state, 1, cx)
-    })
-    .on_action({
-        let state = state.clone();
-        move |_: &dialog::CursorUp, _window, cx| move_cursor(&state, -1, cx)
-    })
-    .on_action(move |_: &dialog::Confirm, _window, cx| {
-        submit(&confirm_state, &confirm_bridge, cx);
-    })
-    .on_action(move |_: &dialog::Cancel, _window, cx| {
-        // §3.8.2: `Esc` aborts the search request only. Bumping the sequence orphans the
-        // pending answer; a `CloneJob` already accepted by the daemon is untouched.
-        with_host(&cancel_state, cx, |host| {
-            host.clone.seq = host.clone.seq.wrapping_add(1);
-            host.clone.searching = false;
-        });
-        cx.propagate();
-    })
-    .child(card)
-    .into_any_element()
+    root(focus)
+        .on_action({
+            let state = state.clone();
+            move |_: &dialog::CursorDown, _window, cx| move_cursor(&state, 1, cx)
+        })
+        .on_action({
+            let state = state.clone();
+            move |_: &dialog::CursorUp, _window, cx| move_cursor(&state, -1, cx)
+        })
+        .on_action(move |_: &dialog::Confirm, _window, cx| {
+            submit(&confirm_state, &confirm_bridge, cx);
+        })
+        .on_action(move |_: &dialog::Cancel, _window, cx| {
+            // §3.8.2: `Esc` aborts the search request only. Bumping the sequence orphans the
+            // pending answer; a `CloneJob` already accepted by the daemon is untouched.
+            with_host(&cancel_state, cx, |host| {
+                host.clone.seq = host.clone.seq.wrapping_add(1);
+                host.clone.searching = false;
+            });
+            sync_search_icon(&cancel_state, cx);
+            cx.propagate();
+        })
+        .child(card)
+        .into_any_element()
 }
 
 fn move_cursor(state: &Entity<AppState>, delta: isize, cx: &mut App) {
@@ -681,7 +708,7 @@ mod tests {
     #[test]
     fn the_manual_row_never_duplicates_a_result() {
         let state = CloneState {
-            query: TextFieldState::from_text("bukhr/payroll"),
+            query: "bukhr/payroll".to_owned(),
             results: vec![repo("bukhr/payroll")],
             ..CloneState::default()
         };
@@ -691,7 +718,7 @@ mod tests {
     #[test]
     fn results_are_capped_at_eight_rows() {
         let state = CloneState {
-            query: TextFieldState::from_text("pay"),
+            query: "pay".to_owned(),
             results: (0..12).map(|n| repo(&format!("acme/pay{n}"))).collect(),
             ..CloneState::default()
         };
@@ -707,7 +734,7 @@ mod tests {
         let mut state = CloneState {
             seq: 9,
             protocol: CloneProtocol::Https,
-            query: TextFieldState::from_text("pay"),
+            query: "pay".to_owned(),
             ..CloneState::default()
         };
         state.begin_search();
@@ -718,7 +745,7 @@ mod tests {
     #[test]
     fn pending_query_cannot_select_stale_result() {
         let mut state = CloneState {
-            query: TextFieldState::from_text("new query"),
+            query: "new query".to_owned(),
             results: vec![repo("acme/old-result")],
             ..CloneState::default()
         };
@@ -730,13 +757,13 @@ mod tests {
     #[test]
     fn retry_reissues_query_without_editing_text() {
         let mut state = CloneState {
-            query: TextFieldState::from_text("payroll"),
+            query: "payroll".to_owned(),
             error: Some("offline".to_owned()),
             ..CloneState::default()
         };
         let previous = state.search_seq;
         state.begin_search();
-        assert_eq!(state.query.text(), "payroll");
+        assert_eq!(state.query, "payroll");
         assert_eq!(state.search_seq, previous + 1);
         assert_eq!(state.error, None);
     }
@@ -746,7 +773,7 @@ mod tests {
         let state = cx.new(|_| AppState::new("/tmp/fleet", std::time::Instant::now()));
         cx.update(|cx| {
             with_host(&state, cx, |host| {
-                host.clone.query = TextFieldState::from_text("payroll");
+                host.clone.query = "payroll".to_owned();
                 host.clone.owners = vec!["buk".to_owned()];
                 host.clone.error = Some("offline".to_owned());
             })
@@ -774,7 +801,7 @@ mod tests {
         ));
         visual.update(|_, cx| {
             with_host(&state, cx, |host| {
-                assert_eq!(host.clone.query.text(), "payroll");
+                assert_eq!(host.clone.query, "payroll");
             })
         });
     }

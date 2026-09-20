@@ -18,7 +18,7 @@ this file; where the two disagree, this file wins.
 | --- | --- | --- | --- |
 | Normal | `Hub` / `Hub > Repos` / `Hub > Worktrees` / `Hub > Prs` / `Hub > Board` | app start, `ctrl-s s` from a terminal, `Esc` from dialogs | opening a session |
 | Terminal | `Workspace > Terminal` | opening a worktree session, `Enter` on a session tab | `ctrl-s` (prefix) |
-| Native | `Workspace > Native` | selecting a tab whose configured command is a `fleet://` surface (the default third tab, `lg`) | `ctrl-s` (prefix), or selecting a PTY tab |
+| Native | `Workspace > Native`, plus `Workspace > Native > Board` on the board tab | selecting a tab whose configured command is a `fleet://` surface (the default third tab, `lg`, or the `board` tab of `ctrl-s b`) | `ctrl-s` (prefix), or selecting a PTY tab |
 | Prefix | `Workspace > Prefix` (one-shot) | `ctrl-s` inside Terminal or Native | any key (consumed) or `Esc` |
 | Scroll | `Workspace > Scroll` | `ctrl-s [` | `Esc`, `q`, `i` |
 | Agent thread | `Agent > AgentIdle` / `Agent > AgentWorking` / `Agent > AgentDecision > *` / `Agent > AgentNativeScroll` (`> AgentRow` under it) | `ctrl-s a`/`ctrl-s A` in Workspace, selecting a native agent tab | selecting another tab, `ctrl-s x` |
@@ -27,10 +27,17 @@ this file; where the two disagree, this file wins.
 | Agent scroll | `Agent > Scroll` | `ctrl-s [` inside the popup | `Esc`, `q`, `i` |
 | Filter | `Filter` | `/` in a list | `Esc` (first keeps filter, second clears), `Enter` |
 | Palette | `Palette` | `:` | `Esc`, `Enter` |
-| Dialog | `Dialog > <name>` | action | `Esc`, `Enter` |
+| Dialog | `Dialog > <name>` while browsing; `Dialog > <name>Editing` where the focused field owns typing | action | `Esc`, `Enter` |
+| Text input | `FleetTextInput` (`mode = single_line` \| `multiline`) | focusing a live `TextInput` | its container moves focus or closes |
 | Jobs | `Jobs` / `Jobs > Log` (overlay) | `J` anywhere in Normal, `ctrl-s J` in a terminal | `Esc`, `J`, `q` |
 | Daemon | `Daemon > Down` / `Daemon > Banner` / `Daemon > Doctor` | fleetd will not start (§3.12 B), fleetd died while attached (§3.12 C), doctor runs | daemon comes back, `Esc` (banner/doctor), `ctrl-q` |
 | FirstRun | `FirstRun` | no contexts and no repos exist | any key that creates or imports something |
+
+The board **pane** is the one Native tab that names itself. A `fleet://board` tab appends a word
+*under* `Workspace > Native`, so the whole Hub board table is bound over it (see *Board and card
+detail*) while `ctrl-s` keeps working, because the word its parent binds the prefix on is still
+on the chain. `lg` adds no such word: the embedded pane takes every key that is not `ctrl-s` and
+publishes its own contexts inside itself.
 
 The agent **thread** is not a shadowing surface: it is the Workspace's selected tab, so it
 *replaces* the `Workspace > …` context rather than covering it. Nothing is therefore inherited
@@ -75,8 +82,10 @@ behind it (`shell/root/focus.rs`, `focus_owner`).
 | `ctrl-q` | quit app (daemon keeps running) |
 | `ctrl-shift-q` | quit app and stop daemon (confirm; lists running jobs/sessions) |
 
-`E` opens the Edit-context dialog, from which `ctrl-d` deletes the context. `D` keeps its
-meaning and routes to the same expanded `Y` confirm.
+`E` opens the Edit-context dialog, from which `ctrl-shift-d` deletes the context. `D` keeps its
+meaning and routes to the same expanded `Y` confirm. The dialog's key is the **shift** variant
+because its two fields are live editors: plain `ctrl-d` is `FleetTextInput`'s delete-forward and
+would never reach the dialog.
 
 ## Hub › Repos pane
 
@@ -167,6 +176,7 @@ alone preserves them.
 | `u` | select the caller of the current child thread, attaching it first if needed |
 | `d` | agent picker: the palette pre-filtered to `AGENTS` |
 | `c` | new terminal tab (shell in worktree path) |
+| `b` | this worktree's board tab: created the first time, selected every time; an agent session is told `boards belong to worktrees` |
 | `x` | close current terminal (confirm if a keep-alive process is running) |
 | `r` | restart the exited command in this terminal [A10] |
 | `y` | copy the worktree path of the current session [A11] |
@@ -259,7 +269,7 @@ scroll mode or owned by a decision card preserves that mode's keyboard owner ins
 | every agent-thread sub-mode | `ctrl-s s` · `ctrl-s S` | go to Hub (thread keeps running) · sleep this session and return to the Hub |
 | every agent-thread sub-mode | `ctrl-s h`/`p` · `ctrl-s l`/`n` | previous / next tab, across the mixed terminal-and-thread strip |
 | every agent-thread sub-mode | `ctrl-s W` · `ctrl-s u` · `ctrl-s d` | session switcher · select the caller (attaching it first) · agent picker pre-filtered to `AGENTS` |
-| every agent-thread sub-mode | `ctrl-s c` · `ctrl-s y` · `ctrl-s z` | new terminal tab · copy the worktree path · zoom |
+| every agent-thread sub-mode | `ctrl-s c` · `ctrl-s b` · `ctrl-s y` · `ctrl-s z` | new terminal tab · this worktree's board tab · copy the worktree path · zoom |
 | every agent-thread sub-mode | `ctrl-s v` · `ctrl-s V` · `ctrl-s N` · `ctrl-s P` | the subagent watch pane: show/hide · dismiss · next · previous |
 | every agent-thread sub-mode | `ctrl-s !` · `ctrl-s J` · `ctrl-s ?` · `ctrl-s Esc` | sticky error · jobs panel · help · cancel the prefix |
 | both | `Esc` | close a picker, else abandon a gate draft, else leave scroll mode, else interrupt — and nothing at all on an idle thread |
@@ -382,11 +392,16 @@ history anchor.
 ## Workspace (Native mode)
 
 The default third tab (`lg`) is not a terminal: it is Fleet's own git pane
-(`crates/fleet-lazygit`) rendered inside the tab. `Workspace > Native` binds `ctrl-s` and
+(`crates/fleet-lazygit`) rendered inside the tab, and `ctrl-s b`'s `board` tab is the other
+reserved command: it draws this worktree's board with the Hub board's own keys under
+`Fleet > Workspace > Native > Board` (see "Board and card detail" below).
+`Workspace > Native` binds `ctrl-s` and
 nothing else — not even the `cmd-c` / `cmd-v` clipboard keys or the viewport shortcuts
 `Workspace > Terminal` reserves, because the pane owns its own selection and its own scrolling —
-so every other key belongs to the pane, whose own key table lives in
-`crates/fleet-lazygit/README.md`. The full context chain is
+so every other key belongs to the pane. Where that table lives is the one difference between the
+two reserved commands: the git pane's is
+`crates/fleet-lazygit/README.md`, while the board tab's is this file, because Fleet draws it
+itself. The git pane's full context chain is
 `Fleet > Workspace > Native > Lazygit > …`, and the pane's own context words are prefixed `Lg`
 (`LgDialog`, `LgConfirm`, `LgHelp`) so they cannot satisfy Fleet's `Dialog`, `Dialog > Confirm`
 or `Dialog > Help` predicates.
@@ -423,19 +438,116 @@ collapses the sheet back to 440 px (a second `Esc` closes the panel).
 
 ## Dialogs and text inputs
 
-Text inputs accept printable keys, `Backspace`, `ctrl-w` (delete word), `ctrl-u` (clear),
-`ctrl-a` / `ctrl-e` (home / end), `←` / `→`. Lists under a text input use `ctrl-n` / `ctrl-p`
-or `↓` / `↑` (never `j` / `k`, because the text field owns them). `Tab` / `S-Tab` move between
-fields. `Enter` confirms; `Esc` cancels.
+Every live `TextInput` entity publishes `FleetTextInput`; this is the one application table that
+defines its editing. Printable text and IME input are delivered by the component itself. `Tab`,
+`S-Tab`, `ctrl-n`, `ctrl-p`, and `Esc` remain container keys. A multi-line input publishes
+`enter = newline | owner`: plain `Enter` inserts only under
+`FleetTextInput && mode == multiline && enter == newline`, while `Shift-Enter` inserts in every
+multi-line input. The agent composer publishes `owner`, so its plain `Enter` reaches Send/Steer.
+
+### Motion
+
+| Key | Action |
+| --- | --- |
+| `left` | move left one grapheme |
+| `right` | move right one grapheme |
+| `alt-left` | move to the previous word boundary |
+| `alt-right` | move to the next word boundary |
+| `home` | move to the visual row start (logical line without a layout) |
+| `end` | move to the visual row end (logical line without a layout) |
+| `cmd-left` | move to the logical line start |
+| `cmd-right` | move to the logical line end |
+| `up` | move one visual row up (logical line without a layout) |
+| `down` | move one visual row down (logical line without a layout) |
+| `cmd-up` | move to the document start |
+| `cmd-down` | move to the document end |
+| `ctrl-a` | move to the logical line start |
+| `ctrl-e` | move to the logical line end |
+| `ctrl-shift-a` | extend to the logical line start |
+| `ctrl-shift-e` | extend to the logical line end |
+| `ctrl-b` | move left one grapheme |
+| `ctrl-f` | move right one grapheme |
+
+### Selection
+
+| Key | Action |
+| --- | --- |
+| `shift-left` | extend left one grapheme |
+| `shift-right` | extend right one grapheme |
+| `alt-shift-left` | extend to the previous word boundary |
+| `alt-shift-right` | extend to the next word boundary |
+| `shift-home` | extend to the visual row start (logical line without a layout) |
+| `shift-end` | extend to the visual row end (logical line without a layout) |
+| `cmd-shift-left` | extend to the logical line start |
+| `cmd-shift-right` | extend to the logical line end |
+| `shift-up` | extend one visual row up (logical line without a layout) |
+| `shift-down` | extend one visual row down (logical line without a layout) |
+| `cmd-shift-up` | extend to the document start |
+| `cmd-shift-down` | extend to the document end |
+| `cmd-a` | select all |
+
+### Deletion
+
+| Key | Action |
+| --- | --- |
+| `backspace` | delete the previous grapheme or selection |
+| `delete` | delete the next grapheme or selection |
+| `alt-backspace` | delete the previous word run |
+| `alt-delete` | delete the next word run |
+| `cmd-backspace` | delete to the logical line start |
+| `cmd-delete` | delete to the logical line end |
+| `ctrl-w` | delete the previous word run |
+| `ctrl-u` | delete to the logical line start |
+| `ctrl-k` | delete to the logical line end |
+| `ctrl-h` | delete the previous grapheme or selection |
+| `ctrl-d` | delete the next grapheme or selection |
+
+### Clipboard
+
+| Key | Action |
+| --- | --- |
+| `cmd-c` | copy the selection |
+| `cmd-x` | cut the selection |
+| `cmd-v` | paste clipboard text |
+
+`ctrl-v` is deliberately unbound: it remains available to shells and terminal applications.
+
+### History
+
+| Key | Action |
+| --- | --- |
+| `cmd-z` | undo |
+| `cmd-shift-z` | redo |
+
+### Newline
+
+| Key | Action |
+| --- | --- |
+| `enter` | insert under `FleetTextInput && mode == multiline && enter == newline` only |
+| `shift-enter` | insert under `FleetTextInput && mode == multiline` |
+
+**Key ownership.** Every dialog field is a live `TextInput`, so the `Dialog` container binds no
+editing key of its own: `Backspace`, `ctrl-w`, `ctrl-u`, `ctrl-a` / `ctrl-e` and `←` / `→` all
+belong to the `FleetTextInput` table above wherever an editor owns the keyboard. A surface with
+bare-letter or caret-collision commands publishes its existing word while browsing and a distinct
+`*Editing` word while a field owns typing. The browsing words are `CardDetail`, `BoardSettings`,
+`Settings`, and `Create`; their editing partners are `CardDetailEditing`, `BoardSettingsEditing`,
+`SettingsEditing`, and `CreateEditing`. Editing words contain only container commands, so the
+deeper `FleetTextInput` rows own editing and no dialog action can steal an accepted character.
+Lists under an input use `ctrl-n` / `ctrl-p` or `down` / `up`; `Tab` / `S-Tab` move fields, `Enter`
+confirms where the single-line container says so, and `Esc` cancels. `CardPicker` is the documented
+exception: its query is a filter that never contains a space, so it always publishes
+`Dialog > CardPicker` and `space` toggles the highlighted card.
 
 | Dialog | Keys beyond the shared frame |
 | --- | --- |
-| Create worktree | `←` / `→` cycle the host · `Enter` create & open · `⌥Enter` create **without** opening [A8] |
+| Create worktree | under browsing `Dialog > Create`, `←` / `→` cycle the host; the branch editor publishes `Dialog > CreateEditing`, where the same arrows move its caret · `Tab` / `S-Tab` move between branch, base and host · `Enter` create & open · `⌥Enter` create **without** opening [A8] |
 | Clone repo | type to search · `ctrl-n` / `ctrl-p` or `↓` / `↑` · `Enter` clone · `Esc` cancels only the search request, never a started clone |
 | Confirm (delete / prune / kill / close terminal) | `y` / `Enter` confirm · `Y` **required instead of `y`** when any decisive safety fact is unknown or the inspection errored, and for repo / context delete [A12] · `n` / `Esc` / `q` cancel · `I` re-check (delete) · `s` toggle the KEEP list (prune). Nothing else is bound. |
-| New / Edit context | `ctrl-d` delete this context (routes to the expanded `Y` confirm) |
+| New / Edit context | `Tab` / `S-Tab` move between name and owners · `ctrl-shift-d` delete this context (routes to the expanded `Y` confirm); plain `ctrl-d` belongs to the focused editor |
+| Repository hooks (`e`) | one editor per command row, `Tab` / `S-Tab` between them; a filled trailing row grows the next blank one · `Enter` saves |
 | Assign repo to context (`m`) | this dialog has **no** text field, so `j` / `k` move the selection as well as `↓` / `↑` and `ctrl-n` / `ctrl-p` |
-| Settings (`,`) | `Space` toggles · `h` / `l` or `←` / `→` cycle a choice · `j` / `k` move (surrendered while a text input has focus) · `Enter` saves · `Esc` discards · `E` open `config.json` in a new terminal tab · `D` run doctor |
+| Settings (`,`) | browsing is `Dialog > Settings`: `Space` toggles · `h` / `l` or `←` / `→` cycle a choice · `j` / `k` move · `E` opens `config.json` · `D` runs doctor · `Enter` on a text or number row opens it for editing, and saves on every other row. That row's editor publishes `Dialog > SettingsEditing`, where every printable key types and `Enter` saves; `ctrl-n` / `ctrl-p` or `↓` / `↑` move to the next row and close it, and `Esc` discards in either word. |
 | Help (`?`) | `Esc` / `?` close |
 | Quit (`ctrl-q`) | `y` quit · `n` / `Esc` cancel · `J` open the jobs panel · `W` never warn again (writes `jobs.warnBeforeQuit=false`) and quit [A23] |
 | Quit and stop daemon (`ctrl-shift-q`) | `Y` stop and quit · `n` / `Esc` cancel |
@@ -447,7 +559,7 @@ opens `config.json` in a new terminal tab. The two never coexist in one key cont
 
 | Key | Action |
 | --- | --- |
-| printable, `Backspace`, `ctrl-w`, `ctrl-u` | edit the query |
+| printable, `Backspace`, `ctrl-w`, `ctrl-u`, motion, selection, undo | edit the query through the full `FleetTextInput` table above |
 | `ctrl-n` / `↓`, `ctrl-p` / `↑` | move the **list** cursor while still typing |
 | `Enter` | open the highlighted row directly from inside the input [A24] |
 | `Esc` | first press leaves the input keeping the filter, second press clears it — **never quits** [A13] |
@@ -456,7 +568,7 @@ opens `config.json` in a new terminal tab. The two never coexist in one key cont
 
 | Key | Action |
 | --- | --- |
-| printable, `Backspace`, `ctrl-w`, `ctrl-u` | edit the query |
+| printable, `Backspace`, `ctrl-w`, `ctrl-u`, motion, selection, undo | edit the query through the full `FleetTextInput` table above |
 | `ctrl-n` / `↓`, `ctrl-p` / `↑` | move between `GO` / `DO` / `CONTEXT` rows |
 | `Enter` | run the highlighted row (destructive commands still route through their confirm) |
 | `Esc` | close (`q` remains a printable query character) |
@@ -480,6 +592,10 @@ opens `config.json` in a new terminal tab. The two never coexist in one key cont
 The doctor report replaces the whole context chain, so it repeats the recovery keys of the
 surface it was raised from — B, C, or Settings §3.8.6 About, where the daemon is healthy and
 `r` only closes the report.
+
+Case C's banner is a container, and `r` and `l` are bare letters, so it obeys the key-ownership
+rule above: `Daemon > Banner` leaves the chain entirely — `Esc` with it — while a live input owns
+the keyboard, and comes straight back when the keyboard returns to a surface that is not typing.
 
 Case A (cold start) binds nothing: fleetd is auto-spawned. While disconnected, read-only keys
 (`j` / `k`, `y`, `b`, `/`, `i`, `:`) keep working; mutating keys flash the banner. Keys typed
@@ -513,7 +629,9 @@ a documented key).
 `Tab` is "next pane" in the Hub and "next PR tab" on the PR screen. `i` is "toggle detail" in
 the Hub and "leave Scroll mode" in the Workspace. `r` is "refresh" in Normal and "restart" after
 `ctrl-s`. `c` is "create without opening" on the PR screen, "new terminal tab" after `ctrl-s`,
-and "cancel job" in the Jobs panel. `f` cycles the Jobs filter in the list and toggles follow
+and "cancel job" in the Jobs panel. `b` is "open in browser" in the Hub and on the PR screen and
+"this worktree's board tab" after `ctrl-s`.
+`f` cycles the Jobs filter in the list and toggles follow
 inside an expanded log. `y` copies a path, a URL or a log path depending on the pane. All are
 mode- or pane-disjoint; the Help dialog groups by mode precisely so they can be read side by
 side.
@@ -523,15 +641,30 @@ side.
 Board shortcuts override the inherited Hub shortcuts. `j` moves down (next),
 and `k` moves up (previous), following the global nvim convention.
 
-`/` does **not** open the Hub's filter overlay: the board owns `BoardState.filter`,
+`/` does **not** open the Hub's filter: the board owns `BoardState.filter`,
 and while its input has the keyboard the screen publishes the `Filter` key context
-instead of `Hub > Board`. Every row below is therefore shadowed while you are typing
-a filter, and the `Filter` rows above apply instead — including their two-stage `Esc`.
+instead of the board word it would otherwise publish. Every row below is therefore shadowed
+while you are typing a filter, and the `Filter` rows above apply instead — including their
+two-stage `Esc`.
 
-The board dialog rows below are **in addition to** everything the generic Dialog
-context binds: enter, tab, ctrl-n / ctrl-p, backspace, ctrl-w, ctrl-u, ctrl-a,
-ctrl-e, left and right. A bare letter bound in the board settings dialog types
-itself when a text row owns the keyboard, exactly as in §3.8.6.
+The board has two surfaces and one key table. The Hub's board tab publishes
+`Fleet > Hub > Board`; the worktree board drawn in a Workspace's `fleet://board` tab
+publishes `Fleet > Workspace > Native > Board`, and every row is repeated verbatim for
+it below against the same action. `ctrl-s` is not among them: the board word nests
+**under** `Workspace > Native`, which keeps the prefix, so `ctrl-s 1` leaves the tab
+and `ctrl-s b` returns to it. `Filter > BoardFilter` serves both surfaces, and so do the
+four board dialogs below — they are opened by the same keys from either one and publish the
+same `Dialog > …` words. One row answers differently by surface: `o`
+(`board::OpenWorktree`) on a card linked to the worktree you are already standing in
+answers "Already in this worktree" instead of re-opening the session, which can only happen
+in the pane, because the Hub is never standing in a worktree.
+
+The board dialog rows below are **in addition to** the generic `Dialog` container rows. Browsing
+uses the existing dialog word; a text owner replaces it with the matching `*Editing` word, and a
+migrated field appends `FleetTextInput` beneath that. Thus `CardDetail` /
+`CardDetailEditing` and `BoardSettings` / `BoardSettingsEditing` never expose their bare browsing
+keys while text is being edited. The card picker keeps `Dialog > CardPicker`: its query is a filter
+that cannot contain a space, and `space` toggles the highlighted card.
 
 | Key | Context | Action |
 | --- | --- | --- |
@@ -562,6 +695,32 @@ itself when a text row owns the keyboard, exactly as in §3.8.6.
 | `,` | `Hub > Board` | `board::Settings` — Settings |
 | `r` | `Hub > Board` | `board::Reload` — Reload |
 | `/` | `Hub > Board` | `board::Filter` — Filter cards |
+| `h` | `Workspace > Native > Board` | `board::PrevColumn` — Previous column |
+| `left` | `Workspace > Native > Board` | `board::PrevColumn` — Previous column |
+| `l` | `Workspace > Native > Board` | `board::NextColumn` — Next column |
+| `right` | `Workspace > Native > Board` | `board::NextColumn` — Next column |
+| `j` | `Workspace > Native > Board` | `board::NextCard` — Next card |
+| `down` | `Workspace > Native > Board` | `board::NextCard` — Next card |
+| `k` | `Workspace > Native > Board` | `board::PrevCard` — Previous card |
+| `up` | `Workspace > Native > Board` | `board::PrevCard` — Previous card |
+| `enter` | `Workspace > Native > Board` | `board::OpenCard` — Open card |
+| `c` | `Workspace > Native > Board` | `board::NewCard` — New card |
+| `s` | `Workspace > Native > Board` | `board::PickStatus` — Status picker |
+| `p` | `Workspace > Native > Board` | `board::PickPriority` — Priority picker |
+| `a` | `Workspace > Native > Board` | `board::PickAssignee` — Assignee picker |
+| `t` | `Workspace > Native > Board` | `board::PickLabels` — Labels picker |
+| `e` | `Workspace > Native > Board` | `board::PickEstimate` — Estimate picker |
+| `[` | `Workspace > Native > Board` | `board::MovePrevColumn` — Move card to previous column |
+| `]` | `Workspace > Native > Board` | `board::MoveNextColumn` — Move card to next column |
+| `w` | `Workspace > Native > Board` | `board::CreateWorktree` — Create worktree from card |
+| `o` | `Workspace > Native > Board` | `board::OpenWorktree` — Open linked worktree |
+| `S` | `Workspace > Native > Board` | `board::Sync` — Sync |
+| `F` | `Workspace > Native > Board` | `board::FullSync` — Full sync, ignoring the incremental cursor |
+| `x` | `Workspace > Native > Board` | `board::OpenRemote` — Open the focused card's remote issue |
+| `d` | `Workspace > Native > Board` | `board::DeleteCard` — Delete card (a mirrored card answers "Mirrored card — delete it in the backend") |
+| `,` | `Workspace > Native > Board` | `board::Settings` — Settings |
+| `r` | `Workspace > Native > Board` | `board::Reload` — Reload |
+| `/` | `Workspace > Native > Board` | `board::Filter` — Filter cards |
 | `escape` | `Dialog > CardDetail` | `card_detail::Close` — Close |
 | `i` | `Dialog > CardDetail` | `card_detail::EditTitle` — Edit title |
 | `d` | `Dialog > CardDetail` | `card_detail::EditDescription` — Edit description |
@@ -575,6 +734,9 @@ itself when a text row owns the keyboard, exactly as in §3.8.6.
 | `R` | `Dialog > CardDetail` | `card_detail::TakeRemote` — Resolve conflict: take remote |
 | `ctrl-s` | `Dialog > CardDetail` | `card_detail::Save` — Save text edit |
 | `:` | `Dialog > CardDetail` | `OpenPalette` — Command palette over the open card detail |
+| `escape` | `Dialog > CardDetailEditing` | `card_detail::Close` — Cancel text edit |
+| `enter` | `Dialog > CardDetailEditing` | `card_detail::EditProperty` — Submit title or insert a legacy multiline newline |
+| `ctrl-s` | `Dialog > CardDetailEditing` | `card_detail::Save` — Save text edit |
 | `ctrl-enter` | `Dialog > CardCreate` | `board::CreateAndOpen` — Create and open |
 | `space` | `Dialog > CardPicker` | `settings::Toggle` — Toggle the highlighted label |
 | `j` | `Dialog > BoardSettings` | `settings::MoveDown` — Next row |
@@ -582,17 +744,18 @@ itself when a text row owns the keyboard, exactly as in §3.8.6.
 | `h` | `Dialog > BoardSettings` | `settings::CyclePrev` — Previous choice |
 | `l` | `Dialog > BoardSettings` | `settings::CycleNext` — Next choice |
 | `space` | `Dialog > BoardSettings` | `settings::Toggle` — Toggle the row |
+| `enter` | `Dialog > BoardSettingsEditing` | `dialog::Confirm` — Save settings |
 
-Board filtering also keeps horizontal navigation:
+Board filtering keeps horizontal navigation on keys the input does not own. `left` / `right` and
+`ctrl-b` / `ctrl-f` now move the caret through `FleetTextInput`; column navigation therefore uses
+`Tab` / `Shift-Tab`:
 
 | Key | Context | Action |
 | --- | --- | --- |
-| `left` | `Filter > BoardFilter` | `board::PrevColumn` — Previous column |
-| `ctrl-b` | `Filter > BoardFilter` | `board::PrevColumn` — Previous column |
-| `right` | `Filter > BoardFilter` | `board::NextColumn` — Next column |
-| `ctrl-f` | `Filter > BoardFilter` | `board::NextColumn` — Next column |
+| `shift-tab` | `Filter > BoardFilter` | `board::PrevColumn` — Previous column |
+| `tab` | `Filter > BoardFilter` | `board::NextColumn` — Next column |
 
-In card text editors, Tab indents by two spaces. In CardCreate, Tab from the title enters
-its description; Shift-Tab returns to the title, Enter in the description inserts a newline,
+In card-detail multi-line editors, Tab inserts a hard tab. In CardCreate, Tab and Shift-Tab move
+between title and description; Enter in the description inserts a newline,
 and Ctrl-Enter creates and opens the card. Escape in the property picker returns to the
 card detail when opened there. Space toggles both labels and custom multi-select options.

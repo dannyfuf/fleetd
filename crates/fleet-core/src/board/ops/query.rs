@@ -56,6 +56,7 @@ pub fn summarize(board: &Board, cards: &[Card]) -> BoardSummary {
     BoardSummary {
         id: board.id.clone(),
         context_id: board.context_id.clone(),
+        worktree_id: board.worktree_id.clone(),
         name: board.name.clone(),
         prefix: board.prefix.clone(),
         backend_kind: board.backend.kind.clone(),

@@ -408,6 +408,8 @@ pub mod prefix {
             AgentsPicker,
             /// `ctrl-s c` — new terminal tab.
             NewTerminal,
+            /// `ctrl-s b` — open or select this worktree's board tab.
+            OpenBoard,
             /// `ctrl-s x` — close the current terminal.
             CloseTerminal,
             /// `ctrl-s r` — restart the exited command in this terminal.
@@ -498,12 +500,6 @@ pub mod filter {
             CursorDown,
             /// `ctrl-p` / `↑` — move the list cursor up while still typing.
             CursorUp,
-            /// `Backspace` — delete the character before the caret.
-            Backspace,
-            /// `ctrl-w` — delete the word before the caret.
-            DeleteWord,
-            /// `ctrl-u` — clear the query.
-            Clear,
         ]
     );
 }
@@ -522,12 +518,6 @@ pub mod palette {
             CursorDown,
             /// `ctrl-p` / `↑` — move to the previous row.
             CursorUp,
-            /// `Backspace` — delete the character before the caret.
-            Backspace,
-            /// `ctrl-w` — delete the word before the caret.
-            DeleteWord,
-            /// `ctrl-u` — clear the query.
-            Clear,
         ]
     );
 }
@@ -586,20 +576,6 @@ pub mod dialog {
             CursorDown,
             /// `ctrl-p` / `↑` — move the list selection up.
             CursorUp,
-            /// `Backspace` — delete the character before the caret.
-            Backspace,
-            /// `ctrl-w` — delete the word before the caret.
-            DeleteWord,
-            /// `ctrl-u` — clear the focused text input.
-            ClearInput,
-            /// `ctrl-a` — move the caret to the start of the input.
-            LineStart,
-            /// `ctrl-e` — move the caret to the end of the input.
-            LineEnd,
-            /// `←` — move the caret left.
-            CursorLeft,
-            /// `→` — move the caret right.
-            CursorRight,
         ]
     );
 }
@@ -646,7 +622,7 @@ pub mod context_dialog {
     actions!(
         context_dialog,
         [
-            /// `ctrl-d` — delete this context, routed through the expanded `Y` confirm.
+            /// `ctrl-shift-d` — delete this context, routed through the expanded `Y` confirm.
             Delete,
         ]
     );

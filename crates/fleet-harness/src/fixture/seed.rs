@@ -14,14 +14,14 @@
 
 use super::{
     git,
-    plan::{Board, Fixture, Repository, Worktree},
+    plan::{Board, Card, Fixture, Repository, Worktree},
 };
 use crate::env::{Daemon, HarnessEnv};
 use anyhow::Context as _;
 use fleet_client::Client;
 use fleet_core::{
-    board::CardDraft,
-    ids::{ContextId, JobId, RepoId},
+    board::{BoardView, CardDraft},
+    ids::{ContextId, JobId, RepoId, WorktreeId},
     model::RepoHooks,
 };
 use fleet_proto::{job::JobStatus, request::RequestBody};
@@ -201,7 +201,27 @@ async fn publish(
         )
         .await?;
     }
+    if !worktree.board.is_empty() {
+        seed_worktree_board(client, &result.worktree.id, &worktree.board).await?;
+    }
     Ok(())
+}
+
+/// Seeds the board scoped to one published worktree.
+///
+/// `ensure_worktree_board` is the same request `ctrl-s b` sends, so the id, name and prefix
+/// the fixture ends up with are the daemon's own derivation and a preset cannot drift from
+/// what the app would have created for itself.
+async fn seed_worktree_board(
+    client: &Client,
+    worktree: &WorktreeId,
+    cards: &[Card],
+) -> anyhow::Result<()> {
+    let view = client
+        .ensure_worktree_board(worktree.clone())
+        .await
+        .map_err(|error| anyhow::anyhow!("ensure {worktree}'s board: {error}"))?;
+    create_cards(client, &view, cards).await
 }
 
 /// Puts the repository's hooks back to none once its worktrees are published.
@@ -237,12 +257,17 @@ async fn seed_board(client: &Client, context: &ContextId, board: &Board) -> anyh
         )
         .await
         .map_err(|error| anyhow::anyhow!("create the {} board: {error}", board.prefix))?;
-    let statuses = view.board.statuses.clone();
+    create_cards(client, &view, &board.cards).await
+}
+
+/// Writes one description's cards into the columns of the board that was just created.
+async fn create_cards(client: &Client, view: &BoardView, cards: &[Card]) -> anyhow::Result<()> {
+    let statuses = &view.board.statuses;
     anyhow::ensure!(
         !statuses.is_empty(),
         "a new board must come with at least one column"
     );
-    for card in &board.cards {
+    for card in cards {
         let column = card.column.min(statuses.len() - 1);
         let draft = CardDraft {
             title: card.title.clone(),

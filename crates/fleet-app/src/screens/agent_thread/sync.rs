@@ -613,7 +613,7 @@ impl AgentThreadView {
             input.set_read_only(!enabled, cx);
             input.set_focus_visible(enabled, cx);
             if let Some(answer) = answer
-                && input.text() != answer
+                && input.text(cx) != answer
             {
                 input.set_text(answer, cx);
             }

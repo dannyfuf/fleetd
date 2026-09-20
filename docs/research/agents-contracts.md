@@ -672,18 +672,25 @@ Typed methods live in `crates/fleet-client/src/api/agents.rs`; mirror types live
 
 ## `fleet-ui-kit`
 
-- `components/multiline_input/` (`buffer.rs`, `element.rs`, `input.rs`):
-  `MultilineInputEvent = Submit(String) | Trigger(char) | Escape`;
+- `components/multiline_input/` (`history.rs`, `input.rs`, `triggers.rs`):
+  `MultilineInputEvent = Submit(String) | Trigger(Trigger) | Changed | Escape`;
   `HISTORY_LIMIT: usize = 100`; `MULTILINE_INPUT_KEY_CONTEXT: &str = "FleetMultilineInput"`, the
-  key context the composer pushes and which an owner must shadow with `gpui::NoAction` for any
-  bare key it wants for itself. `MultilineInput` implements `EventEmitter`, `Focusable`, and
-  `Render`, with `new(&mut Context<Self>, SharedString) -> Self`, `text(&self) -> &str`,
-  `is_empty`, `buffer(&self) -> &MultilineBuffer`, `history(&self) -> &PromptHistory`,
-  `set_text`, `clear`, `set_placeholder`, `set_focus_visible`, `focus_handle`, `push_history`,
-  `submit`, `recall_previous(&mut self, &mut Context<Self>) -> bool`, and
+  key context the composer pushes. The app binds submit, history and escape in its own agent
+  contexts rather than shadowing them with `gpui::NoAction`; the nested `FleetTextInput` consumes
+  the editing actions and propagates vertical motion at visual-row boundaries. `MultilineInput`
+  implements `EventEmitter`, `Focusable` and `Render`, with
+  `new(&mut Context<Self>, SharedString) -> Self`, `text(&self, &App) -> &str`,
+  `is_empty(&self, &App)`, `is_composing(&self, &App)`, `buffer(&self, &App) -> &InputBuffer`,
+  `active_trigger(&self, &App) -> Option<Trigger>`, `set_text`, `clear`, `set_placeholder`,
+  `set_focus_visible`, `set_read_only`, `focus_handle`, `push_history`, `submit`,
+  `replace_and_mark_text_in_range`, `recall_previous(&mut self, &mut Context<Self>) -> bool`, and
   `caret_up` / `caret_down`, both `-> bool` so an owner can fall through to prompt history.
-  `MultilineBuffer` is the editable text model (selection, word motion, UTF-16 offsets for IME,
-  `trigger_for`) and `PromptHistory` the bounded submitted-prompt ring.
+  The composer owns an `Entity<TextInput>` (ADR 0020): editing, selection, undo, IME, pointer
+  geometry and scrolling belong to that shared input, and `InputBuffer` — the editable text model
+  with selection, word motion and UTF-16 offsets for IME — lives in `components/input/buffer.rs`.
+  This wrapper keeps only prompt history, completion triggers, submit/escape events, read-only
+  state and focus-visible chrome. `triggers.rs` owns `Trigger` and `PromptHistory` is the bounded
+  submitted-prompt ring in `history.rs`.
 - `components/markdown/` (`parser.rs`, `render.rs`, `code.rs`):
   `MarkdownDocument { blocks: Vec<MarkdownBlock> }`;
   `MarkdownBlock = Paragraph(Vec<MarkdownInline>) | Code { lang: Option<String>,
@@ -917,7 +924,7 @@ above are the current truth.
 | `fleet-client` | `MirrorOutcome::{Duplicate, Rejected}`, `install_snapshot(…, &[SeqEvent])`, `AgentMirror::apply_or_resync`, `AgentEvents` and `Client::agent_events` |
 | `fleet-ui-kit` agent | `components/agent/{format,metrics}.rs`, `ToolRowElement`, `DecisionCardElement`, `decision_key_hints`, `permission_actions`/`question_actions`/`plan_actions`, `SOMETHING_ELSE`, `expand_hint` |
 | `fleet-ui-kit` transcript | `TranscriptEvent`, `RowSplice`/`diff_rows`, `scroll_fraction`, `ToolBodyRenderer`, `TranscriptRow::Notice`, `UserBlock.attachments`, `ErrorCard.retrying`, `DecisionCard::{selected, cursor}` |
-| `fleet-ui-kit` elsewhere | `MultilineBuffer`/`PromptHistory`/`MULTILINE_INPUT_KEY_CONTEXT`, `Mode::Agent`, `TerminalTab::unread`; the diff tints live in `theme/tokens.rs` on `ColorTokens`, not on a `ThemeColors` |
+| `fleet-ui-kit` elsewhere | `InputBuffer`/`PromptHistory`/`MULTILINE_INPUT_KEY_CONTEXT`, `Mode::Agent`, `TerminalTab::unread`; the diff tints live in `theme/tokens.rs` on `ColorTokens`, not on a `ThemeColors` |
 | `fleet-lazygit` | `DiffView::{for_path, expanded, set_expanded, set_actions, clear_actions}`, `MAX_ROWS` |
 | `fleet-app` | `native_agent::{HistoryNext, ScrollLineDown, ScrollLineUp, ScrollHalfPageDown, ScrollHalfPageUp, ScrollPageDown, ScrollPageUp, ScrollTop, ScrollBottom, ScrollExit, TerminalFallback}` (and no `Newline`), the `AgentNativeScroll` key context, `AgentThreadEvent`, `state/agents.rs`, `FocusTarget::AgentThread` |
 | `fleet-cli` | `fleet agent terminal` |
