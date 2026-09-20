@@ -9,7 +9,7 @@ disagree, the code is right and this file needs the fix.
 | Flag | Meaning |
 | --- | --- |
 | `--board <id>` | An existing board by id. Never creates. |
-| `--worktree` | The worktree owning `FLEET_SESSION` (worktree terminals only). Creates the board on first use. |
+| `--worktree` | The worktree owning `FLEET_SESSION` — the worktree session in a terminal, or the native agent thread with that id. Creates the board on first use. |
 | `--worktree=<owner/name#slug>` | A named worktree. The `=` is mandatory so a subcommand is never eaten as the value. Creates on first use. |
 | `--context <id>` | A named context. Creates on first use. |
 | *(none)* | The daemon's active context. Creates on first use. Errors with `no active context` if there is none. |

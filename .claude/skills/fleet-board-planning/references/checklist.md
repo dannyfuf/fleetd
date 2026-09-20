@@ -6,9 +6,10 @@ list before declaring the pass done. Each item names the rule in `SKILL.md`.
 ## Before writing to a board
 
 - [ ] I know which board I am writing to and I named it explicitly (`--board`, `--worktree=…`,
-      or `--context`), or I am in a worktree terminal and a bare `--worktree` resolves. (Rule 1)
-- [ ] If I am a native agent thread or a subagent, I passed `--worktree=<owner/name#slug>` with
-      the `=`; I did not rely on a bare `--worktree`. (Rule 1)
+      or `--context`), or I am in a worktree terminal or a native agent thread and a bare
+      `--worktree` resolves. (Rule 1)
+- [ ] If I need a worktree other than the one my terminal or thread belongs to, I passed
+      `--worktree=<owner/name#slug>` with the `=`. (Rule 1)
 - [ ] I ran `fleet board show` once (human output) and read what is already planned and what is
       in progress before adding anything. (Rules 2, 3)
 - [ ] Every card I am about to create is one verifiable outcome with an imperative title and a
@@ -49,4 +50,5 @@ list before declaring the pass done. Each item names the rule in `SKILL.md`.
 - More than one card in progress per agent → finding.
 - A comment thread used as chat → finding.
 - `card delete` on a card that had work recorded → finding.
-- A bare `--worktree` in a script that runs from a native thread → finding.
+- A bare `--worktree` in a script that may run outside a worktree terminal or agent thread →
+  finding.

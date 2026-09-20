@@ -54,10 +54,13 @@ Full flag and output reference: `references/commands.md`. Pre-flight lists:
    - In a Fleet **worktree terminal**, `FLEET_SESSION` is a worktree session, so a bare
      `--worktree` selects this worktree's board.
    - In a **native agent thread** (Claude Code or Codex started by Fleet, including every
-     subagent), `FLEET_SESSION` is the thread UUID, which is not a session. A bare `--worktree`
-     fails with `no worktree session`. Pass `--worktree=<owner/name#slug>` explicitly; find the
-     id in the sixth column of `fleet agent list` for your thread, or match your `pwd` against
-     the `path` fields of `fleet list --json`. The `=` is required.
+     subagent), `FLEET_SESSION` is the thread UUID, which is not a session; the CLI matches it
+     against the daemon's agent threads instead, so a bare `--worktree` selects the thread's
+     worktree board. It fails with `no worktree session` only when neither a session nor a thread
+     owns that id — from a plain shell, say. To name another worktree, pass
+     `--worktree=<owner/name#slug>`; find the id in the sixth column of `fleet agent list` for
+     your thread, or match your `pwd` against the `path` fields of `fleet list --json`. The `=`
+     is required when an id is passed.
    - `--board`, `--worktree`, and `--context` are mutually exclusive, and are global flags: they
      may sit before or after the subcommand.
 
@@ -196,7 +199,8 @@ refusal). Errors go to stderr as one line, or as a JSON error envelope when `--j
 - **A comment thread as a chat.** Comments are for the next reader, weeks later.
 - **Creating labels ad hoc.** `--label` errors; and a board with twenty one-off labels filters
   nothing.
-- **A bare `--worktree` from a native thread.** It cannot resolve; pass the id with `=`.
+- **A bare `--worktree` from a plain shell.** Nothing owns `FLEET_SESSION` there; pass the id
+  with `=`.
 - **`sync` on a local board, or after every edit on a Jira board.** Dirty cards accumulate and one
   sync pushes them all.
 

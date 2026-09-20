@@ -1240,6 +1240,7 @@ mod orchestration {
     use crate::commands::board::*;
     use clap::Parser;
     use fleet_core::{
+        agents::{AgentKind, AgentThreadSummary, Attention, Seq, SessionState, TurnState},
         board::{RemoteLink, new_board},
         config::Agent,
         model::Context,
@@ -1403,6 +1404,25 @@ mod orchestration {
         }
     }
 
+    fn agent_thread(thread: &str, worktree: WorktreeId) -> AgentThreadSummary {
+        AgentThreadSummary {
+            thread: thread.parse().unwrap(),
+            parent: None,
+            worktree,
+            host: None,
+            provider: AgentKind::Claude,
+            title: "Fix the board selector".into(),
+            attention: Attention::Idle,
+            session: SessionState::Ready,
+            turn: TurnState::None,
+            last_seq: Seq(0),
+            last_activity: None,
+            last_completed_seq: None,
+            last_nonterminal_seq: None,
+            exit_code: None,
+        }
+    }
+
     fn link(key: &str) -> RemoteLink {
         RemoteLink {
             parent_key: None,
@@ -1515,6 +1535,31 @@ mod orchestration {
         );
         for id in [Some("api/agent"), Some("api/missing"), None] {
             let error = worktree_from_session(&snapshot, id).unwrap_err();
+            assert_eq!(error.kind, ErrorKind::Validation);
+            assert_eq!(
+                error.message,
+                "no worktree session: pass --worktree=<owner/name#slug> or run inside a worktree terminal"
+            );
+        }
+    }
+
+    #[test]
+    fn resolves_a_native_agent_thread_from_the_snapshot_threads() {
+        let worktree: WorktreeId = "acme/api#feature".parse().unwrap();
+        let thread = "11111111-1111-4111-8111-111111111111";
+        let mut snapshot = empty_snapshot();
+        snapshot.agent_threads = vec![agent_thread(thread, worktree.clone())];
+        let threads = snapshot.agent_threads.as_slice();
+        assert_eq!(
+            worktree_from_thread(threads, Some(thread)).unwrap(),
+            worktree
+        );
+        for id in [
+            Some("22222222-2222-4222-8222-222222222222"),
+            Some("api/feature"),
+            None,
+        ] {
+            let error = worktree_from_thread(threads, id).unwrap_err();
             assert_eq!(error.kind, ErrorKind::Validation);
             assert_eq!(
                 error.message,

@@ -891,8 +891,10 @@ client is talking to (`docs/REMOTE-MACHINES.md` §6).
 
 CLI (`fleet board …`, JSON envelopes v1 with `--json`, human tables otherwise; board resolved from
 `--board <id>` else `--worktree[=<owner/name#slug>]` else `--context <id>` else the active context
-via `EnsureBoard`; a bare `--worktree` resolves `FLEET_SESSION` to a worktree session, while an
-explicit id requires `=` so a subcommand name is never consumed as the optional value):
+via `EnsureBoard`; a bare `--worktree` resolves `FLEET_SESSION` against one snapshot — its
+sessions first, then its agent threads, because in a native agent thread `FLEET_SESSION` is the
+thread id and names no session — while an explicit id requires `=` so a subcommand name is never
+consumed as the optional value):
 
 ```rust
 pub enum BoardWorktreeSelector { Explicit(WorktreeId), FromSession }
@@ -1143,7 +1145,8 @@ thing so a failure names the layer that broke.
   payload compatibility.
 - **Client** covers one daemon-socket round trip for each new typed method.
 - **CLI** covers bare and explicit `--worktree` parsing, selector conflicts, `FLEET_SESSION`
-  resolution and refusal cases, capability gating, worktree creation, and the scope column/header.
+  resolution from both a worktree session and a native agent thread, the refusal cases, capability
+  gating, worktree creation, and the scope column/header.
 - **App** covers the reducers rather than rendered strings: the board mirror's staleness and
   generation rules, the focus clamp under a filter, and the two-stage filter `Esc`. The keymap
   drift test keeps `docs/KEYMAP.md` and `keymap.rs` in agreement.

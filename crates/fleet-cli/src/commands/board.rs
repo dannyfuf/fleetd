@@ -12,6 +12,7 @@ use crate::{
 };
 use fleet_client::Client;
 use fleet_core::{
+    agents::{AgentThreadSummary, ThreadId},
     board::{
         BackendDescriptor, BackendRef, Board, BoardPatch, BoardView, Card, CardDraft, CardPatch,
         ConflictPolicy, ConflictResolution, Label, Priority, merge_settings, summarize, valid_date,
@@ -280,7 +281,13 @@ async fn resolve_worktree(
         BoardWorktreeSelector::FromSession => {
             let snapshot = client.get_snapshot().await?;
             let session = std::env::var("FLEET_SESSION").ok();
-            worktree_from_session(&snapshot, session.as_deref())
+            if let Ok(worktree) = worktree_from_session(&snapshot, session.as_deref()) {
+                return Ok(worktree);
+            }
+            // In a native agent thread `FLEET_SESSION` is the thread id, which names no session.
+            // The snapshot just read already carries every thread the daemon owns, and the thread
+            // the CLI runs inside is one of them, so it answers both cases on its own.
+            worktree_from_thread(&snapshot.agent_threads, session.as_deref())
         }
     }
 }
@@ -296,11 +303,29 @@ fn worktree_from_session(
             SessionKind::Worktree(worktree) => Some(worktree.clone()),
             SessionKind::Agent(_) => None,
         });
-    worktree.ok_or_else(|| {
-        validation(
-            "no worktree session: pass --worktree=<owner/name#slug> or run inside a worktree terminal",
-        )
-    })
+    worktree.ok_or_else(no_worktree_session)
+}
+
+/// The worktree of the native-agent thread `session` names, for a bare `--worktree` issued from
+/// a Claude Code or Codex thread Fleet started, where `FLEET_SESSION` carries the thread id.
+///
+/// The threads come from the snapshot the session lookup already read.
+fn worktree_from_thread(
+    threads: &[AgentThreadSummary],
+    session: Option<&str>,
+) -> Result<WorktreeId, ProtoError> {
+    let worktree = session
+        .and_then(|session| session.parse::<ThreadId>().ok())
+        .and_then(|thread| threads.iter().find(|item| item.thread == thread))
+        .map(|thread| thread.worktree.clone());
+    worktree.ok_or_else(no_worktree_session)
+}
+
+/// The refusal both bare-`--worktree` lookups share, so they cannot drift apart.
+fn no_worktree_session() -> ProtoError {
+    validation(
+        "no worktree session: pass --worktree=<owner/name#slug> or run inside a worktree terminal",
+    )
 }
 
 /// The descriptor for `kind`, or `None` when the daemon cannot name it.
