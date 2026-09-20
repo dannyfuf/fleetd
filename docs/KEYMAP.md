@@ -386,7 +386,10 @@ history anchor.
 ## Workspace (Native mode)
 
 The default third tab (`lg`) is not a terminal: it is Fleet's own git pane
-(`crates/fleet-lazygit`) rendered inside the tab. `Workspace > Native` binds `ctrl-s` and
+(`crates/fleet-lazygit`) rendered inside the tab, and `ctrl-s b`'s `board` tab is the other
+reserved command: it draws this worktree's board with the Hub board's own keys under
+`Fleet > Workspace > Native > Board` (see "Board and card detail" below).
+`Workspace > Native` binds `ctrl-s` and
 nothing else — not even the `cmd-c` / `cmd-v` clipboard keys or the viewport shortcuts
 `Workspace > Terminal` reserves, because the pane owns its own selection and its own scrolling —
 so every other key belongs to the pane, whose own key table lives in
@@ -635,6 +638,15 @@ and while its input has the keyboard the screen publishes the `Filter` key conte
 instead of `Hub > Board`. Every row below is therefore shadowed while you are typing
 a filter, and the `Filter` rows above apply instead — including their two-stage `Esc`.
 
+The board has two surfaces and one key table. The Hub's board tab publishes
+`Fleet > Hub > Board`; the worktree board drawn in a Workspace's `fleet://board` tab
+publishes `Fleet > Workspace > Native > Board`, and every row is repeated verbatim for
+it below against the same action. `ctrl-s` is not among them: the board word nests
+**under** `Workspace > Native`, which keeps the prefix, so `ctrl-s 1` leaves the tab
+and `ctrl-s b` returns to it. `Filter > BoardFilter` serves both surfaces, and `o`
+(`board::OpenWorktree`) on a card linked to the worktree you are already standing in
+answers "Already in this worktree" instead of re-opening the session.
+
 The board dialog rows below are **in addition to** the generic `Dialog` container rows. Browsing
 uses the existing dialog word; a text owner replaces it with the matching `*Editing` word, and a
 migrated field appends `FleetTextInput` beneath that. Thus `CardDetail` /
@@ -671,6 +683,32 @@ that cannot contain a space, and `space` toggles the highlighted card.
 | `,` | `Hub > Board` | `board::Settings` — Settings |
 | `r` | `Hub > Board` | `board::Reload` — Reload |
 | `/` | `Hub > Board` | `board::Filter` — Filter cards |
+| `h` | `Workspace > Native > Board` | `board::PrevColumn` — Previous column |
+| `left` | `Workspace > Native > Board` | `board::PrevColumn` — Previous column |
+| `l` | `Workspace > Native > Board` | `board::NextColumn` — Next column |
+| `right` | `Workspace > Native > Board` | `board::NextColumn` — Next column |
+| `j` | `Workspace > Native > Board` | `board::NextCard` — Next card |
+| `down` | `Workspace > Native > Board` | `board::NextCard` — Next card |
+| `k` | `Workspace > Native > Board` | `board::PrevCard` — Previous card |
+| `up` | `Workspace > Native > Board` | `board::PrevCard` — Previous card |
+| `enter` | `Workspace > Native > Board` | `board::OpenCard` — Open card |
+| `c` | `Workspace > Native > Board` | `board::NewCard` — New card |
+| `s` | `Workspace > Native > Board` | `board::PickStatus` — Status picker |
+| `p` | `Workspace > Native > Board` | `board::PickPriority` — Priority picker |
+| `a` | `Workspace > Native > Board` | `board::PickAssignee` — Assignee picker |
+| `t` | `Workspace > Native > Board` | `board::PickLabels` — Labels picker |
+| `e` | `Workspace > Native > Board` | `board::PickEstimate` — Estimate picker |
+| `[` | `Workspace > Native > Board` | `board::MovePrevColumn` — Move card to previous column |
+| `]` | `Workspace > Native > Board` | `board::MoveNextColumn` — Move card to next column |
+| `w` | `Workspace > Native > Board` | `board::CreateWorktree` — Create worktree from card |
+| `o` | `Workspace > Native > Board` | `board::OpenWorktree` — Open linked worktree |
+| `S` | `Workspace > Native > Board` | `board::Sync` — Sync |
+| `F` | `Workspace > Native > Board` | `board::FullSync` — Full sync, ignoring the incremental cursor |
+| `x` | `Workspace > Native > Board` | `board::OpenRemote` — Open the focused card's remote issue |
+| `d` | `Workspace > Native > Board` | `board::DeleteCard` — Delete card (a mirrored card answers "Mirrored card — delete it in the backend") |
+| `,` | `Workspace > Native > Board` | `board::Settings` — Settings |
+| `r` | `Workspace > Native > Board` | `board::Reload` — Reload |
+| `/` | `Workspace > Native > Board` | `board::Filter` — Filter cards |
 | `escape` | `Dialog > CardDetail` | `card_detail::Close` — Close |
 | `i` | `Dialog > CardDetail` | `card_detail::EditTitle` — Edit title |
 | `d` | `Dialog > CardDetail` | `card_detail::EditDescription` — Edit description |

@@ -689,3 +689,77 @@ fn selecting_another_worktrees_child_switches_session_then_attaches() {
     assert!(state.agents.is_attached(other.thread));
     assert_eq!(state.active_agent_thread(), Some(other.thread));
 }
+
+/// A Workspace whose active tab is the session's `fleet://board` terminal (BOARD §8).
+fn board_pane_state() -> AppState {
+    let now = Instant::now();
+    let mut state = AppState::new("/tmp/fleet-board-pane", now);
+    let mut session = session_with("payroll/feat", &[1, 2]);
+    session.terminals[1].kind = fleet_core::sessions::TerminalKind::Native;
+    session.terminals[1].command = fleet_core::config::NATIVE_BOARD.to_owned();
+    session.terminals[1].name = "board".to_owned();
+    session.active_terminal = Some(TerminalId(2));
+    let mut snapshot = snapshot();
+    snapshot.contexts = vec![fleet_core::model::Context {
+        id: "work".parse().unwrap_or_else(|error| panic!("{error}")),
+        name: "Fleet".into(),
+        owners: Vec::new(),
+        created_at: "2026-09-19T12:00:00Z".into(),
+    }];
+    snapshot.active_context = Some(snapshot.contexts[0].id.clone());
+    snapshot.sessions = vec![session.clone()];
+    state.apply_bridge_event(BridgeEvent::Connected(Box::new(snapshot)), now);
+    state.screen = Screen::Workspace {
+        session: session.id.clone(),
+    };
+    state.terminal_mode = TerminalMode::Native;
+    state
+}
+
+/// The pane names itself a third word deep, so every `Hub > Board` row is bound over it while
+/// `ctrl-s` stays `Workspace > Native`'s.
+#[test]
+fn the_board_pane_publishes_its_own_key_context() {
+    let mut state = board_pane_state();
+    assert!(state.board_pane_is_active());
+    assert_eq!(state.context_chain(), vec!["Workspace", "Native", "Board"]);
+    assert_eq!(state.mode(), Mode::Native);
+
+    // §3.10: the filter input owns the letters, and the whole word leaves the chain for it.
+    state.board.filter_editing = true;
+    assert!(state.board_filter_owns_keys());
+    assert_eq!(state.context_chain(), vec!["Filter", "BoardFilter"]);
+    assert_eq!(state.mode(), Mode::Filter);
+    state.board.filter_editing = false;
+
+    // The prefix is a Workspace mode, not a board one: `ctrl-s b` is never a bare `b`.
+    state.enter_prefix();
+    assert_eq!(state.context_chain(), vec!["Workspace", "Prefix"]);
+}
+
+/// The reserved command decides it, and only while that tab is the one the daemon selected.
+#[test]
+fn only_the_board_tab_publishes_the_board_word() {
+    let mut state = board_pane_state();
+    let session = state
+        .active_session()
+        .unwrap_or_else(|| panic!("the fixture installs a session"))
+        .id
+        .clone();
+
+    state.touch_terminal(&session, TerminalId(1));
+    let mut snapshot = state
+        .snapshot
+        .clone()
+        .unwrap_or_else(|| panic!("the fixture installs a snapshot"));
+    snapshot.sessions[0].active_terminal = Some(TerminalId(1));
+    state.apply_snapshot(snapshot, Instant::now());
+    assert!(!state.board_pane_is_active());
+    assert_eq!(state.context_chain(), vec!["Workspace", "Terminal"]);
+
+    // A board tab the Hub is showing over is not a board pane either.
+    state.screen = Screen::Hub {
+        tab: HubTab::Worktrees,
+    };
+    assert!(!state.board_pane_is_active());
+}

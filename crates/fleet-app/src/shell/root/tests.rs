@@ -487,7 +487,7 @@ fn root_input_fixture(cx: &mut gpui::TestAppContext, name: &str) -> RootInputFix
         });
         state = Some(shell.state.clone());
         body_focus = Some(shell.body_focus.clone());
-        board_filter_focus = Some(shell.hub.board_filter_focus_handle(cx));
+        board_filter_focus = Some(shell.board.filter_focus_handle(cx));
         hub_filter_focus = Some(shell.hub.filter_focus_handle(cx));
         focus_owner_keys = Some(Rc::clone(&shell.focus_owner_keys));
         shell.observe_window(window, cx);
@@ -1228,4 +1228,249 @@ fn real_shell_board_palette_row_reaches_the_same_handler(cx: &mut gpui::TestAppC
         last_toast(&mut fixture).as_deref(),
         Some(crate::state::WORKTREE_BOARDS_UNSUPPORTED)
     );
+}
+
+/// A worktree board with two cards in two columns, the shape the pane is driven with.
+fn worktree_board_view(context: &FleetContext, worktree: &Worktree) -> BoardView {
+    let mut board =
+        fleet_core::board::new_worktree_board(context, worktree, "2026-09-19T12:00:00Z");
+    let mut cards = Vec::new();
+    for (index, title) in ["Fix login", "Ship the board"].into_iter().enumerate() {
+        let card = create_card(
+            &mut board,
+            &cards,
+            format!("wt-card-{index}").parse().unwrap(),
+            CardDraft {
+                title: title.to_owned(),
+                ..CardDraft::default()
+            },
+            "2026-09-19T12:00:00Z",
+        )
+        .unwrap();
+        cards.push(card);
+    }
+    // One card per column, so `l` / `h` have somewhere to go and `j` / `k` have nowhere.
+    for (index, card) in cards.iter_mut().enumerate() {
+        card.status_id = board.statuses[index].id.clone();
+    }
+    BoardView { board, cards }
+}
+
+/// The real shell standing in a worktree Workspace whose `fleet://board` tab is selected.
+///
+/// Only what the daemon owns is staged: the tab exists and it is the session's active one.
+/// Pointing the mirror is the pane's own job, so the fixture asserts that it did it and then
+/// answers the load the way fleetd would, with that worktree's board.
+fn root_board_pane_fixture(cx: &mut gpui::TestAppContext, name: &str) -> RootInputFixture {
+    let mut fixture = root_input_fixture(cx, name);
+    let state = fixture.state.clone();
+    fixture.visual.update(|_, cx| {
+        state.update(cx, |app, cx| {
+            let worktree = filter_worktree("feat-one");
+            let session = fleet_core::sessions::Session {
+                id: worktree.session.parse().unwrap(),
+                host: None,
+                kind: fleet_core::sessions::SessionKind::Worktree(worktree.id.clone()),
+                cwd: worktree.path.clone(),
+                terminals: vec![
+                    workspace_terminal(1, "sh", fleet_core::sessions::TerminalKind::Pty),
+                    workspace_terminal(
+                        2,
+                        fleet_core::config::NATIVE_BOARD,
+                        fleet_core::sessions::TerminalKind::Native,
+                    ),
+                ],
+                active_terminal: Some(fleet_core::ids::TerminalId(2)),
+                slept_at: None,
+                kept_terminals: Vec::new(),
+            };
+            let mut snapshot = app.snapshot.clone().unwrap();
+            snapshot.sessions = vec![session.clone()];
+            app.daemon_capabilities
+                .insert(fleet_proto::response::BOARD_WORKTREE_CAPABILITY.to_owned());
+            app.apply_snapshot(snapshot, Instant::now());
+            app.screen = Screen::Workspace {
+                session: session.id,
+            };
+            app.sync_terminal_mode();
+            cx.notify();
+        });
+    });
+    // The pane's own `sync_board_scope` runs on this notify and points the mirror at the
+    // worktree; only then does a worktree board view pass `apply_board_view`'s scope guard,
+    // which is the whole point of the guard.
+    settle(&mut fixture);
+    let worktree = filter_worktree("feat-one");
+    fixture.visual.update(|_, cx| {
+        state.update(cx, |app, cx| {
+            assert!(
+                matches!(&app.board.scope, Some(crate::state::BoardScope::Worktree(id))
+                    if id == &worktree.id),
+                "activating the board tab enters the worktree scope: {:?}",
+                app.board.scope
+            );
+            app.apply_board_view(worktree_board_view(&board_context(), &worktree));
+            cx.notify();
+        });
+    });
+    settle(&mut fixture);
+    fixture
+}
+
+fn workspace_terminal(
+    id: u64,
+    command: &str,
+    kind: fleet_core::sessions::TerminalKind,
+) -> fleet_core::sessions::Terminal {
+    fleet_core::sessions::Terminal {
+        id: fleet_core::ids::TerminalId(id),
+        name: format!("t{id}"),
+        command: command.to_owned(),
+        cwd: "/tmp".to_owned(),
+        shell_pid: None,
+        foreground_command: None,
+        status: fleet_core::sessions::TerminalStatus::Running,
+        title: None,
+        keep_alive: Vec::new(),
+        has_unseen_output: false,
+        agent_attention: None,
+        kind,
+    }
+}
+
+fn chain(fixture: &mut RootInputFixture) -> Vec<&'static str> {
+    fixture
+        .state
+        .read_with(&fixture.visual, |app, _| app.context_chain())
+}
+
+fn board_focus(fixture: &mut RootInputFixture) -> (usize, usize) {
+    fixture.state.read_with(&fixture.visual, |app, _| {
+        (app.board.focus.column, app.board.focus.row)
+    })
+}
+
+/// Every `Hub > Board` key is bound over the pane, and `ctrl-s` is still the prefix.
+#[gpui::test]
+fn real_shell_board_pane_binds_the_board_keys_and_keeps_the_prefix(cx: &mut gpui::TestAppContext) {
+    let mut fixture = root_board_pane_fixture(cx, "board-pane-keys");
+    assert_eq!(chain(&mut fixture), vec!["Workspace", "Native", "Board"]);
+    assert_eq!(board_focus(&mut fixture), (0, 0));
+
+    // The bare letters walk the board rather than reaching a PTY that is not there.
+    dispatch_root_key(&mut fixture, "l");
+    assert_eq!(board_focus(&mut fixture), (1, 0));
+    dispatch_root_key(&mut fixture, "j");
+    assert_eq!(board_focus(&mut fixture), (1, 0), "one card in this column");
+    dispatch_root_key(&mut fixture, "h");
+    assert_eq!(board_focus(&mut fixture), (0, 0));
+    dispatch_root_key(&mut fixture, "enter");
+    assert_eq!(
+        fixture
+            .state
+            .read_with(&fixture.visual, |app, _| app.overlay.clone()),
+        Some(Overlay::Dialog(Dialogs::CardDetail))
+    );
+    dispatch_root_key(&mut fixture, "escape");
+    assert_eq!(chain(&mut fixture), vec!["Workspace", "Native", "Board"]);
+
+    // `]` asks the daemon to move the card and never writes the move itself. The fixture's
+    // bridge is shut down, so the refusal in the sticky slot is what proves the key reached
+    // `board::MoveNextColumn` rather than falling through to the Workspace behind it.
+    dispatch_root_key(&mut fixture, "]");
+    fixture.visual.run_until_parked();
+    fixture.state.read_with(&fixture.visual, |app, _| {
+        let sticky = app
+            .sticky_error
+            .as_ref()
+            .unwrap_or_else(|| panic!("the move was attempted"));
+        assert!(sticky.text.contains("bridge is closed"), "{sticky:?}");
+    });
+
+    // §3.10: the filter takes the letters, and the board word leaves the chain for it.
+    dispatch_root_key(&mut fixture, "/");
+    assert_eq!(chain(&mut fixture), vec!["Filter", "BoardFilter"]);
+    fixture.visual.update(|window, _| {
+        assert!(fixture.board_filter_focus.is_focused(window));
+    });
+    fixture.visual.simulate_input("ship");
+    settle(&mut fixture);
+    assert_eq!(
+        fixture
+            .state
+            .read_with(&fixture.visual, |app, _| app.board.filter.clone()),
+        "ship"
+    );
+    dispatch_root_key(&mut fixture, "escape");
+    assert_eq!(chain(&mut fixture), vec!["Workspace", "Native", "Board"]);
+}
+
+/// Leaving the tab leaves the pane: the prefix still belongs to `Workspace > Native`.
+#[gpui::test]
+fn real_shell_board_pane_gives_the_prefix_and_the_scope_back(cx: &mut gpui::TestAppContext) {
+    let mut fixture = root_board_pane_fixture(cx, "board-pane-prefix");
+    fixture.state.read_with(&fixture.visual, |app, _| {
+        assert!(
+            matches!(&app.board.scope, Some(crate::state::BoardScope::Worktree(id))
+                if id.as_str() == "acme/api#feat-one"),
+            "{:?}",
+            app.board.scope
+        );
+    });
+
+    dispatch_root_key(&mut fixture, "ctrl-s");
+    assert_eq!(chain(&mut fixture), vec!["Workspace", "Prefix"]);
+    dispatch_root_key(&mut fixture, "1");
+
+    // The selection is optimistic in the mode and authoritative in the snapshot; both say the
+    // pane is gone, and the mirror goes back to the Hub's context board with it.
+    assert_eq!(chain(&mut fixture), vec!["Workspace", "Terminal"]);
+    let session = fixture.state.read_with(&fixture.visual, |app, _| {
+        app.active_session().unwrap().id.clone()
+    });
+    let state = fixture.state.clone();
+    fixture.visual.update(|_, cx| {
+        state.update(cx, |app, cx| {
+            let mut snapshot = app.snapshot.clone().unwrap();
+            snapshot.sessions[0].active_terminal = Some(fleet_core::ids::TerminalId(1));
+            app.apply_snapshot(snapshot, Instant::now());
+            cx.notify();
+        });
+    });
+    settle(&mut fixture);
+    assert_eq!(session.as_str(), "acme/api#feat-one");
+    fixture.state.read_with(&fixture.visual, |app, _| {
+        assert!(!app.board_pane_is_active());
+        assert!(
+            matches!(&app.board.scope, Some(crate::state::BoardScope::Context(id))
+                if id.as_str() == "work"),
+            "the Hub must not inherit a worktree scope: {:?}",
+            app.board.scope
+        );
+    });
+}
+
+/// `o` on a card linked to the worktree the pane is standing in is a no-op that says so.
+#[gpui::test]
+fn real_shell_board_pane_refuses_to_reopen_its_own_worktree(cx: &mut gpui::TestAppContext) {
+    let mut fixture = root_board_pane_fixture(cx, "board-pane-open");
+    let state = fixture.state.clone();
+    fixture.visual.update(|_, cx| {
+        state.update(cx, |app, cx| {
+            let worktree = app.active_worktree().cloned();
+            app.board.view.as_mut().unwrap().cards[0].worktree_id = worktree;
+            cx.notify();
+        });
+    });
+    settle(&mut fixture);
+
+    dispatch_root_key(&mut fixture, "o");
+
+    assert_eq!(
+        last_toast(&mut fixture).as_deref(),
+        Some(crate::screens::board::ALREADY_IN_WORKTREE)
+    );
+    fixture.state.read_with(&fixture.visual, |app, _| {
+        assert!(matches!(app.screen, Screen::Workspace { .. }));
+    });
 }

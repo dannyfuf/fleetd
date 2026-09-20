@@ -721,7 +721,7 @@ close buttons, a breadcrumb (the session name in the status bar is the breadcrum
 | Terminal agent hook attention | the PTY tab keeps the same static amber `NeedsYou` dot used by native tabs, including while selected; each session edge into permission, question, plan, or finished uses the configured toast/sound channels once |
 | Terminal exited | grid frozen at the last frame + the exit strip |
 | Alt-screen app running | the scroll pill is **suppressed**; `ctrl-s [` shows the 1.6 s toast `no scrollback in alt-screen` |
-| Non-agent native pane selected (`fleet://`, currently `lg`) | the grid, the scroll pill and the exit strip are all absent — there is no PTY. `ctrl-s [` toasts `no scrollback in this tab`; every key except `ctrl-s` belongs to the pane. The mode word stays `TERMINAL`: §2.8 has eight words and this is still "the Workspace has the keyboard". A native **agent thread** is the separate §3.6.0 surface and `ctrl-s [` enters its transcript scroll mode. |
+| Non-agent native pane selected (`fleet://`: `lg`, or the `board` tab of `ctrl-s b`) | the grid, the scroll pill and the exit strip are all absent — there is no PTY. `ctrl-s [` toasts `no scrollback in this tab`; every key except `ctrl-s` belongs to the pane. The mode word stays `TERMINAL`: §2.8 has eight words and this is still "the Workspace has the keyboard". A native **agent thread** is the separate §3.6.0 surface and `ctrl-s [` enters its transcript scroll mode. |
 | Job running for this worktree | `⟳n` in the header and the status-bar ticker; **never** an overlay on the grid |
 | Daemon lost | grid dims to 55 %, keys are dropped (not buffered), and the §3.12 C banner replaces the header |
 
@@ -740,6 +740,18 @@ until the daemon stops listing that worktree. Its own keys are documented in
 `crates/fleet-lazygit/README.md`; `q` inside it selects the previous tab rather than quitting
 Fleet. **[D-8] still holds**: the pane's key-hint bar lives *inside* the pane, which is its own
 key context, so its bare keys are not "drawn over Terminal mode".
+
+The `board` tab `ctrl-s b` opens is the other native tab, and it is Fleet's own board rather
+than an embedded app: it draws **this worktree's** board — `EnsureWorktreeBoard(worktree)`, not
+the active context's — with the same columns, cards, dialogs and keys the Hub's board tab has,
+under the key context `Fleet > Workspace > Native > Board` (`docs/KEYMAP.md`). It builds
+nothing per worktree: the Hub tab and this one share one board mirror behind a scope, and
+selecting the tab is what points that mirror at the worktree. Selecting any other tab, closing
+the tab or leaving the Workspace points it back at the active context. Because the tab is
+created on demand and never written to `windows[]`, sleeping the session closes it and waking
+does not restore it — `ctrl-s b` reopens it in one keystroke. `o` on a card linked to the
+worktree you are already standing in answers `Already in this worktree` rather than re-opening
+the session.
 
 **Keyboard:** all keys → PTY except `cmd-c` copy selection and `cmd-v` paste — or, on a native
 tab, every key except `ctrl-s` → the pane; `ctrl-s` then

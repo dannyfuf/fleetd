@@ -1047,11 +1047,11 @@ fn the_empty_git_pane_names_the_remote_case_separately() {
     let git = Some(NativeTab::Lazygit);
     assert_ne!(no_pane_reason(git, true), no_pane_reason(git, false));
     assert!(no_pane_reason(git, true).contains("remote"));
-    // A board tab shares the worktree with the git tab, so "no worktree" and "remote" are both
-    // the wrong sentence for it: it is empty because this build draws no board pane (P2-T04).
+    // A board needs no local path, so a remote worktree is not a reason for its tab to be
+    // empty: the only one left is a session the snapshot lists no worktree for at all.
     let board = Some(NativeTab::Board);
-    assert_ne!(no_pane_reason(board, false), no_pane_reason(git, false));
     assert_eq!(no_pane_reason(board, true), no_pane_reason(board, false));
+    assert_eq!(no_pane_reason(board, false), no_pane_reason(git, false));
     assert_ne!(
         no_pane_reason(Some(NativeTab::Unknown), false),
         no_pane_reason(board, false)
@@ -1481,4 +1481,70 @@ fn the_board_key_says_why_a_session_without_a_worktree_opens_nothing(
         );
         assert!(app.sticky_error.is_none(), "a refusal is not an error");
     });
+}
+
+/// A board tab only draws the board when the snapshot still names a worktree under it.
+#[test]
+fn the_board_band_needs_a_worktree_to_be_the_board_of() {
+    let screen = WorkspaceScreen {
+        model: None,
+        local: Rc::new(RefCell::new(local_with(|_| {}))),
+        panes: HashMap::new(),
+        agent_views: Rc::new(RefCell::new(AgentViews::new())),
+    };
+    let mut app = app_with_worktree(None);
+    let session = app
+        .active_session()
+        .unwrap_or_else(|| panic!("the fixture installs a session"))
+        .id
+        .clone();
+    let mut board = terminal(2, TerminalKind::Native);
+    board.command = fleet_core::config::NATIVE_BOARD.to_owned();
+    let mut snapshot = app
+        .snapshot
+        .clone()
+        .unwrap_or_else(|| panic!("the fixture installs a snapshot"));
+    snapshot.sessions[0].terminals.push(board);
+    snapshot.sessions[0].active_terminal = Some(TerminalId(2));
+    app.snapshot = Some(snapshot.clone());
+
+    assert!(screen.draws_board(&model_of(&app)));
+    assert_eq!(model_of(&app).native, Some(NativeTab::Board));
+
+    // The same tab on a session the snapshot lists no worktree for draws the empty band.
+    snapshot.worktrees.clear();
+    app.snapshot = Some(snapshot);
+    assert_eq!(
+        app.active_session().map(|session| &session.id),
+        Some(&session)
+    );
+    assert!(!screen.draws_board(&model_of(&app)));
+}
+
+/// `ctrl-s b` claims the scope before its tab exists; only that tab may keep the claim alive.
+///
+/// The frames between the keystroke and fleetd's snapshot still show the previous tab, so the
+/// release rule cannot be "the board tab is not active" alone — it would cancel the load the
+/// keystroke started.
+#[gpui::test]
+fn selecting_another_tab_ends_a_pending_board_claim(cx: &mut gpui::TestAppContext) {
+    let (app, record) = app_with_board_tab(true);
+    let state = cx.new(|_| app);
+    let requester = scripted(&record);
+    let claim = || {
+        Some(BoardClaim::Requested {
+            worktree: worktree_id(),
+        })
+    };
+
+    // Selecting the board tab itself is the very selection the claim is waiting for.
+    let local = Rc::new(RefCell::new(local_with(|local| {
+        local.state.board_claim = claim();
+    })));
+    cx.update(|cx| select_terminal(&local, &requester, &state, Some(TerminalId(2)), cx));
+    assert_eq!(local.borrow().state.board_claim, claim());
+
+    // Any other tab is the user choosing another surface, and the wait ends with it.
+    cx.update(|cx| select_terminal(&local, &requester, &state, Some(TerminalId(1)), cx));
+    assert_eq!(local.borrow().state.board_claim, None);
 }

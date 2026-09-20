@@ -59,7 +59,8 @@ use crate::{
     bridge::Bridge,
     dialogs::{self, Dialogs},
     presentation::session_glyph,
-    state::{AppState, Overlay, Screen, TerminalMode, dwell_for},
+    screens::board::BoardScreen,
+    state::{AppState, BoardScope, Overlay, Screen, TerminalMode, dwell_for},
     terminal::{
         MouseCell, SelectionGranularity, absolute_selection_at, cell_size, grid_modes, measure,
         surface, try_selection_text, viewport_base, zoom_bar,
@@ -78,7 +79,7 @@ const SHELL_TAB_COMMAND: &str = "clear";
 pub(crate) struct WorkspaceScreen {
     model: Option<Model>,
     local: Rc<RefCell<Local>>,
-    /// One live pane per worktree whose `fleet://` tab has been visited.
+    /// One live git pane per worktree whose `fleet://lazygit` tab has been visited.
     ///
     /// Keyed by worktree because that is what the pane is *about*: a session comes and goes
     /// with sleep and wake, and re-opening the same worktree should find the same git view.
@@ -110,12 +111,17 @@ impl WorkspaceScreen {
 
     /// Composes the last synchronized surface into the frame's body.
     ///
-    /// The root element tracks `focus`, which is what puts the `on_action` listeners below on
+    /// The root element tracks `focus` — unless the board pane is drawing, which brings a
+    /// focus-tracking root of its own — which is what puts the `on_action` listeners below on
     /// gpui's dispatch path under the `Workspace > <mode>` contexts the shell has applied above.
     /// Preparation belongs to [`WorkspaceScreen::synchronize`]: this issues no request and
     /// reconciles no resource.
+    ///
+    /// `board` is the shell's one board screen, lent for the frame: a `fleet://board` tab draws
+    /// the very same view the Hub's board tab does, and the two are never on screen together.
     pub(crate) fn render_prepared(
         &mut self,
+        board: &mut BoardScreen,
         state: &Entity<AppState>,
         bridge: &Bridge,
         focus: &FocusHandle,
@@ -143,10 +149,26 @@ impl WorkspaceScreen {
         let agent_word = self.agent_header_word(state.read(cx), model, cx);
         let header = (!model.zoomed).then(|| self.header(model, pr, agent_word));
         let tabs = (!model.zoomed).then(|| self.tab_strip(model, bridge, state, cx));
+        // The board pane brings its own focus-tracking root, exactly as the Hub's board tab
+        // does: tracking the same handle twice would put two nodes in gpui's dispatch tree for
+        // one focus id. The prefix listeners below stay reachable either way — every element
+        // is a dispatch node, focus-tracking or not, so `ctrl-s` still leaves the pane.
+        let board_pane = self.draws_board(model);
         let terminal = if model.agent.is_some() {
             self.agent_area(model, cx)
         } else {
-            self.terminal_area(model, bridge, state, focus, focused, cx)
+            self.terminal_area(
+                model,
+                PaneCtx {
+                    board,
+                    state,
+                    bridge,
+                    focus,
+                },
+                focused,
+                window,
+                cx,
+            )
         };
         let watch = crate::views::watch_pane::render(
             &model.session,
@@ -174,7 +196,7 @@ impl WorkspaceScreen {
         let theme = cx.theme().clone();
 
         let mut root = div()
-            .track_focus(focus)
+            .when(!board_pane, |root| root.track_focus(focus))
             .flex()
             .flex_col()
             .size_full()
@@ -210,6 +232,7 @@ struct WorkspaceState {
     pr_tasks: HashMap<RepoId, gpui::Task<()>>,
     pane_focused: bool,
     pane_quit: Vec<WorktreeId>,
+    board_claim: Option<BoardClaim>,
     pending_selection_scroll: Option<PendingSelectionScroll>,
     watch_scroll: UniformListScrollHandle,
 }

@@ -206,6 +206,10 @@ const GROUPS: &[(&str, &[&str])] = &[
         "Board",
         &[
             "Hub > Board",
+            // The same table twice over, because it really is bound twice: the Hub's board tab
+            // and the Workspace's `fleet://board` tab draw the same board and the reader has to
+            // find the keys under whichever one they are standing on.
+            "Workspace > Native > Board",
             "Filter > BoardFilter",
             "Dialog > CardDetail",
             "Dialog > CardDetailEditing",

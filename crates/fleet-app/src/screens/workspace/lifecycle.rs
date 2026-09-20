@@ -302,6 +302,11 @@ impl WorkspaceScreen {
                 pane.view
                     .update(cx, |pane, cx| pane.set_active(false, window, cx));
             }
+            // The Hub must not inherit a worktree scope: `g b` would show this worktree's
+            // board under the context tab's heading, and the loader's eligibility gate reads
+            // the scope. A `ctrl-s b` whose tab never arrived ends here too — there is no
+            // Workspace left for its reply to select into.
+            self.release_board_scope(true, bridge, state, cx);
             self.model = None;
             return;
         }
@@ -342,6 +347,7 @@ impl WorkspaceScreen {
         self.arm_prefix_hint(&model, state, cx);
         self.lookup_pr(&model, bridge, state, cx);
         self.sync_panes(&model, bridge, state, window, cx);
+        self.sync_board_scope(&model, bridge, state, cx);
         self.sync_agent_views(&model, bridge, state, window, cx);
 
         if let Some(grid) = state.read(cx).active_grid().filter(|grid| grid.primed) {

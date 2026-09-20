@@ -467,6 +467,36 @@ key_table! {
     ",", "Hub > Board" => board::Settings;
     "r", "Hub > Board" => board::Reload;
     "/", "Hub > Board" => board::Filter;
+
+    // BOARD §8: the `fleet://board` tab draws the very same board with the very same keys, so
+    // every `Hub > Board` row above is repeated here against the same action. The word sits
+    // under `Workspace > Native`, which keeps `ctrl-s` — the prefix is never a board key.
+    "h", "Workspace > Native > Board" => board::PrevColumn;
+    "left", "Workspace > Native > Board" => board::PrevColumn;
+    "l", "Workspace > Native > Board" => board::NextColumn;
+    "right", "Workspace > Native > Board" => board::NextColumn;
+    "j", "Workspace > Native > Board" => board::NextCard;
+    "down", "Workspace > Native > Board" => board::NextCard;
+    "k", "Workspace > Native > Board" => board::PrevCard;
+    "up", "Workspace > Native > Board" => board::PrevCard;
+    "enter", "Workspace > Native > Board" => board::OpenCard;
+    "c", "Workspace > Native > Board" => board::NewCard;
+    "s", "Workspace > Native > Board" => board::PickStatus;
+    "p", "Workspace > Native > Board" => board::PickPriority;
+    "a", "Workspace > Native > Board" => board::PickAssignee;
+    "t", "Workspace > Native > Board" => board::PickLabels;
+    "e", "Workspace > Native > Board" => board::PickEstimate;
+    "[", "Workspace > Native > Board" => board::MovePrevColumn;
+    "]", "Workspace > Native > Board" => board::MoveNextColumn;
+    "w", "Workspace > Native > Board" => board::CreateWorktree;
+    "o", "Workspace > Native > Board" => board::OpenWorktree;
+    "S", "Workspace > Native > Board" => board::Sync;
+    "F", "Workspace > Native > Board" => board::FullSync;
+    "x", "Workspace > Native > Board" => board::OpenRemote;
+    "d", "Workspace > Native > Board" => board::DeleteCard;
+    ",", "Workspace > Native > Board" => board::Settings;
+    "r", "Workspace > Native > Board" => board::Reload;
+    "/", "Workspace > Native > Board" => board::Filter;
     "escape", "Dialog > CardDetail" => card_detail::Close;
     "i", "Dialog > CardDetail" => card_detail::EditTitle;
     "d", "Dialog > CardDetail" => card_detail::EditDescription;
@@ -982,6 +1012,7 @@ mod tests {
         "Dialog > BoardSettingsEditing",
         "Workspace > Terminal",
         "Workspace > Native",
+        "Workspace > Native > Board",
         "Workspace > Prefix",
         "Workspace > Scroll",
         // `Agent` itself binds nothing: gpui evaluates a bare identifier against every node of
@@ -1082,6 +1113,10 @@ mod tests {
         "Hub > Worktrees",
         "Hub > Prs",
         "Hub > Board",
+        // The board pane's own word, for the same reason the Hub's is here: the board's filter
+        // input never wraps in it, because `AppState::context_chain` publishes
+        // `Filter > BoardFilter` and nothing else while that editor owns the keyboard.
+        "Workspace > Native > Board",
         "Workspace > Terminal",
         "Workspace > Prefix",
         "Workspace > Scroll",
@@ -1378,6 +1413,9 @@ mod tests {
             .filter(|spec| spec.context == "Workspace > Native")
             .collect();
         assert_eq!(bound.len(), 1, "Workspace > Native binds more than one key");
+        // `Workspace > Native > Board` is a different word, nested one deeper: the board tab
+        // draws the board itself instead of handing its keys to an embedded view, and it still
+        // reserves nothing beyond the prefix its parent binds.
         assert_eq!(bound[0].keys, "ctrl-s");
         assert_eq!(bound[0].action, "workspace::EnterPrefix");
     }

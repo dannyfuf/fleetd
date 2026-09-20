@@ -2,8 +2,14 @@ use super::*;
 
 impl HubScreen {
     /// Renders the Hub into the frame's body.
+    ///
+    /// `board` is the shell's one board screen, lent for the frame: the Hub's tab and the
+    /// Workspace's `fleet://board` pane draw the same [`crate::state::BoardState`] through it
+    /// and are never on screen together, so its lists, its scrollers and its filter editor are
+    /// one set rather than two that drift (BOARD §8).
     pub fn render(
         &mut self,
+        board: &mut crate::screens::board::BoardScreen,
         state: &Entity<AppState>,
         bridge: &Bridge,
         focus: &FocusHandle,
@@ -16,7 +22,7 @@ impl HubScreen {
         // The board owns the whole body and its own keys, so the Hub's panes are not even
         // composed while it is up (BOARD §8).
         let body = if on_board {
-            self.board.render(state, bridge, focus, window, cx)
+            board.render(state, bridge, focus, window, cx)
         } else {
             let now = now_unix();
             let viewport = window.viewport_size();

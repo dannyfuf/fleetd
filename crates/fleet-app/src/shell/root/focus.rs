@@ -527,7 +527,9 @@ impl Shell {
             return Some(self.hub.filter_focus_handle(cx));
         }
         if self.state.read(cx).board_filter_owns_keys() {
-            return Some(self.hub.board_filter_focus_handle(cx));
+            // One editor for both surfaces that draw the board: the Hub's tab and the
+            // Workspace's `fleet://board` pane (BOARD §8).
+            return Some(self.board.filter_focus_handle(cx));
         }
         // `None` is not "no input on screen": it means no live editor owns the keyboard on this
         // surface, so the coarse focus handle keeps it.

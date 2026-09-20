@@ -37,9 +37,14 @@
     row reaches it; the tab is matched by command, never by name; `Model.native` became
     `Option<NativeTab::{Lazygit, Board, Unknown}>` and a board tab draws an empty native band until
     P2-T04. Two workspace scenarios that used `ctrl-s b` as the unbound example now use `ctrl-s o`.
-- [~] P2-T04 — Render the board pane inside the Workspace
-- [ ] P2-T05 — Drive the tab with a harness scenario
-- [ ] P2-T06 — Reconcile the UX, keymap and contract docs
+- [x] P2-T04 — Render the board pane inside the Workspace
+  - verified: `cargo test -p fleet-app` (916 passed), `make lint`, `make harness` 64 of 64 (agent run
+    `20260920-004914` and an independent run). Shape: no pane entity; the one `BoardScreen` moved
+    from `HubScreen` to `Shell` and is lent per frame to whichever surface draws; lazygit's
+    `sync_panes` untouched. Scope entered/released from `WorkspaceScreen::synchronize` through a
+    `BoardClaim` carrying worktree and board generation; 26 `Workspace > Native > Board` rows.
+- [~] P2-T05 — Drive the tab with a harness scenario
+- [~] P2-T06 — Reconcile the UX, keymap and contract docs
 
 ## Notes / decisions log
 (Append-only. Date-stamp entries. Capture anything that surprised you or that future-you will want.)
@@ -53,6 +58,10 @@
 
 ## Follow-ups
 (Things discovered mid-flight that are out of scope for this plan. Each gets a one-line description.)
+
+- Card detail's Worktree property row still calls `open_session` unconditionally, so `Enter` on the
+  current worktree from the pane re-ensures the session on screen instead of answering
+  "already in this worktree" as `o` does.
 
 - Consider a worktree-board open count on the Workspace tab and in the Hub worktrees list, mirroring the Hub Board tab badge.
 - Consider adding `fleet://board` to the default `windows[]` if users want the tab to survive sleep/wake without `ctrl-s b`.

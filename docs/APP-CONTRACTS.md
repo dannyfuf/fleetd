@@ -177,6 +177,7 @@ is always `Fleet`.
 | Hub, board tab (independent of repo pane selection) | `Fleet > Hub > Board` |
 | Workspace, PTY tab | `Fleet > Workspace > Terminal` \| `Prefix` \| `Scroll` |
 | Workspace, `fleet://` tab | `Fleet > Workspace > Native`, then the embedded view's own chain (`> Lazygit > Panels > Files`, …) |
+| Workspace, `fleet://board` tab | `Fleet > Workspace > Native > Board` — the board is Fleet-drawn, so the word is Fleet's own and every `Hub > Board` row is repeated on it |
 | Workspace, native agent tab | `Fleet > Agent > AgentIdle` \| `AgentWorking` \| `AgentNativeScroll`, or `Fleet > Agent > AgentDecision > AgentPermission` \| `AgentQuestion` \| `AgentPlan` while a gate is open |
 | Floating agent terminal | `Fleet > Agent > Terminal` \| `Prefix` \| `Scroll` |
 | Filter / Palette / Jobs | `Fleet > Filter` (`> BoardFilter` on the board) \| `Palette` \| `Jobs`, then the focused editor's `FleetTextInput` context for the first two |
@@ -759,13 +760,19 @@ harness in this crate; actual pointer delivery still needs a host GUI smoke test
 
 ## Board app extension points (BOARD §8)
 
-`HubTab::Board` is selected by `board::GoBoard` (`g b`). `HubScreen` owns
-`screens::board::BoardScreen` and renders it with the frozen signature. The Hub's
-screen strip includes `Board`, the active context's summary `open_count`, and a
+`HubTab::Board` is selected by `board::GoBoard` (`g b`). `Shell` owns the one
+`screens::board::BoardScreen` and lends it for the frame to whichever surface is drawing the
+board — `HubScreen::render` on the board tab, `WorkspaceScreen::render_prepared` on a
+`fleet://board` tab — which is what keeps one filter editor, one set of column lists and one
+projection cache behind the one `BoardState`. The board pane is not an entity and is not keyed
+by worktree: the tab is a place to draw the shared mirror, not a thing to build and evict. The
+Hub's screen strip includes `Board`, the active context's summary `open_count`, and a
 conflict dot when `conflict_count > 0`. `BoardScreen` owns one horizontal
 `ScrollHandle` for the columns and one per column for its cards, and reveals the
 focused column and card when their selection changes. Only the inner Board root tracks the
-Hub focus handle on that tab. `views::board_screen` holds the pure model
+body focus handle on either surface — the Hub's screen root and the Workspace's both skip
+`track_focus` while the board is drawing, because two dispatch nodes for one focus id is one
+node too many. `views::board_screen` holds the pure model
 (filter predicate, visible slice of a column, priority and category mappings, header
 facts) and the rendering; `views::board_card_detail` holds the property-row model and
 the detail panes. Placement and content decisions are in `UX-SPEC.md` § Board.
@@ -777,9 +784,12 @@ the detail panes. Placement and content decisions are in `UX-SPEC.md` § Board.
 tab and the Workspace's board pane, because the two are never visible at once. `None` resolves
 to the active context — the Hub's board — and the first load records that resolution.
 `filter_editing` records whether the board filter owns text input. It is what
-`AppState::board_filter_owns_keys` reads, and while it is set `context_chain()`
+`AppState::board_filter_owns_keys` reads on both surfaces — `Screen::Hub { tab: Board }` or
+`AppState::board_pane_is_active()`, which is a Workspace whose active tab is a native terminal
+whose command is `fleet://board` — and while it is set `context_chain()`
 returns `["Filter", "BoardFilter"]` (and `mode()` returns `Mode::Filter`) instead of
-`["Hub", "Board"]`, so the board's bare letters type instead of firing.
+`["Hub", "Board"]` or `["Workspace", "Native", "Board"]`, so the board's bare letters type
+instead of firing.
 `AppState::board_filter_escape()` is the §3.10 two-stage `Esc` for it; base Cancel
 calls its second stage. The focused board `TextInput` adds `FleetTextInput` beneath
 `Filter > BoardFilter`; its `Changed` event mirrors text into `BoardState.filter`.
@@ -818,7 +828,23 @@ The board loader runs on tab entry, active-context change, reconnect, a stale
 board's next render, a Workspace board-tab activation, and a Workspace session change while
 that tab is active; `screens::board::{enter_context_scope, enter_worktree_scope}` are the two
 triggers that point the mirror and load it, the second answering `false` when the daemon
-refuses. `prefix::OpenBoard` (`ctrl-s b`, `Workspace > Prefix`) is the Workspace's way in: on a
+refuses.
+
+`WorkspaceScreen::sync_board_scope` is where the pane's half of that runs, from
+`WorkspaceScreen::synchronize` and therefore on the update path, never from a paint. It enters
+the worktree scope whenever the session's active tab is the `fleet://board` one — whichever key
+or click selected it — and `release_board_scope` hands the mirror back to
+`enter_context_scope` as soon as it is not, including when the Workspace itself goes away, so
+the Hub never inherits a worktree scope. Both are idempotent against a claim the screen keeps:
+`BoardClaim::Drawing { worktree, generation }` records `AppState::board_generation()` alongside
+the worktree, so a `clear_board` makes the claim stale and the scope is entered again, while a
+daemon that refused once is not asked again on every notify. `BoardClaim::Requested` is the
+other half: `ctrl-s b` points the mirror before the tab exists so its load is in flight by the
+time the pane first paints, and the frames until fleetd lists and selects that tab still show
+the previous one — releasing there would cancel the load the keystroke started. Selecting any
+other tab drops the pending claim, as does leaving the Workspace.
+
+`prefix::OpenBoard` (`ctrl-s b`, `Workspace > Prefix`) is the Workspace's way in: on a
 session with no worktree it toasts `boards belong to worktrees` and stops, otherwise it enters
 the worktree scope and then selects the session's `fleet://board` terminal — or asks for one
 with `NewTerminal { name: "board", command: "fleet://board", cwd }` and selects the reply, the

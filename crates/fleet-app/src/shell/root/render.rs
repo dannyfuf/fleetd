@@ -124,13 +124,18 @@ impl Shell {
                 .into_any_element();
         }
         match state.screen {
-            Screen::Hub { .. } => {
-                self.hub
-                    .render(&self.state, &self.bridge, &self.body_focus, window, cx)
-            }
+            Screen::Hub { .. } => self.hub.render(
+                &mut self.board,
+                &self.state,
+                &self.bridge,
+                &self.body_focus,
+                window,
+                cx,
+            ),
             Screen::Workspace { .. } => {
                 let veiled = state.drops_terminal_keys();
                 let workspace = self.workspace.render_prepared(
+                    &mut self.board,
                     &self.state,
                     &self.bridge,
                     &self.body_focus,

@@ -421,7 +421,7 @@ impl AppState {
             // An agent tab owns the whole `Agent > …` chain of §9; the terminal sub-modes
             // belong to the tabs that really are terminals.
             (None, Screen::Workspace { .. }) => self.agent_context_chain().unwrap_or_else(|| {
-                vec![
+                let mut chain = vec![
                     "Workspace",
                     match self.terminal_mode {
                         TerminalMode::Terminal => "Terminal",
@@ -429,7 +429,16 @@ impl AppState {
                         TerminalMode::Prefix => "Prefix",
                         TerminalMode::Scroll => "Scroll",
                     },
-                ]
+                ];
+                // BOARD §8: a `fleet://board` tab draws the board itself rather than handing
+                // its keys to an embedded view, so it names the surface a third word deep and
+                // the whole `Hub > Board` table is repeated there. `ctrl-s` stays the prefix
+                // because the word is appended *under* `Native`, which still binds it — and it
+                // is dropped while the prefix is armed, so `ctrl-s b` is never `b`.
+                if self.terminal_mode == TerminalMode::Native && self.board_pane_is_active() {
+                    chain.push("Board");
+                }
+                chain
             }),
         };
         // Key ownership (`docs/KEYMAP.md`, `docs/APP-CONTRACTS.md` §3): the banner binds bare
@@ -636,6 +645,15 @@ impl AppState {
     pub fn active_terminal_is_native(&self) -> bool {
         self.active_terminal_record()
             .is_some_and(fleet_core::sessions::Terminal::is_native)
+    }
+
+    /// The worktree the open session belongs to, when it is a worktree session.
+    #[must_use]
+    pub fn active_worktree(&self) -> Option<&WorktreeId> {
+        match &self.active_session()?.kind {
+            SessionKind::Worktree(worktree) => Some(worktree),
+            SessionKind::Agent(_) => None,
+        }
     }
 
     /// The active session's active terminal record, straight from the snapshot.

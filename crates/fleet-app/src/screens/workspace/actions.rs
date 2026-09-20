@@ -974,10 +974,7 @@ pub(super) fn active_terminal_record(state: &Entity<AppState>, cx: &App) -> Opti
 
 /// The worktree the open session belongs to, when it is a worktree session.
 pub(super) fn active_worktree_id(state: &Entity<AppState>, cx: &App) -> Option<WorktreeId> {
-    match &state.read(cx).active_session()?.kind {
-        SessionKind::Worktree(id) => Some(id.clone()),
-        SessionKind::Agent(_) => None,
-    }
+    state.read(cx).active_worktree().cloned()
 }
 
 /// How many rows the mirror currently holds.
@@ -1028,15 +1025,30 @@ pub(super) fn select_terminal<T: MutationRequester>(
     let Some(terminal) = terminal else {
         return;
     };
-    let Some((session, native)) = state.read(cx).active_session().map(|session| {
-        let native = session
+    let Some((session, native, board)) = state.read(cx).active_session().map(|session| {
+        let entry = session
             .terminals
             .iter()
-            .any(|entry| entry.id == terminal && entry.is_native());
-        (session.id.clone(), native)
+            .find(|entry| entry.id == terminal && entry.is_native());
+        (
+            session.id.clone(),
+            entry.is_some(),
+            entry.is_some_and(|entry| entry.command == NATIVE_BOARD),
+        )
     }) else {
         return;
     };
+    // Selecting anything else ends a `ctrl-s b` still waiting for its tab: the user has chosen
+    // another surface, so the scope the keystroke claimed is released on the next synchronize
+    // instead of being held for a tab nobody is going to look at.
+    if !board
+        && matches!(
+            local.borrow().state.board_claim,
+            Some(BoardClaim::Requested { .. })
+        )
+    {
+        local.borrow_mut().state.board_claim = None;
+    }
     request_mutation(
         bridge,
         MutationRequest::select(session.clone(), terminal),
@@ -1145,9 +1157,13 @@ fn open_board_tab(
     // The mirror is pointed at the worktree before the tab exists, so the pane has its load in
     // flight by the time it first paints — and a daemon that serves no worktree boards refuses
     // here, having said so itself, instead of leaving behind a tab nothing can ever fill.
-    if !crate::screens::board::enter_worktree_scope(worktree, state, bridge, cx) {
+    if !crate::screens::board::enter_worktree_scope(worktree.clone(), state, bridge, cx) {
         return;
     }
+    // The claim is what stops the very next `synchronize` — which runs on this notify, with
+    // the snapshot that still shows the previous tab — from handing the scope straight back
+    // and cancelling the load this keystroke started.
+    local.borrow_mut().state.board_claim = Some(BoardClaim::Requested { worktree });
     show_board_tab(local, bridge, state, cx);
 }
 

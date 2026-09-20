@@ -30,7 +30,8 @@ pub(crate) fn enter_context_scope(state: &Entity<AppState>, bridge: &Bridge, cx:
 /// Points the board at one worktree's board and loads it, or refuses and says why.
 ///
 /// `ctrl-s b` calls this before it opens or selects the tab, and the Workspace's board pane
-/// calls it again when the session under it changes while the tab is showing (P2-T04). The
+/// calls it again on every activation — a click on the strip, `ctrl-s <n>`, a restored session
+/// — and when the session under it changes while the tab is showing. The
 /// answer is whether the scope was entered: a daemon without `board.worktree` refuses, toasts
 /// [`WORKTREE_BOARDS_UNSUPPORTED`](crate::state::WORKTREE_BOARDS_UNSUPPORTED), and leaves the
 /// mirror pointed where it was, so the caller can decline to open the tab at all.

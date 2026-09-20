@@ -203,7 +203,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         crate::screens::board::filter(&self.state, &self.bridge, cx);
-        self.hub.focus_board_filter(window, cx);
+        self.board.focus_filter(window, cx);
     }
 
     pub(super) fn card_detail_close(

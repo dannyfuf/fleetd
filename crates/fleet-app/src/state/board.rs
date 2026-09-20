@@ -1,5 +1,8 @@
 use super::*;
-use fleet_core::board::{BoardView, Card};
+use fleet_core::{
+    board::{BoardView, Card},
+    config::NATIVE_BOARD,
+};
 use fleet_proto::response::BOARD_WORKTREE_CAPABILITY;
 
 /// What the app says when the connected daemon serves no worktree boards.
@@ -323,6 +326,31 @@ impl AppState {
             || matches!(self.board.scope, Some(BoardScope::Worktree(_)))
     }
 
+    /// Whether the Workspace's `fleet://board` tab is the surface drawing the board.
+    ///
+    /// The reserved command decides it, not the tab's name, exactly as the Workspace's own
+    /// model does: the daemon owns the tab list, and an agent tab shadows the terminal strip
+    /// entirely, so neither of them may answer for a board pane that is not on screen.
+    #[must_use]
+    pub(crate) fn board_pane_is_active(&self) -> bool {
+        matches!(self.screen, Screen::Workspace { .. })
+            && self.active_agent_thread().is_none()
+            && self
+                .active_terminal_record()
+                .is_some_and(|terminal| terminal.is_native() && terminal.command == NATIVE_BOARD)
+    }
+
+    /// The invalidation counter every board request in flight is stamped with.
+    ///
+    /// The Workspace's board pane records it beside the worktree it claimed the scope for, so
+    /// a [`AppState::clear_board`] — a reconnect, a context switch — makes the claim stale and
+    /// the pane points the mirror again, while a refusal the daemon has already explained is
+    /// asked for exactly once.
+    #[must_use]
+    pub(crate) const fn board_generation(&self) -> u64 {
+        self.board_generation
+    }
+
     /// Claims one load; an error waits for reload instead of retrying every render.
     pub(crate) fn begin_board_load(&mut self) -> Option<(BoardScope, u64)> {
         if !self.board_is_shown() {
@@ -402,11 +430,17 @@ impl AppState {
     }
 
     /// Whether the board's filter input, rather than the board itself, owns the keyboard.
+    ///
+    /// Both surfaces that draw the board answer here: the Hub's tab and the Workspace's board
+    /// pane share one editor, one `BoardState.filter` and one two-stage `Esc`, so the pane
+    /// publishes `Filter > BoardFilter` over `Workspace > Native > Board` for the same reason
+    /// the Hub publishes it over `Hub > Board` — the bare letters have to type.
     #[must_use]
     pub(crate) fn board_filter_owns_keys(&self) -> bool {
         self.overlay.is_none()
             && self.agent_popup.is_none()
-            && matches!(self.screen, Screen::Hub { tab: HubTab::Board })
+            && (matches!(self.screen, Screen::Hub { tab: HubTab::Board })
+                || self.board_pane_is_active())
             && self.board.filter_editing
     }
 

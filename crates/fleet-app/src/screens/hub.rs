@@ -318,7 +318,6 @@ struct SelectionAnchors {
 
 /// The Hub screen.
 pub struct HubScreen {
-    board: super::board::BoardScreen,
     hub: Entity<HubState>,
     rail_scroll: UniformListScrollHandle,
     list_scroll: UniformListScrollHandle,
@@ -346,7 +345,6 @@ impl HubScreen {
             input
         });
         Self {
-            board: super::board::BoardScreen::new(cx),
             hub: cx.new(|_| HubState::default()),
             rail_scroll: UniformListScrollHandle::new(),
             list_scroll: UniformListScrollHandle::new(),
@@ -427,16 +425,6 @@ impl HubScreen {
     /// The Hub filter's live input handle, for the shell's focus reconciliation.
     pub(crate) fn filter_focus_handle(&self, cx: &App) -> FocusHandle {
         self.filter_input.read(cx).focus_handle()
-    }
-
-    /// Focus the board filter after `/` changes the owning state.
-    pub(crate) fn focus_board_filter(&self, window: &mut Window, cx: &mut App) {
-        self.board.focus_filter(window, cx);
-    }
-
-    /// The board filter's live input handle, when the shell needs to preserve it.
-    pub(crate) fn board_filter_focus_handle(&self, cx: &App) -> FocusHandle {
-        self.board.filter_focus_handle(cx)
     }
 }
 

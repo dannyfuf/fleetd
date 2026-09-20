@@ -3,7 +3,8 @@
 use crate::{
     bridge::Bridge,
     screens::{
-        agent_popup::AgentPopup, hub::HubScreen, jobs::JobsPanel, workspace::WorkspaceScreen,
+        agent_popup::AgentPopup, board::BoardScreen, hub::HubScreen, jobs::JobsPanel,
+        workspace::WorkspaceScreen,
     },
     shell::chrome,
     state::AppState,
@@ -55,6 +56,13 @@ pub struct Shell {
     /// Focused while the floating agent terminal is the topmost surface.
     agent_focus: FocusHandle,
     hub: HubScreen,
+    /// The one board screen, lent to whichever surface is drawing the board this frame.
+    ///
+    /// The Hub's tab and the Workspace's `fleet://board` pane are never visible together and
+    /// share a single [`crate::state::BoardState`] behind a scope, so they share the column
+    /// lists, the scrollers and the filter editor too: two of them would mean two carets, two
+    /// measured tile heights and a filter that only half the app can see (BOARD §8).
+    board: BoardScreen,
     workspace: WorkspaceScreen,
     agent_popup: AgentPopup,
     /// Single-flight EnsureSession claims retained across popup hide/switch transitions.
@@ -106,6 +114,7 @@ impl Shell {
 
         let mut hub = HubScreen::new(cx);
         hub.bind(&state, &bridge, cx);
+        let board = BoardScreen::new(cx);
         let mut jobs = JobsPanel::new(cx);
         jobs.bind(&state, cx);
         let overlay_focus = cx.focus_handle();
@@ -136,6 +145,7 @@ impl Shell {
             overlay_focus,
             agent_focus: cx.focus_handle(),
             hub,
+            board,
             workspace,
             agent_popup,
             agent_ensures: AgentEnsureFlights::default(),

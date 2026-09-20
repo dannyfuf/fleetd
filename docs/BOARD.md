@@ -767,6 +767,11 @@ Property rows in the card detail reuse `KeyValueList`/`FactRow`; pickers reuse
 - **Screen**: the board is a hub tab: `HubTab::Board`, key `g b`, tab label "Board", rendered by
   `screens/board.rs::BoardScreen` with the frozen screen signature (`docs/APP-CONTRACTS.md` §2).
   The hub context bar scopes it: the board shown is `EnsureBoard(active_context)`.
+  A worktree Workspace's `fleet://board` tab (`ctrl-s b`) is the board's second surface and
+  shows `EnsureWorktreeBoard(worktree)`. It builds nothing of its own: `Shell` owns the one
+  `BoardScreen` and lends it to whichever surface is drawing, since the two are never visible
+  together. `WorkspaceScreen::sync_board_scope` points the mirror when that tab is the session's
+  active one and gives it back when it is not.
 - **State** (`state.rs`): `AppState.board: BoardState { scope: Option<BoardScope>,
   view: Option<BoardView>, loading: bool,
   error: Option<String>, focus: BoardFocus { column: usize, row: usize }, filter: String,
@@ -807,7 +812,10 @@ Property rows in the card detail reuse `KeyValueList`/`FactRow`; pickers reuse
   select row, `enter` opens the matching picker. Conflict banner with `K` keep-local / `R`
   take-remote when `card.conflict` is set.
 - **Keymap** (`docs/KEYMAP.md` rows, contexts `Hub > Board` and `Dialog > CardDetail` etc., one
-  action per row):
+  action per row). Every `Hub > Board` row below is bound a second time, verbatim and against
+  the same action, on `Workspace > Native > Board` — the board pane's key context — and
+  `Filter > BoardFilter` serves both surfaces. `o` answers "Already in this worktree" instead of
+  re-opening the session when the card names the worktree the pane is standing in:
 
 | Key | Context | Action |
 |---|---|---|

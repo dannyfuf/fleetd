@@ -1,4 +1,9 @@
-//! The active-context board screen (BOARD §8).
+//! The board screen (BOARD §8).
+//!
+//! One screen, two surfaces: the Hub's `Board` tab shows the active context's board, and a
+//! worktree Workspace's `fleet://board` tab shows that worktree's. Which of the two the single
+//! [`crate::state::BoardState`] holds is its `scope`, and the surfaces are never visible
+//! together — so `Shell` owns one of these and lends it to whichever is drawing.
 //!
 //! *One board per context, one column per status, one key per edit.* The screen owns nothing
 //! authoritative: it draws [`crate::state::BoardState`], and every key that changes a card
@@ -8,8 +13,8 @@
 //! The keyboard model is the Hub's: `h` / `l` walk the columns, `j` / `k` walk the cards,
 //! `Enter` opens the detail dialog, and every property has one letter that opens its picker.
 //! `/` is the exception: while the filter input owns the keyboard the screen publishes the
-//! `Filter` key context instead of `Hub > Board`, so the bare letters type instead of firing
-//! (`crate::state::AppState::context_chain`).
+//! `Filter` key context instead of `Hub > Board` — or `Workspace > Native > Board` — so the
+//! bare letters type instead of firing (`crate::state::AppState::context_chain`).
 
 use std::{cell::RefCell, rc::Rc, time::Instant};
 
@@ -48,21 +53,24 @@ pub(crate) use actions::{
     open_remote, open_worktree, pick_assignee, pick_estimate, pick_labels, pick_priority,
     pick_status, readonly_message, refuses, reload, remote_url, settings, sync,
 };
+// The refusal `o` answers in the Workspace's board pane, where the card can name the worktree
+// the user is already standing in. Only the shell's own test asserts on the sentence.
+#[cfg(test)]
+pub(crate) use actions::ALREADY_IN_WORKTREE;
 pub(crate) use lifecycle::{
     Refusal, open_session, request_worktree_reporting, send_card_reporting,
 };
 use lifecycle::{ensure_current, fail, request_worktree, send_card, syncing};
-// The two scope triggers: the Hub reaches `enter_context_scope` through its own observation,
-// and P2-T04's Workspace board pane calls both of them from here. Both `allow`s go with that
-// wiring, here and on `lifecycle::enter_worktree_scope`.
-#[allow(unused_imports)]
+// The two scope triggers. The Hub reaches `enter_context_scope` through its own observation;
+// the Workspace's board pane calls both, from `sync_board_scope` and `release_board_scope`,
+// and `ctrl-s b` calls the second one before the tab it opens exists.
 pub(crate) use lifecycle::{enter_context_scope, enter_worktree_scope};
 use navigation::{board_id, leave_filter_input, on_click, step_focus};
 pub(crate) use navigation::{
     focus_card, jump_rows, move_rows, next_card, next_column, prev_card, prev_column, selected_card,
 };
 
-/// Hub tab for the active context's board.
+/// The board, drawn for whichever surface is showing it.
 pub(crate) struct BoardScreen {
     /// Horizontal scroller of the columns; `h` / `l` reveal the focused one.
     board_scroll: ScrollHandle,
@@ -162,7 +170,11 @@ impl BoardScreen {
         self.filter_input.read(cx).focus_handle()
     }
 
-    /// Renders the board into the Hub's body.
+    /// Renders the board into the body of the surface that is showing it.
+    ///
+    /// The returned root tracks `focus` itself, so the caller's own root must not: two dispatch
+    /// nodes for one focus id is one node too many. The Hub's `HubScreen::render` and the
+    /// Workspace's `WorkspaceScreen::render_prepared` both hand it their body handle.
     pub(crate) fn render(
         &mut self,
         state: &Entity<AppState>,
