@@ -57,7 +57,10 @@ impl Services {
         }
         match self.router.route(&body) {
             router::Target::Local => self.dispatch_owned_with_context(body, owner, context).await,
-            router::Target::Host(host) => self.router.forward(&host, body).await,
+            router::Target::Host(host) => {
+                self.retire_stale_worktree_board(&body, &host).await;
+                self.router.forward(&host, body).await
+            }
             router::Target::Fanout(parts) => {
                 let local = router::classify::local_fanout_part(&body, self.router.as_ref());
                 let results = self.router.fanout(parts).await;
@@ -74,6 +77,36 @@ impl Services {
             router::Target::Unsupported(operation) => Err(DaemonError::Unsupported(format!(
                 "unsupported routed operation: {operation}"
             ))),
+        }
+    }
+
+    /// Trashes this daemon's own document for a worktree board another host owns.
+    ///
+    /// Before PR #42 the laptop answered `EnsureWorktreeBoard` locally and wrote an empty
+    /// `boards/wt-*.json`; leaving it behind would keep shadowing the owner's board in every
+    /// listing. Retirement is best effort: a failure here must not stop the request that finally
+    /// reaches the right daemon.
+    async fn retire_stale_worktree_board(
+        &self,
+        body: &RequestBody,
+        host: &fleet_core::ids::HostId,
+    ) {
+        let worktree_id = match body {
+            RequestBody::EnsureWorktreeBoard { worktree_id }
+            | RequestBody::CreateWorktreeBoard { worktree_id, .. } => worktree_id,
+            _ => return,
+        };
+        if let Err(error) = self
+            .boards
+            .retire_hosted_worktree_board(worktree_id, host)
+            .await
+        {
+            tracing::warn!(
+                %worktree_id,
+                %host,
+                %error,
+                "could not retire the stale local board of a hosted worktree"
+            );
         }
     }
 

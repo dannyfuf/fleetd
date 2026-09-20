@@ -56,9 +56,9 @@ pub fn classify(body: &RequestBody, resolver: &dyn Resolver) -> Target {
         | CreateWorktreeFromPr {
             host: Some(host), ..
         } => Target::Host(host.clone()),
-        CreateWorktree { host: None, .. }
-        | CreateWorktreeFromPr { host: None, .. }
-        | CreateWorktreeFromCard { .. } => Target::Local,
+        CreateWorktree { host: None, .. } | CreateWorktreeFromPr { host: None, .. } => {
+            Target::Local
+        }
 
         DeleteWorktrees { ids } | InspectWorktrees { ids, .. } => {
             fanout_worktrees(body, ids, resolver)
@@ -105,22 +105,32 @@ pub fn classify(body: &RequestBody, resolver: &dyn Resolver) -> Target {
         }
         DismissJobs { jobs } => fanout_jobs(body, jobs, resolver),
 
+        // A worktree board lives on the daemon that owns the worktree, so the scope request is
+        // routed by the worktree and every later request by the board or card it names
+        // (`docs/decisions/0021-hosted-worktree-boards-route-to-owner.md`).
+        EnsureWorktreeBoard { worktree_id } | CreateWorktreeBoard { worktree_id, .. } => {
+            host_or_local(resolver.host_of_worktree(worktree_id))
+        }
+        GetBoard { board_id }
+        | UpdateBoard { board_id, .. }
+        | DeleteBoard { board_id }
+        | CreateCard { board_id, .. }
+        | SyncBoard { board_id, .. }
+        | DescribeBoardBackend { board_id } => host_or_local(resolver.host_of_board(board_id)),
+        UpdateCard { card_id, .. }
+        | MoveCard { card_id, .. }
+        | DeleteCard { card_id }
+        | AddCardComment { card_id, .. }
+        | ResolveCardConflict { card_id, .. }
+        | CreateWorktreeFromCard { card_id, .. } => host_or_local(resolver.host_of_card(card_id)),
+
+        // `ListBoards` is federated by [`super::Router::route`], which needs the endpoint list
+        // this resolver-only seam does not have; reaching classify means there are no hosts.
+        // `EnsureBoard`, `CreateBoard` and the backend registry are context-scoped or
+        // daemon-scoped, and stay here.
         ListBoards { .. }
-        | GetBoard { .. }
         | EnsureBoard { .. }
-        | EnsureWorktreeBoard { .. }
         | CreateBoard { .. }
-        | CreateWorktreeBoard { .. }
-        | UpdateBoard { .. }
-        | DeleteBoard { .. }
-        | CreateCard { .. }
-        | UpdateCard { .. }
-        | MoveCard { .. }
-        | DeleteCard { .. }
-        | AddCardComment { .. }
-        | SyncBoard { .. }
-        | ResolveCardConflict { .. }
-        | DescribeBoardBackend { .. }
         | ListBoardBackends {}
         | AppendWatchOutput { .. }
         | FinishWatch { .. }
@@ -286,7 +296,10 @@ pub(crate) fn local_fanout_part(
                 .collect::<Vec<_>>();
             (!jobs.is_empty()).then_some(RequestBody::DismissJobs { jobs })
         }
-        RequestBody::AgentItemBody { .. }
+        // The local list always runs: a host being enumerated never hides this daemon's own
+        // boards, and the merge puts the local rows first.
+        RequestBody::ListBoards { .. }
+        | RequestBody::AgentItemBody { .. }
         | RequestBody::PruneWorktrees { ids: None, .. }
         | RequestBody::AgentThreadList
         | RequestBody::AgentSeenCursors
@@ -312,7 +325,6 @@ pub(crate) fn local_fanout_part(
         | RequestBody::DelegationGet { .. }
         | RequestBody::DelegationCancel { .. }
         | RequestBody::DelegationWait { .. }
-        | RequestBody::ListBoards { .. }
         | RequestBody::GetBoard { .. }
         | RequestBody::EnsureBoard { .. }
         | RequestBody::EnsureWorktreeBoard { .. }
@@ -418,7 +430,8 @@ fn nonempty_worktree_part(
 mod tests {
     use fleet_core::{
         agents::{AgentKind, DelegationId, ItemId, StreamKind, ThreadId, UserInput},
-        ids::{JobId, TerminalId, WorktreeId},
+        board::{BoardPatch, CardDraft, CardPatch, ConflictResolution},
+        ids::{BoardId, CardId, JobId, StatusId, TerminalId, WorktreeId},
     };
 
     use super::*;
@@ -426,6 +439,19 @@ mod tests {
     struct TestResolver {
         remote: WorktreeId,
         host: HostId,
+        remote_board: BoardId,
+        remote_card: CardId,
+    }
+
+    impl TestResolver {
+        fn new(remote: WorktreeId, host: HostId) -> Self {
+            Self {
+                remote,
+                host,
+                remote_board: board("wt-acme-api-remote"),
+                remote_card: card("card-remote"),
+            }
+        }
     }
 
     impl Resolver for TestResolver {
@@ -444,6 +470,20 @@ mod tests {
         fn host_of_thread(&self, _id: &ThreadId) -> Option<HostId> {
             Some(self.host.clone())
         }
+        fn host_of_board(&self, id: &BoardId) -> Option<HostId> {
+            (id == &self.remote_board).then(|| self.host.clone())
+        }
+        fn host_of_card(&self, id: &CardId) -> Option<HostId> {
+            (id == &self.remote_card).then(|| self.host.clone())
+        }
+    }
+
+    fn board(value: &str) -> BoardId {
+        value.parse().expect("board id")
+    }
+
+    fn card(value: &str) -> CardId {
+        value.parse().expect("card id")
     }
 
     #[test]
@@ -451,10 +491,7 @@ mod tests {
         let remote = WorktreeId::try_from("acme/api#remote").expect("worktree");
         let local = WorktreeId::try_from("acme/api#local").expect("worktree");
         let host = HostId::try_from("dev-box").expect("host");
-        let resolver = TestResolver {
-            remote: remote.clone(),
-            host: host.clone(),
-        };
+        let resolver = TestResolver::new(remote.clone(), host.clone());
         assert_eq!(classify(&RequestBody::GetConfig, &resolver), Target::Local);
         assert_eq!(
             classify(&RequestBody::WorktreePath { id: remote.clone() }, &resolver),
@@ -510,12 +547,196 @@ mod tests {
     }
 
     #[test]
+    fn every_board_and_card_request_follows_the_daemon_that_owns_it() {
+        let remote = WorktreeId::try_from("acme/api#remote").expect("worktree");
+        let local_worktree = WorktreeId::try_from("acme/api#local").expect("worktree");
+        let host = HostId::try_from("dev-box").expect("host");
+        let resolver = TestResolver::new(remote.clone(), host.clone());
+        let hosted_board = resolver.remote_board.clone();
+        let local_board = board("wt-acme-api-local");
+        let hosted_card = resolver.remote_card.clone();
+        let local_card = card("card-local");
+
+        for (hosted, local) in [
+            (
+                RequestBody::GetBoard {
+                    board_id: hosted_board.clone(),
+                },
+                RequestBody::GetBoard {
+                    board_id: local_board.clone(),
+                },
+            ),
+            (
+                RequestBody::UpdateBoard {
+                    board_id: hosted_board.clone(),
+                    patch: BoardPatch::default(),
+                },
+                RequestBody::UpdateBoard {
+                    board_id: local_board.clone(),
+                    patch: BoardPatch::default(),
+                },
+            ),
+            (
+                RequestBody::DeleteBoard {
+                    board_id: hosted_board.clone(),
+                },
+                RequestBody::DeleteBoard {
+                    board_id: local_board.clone(),
+                },
+            ),
+            (
+                RequestBody::CreateCard {
+                    board_id: hosted_board.clone(),
+                    draft: CardDraft::default(),
+                },
+                RequestBody::CreateCard {
+                    board_id: local_board.clone(),
+                    draft: CardDraft::default(),
+                },
+            ),
+            (
+                RequestBody::SyncBoard {
+                    board_id: hosted_board.clone(),
+                    full: false,
+                },
+                RequestBody::SyncBoard {
+                    board_id: local_board.clone(),
+                    full: false,
+                },
+            ),
+            (
+                RequestBody::DescribeBoardBackend {
+                    board_id: hosted_board,
+                },
+                RequestBody::DescribeBoardBackend {
+                    board_id: local_board,
+                },
+            ),
+            (
+                RequestBody::UpdateCard {
+                    card_id: hosted_card.clone(),
+                    patch: CardPatch::default(),
+                },
+                RequestBody::UpdateCard {
+                    card_id: local_card.clone(),
+                    patch: CardPatch::default(),
+                },
+            ),
+            (
+                RequestBody::MoveCard {
+                    card_id: hosted_card.clone(),
+                    status_id: status(),
+                    index: None,
+                },
+                RequestBody::MoveCard {
+                    card_id: local_card.clone(),
+                    status_id: status(),
+                    index: None,
+                },
+            ),
+            (
+                RequestBody::DeleteCard {
+                    card_id: hosted_card.clone(),
+                },
+                RequestBody::DeleteCard {
+                    card_id: local_card.clone(),
+                },
+            ),
+            (
+                RequestBody::AddCardComment {
+                    card_id: hosted_card.clone(),
+                    body: "note".to_owned(),
+                },
+                RequestBody::AddCardComment {
+                    card_id: local_card.clone(),
+                    body: "note".to_owned(),
+                },
+            ),
+            (
+                RequestBody::ResolveCardConflict {
+                    card_id: hosted_card.clone(),
+                    resolution: ConflictResolution::KeepLocal,
+                },
+                RequestBody::ResolveCardConflict {
+                    card_id: local_card.clone(),
+                    resolution: ConflictResolution::KeepLocal,
+                },
+            ),
+            (
+                RequestBody::CreateWorktreeFromCard {
+                    card_id: hosted_card,
+                    repo_id: None,
+                    base: None,
+                    host: None,
+                },
+                RequestBody::CreateWorktreeFromCard {
+                    card_id: local_card,
+                    repo_id: None,
+                    base: None,
+                    host: None,
+                },
+            ),
+            (
+                RequestBody::EnsureWorktreeBoard {
+                    worktree_id: remote.clone(),
+                },
+                RequestBody::EnsureWorktreeBoard {
+                    worktree_id: local_worktree.clone(),
+                },
+            ),
+            (
+                RequestBody::CreateWorktreeBoard {
+                    worktree_id: remote,
+                    name: None,
+                    prefix: None,
+                    backend: None,
+                },
+                RequestBody::CreateWorktreeBoard {
+                    worktree_id: local_worktree,
+                    name: None,
+                    prefix: None,
+                    backend: None,
+                },
+            ),
+        ] {
+            assert_eq!(
+                classify(&hosted, &resolver),
+                Target::Host(host.clone()),
+                "{hosted:?}"
+            );
+            assert_eq!(classify(&local, &resolver), Target::Local, "{local:?}");
+        }
+
+        // A context board and the backend registry are this daemon's own whatever the resolver
+        // says, and `ListBoards` is federated by the router, not here.
+        for always_local in [
+            RequestBody::EnsureBoard {
+                context_id: "personal".parse().expect("context id"),
+            },
+            RequestBody::CreateBoard {
+                context_id: "personal".parse().expect("context id"),
+                name: None,
+                prefix: None,
+                backend: None,
+            },
+            RequestBody::ListBoardBackends {},
+        ] {
+            assert_eq!(
+                classify(&always_local, &resolver),
+                Target::Local,
+                "{always_local:?}"
+            );
+        }
+    }
+
+    fn status() -> StatusId {
+        "todo".parse().expect("status id")
+    }
+
+    #[test]
     fn every_delegation_request_is_served_locally() {
         let remote = WorktreeId::try_from("acme/api#remote").expect("worktree");
-        let resolver = TestResolver {
-            remote,
-            host: HostId::try_from("dev-box").expect("host"),
-        };
+        let resolver = TestResolver::new(remote, HostId::try_from("dev-box").expect("host"));
         let caller = ThreadId::new();
         let child = ThreadId::new();
         let delegation = DelegationId::new();

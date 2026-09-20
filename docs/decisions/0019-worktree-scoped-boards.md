@@ -97,6 +97,10 @@ today a worktree board is removed with its worktree or through another typed cli
 
 ## Addendum: a worktree board for a mirrored remote worktree
 
+**Superseded by [ADR 0021](0021-hosted-worktree-boards-route-to-owner.md) on 2026-09-20:** a
+worktree board now lives on the daemon that owns the worktree and every board and card request for
+it is routed there. The rest of this addendum is kept as the record of what was tried first.
+
 A Workspace session on a worktree another host owns opens its board with the same
 `EnsureWorktreeBoard` every local worktree uses, and that board is **owned by the daemon whose
 client asked for it**, stored in that daemon's board store and resolved against its contexts.

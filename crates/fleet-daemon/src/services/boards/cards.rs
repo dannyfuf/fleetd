@@ -31,7 +31,7 @@ impl Boards {
         // links it through the same field, and clearing its repository strands it the same way.
         if let Some(next) = patch.repo_id.as_ref()
             && let Some(worktree) = doc.cards[index].worktree_id.clone()
-            && let Some((live, _)) = self.known_worktree(&self.state_store.load().await?, &worktree)
+            && let Some(live) = self.known_worktree(&self.state_store.load().await?, &worktree)
             && next.as_ref() != Some(&live.repo_id)
         {
             return Err(DaemonError::Conflict(match next {

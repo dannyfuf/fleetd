@@ -632,27 +632,97 @@ async fn clone_repo_locally(services: &Services) {
         .unwrap();
 }
 
-/// `ctrl-s b` in a Workspace on a worktree another host owns.
+/// Writes the document an older build left here for a worktree another host owns.
 ///
-/// The worktree is never in this daemon's state — the mirror is the only place it exists — and
-/// the board it opens is this daemon's own document, kept beside the local worktrees' boards in
-/// the repository's context.
+/// A board for a hosted worktree can no longer be created through this service, so the stale
+/// document every retirement starts from is written straight to the store.
+async fn stale_hosted_board(
+    services: &Services,
+    worktree: &WorktreeId,
+    cards: usize,
+) -> BoardDocument {
+    let state = services.state.load().await.unwrap();
+    let context = state
+        .contexts
+        .iter()
+        .find(|context| context.id.as_str() == "work")
+        .unwrap()
+        .clone();
+    let record: fleet_core::model::Worktree =
+        serde_json::from_value(remote_worktree(worktree)).unwrap();
+    let board = new_worktree_board(&context, &record, "now");
+    let cards = (1..=cards)
+        .map(|number| {
+            serde_json::from_value(serde_json::json!({
+                "id": format!("card-{number}"), "boardId": board.id, "number": number,
+                "title": format!("Task {number}"), "statusId": "todo",
+                "createdAt": "now", "updatedAt": "now"
+            }))
+            .unwrap()
+        })
+        .collect();
+    let doc = BoardDocument {
+        version: BOARD_DOCUMENT_VERSION,
+        board,
+        cards,
+    };
+    services.boards.store.save(&doc).unwrap();
+    doc
+}
+
+/// `ctrl-s b` in a Workspace on a worktree another host owns is that host's board to serve.
+///
+/// The worktree is never in this daemon's state — the mirror is the only place it exists — and a
+/// board scoped to it lives on the daemon that owns the worktree, so this service refuses to
+/// invent a local one and the router sends the request on (`docs/BOARD.md` §4).
 #[tokio::test]
-async fn a_board_for_a_mirrored_worktree_is_created_and_stored_locally() {
+async fn a_board_for_a_worktree_another_host_owns_is_not_found_here() {
     let (_temp, services, _receiver) = fixture().await;
     clone_repo_locally(&services).await;
     let worktree: WorktreeId = "acme/api#feature".parse().unwrap();
     mirror_worktrees(&services, "dev-box", vec![remote_worktree(&worktree)]);
+
+    let error = services
+        .boards
+        .ensure_for_worktree(&worktree)
+        .await
+        .unwrap_err();
     assert!(
-        !services
-            .state
-            .load()
-            .await
-            .unwrap()
-            .worktrees
-            .iter()
-            .any(|item| item.id == worktree)
+        matches!(&error, DaemonError::NotFound(message) if message == "worktree acme/api#feature"),
+        "{error:?}"
     );
+
+    // Explicit creation answers the same way: the repository being cloned here as well changes
+    // nothing about who owns the worktree.
+    let error = services
+        .boards
+        .create_for_worktree(&worktree, Some("Feature plan".into()), None, None)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, DaemonError::NotFound(message) if message == "worktree acme/api#feature"),
+        "{error:?}"
+    );
+    assert!(services.boards.store.list().unwrap().is_empty());
+}
+
+/// A local worktree board is unaffected: the daemon that publishes the worktree serves it.
+#[tokio::test]
+async fn a_board_for_a_worktree_this_daemon_published_is_still_created_locally() {
+    let (_temp, services, _receiver) = fixture().await;
+    clone_repo_locally(&services).await;
+    let worktree: WorktreeId = "acme/api#local".parse().unwrap();
+    let record = remote_worktree(&worktree);
+    services
+        .state
+        .transaction(move |state| {
+            state
+                .worktrees
+                .push(serde_json::from_value(record.clone()).unwrap());
+            Ok(())
+        })
+        .await
+        .unwrap();
 
     let view = services
         .boards
@@ -661,26 +731,7 @@ async fn a_board_for_a_mirrored_worktree_is_created_and_stored_locally() {
         .unwrap();
 
     assert_eq!(view.board.worktree_id.as_ref(), Some(&worktree));
-    // The repository is cloned on both hosts, so both ids are `acme/api` and the board lands in
-    // the context that repository belongs to here.
     assert_eq!(view.board.context_id.as_str(), "work");
-    assert_eq!(
-        view.board.default_repo_id.as_ref().map(RepoId::as_str),
-        Some("acme/api")
-    );
-    assert_eq!(
-        services.boards.store.list().unwrap(),
-        vec![view.board.id.clone()]
-    );
-    assert_eq!(services.boards.get(&view.board.id).await.unwrap(), view);
-    assert_eq!(
-        services
-            .boards
-            .ensure_for_worktree(&worktree)
-            .await
-            .unwrap(),
-        view
-    );
     assert_eq!(
         services
             .boards
@@ -689,143 +740,94 @@ async fn a_board_for_a_mirrored_worktree_is_created_and_stored_locally() {
             .iter()
             .filter_map(|summary| summary.worktree_id.clone())
             .collect::<Vec<_>>(),
-        vec![worktree.clone()]
+        vec![worktree]
     );
+}
 
-    // Deleted on its owning host, the worktree leaves the mirror and its board is hidden,
-    // exactly as a board whose local worktree is gone is hidden.
-    mirror_worktrees(&services, "dev-box", Vec::new());
-    assert!(services.boards.summaries().await.is_empty());
+/// A document left behind for a hosted worktree is not published as one of this daemon's boards.
+#[tokio::test]
+async fn a_stale_document_for_a_worktree_another_host_owns_is_skipped_by_list_and_summaries() {
+    let (_temp, services, _receiver) = fixture().await;
+    clone_repo_locally(&services).await;
+    let worktree: WorktreeId = "acme/api#feature".parse().unwrap();
+    mirror_worktrees(&services, "dev-box", vec![remote_worktree(&worktree)]);
+    let doc = stale_hosted_board(&services, &worktree, 1).await;
+
     assert!(services.boards.list(None).await.unwrap().is_empty());
-}
-
-/// A mirrored worktree of a repository this daemon never cloned still needs a context.
-#[tokio::test]
-async fn a_mirrored_worktree_without_a_local_repository_takes_the_owner_then_active_context() {
-    let (_temp, services, _receiver) = fixture().await;
-    let worktree: WorktreeId = "acme/api#feature".parse().unwrap();
-    mirror_worktrees(&services, "dev-box", vec![remote_worktree(&worktree)]);
-
-    // Nothing here names the repository, no context collects its owner, and no context is
-    // active: there is nowhere to put the board, and saying so beats inventing a placement.
-    let error = services
-        .boards
-        .ensure_for_worktree(&worktree)
-        .await
-        .unwrap_err();
-    assert!(
-        matches!(&error, DaemonError::NotFound(message)
-            if message == "context for remote worktree acme/api#feature"),
-        "{error:?}"
-    );
-
-    // The active context is the surface the user asked from when nothing else places it.
-    services
-        .state
-        .transaction(|state| {
-            state.active_context_id = Some("work".parse().unwrap());
-            Ok(())
-        })
-        .await
-        .unwrap();
-    let view = services
-        .boards
-        .ensure_for_worktree(&worktree)
-        .await
-        .unwrap();
-    assert_eq!(view.board.context_id.as_str(), "work");
-    assert_eq!(view.board.worktree_id.as_ref(), Some(&worktree));
-}
-
-/// A context that collects the repository's owner beats the merely active one.
-#[tokio::test]
-async fn a_mirrored_worktree_lands_in_the_context_that_collects_its_owner() {
-    let (_temp, services, _receiver) = fixture().await;
-    services
-        .state
-        .transaction(|state| {
-            state.contexts.push(Context {
-                id: "oss".parse().unwrap(),
-                name: "OSS".into(),
-                owners: vec!["acme".into()],
-                created_at: "now".into(),
-            });
-            state.active_context_id = Some("work".parse().unwrap());
-            Ok(())
-        })
-        .await
-        .unwrap();
-    let worktree: WorktreeId = "acme/api#feature".parse().unwrap();
-    mirror_worktrees(&services, "dev-box", vec![remote_worktree(&worktree)]);
-
-    let view = services
-        .boards
-        .ensure_for_worktree(&worktree)
-        .await
-        .unwrap();
-
-    assert_eq!(view.board.context_id.as_str(), "oss");
-}
-
-/// A mistyped or stale worktree id is still a missing worktree, not a placement problem.
-#[tokio::test]
-async fn a_worktree_neither_published_nor_mirrored_is_still_not_found() {
-    let (_temp, services, _receiver) = fixture().await;
-    clone_repo_locally(&services).await;
-    mirror_worktrees(
-        &services,
-        "dev-box",
-        vec![remote_worktree(&"acme/api#feature".parse().unwrap())],
-    );
-
-    let error = services
-        .boards
-        .ensure_for_worktree(&"acme/api#ghost".parse().unwrap())
-        .await
-        .unwrap_err();
-
-    assert!(
-        matches!(&error, DaemonError::NotFound(message) if message == "worktree acme/api#ghost"),
-        "{error:?}"
+    assert!(services.boards.summaries().await.is_empty());
+    // The file is still readable by id, which is what retirement needs to report its cards.
+    assert_eq!(
+        services
+            .boards
+            .get(&doc.board.id)
+            .await
+            .unwrap()
+            .cards
+            .len(),
+        1
     );
 }
 
-/// Explicit creation resolves a mirrored worktree exactly as `ensure` does.
+/// A card may link a worktree another host owns, and that link is not a stale one.
 #[tokio::test]
-async fn create_for_worktree_resolves_a_mirrored_worktree_the_same_way() {
+async fn a_card_link_to_a_worktree_another_host_owns_survives_a_board_read() {
     let (_temp, services, _receiver) = fixture().await;
     clone_repo_locally(&services).await;
     let worktree: WorktreeId = "acme/api#feature".parse().unwrap();
     mirror_worktrees(&services, "dev-box", vec![remote_worktree(&worktree)]);
-
     let view = services
         .boards
-        .create_for_worktree(
-            &worktree,
-            Some("Feature plan".into()),
-            Some("PLAN".into()),
-            None,
-        )
+        .ensure(&"work".parse().unwrap())
         .await
         .unwrap();
+    let card: Card = serde_json::from_value(serde_json::json!({
+        "id": "card-1", "boardId": view.board.id, "number": 1, "title": "Task",
+        "statusId": "todo", "worktreeId": worktree, "repoId": "acme/api",
+        "createdAt": "now", "updatedAt": "now"
+    }))
+    .unwrap();
+    let doc = BoardDocument {
+        version: BOARD_DOCUMENT_VERSION,
+        board: view.board,
+        cards: vec![card],
+    };
+    services.boards.store.save(&doc).unwrap();
 
-    assert_eq!(view.board.worktree_id.as_ref(), Some(&worktree));
-    assert_eq!(view.board.context_id.as_str(), "work");
-    assert_eq!(view.board.name, "Feature plan");
-    assert_eq!(view.board.prefix, "PLAN");
+    assert_eq!(
+        services.boards.get(&doc.board.id).await.unwrap().cards[0]
+            .worktree_id
+            .as_ref(),
+        Some(&worktree)
+    );
+    // Clearing the repository of a card that owns a live worktree is refused for a hosted
+    // worktree exactly as for a local one: the link is the same field either way.
     assert!(matches!(
         services
             .boards
-            .create_for_worktree(&worktree, None, None, None)
+            .update_card(
+                &"card-1".parse().unwrap(),
+                CardPatch {
+                    repo_id: Some(None),
+                    ..CardPatch::default()
+                },
+            )
             .await,
         Err(DaemonError::Conflict(_))
     ));
+
+    // Once the worktree leaves the mirror — deleted on its owning host — the link is stale and
+    // the view drops it, as it drops a link to a deleted local worktree.
+    mirror_worktrees(&services, "dev-box", Vec::new());
+    assert!(
+        services.boards.get(&doc.board.id).await.unwrap().cards[0]
+            .worktree_id
+            .is_none()
+    );
 }
 
-/// The board of a mirrored worktree took its context from the local repository, so it moves
-/// with that repository just as the boards of the repository's local worktrees do.
+/// Moving a repository rehomes the boards of the worktrees this daemon published, and no others.
 #[tokio::test]
-async fn moving_a_repository_rehomes_the_board_of_its_mirrored_worktree() {
+async fn moving_a_repository_leaves_a_hosted_worktrees_document_where_it_is() {
     let (_temp, services, _receiver) = fixture().await;
     clone_repo_locally(&services).await;
     services
@@ -843,11 +845,7 @@ async fn moving_a_repository_rehomes_the_board_of_its_mirrored_worktree() {
         .unwrap();
     let worktree: WorktreeId = "acme/api#feature".parse().unwrap();
     mirror_worktrees(&services, "dev-box", vec![remote_worktree(&worktree)]);
-    let view = services
-        .boards
-        .ensure_for_worktree(&worktree)
-        .await
-        .unwrap();
+    let doc = stale_hosted_board(&services, &worktree, 0).await;
 
     services
         .dispatch(fleet_proto::request::RequestBody::MoveRepoToContext {
@@ -857,15 +855,117 @@ async fn moving_a_repository_rehomes_the_board_of_its_mirrored_worktree() {
         .await
         .unwrap();
 
+    // Nothing rehomes a document this daemon does not publish: the owning host holds the board
+    // whose context matters, and this one is only waiting to be retired.
     assert_eq!(
         services
             .boards
-            .get(&view.board.id)
-            .await
+            .store
+            .peek(&doc.board.id)
+            .unwrap()
             .unwrap()
             .board
             .context_id
             .as_str(),
-        "next"
+        "work"
     );
+}
+
+/// Retiring a board no document names is not an error and reports nothing.
+#[tokio::test]
+async fn retiring_the_board_of_a_hosted_worktree_reports_nothing_when_there_is_none() {
+    let (_temp, services, _receiver) = fixture().await;
+    clone_repo_locally(&services).await;
+    let worktree: WorktreeId = "acme/api#feature".parse().unwrap();
+    mirror_worktrees(&services, "dev-box", vec![remote_worktree(&worktree)]);
+
+    assert_eq!(
+        services
+            .boards
+            .retire_hosted_worktree_board(&worktree, &"dev-box".parse().unwrap())
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(services.boards.store.list().unwrap().is_empty());
+}
+
+/// The empty document an older build created here is moved to the trash, not deleted outright.
+#[tokio::test]
+async fn retiring_an_empty_board_for_a_hosted_worktree_trashes_its_document() {
+    let (temp, services, _receiver) = fixture().await;
+    clone_repo_locally(&services).await;
+    let worktree: WorktreeId = "acme/api#feature".parse().unwrap();
+    mirror_worktrees(&services, "dev-box", vec![remote_worktree(&worktree)]);
+    let doc = stale_hosted_board(&services, &worktree, 0).await;
+    let home = FleetHome::new(temp.path());
+
+    let retired = services
+        .boards
+        .retire_hosted_worktree_board(&worktree, &"dev-box".parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(retired.board, doc.board.id);
+    assert_eq!(retired.cards, 0);
+    assert!(retired.path.starts_with(home.trash_dir()));
+    assert!(retired.path.exists());
+    assert!(!home.board_path(&doc.board.id).exists());
+    assert!(services.boards.store.list().unwrap().is_empty());
+    assert!(services.boards.list(None).await.unwrap().is_empty());
+
+    // Retirement is idempotent: the forwarded request that triggers it runs on every refresh.
+    assert_eq!(
+        services
+            .boards
+            .retire_hosted_worktree_board(&worktree, &"dev-box".parse().unwrap())
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+/// Cards are never merged into the host's board, so the trashed file is the only copy left.
+#[tokio::test]
+async fn retiring_a_board_for_a_hosted_worktree_keeps_its_cards_in_the_trashed_document() {
+    let (_temp, services, _receiver) = fixture().await;
+    clone_repo_locally(&services).await;
+    let worktree: WorktreeId = "acme/api#feature".parse().unwrap();
+    mirror_worktrees(&services, "dev-box", vec![remote_worktree(&worktree)]);
+    let doc = stale_hosted_board(&services, &worktree, 2).await;
+
+    let retired = services
+        .boards
+        .retire_hosted_worktree_board(&worktree, &"dev-box".parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(retired.cards, 2);
+    let trashed: BoardDocument =
+        serde_json::from_str(&std::fs::read_to_string(&retired.path).unwrap()).unwrap();
+    assert_eq!(trashed, doc);
+    assert_eq!(
+        trashed
+            .cards
+            .iter()
+            .map(|card| card.id.to_string())
+            .collect::<Vec<_>>(),
+        vec!["card-1".to_owned(), "card-2".to_owned()]
+    );
+    // The card index no longer routes those ids to a board that is gone.
+    assert!(matches!(
+        services
+            .boards
+            .update_card(
+                &"card-1".parse().unwrap(),
+                CardPatch {
+                    title: Some("Renamed".into()),
+                    ..CardPatch::default()
+                },
+            )
+            .await,
+        Err(DaemonError::NotFound(message)) if message == "card card-1"
+    ));
 }
