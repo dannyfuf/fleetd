@@ -138,16 +138,27 @@ impl BoardStore {
     }
     /// Moves a board and anything quarantined from it into Fleet's trash directory.
     pub fn delete(&self, id: &BoardId) -> DaemonResult<()> {
+        self.delete_reporting(id)?;
+        Ok(())
+    }
+    /// Deletes a board and reports where each document it moved now lives, the live one last.
+    ///
+    /// Retiring a board a user never asked to lose — this daemon's stale document for a
+    /// worktree another host owns — has to name the file in its log line, and only the trash
+    /// destination is recoverable: the source path is gone by the time the caller is told.
+    pub fn delete_reporting(&self, id: &BoardId) -> DaemonResult<Vec<PathBuf>> {
+        let mut trashed = Vec::new();
         // A quarantined remnant left in place would refuse every later board this id derives
         // from, so a deleted context could never be recreated with a working board.
         for path in self.quarantined(id)? {
-            self.trash(&path, id)?;
+            trashed.push(self.trash(&path, id)?);
         }
         let path = self.home.board_path(id);
         if !self.files.exists(&path) {
-            return Ok(());
+            return Ok(trashed);
         }
-        self.trash(&path, id)
+        trashed.push(self.trash(&path, id)?);
+        Ok(trashed)
     }
     /// Moves a worktree-owned board into that worktree's trash entry so undo restores both.
     pub fn delete_with_worktree(&self, id: &BoardId, worktree_trash: &Path) -> DaemonResult<()> {
@@ -203,13 +214,14 @@ impl BoardStore {
         self.files.remove_detached(&bundle)?;
         Ok(ids.into_iter().collect())
     }
-    fn trash(&self, path: &std::path::Path, id: &BoardId) -> DaemonResult<()> {
+    fn trash(&self, path: &std::path::Path, id: &BoardId) -> DaemonResult<PathBuf> {
         self.files.create_dir_all(&self.home.trash_dir())?;
         let destination = self
             .home
             .trash_dir()
             .join(format!("board-{id}-{}.json", uuid::Uuid::new_v4()));
-        self.files.rename(path, &destination)
+        self.files.rename(path, &destination)?;
+        Ok(destination)
     }
 }
 

@@ -138,9 +138,25 @@ impl Services {
                     .into_iter()
                     .filter(|thread| !local_thread_ids.contains(&thread.thread))
                     .collect::<Vec<_>>();
-                self.router
-                    .ids
-                    .replace_host_inventory(host, &owned_worktrees, &owned_threads);
+                // A board whose worktree this daemon also has is not the host's to route, the
+                // same rule the worktree and thread filters above apply.
+                let owned_boards = fragment
+                    .snapshot
+                    .boards
+                    .into_iter()
+                    .filter(|board| {
+                        board
+                            .worktree_id
+                            .as_ref()
+                            .is_some_and(|worktree| !local_ids.contains(worktree))
+                    })
+                    .collect::<Vec<_>>();
+                self.router.ids.replace_host_inventory(
+                    host,
+                    &owned_worktrees,
+                    &owned_threads,
+                    &owned_boards,
+                );
             }
         }
         let mut worktrees = local_worktrees;

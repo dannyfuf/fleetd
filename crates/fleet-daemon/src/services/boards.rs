@@ -21,15 +21,17 @@ use fleet_proto::{
     event::{BoardChangeReason, Event},
     job::JobKind,
 };
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use tokio::sync::{Mutex, RwLock};
 
 /// The worktrees other hosts own, as this daemon last mirrored them.
 ///
-/// A worktree board may be scoped to a mirrored remote worktree, and those worktrees never
-/// reach the local `StateStore` — they live only in the router's mirror. The trait is the
-/// late-bound seam that lets `Boards` see them without naming the mirror's type, in the same
-/// shape as [`WorktreeCascade`] (`docs/BOARD.md` §4).
+/// A *card* on a local board may link a worktree another host owns — `create_worktree_from_card`
+/// with a placement is how it gets there — and those worktrees never reach the local
+/// `StateStore`: they live only in the router's mirror. The trait is the late-bound seam that
+/// lets `Boards` see them without naming the mirror's type, in the same shape as
+/// [`WorktreeCascade`] (`docs/BOARD.md` §4). Board *scope* never consults it: a worktree board
+/// belongs to the daemon that owns the worktree.
 pub(super) trait RemoteWorktrees: Send + Sync {
     /// Every mirrored worktree currently known, each carrying its owning host.
     fn worktrees(&self) -> Vec<Worktree>;
@@ -41,13 +43,15 @@ impl RemoteWorktrees for super::mirror::Mirror {
     }
 }
 
-/// Where the boards service found a worktree it was asked about.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum WorktreeOrigin {
-    /// Published by this daemon and present in its state.
-    Local,
-    /// Owned by another host and seen only through the mirror.
-    Mirrored,
+/// The board document a daemon retired because another host owns its worktree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetiredBoard {
+    /// The board the retired document described.
+    pub board: BoardId,
+    /// Where the document now lives, inside the daemon's trash directory.
+    pub path: PathBuf,
+    /// How many cards it held, which are only recoverable from that file.
+    pub cards: usize,
 }
 
 /// Coordinates board persistence, backend synchronization, and worktree creation.
@@ -140,9 +144,8 @@ impl Boards {
     }
 
     /// The worktree `id` names, whether this daemon published it or a host it mirrors owns it.
-    fn known_worktree(&self, state: &State, id: &WorktreeId) -> Option<(Worktree, WorktreeOrigin)> {
-        find_worktree(state, &self.mirrored_worktrees(), id)
-            .map(|(worktree, origin)| (worktree.clone(), origin))
+    fn known_worktree(&self, state: &State, id: &WorktreeId) -> Option<Worktree> {
+        find_worktree(state, &self.mirrored_worktrees(), id).cloned()
     }
 
     /// Serializes the read-modify-write cycles of one board without touching the others.
@@ -175,18 +178,12 @@ fn find_worktree<'a>(
     state: &'a State,
     mirrored: &'a [Worktree],
     id: &WorktreeId,
-) -> Option<(&'a Worktree, WorktreeOrigin)> {
+) -> Option<&'a Worktree> {
     state
         .worktrees
         .iter()
+        .chain(mirrored)
         .find(|worktree| worktree.id == *id)
-        .map(|worktree| (worktree, WorktreeOrigin::Local))
-        .or_else(|| {
-            mirrored
-                .iter()
-                .find(|worktree| worktree.id == *id)
-                .map(|worktree| (worktree, WorktreeOrigin::Mirrored))
-        })
 }
 
 /// Whether `id` names a worktree this daemon published or one it mirrors.

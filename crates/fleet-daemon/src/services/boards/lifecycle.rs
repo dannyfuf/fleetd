@@ -12,19 +12,20 @@ impl Boards {
         {
             return Err(DaemonError::NotFound(format!("context {context}")));
         }
-        let mirrored = self.mirrored_worktrees();
         let mut summaries = Vec::new();
         for id in self.store.list()? {
             let Some(doc) = self.scan_load(&id) else {
                 continue;
             };
+            // Local state only, and the mirror is never consulted: a worktree board lives on
+            // the daemon that owns the worktree, so a document scoped to a worktree this
+            // daemon never published is either an orphan or the stale copy an older build
+            // made before the request was routed to its owner (`docs/BOARD.md` §4).
             if context.is_some_and(|id| *id != doc.board.context_id)
                 || !state.contexts.iter().any(|c| c.id == doc.board.context_id)
-                || doc
-                    .board
-                    .worktree_id
-                    .as_ref()
-                    .is_some_and(|worktree| !worktree_exists(&state, &mirrored, worktree))
+                || doc.board.worktree_id.as_ref().is_some_and(|worktree| {
+                    !state.worktrees.iter().any(|item| item.id == *worktree)
+                })
             {
                 continue;
             }
@@ -44,6 +45,8 @@ impl Boards {
             .load(id)?
             .ok_or_else(|| BoardError::BoardNotFound(id.to_string()))?;
         let state = self.state_store.load().await?;
+        // A *card* may link a worktree another host owns, so the scrub below reads the mirror
+        // too; the board's own scope is a local question and is not checked here.
         let mirrored = self.mirrored_worktrees();
         let context = doc.board.context_id.clone();
         scrub_repo(&state, &context, &mut doc.board.default_repo_id);
@@ -102,10 +105,10 @@ impl Boards {
         })
     }
 
-    /// Gets or creates the board scoped to one worktree, local or mirrored.
+    /// Gets or creates the board scoped to one worktree this daemon published.
     pub async fn ensure_for_worktree(&self, worktree: &WorktreeId) -> DaemonResult<BoardView> {
         let state = self.state_store.load().await?;
-        self.worktree_context(&state, worktree)?;
+        worktree_context(&state, worktree)?;
         // Existing-board refreshes stay lock-free, as context-board refreshes do.
         if let Some(id) = self.worktree_board(worktree)? {
             return self.get(&id).await;
@@ -115,7 +118,7 @@ impl Boards {
         // empty document before restore has returned the archived board and its cards.
         let _lifecycle = self.worktrees.claim_lifecycle(worktree.clone()).await;
         let state = self.state_store.load().await?;
-        let (worktree_record, context) = self.worktree_context(&state, worktree)?;
+        let (worktree_record, context) = worktree_context(&state, worktree)?;
         if let Some(id) = self.worktree_board(worktree)? {
             return self.get(&id).await;
         }
@@ -161,7 +164,6 @@ impl Boards {
                 return Vec::new();
             }
         };
-        let mirrored = self.mirrored_worktrees();
         let mut summaries = Vec::new();
         for id in &ids {
             let stamp = self.store.stamp(id);
@@ -199,10 +201,12 @@ impl Boards {
                 .contexts
                 .iter()
                 .any(|context| context.id == summary.context_id)
+                // Local state only, as in `list`: a board scoped elsewhere is not this
+                // daemon's to publish.
                 && summary
                     .worktree_id
                     .as_ref()
-                    .is_none_or(|worktree| worktree_exists(&state, &mirrored, worktree))
+                    .is_none_or(|worktree| state.worktrees.iter().any(|item| item.id == *worktree))
             {
                 summaries.push(summary);
             }
@@ -274,7 +278,7 @@ impl Boards {
     ) -> DaemonResult<BoardView> {
         let _lifecycle = self.worktrees.claim_lifecycle(worktree.clone()).await;
         let state = self.state_store.load().await?;
-        let (worktree_record, context) = self.worktree_context(&state, worktree)?;
+        let (worktree_record, context) = worktree_context(&state, worktree)?;
         let now = self.now();
         let mut board = new_worktree_board(&context, &worktree_record, &now);
         let base = board.id.clone();
@@ -321,37 +325,6 @@ impl Boards {
         )))
     }
 
-    /// Resolves the worktree a board is scoped to, and the context that board belongs to.
-    ///
-    /// The worktree is looked up in this daemon's state first and in the worktrees it mirrors
-    /// second, so a session on a worktree another host owns can open a board here
-    /// (`docs/BOARD.md` §4). A worktree neither names is `not found: worktree <id>`.
-    fn worktree_context(
-        &self,
-        state: &State,
-        id: &WorktreeId,
-    ) -> DaemonResult<(Worktree, Context)> {
-        let (worktree, origin) = self
-            .known_worktree(state, id)
-            .ok_or_else(|| DaemonError::NotFound(format!("worktree {id}")))?;
-        // A repository cloned on both hosts has the same derived `owner/name` id, so a mirrored
-        // worktree of a repository this daemon also has lands in that repository's context, and
-        // its board sits beside the local worktrees' boards.
-        let context = match context_of_repo(state, &worktree.repo_id) {
-            Some(context) => context?,
-            // A local worktree whose repository is gone is a broken state, not a placement
-            // question: it keeps reporting the missing repository it was published from.
-            None if origin == WorktreeOrigin::Local => {
-                return Err(DaemonError::NotFound(format!(
-                    "repository {}",
-                    worktree.repo_id
-                )));
-            }
-            None => context_for_mirrored_worktree(state, &worktree)?,
-        };
-        Ok((worktree, context))
-    }
-
     fn board_id_is_available(&self, id: &BoardId) -> DaemonResult<bool> {
         self.refuse_over_quarantine(id)?;
         Ok(self.store.load(id)?.is_none())
@@ -395,16 +368,6 @@ impl Boards {
             }
         }
 
-        // A board scoped to a mirrored worktree of this repository is stored here and derived
-        // its context from this repository, so it is rehomed with the local worktrees' boards.
-        // There is no lifecycle claim to take for one: the owning host runs its lifecycle.
-        let mut scoped_ids = claimed_ids.clone();
-        for worktree in self.mirrored_worktrees() {
-            if worktree.repo_id == repo && !scoped_ids.contains(&worktree.id) {
-                scoped_ids.push(worktree.id);
-            }
-        }
-
         let ids = self.store.list()?;
         let mut gates = Vec::with_capacity(ids.len());
         for id in &ids {
@@ -419,7 +382,7 @@ impl Boards {
                 .board
                 .worktree_id
                 .as_ref()
-                .is_some_and(|worktree| scoped_ids.contains(worktree))
+                .is_some_and(|worktree| claimed_ids.contains(worktree))
             {
                 originals.push(doc.clone());
                 doc.board.context_id = context.clone();
@@ -676,6 +639,50 @@ impl Boards {
         Ok(())
     }
 
+    /// Moves this daemon's own document for a worktree another host owns into the trash.
+    ///
+    /// A worktree board lives on the daemon that owns the worktree (`docs/BOARD.md` §4), so a
+    /// document found here for a hosted worktree is the copy an older build created before board
+    /// requests were routed to their owner. Left in place it shadows the real board — the derived
+    /// id is the same on both hosts — and it is trashed rather than merged, because nothing here
+    /// can tell which side of a divergence is the user's work. No `BoardChanged` is published:
+    /// the request this retirement runs under is about to return the *host's* board under that
+    /// same id, and a `Deleted` event would tell the app to drop the board it just opened.
+    pub async fn retire_hosted_worktree_board(
+        &self,
+        worktree: &WorktreeId,
+        host: &HostId,
+    ) -> DaemonResult<Option<RetiredBoard>> {
+        let Some(board) = self.worktree_board(worktree)? else {
+            return Ok(None);
+        };
+        let _guard = self.gate(&board).await;
+        // Re-read under the gate and by persisted scope: the id above came from a lock-free
+        // scan, and only the document itself proves which worktree it belongs to. `peek`, so a
+        // damaged file is reported instead of being quarantined and then retired as empty.
+        let Some(doc) = self.store.peek(&board)? else {
+            return Ok(None);
+        };
+        if doc.board.worktree_id.as_ref() != Some(worktree) {
+            return Ok(None);
+        }
+        let cards = doc.cards.len();
+        let trashed = self.store.delete_reporting(&board)?;
+        self.summaries.write().await.remove(&board);
+        self.index.write().await.retain(|_, owner| *owner != board);
+        let Some(path) = trashed.last().cloned() else {
+            // Nothing was left to move: the file went away between the read above and the
+            // rename, so there is no trashed document to report or to name in the log.
+            return Ok(None);
+        };
+        if cards == 0 {
+            tracing::info!(%worktree, %host, %board, path = %path.display(), "retired this daemon's empty board for a worktree another host owns");
+        } else {
+            tracing::warn!(%worktree, %host, %board, cards, path = %path.display(), "retired this daemon's board for a worktree another host owns; its cards must be re-created by hand on that host");
+        }
+        Ok(Some(RetiredBoard { board, path, cards }))
+    }
+
     /// Restores a worktree board bundled into the restored worktree directory.
     pub async fn restore_for_worktree(
         &self,
@@ -739,42 +746,30 @@ impl RepoContextMover for Boards {
     }
 }
 
-/// The context of a repository this daemon has, or `None` when it has no such repository.
+/// Resolves the worktree a board is scoped to, and the context that board belongs to.
 ///
-/// The inner failure is a repository pointing at a context that is gone, which is a broken state
-/// and not the same answer as "this daemon never cloned it".
-fn context_of_repo(state: &State, repo: &RepoId) -> Option<DaemonResult<Context>> {
-    let repo = state.repos.iter().find(|item| item.id == *repo)?;
-    Some(
-        state
-            .contexts
-            .iter()
-            .find(|context| context.id == repo.context_id)
-            .cloned()
-            .ok_or_else(|| DaemonError::NotFound(format!("context {}", repo.context_id))),
-    )
-}
-
-/// The context a mirrored worktree's board belongs to, when this daemon has no such repository.
-///
-/// The worktree lives on another host, so nothing local names its context. The owner of its
-/// repository id is the closest thing to a statement of intent — contexts are defined by the
-/// GitHub owners they collect — and the active context is the surface the user is working in
-/// when even that says nothing.
-fn context_for_mirrored_worktree(state: &State, worktree: &Worktree) -> DaemonResult<Context> {
-    let owner = worktree.repo_id.owner();
-    state
+/// This daemon's state is the only place it looks: a worktree board lives on the daemon that
+/// owns the worktree, so a worktree this daemon never published is `not found: worktree <id>`
+/// here and the request belongs to that worktree's owner (`docs/BOARD.md` §4).
+fn worktree_context(state: &State, id: &WorktreeId) -> DaemonResult<(Worktree, Context)> {
+    let worktree = state
+        .worktrees
+        .iter()
+        .find(|worktree| worktree.id == *id)
+        .cloned()
+        .ok_or_else(|| DaemonError::NotFound(format!("worktree {id}")))?;
+    let repo = state
+        .repos
+        .iter()
+        .find(|repo| repo.id == worktree.repo_id)
+        .ok_or_else(|| DaemonError::NotFound(format!("repository {}", worktree.repo_id)))?;
+    let context = state
         .contexts
         .iter()
-        .find(|context| context.owners.iter().any(|item| item == owner))
-        .or_else(|| {
-            let active = state.active_context_id.as_ref()?;
-            state.contexts.iter().find(|context| context.id == *active)
-        })
+        .find(|context| context.id == repo.context_id)
         .cloned()
-        .ok_or_else(|| {
-            DaemonError::NotFound(format!("context for remote worktree {}", worktree.id))
-        })
+        .ok_or_else(|| DaemonError::NotFound(format!("context {}", repo.context_id)))?;
+    Ok((worktree, context))
 }
 
 fn suffixed_board_id(base: &BoardId, suffix: u32) -> BoardId {

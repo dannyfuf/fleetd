@@ -8,7 +8,7 @@ use std::{
 
 use fleet_core::{
     agents::{AgentThreadSummary, ThreadId},
-    ids::{HostId, SessionId, WorktreeId},
+    ids::{BoardId, HostId, SessionId, WorktreeId},
     model::Worktree,
     sessions::{AgentActivity, Session, SessionState, WorktreeStatus},
 };
@@ -175,6 +175,23 @@ impl Mirror {
                 .agent_threads
                 .iter()
                 .any(|summary| &summary.thread == id)
+                .then(|| host.clone())
+        })
+    }
+
+    /// The host that owns one mirrored worktree board, if a snapshot fragment names it.
+    ///
+    /// Only worktree-scoped summaries answer: a host's context boards carry ids derived from
+    /// context ids, which collide with this daemon's own context boards by construction. It is
+    /// the board analog of [`Self::host_of_worktree`] (`docs/decisions/0021-hosted-worktree-boards-route-to-owner.md`).
+    #[must_use]
+    pub fn host_of_board(&self, id: &BoardId) -> Option<HostId> {
+        read(&self.fragments).iter().find_map(|(host, fragment)| {
+            fragment
+                .snapshot
+                .boards
+                .iter()
+                .any(|summary| &summary.id == id && summary.worktree_id.is_some())
                 .then(|| host.clone())
         })
     }
@@ -489,6 +506,45 @@ mod tests {
         // restart before any per-thread list registers the id.
         assert_eq!(mirror.host_of_thread(&thread), Some(owner));
         assert_eq!(mirror.host_of_thread(&ThreadId::new()), None);
+    }
+
+    #[test]
+    fn host_of_board_names_the_owning_fragment_only_for_a_worktree_board() {
+        let mirror = Mirror::new();
+        let owner: HostId = "dev-box".parse().expect("host");
+        let scoped = BoardId::try_from("wt-acme-api-feature").expect("board");
+        let context = BoardId::try_from("personal").expect("board");
+        let mut snapshot = snapshot_with_thread(thread_summary(
+            ThreadId::new(),
+            WorktreeId::try_from("acme/api#feature").expect("worktree"),
+        ));
+        snapshot.boards = vec![
+            board_summary(scoped.clone(), Some("acme/api#feature")),
+            board_summary(context.clone(), None),
+        ];
+        mirror.apply(&owner, snapshot);
+
+        // The board analog of `host_of_worktree`, restricted to worktree boards: `personal` is
+        // also this daemon's own context board id, so answering it would route local work away.
+        assert_eq!(mirror.host_of_board(&scoped), Some(owner));
+        assert_eq!(mirror.host_of_board(&context), None);
+    }
+
+    fn board_summary(id: BoardId, worktree: Option<&str>) -> fleet_core::board::BoardSummary {
+        fleet_core::board::BoardSummary {
+            id,
+            context_id: "personal".parse().expect("context id"),
+            worktree_id: worktree.map(|id| WorktreeId::try_from(id).expect("worktree")),
+            name: "board".to_owned(),
+            prefix: "FLT".to_owned(),
+            backend_kind: "local".to_owned(),
+            card_count: 0,
+            open_count: 0,
+            dirty_count: 0,
+            conflict_count: 0,
+            last_synced_at: None,
+            last_error: None,
+        }
     }
 
     fn snapshot_with_thread(summary: AgentThreadSummary) -> Snapshot {
