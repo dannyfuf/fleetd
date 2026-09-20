@@ -71,5 +71,26 @@ Workspace worktree board are never visible at the same time. If a later feature 
 both boards live concurrently, that single-state assumption must be revisited rather than sharing
 one generation, selection, loading flag, or cached view between the two scopes.
 
+Phase 2 shipped that surface and added three things to this record. **The tab**: `fleet://board`
+is now a second reserved native command, opened on demand by `ctrl-s b` in a worktree Workspace
+and drawn by the app's own board screen — the same one the Hub tab uses, lent by `Shell` to
+whichever surface is drawing, since the two are never on screen together. **The scope**:
+`BoardState.scope` is `Context(ContextId) | Worktree(WorktreeId)`, `None` resolving to the active
+context; entering a scope invalidates the mirror through the existing generation counter, so a
+reply from the scope just left is stranded exactly as a reply from the previous context is, and
+the Hub can never inherit a worktree scope. **The sleep/wake statement**: because Fleet never
+writes the tab into `windows[]`, sleeping a session closes it and waking does not restore it;
+that is a product decision recorded in `docs/UX-SPEC.md` §3.6, reversible by a user's own
+`windows[]` entry and by a future default change, not by code.
+
+No phase-1 assumption changed. The roadmap's rule that the app only ever reaches a board through
+`EnsureBoard` or `EnsureWorktreeBoard` holds in the code: `screens::board::ensure_current` picks
+the request from the scope, `AppState::apply_board_view` admits a view only when the scope does
+(a worktree board must carry that worktree; a context board that context and **no** worktree),
+and the only `BoardId` `fleet-app` ever holds is the one a daemon answer carried — the derived
+`wt-…` id is never computed client-side. The capability gate holds too: the app refuses to enter
+a worktree scope on a daemon without `board.worktree`, with the CLI's own sentence as a toast,
+and the typed client re-checks at dispatch.
+
 The protocol already exposes `DeleteBoard`, but `fleet board delete` remains a separate follow-up;
 today a worktree board is removed with its worktree or through another typed client.

@@ -138,9 +138,13 @@ system, the native git UI and the diff pipeline — are recorded in `docs/decisi
   Two reserved commands exist, and only the first is process-backed:
   - `fleet://lazygit` — the git UI, drawn by `crates/fleet-lazygit` embedded in `fleet-app` (see
     that crate's README, "Embedding"). It degrades to `lazygit` when proxied.
-  - `fleet://board` — the worktree board tab, drawn from the board the owning daemon already
-    serves over the wire. It is daemon-data-driven rather than process-backed, so, like a
-    structured agent tab, it stays native on a proxied session.
+  - `fleet://board` — the worktree board tab. `fleet-app` draws it with its own board screen,
+    the one the Hub's `Board` tab uses, pointed at that worktree's board rather than the active
+    context's (`EnsureWorktreeBoard`, `docs/BOARD.md` §8): nothing is embedded and no second
+    implementation exists. Its content is the board the owning daemon already serves over the
+    wire, so it is daemon-data-driven rather than process-backed and, like a structured agent
+    tab, it stays native on a proxied session. Fleet never puts it in the default `windows[]`;
+    `ctrl-s b` creates it on demand.
 
   `fleet_core::config::proxied_degradation` is the single place that rule lives.
 

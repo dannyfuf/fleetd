@@ -747,11 +747,19 @@ the active context's — with the same columns, cards, dialogs and keys the Hub'
 under the key context `Fleet > Workspace > Native > Board` (`docs/KEYMAP.md`). It builds
 nothing per worktree: the Hub tab and this one share one board mirror behind a scope, and
 selecting the tab is what points that mirror at the worktree. Selecting any other tab, closing
-the tab or leaving the Workspace points it back at the active context. Because the tab is
-created on demand and never written to `windows[]`, sleeping the session closes it and waking
-does not restore it — `ctrl-s b` reopens it in one keystroke. `o` on a card linked to the
-worktree you are already standing in answers `Already in this worktree` rather than re-opening
-the session.
+the tab or leaving the Workspace points it back at the active context. `o` on a card linked to
+the worktree you are already standing in answers `Already in this worktree` rather than
+re-opening the session.
+
+**The board tab is not in `windows[]`.** `ctrl-s b` asks fleetd for it the first time and
+selects it every time after, so it is a tab the session acquired rather than one it was born
+with: sleeping the session closes it with every other non-kept tab, and waking does not bring
+it back. That is one keystroke to undo — `ctrl-s b` again — and it is the reason the key is
+worth memorising rather than the tab position. A user who wants it permanent adds
+`{"name":"board","command":"fleet://board"}` to `windows[]` in `config.json` (§3.8.6); it is
+then created with every new session and rebuilt on wake like `lg`, and `ctrl-s b` still selects
+it instead of adding a second one, because the tab is recognised by its reserved command and
+never by its name — rename it with `ctrl-s ,` and the key still finds it.
 
 **Keyboard:** all keys → PTY except `cmd-c` copy selection and `cmd-v` paste — or, on a native
 tab, every key except `ctrl-s` → the pane; `ctrl-s` then
@@ -1937,18 +1945,37 @@ limits when an already-completed watch is first discovered.
 
 ## Board
 
-*One unscoped board per context, one column per status, one key per edit* (BOARD §8).
+*One unscoped board per context and, on demand, one per worktree; one column per status, one key
+per edit* (BOARD §8).
 
 ### Placement
 
-The board is the Hub's third screen tab (`g b`, tab label `Board`), rendered by
-`screens::board::BoardScreen` in the Hub's body. It replaces the worktrees list and the repos
-rail in place; the context bar above it is what scopes it, because the board shown is always
-`EnsureBoard(active_context)`. Switching context clears the board and re-ensures the new one.
+The board has **two surfaces and one pane**. The Hub's third screen tab (`g b`, tab label
+`Board`) shows the active context's board; a worktree Workspace's `fleet://board` tab (`ctrl-s b`,
+§3.6) shows that worktree's. Both are drawn by the same `screens::board::BoardScreen` — the two
+are never on screen at once, so there is one of it, one filter editor and one mirror behind them.
+
+On the Hub the board replaces the worktrees list and the repos rail in place, and the context bar
+above it is what scopes it: the board shown is always `EnsureBoard(active_context)`. Switching
+context clears the board and re-ensures the new one.
+
+Inside a worktree session the `fleet://board` tab shows `EnsureWorktreeBoard(worktree)` instead —
+the board of the worktree whose Workspace you are standing in, whatever the active context's
+board holds. Selecting the tab is what asks for it; selecting another tab, leaving the Workspace
+or closing the tab hands the pane back to the context board. **The Hub never shows a worktree
+board's cards**, and the worktree tab never shows the context board's: a board belongs to exactly
+one scope, so `g b` and `ctrl-s b` answer different questions and neither inherits the other's
+answer. A daemon too old to serve worktree boards refuses the tab and says so
+(`this daemon does not support worktree boards; run fleet daemon restart`, §2.7) rather than
+opening a tab it could never fill.
 
 The `Board` tab carries the active context's **unscoped** `Snapshot.boards` summary: `open_count`
 as the tab count, and a `•` appended to the label when `conflict_count > 0`. Worktree-scoped
-summaries from that context are ignored. The tab spins while a load is in flight.
+summaries from that context are ignored — the Hub's count is the context board's count, not the
+sum of everything in the context. The tab spins while a load is in flight. The Workspace's board
+tab carries no open count and no conflict dot: its only chrome is the native-tab glyph every
+`fleet://` tab has, because the tab strip is a strip of terminals and a count there would be the
+one number in it that is not about a terminal.
 
 ### The pane
 
@@ -1979,7 +2006,8 @@ the app never invents an order the daemon does not agree with.
 
 ### States
 
-* **cold** — skeleton columns while the first `EnsureBoard` is in flight;
+* **cold** — skeleton columns while the first load is in flight, whichever request the scope
+  named (`EnsureBoard` on the Hub, `EnsureWorktreeBoard` in the worktree tab);
 * **failed** — the message verbatim in a sticky row plus `The board could not be loaded. · r reload`;
 * **no context, no daemon** — the two states where a load can never go out take the failed
   shape rather than cold columns, because skeletons promise a request that was never sent:
@@ -2003,7 +2031,9 @@ wrap (§5.11), and the focused column and card are always scrolled into view. Ev
    (its rows are cards in columns, and `Overlay::Filter`'s `Enter` opens a worktree), so the board
    mirrors into `BoardState.filter` on `Changed`. While the input has the keyboard,
    `AppState::context_chain` returns
-   `["Filter", "BoardFilter"]` instead of `["Hub", "Board"]`: that is the only thing that makes `c`, `d`, `s` and
+   `["Filter", "BoardFilter"]` instead of `["Hub", "Board"]` — or instead of
+   `["Workspace", "Native", "Board"]` in the worktree tab, where the same editor and the same
+   two-stage `Esc` serve: that is the only thing that makes `c`, `d`, `s` and
    `w` type instead of fire. `Esc` is the two-stage §3.10 one — leave the input keeping the filter,
    then clear it — and never quits. `Tab` / `Shift-Tab` move columns while left/right and
    ctrl-b/ctrl-f move the filter caret.

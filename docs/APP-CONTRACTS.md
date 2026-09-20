@@ -65,6 +65,7 @@ impl HubScreen {
     pub fn new(cx: &mut App) -> Self;
     pub fn render(
         &mut self,
+        board: &mut BoardScreen,          // the shell's one board screen, lent for the frame
         state: &Entity<AppState>,
         bridge: &Bridge,
         focus: &FocusHandle,
@@ -73,7 +74,10 @@ impl HubScreen {
     ) -> AnyElement;
 }
 
-// screens/board.rs — same frozen constructor/render signature as HubScreen
+// screens/board.rs — same frozen constructor/render signature as HubScreen, minus the loan:
+// `Shell` owns the one BoardScreen and passes it to whichever surface draws the board this
+// frame (the Hub's `Board` tab, or a Workspace's `fleet://board` tab). Its root tracks the
+// `focus` it is handed, so the surface's own root must not track it a second time.
 impl BoardScreen { pub fn new(cx: &mut App) -> Self; pub fn render(/* … */) -> AnyElement; }
 
 // screens/jobs.rs — same shape, rendered into the overlay layer
@@ -85,6 +89,8 @@ impl WorkspaceScreen {
     pub(crate) fn synchronize(&mut self, state: &Entity<AppState>, bridge: &Bridge,
                               window: &mut Window, cx: &mut App);
     /// Composes what `synchronize` prepared. Issues no request, reconciles no resource.
+    /// Takes the same lent `board: &mut BoardScreen` first argument as `HubScreen::render`,
+    /// for the frames where the session's active tab is the `fleet://board` one.
     pub(crate) fn render_prepared(/* same arguments as `render` */) -> AnyElement;
 }
 

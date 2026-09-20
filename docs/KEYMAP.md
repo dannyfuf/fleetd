@@ -18,7 +18,7 @@ this file; where the two disagree, this file wins.
 | --- | --- | --- | --- |
 | Normal | `Hub` / `Hub > Repos` / `Hub > Worktrees` / `Hub > Prs` / `Hub > Board` | app start, `ctrl-s s` from a terminal, `Esc` from dialogs | opening a session |
 | Terminal | `Workspace > Terminal` | opening a worktree session, `Enter` on a session tab | `ctrl-s` (prefix) |
-| Native | `Workspace > Native` | selecting a tab whose configured command is a `fleet://` surface (the default third tab, `lg`) | `ctrl-s` (prefix), or selecting a PTY tab |
+| Native | `Workspace > Native`, plus `Workspace > Native > Board` on the board tab | selecting a tab whose configured command is a `fleet://` surface (the default third tab, `lg`, or the `board` tab of `ctrl-s b`) | `ctrl-s` (prefix), or selecting a PTY tab |
 | Prefix | `Workspace > Prefix` (one-shot) | `ctrl-s` inside Terminal or Native | any key (consumed) or `Esc` |
 | Scroll | `Workspace > Scroll` | `ctrl-s [` | `Esc`, `q`, `i` |
 | Agent thread | `Agent > AgentIdle` / `Agent > AgentWorking` / `Agent > AgentDecision > *` / `Agent > AgentNativeScroll` (`> AgentRow` under it) | `ctrl-s a`/`ctrl-s A` in Workspace, selecting a native agent tab | selecting another tab, `ctrl-s x` |
@@ -32,6 +32,12 @@ this file; where the two disagree, this file wins.
 | Jobs | `Jobs` / `Jobs > Log` (overlay) | `J` anywhere in Normal, `ctrl-s J` in a terminal | `Esc`, `J`, `q` |
 | Daemon | `Daemon > Down` / `Daemon > Banner` / `Daemon > Doctor` | fleetd will not start (§3.12 B), fleetd died while attached (§3.12 C), doctor runs | daemon comes back, `Esc` (banner/doctor), `ctrl-q` |
 | FirstRun | `FirstRun` | no contexts and no repos exist | any key that creates or imports something |
+
+The board **pane** is the one Native tab that names itself. A `fleet://board` tab appends a word
+*under* `Workspace > Native`, so the whole Hub board table is bound over it (see *Board and card
+detail*) while `ctrl-s` keeps working, because the word its parent binds the prefix on is still
+on the chain. `lg` adds no such word: the embedded pane takes every key that is not `ctrl-s` and
+publishes its own contexts inside itself.
 
 The agent **thread** is not a shadowing surface: it is the Workspace's selected tab, so it
 *replaces* the `Workspace > …` context rather than covering it. Nothing is therefore inherited
@@ -170,7 +176,7 @@ alone preserves them.
 | `u` | select the caller of the current child thread, attaching it first if needed |
 | `d` | agent picker: the palette pre-filtered to `AGENTS` |
 | `c` | new terminal tab (shell in worktree path) |
-| `b` | this worktree's board tab: created the first time, selected every time |
+| `b` | this worktree's board tab: created the first time, selected every time; an agent session is told `boards belong to worktrees` |
 | `x` | close current terminal (confirm if a keep-alive process is running) |
 | `r` | restart the exited command in this terminal [A10] |
 | `y` | copy the worktree path of the current session [A11] |
@@ -392,8 +398,10 @@ reserved command: it draws this worktree's board with the Hub board's own keys u
 `Workspace > Native` binds `ctrl-s` and
 nothing else — not even the `cmd-c` / `cmd-v` clipboard keys or the viewport shortcuts
 `Workspace > Terminal` reserves, because the pane owns its own selection and its own scrolling —
-so every other key belongs to the pane, whose own key table lives in
-`crates/fleet-lazygit/README.md`. The full context chain is
+so every other key belongs to the pane. Where that table lives is the one difference between the
+two reserved commands: the git pane's is
+`crates/fleet-lazygit/README.md`, while the board tab's is this file, because Fleet draws it
+itself. The git pane's full context chain is
 `Fleet > Workspace > Native > Lazygit > …`, and the pane's own context words are prefixed `Lg`
 (`LgDialog`, `LgConfirm`, `LgHelp`) so they cannot satisfy Fleet's `Dialog`, `Dialog > Confirm`
 or `Dialog > Help` predicates.
@@ -635,17 +643,21 @@ and `k` moves up (previous), following the global nvim convention.
 
 `/` does **not** open the Hub's filter: the board owns `BoardState.filter`,
 and while its input has the keyboard the screen publishes the `Filter` key context
-instead of `Hub > Board`. Every row below is therefore shadowed while you are typing
-a filter, and the `Filter` rows above apply instead — including their two-stage `Esc`.
+instead of the board word it would otherwise publish. Every row below is therefore shadowed
+while you are typing a filter, and the `Filter` rows above apply instead — including their
+two-stage `Esc`.
 
 The board has two surfaces and one key table. The Hub's board tab publishes
 `Fleet > Hub > Board`; the worktree board drawn in a Workspace's `fleet://board` tab
 publishes `Fleet > Workspace > Native > Board`, and every row is repeated verbatim for
 it below against the same action. `ctrl-s` is not among them: the board word nests
 **under** `Workspace > Native`, which keeps the prefix, so `ctrl-s 1` leaves the tab
-and `ctrl-s b` returns to it. `Filter > BoardFilter` serves both surfaces, and `o`
+and `ctrl-s b` returns to it. `Filter > BoardFilter` serves both surfaces, and so do the
+four board dialogs below — they are opened by the same keys from either one and publish the
+same `Dialog > …` words. One row answers differently by surface: `o`
 (`board::OpenWorktree`) on a card linked to the worktree you are already standing in
-answers "Already in this worktree" instead of re-opening the session.
+answers "Already in this worktree" instead of re-opening the session, which can only happen
+in the pane, because the Hub is never standing in a worktree.
 
 The board dialog rows below are **in addition to** the generic `Dialog` container rows. Browsing
 uses the existing dialog word; a text owner replaces it with the matching `*Editing` word, and a

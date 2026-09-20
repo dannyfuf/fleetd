@@ -29,8 +29,9 @@ Notion, anything — without the core knowing their shape. Backend-specific fiel
 `Card.properties`, described by `PropertySchema` so the generic UI can render/edit them. The first
 backend is `local` (no remote). Jira is the second (separate contract, later).
 
-Non-goals for v1: multiple boards per context in the UI (the model allows it, the UI shows the
-context's first board), cycles/projects/milestones, attachments, rich-text editing beyond a plain
+Non-goals for v1: multiple boards per scope in the UI (the model allows it; the Hub shows the
+context's first board and a worktree's Workspace tab shows that worktree's, and no surface shows
+two at once), cycles/projects/milestones, attachments, rich-text editing beyond a plain
 multi-line editor with a read-mode markdown renderer.
 
 ## 1. Crate placement
@@ -771,7 +772,14 @@ Property rows in the card detail reuse `KeyValueList`/`FactRow`; pickers reuse
   shows `EnsureWorktreeBoard(worktree)`. It builds nothing of its own: `Shell` owns the one
   `BoardScreen` and lends it to whichever surface is drawing, since the two are never visible
   together. `WorkspaceScreen::sync_board_scope` points the mirror when that tab is the session's
-  active one and gives it back when it is not.
+  active one and gives it back when it is not, and the Hub's own observation takes the context
+  scope back, so a worktree scope never outlives the pane that asked for it.
+  The tab is created on demand — `prefix::OpenBoard` (`ctrl-s b`) selects the session's terminal
+  whose command is `fleet://board`, or asks for one with
+  `NewTerminal { name: "board", command: "fleet://board", cwd }` and selects the reply — and is
+  never written into `windows[]` by Fleet, so a slept session loses it and `ctrl-s b` brings it
+  back. A user may add the `windows[]` entry themselves; the tab is matched by its reserved
+  command, never by its name, so a renamed or user-configured one is still the board tab.
 - **State** (`state.rs`): `AppState.board: BoardState { scope: Option<BoardScope>,
   view: Option<BoardView>, loading: bool,
   error: Option<String>, focus: BoardFocus { column: usize, row: usize }, filter: String,
@@ -885,7 +893,8 @@ selects the Filter key context while typing, with two-stage Escape. `group_secon
 Parent is read-only in this milestone. Card detail is an 880 px two-pane dialog. `ctrl-enter` in
 CardCreate creates and opens detail; label pickers use Space for multi-select; BoardSettings
 reuses the settings row keys. Delete uses `ConfirmRequest::DeleteCard`. These supplemental dialog
-keys are listed in KEYMAP; context-only create-and-open has no palette command.
+keys are listed in KEYMAP; create-and-open exists only as that chord inside the dialog and has no
+palette command.
 Description/comment editors are multi-line `TextInput` entities the dialog creates when an edit
 begins and drops when it ends; no surface decodes editing keys (ADR 0019). Card tiles suppress None priority, while standalone
 PriorityGlyph still renders it. Label colors remain token names.
@@ -916,6 +925,42 @@ thing so a failure names the layer that broke.
 - **App** covers the reducers rather than rendered strings: the board mirror's staleness and
   generation rules, the focus clamp under a filter, and the two-stage filter `Esc`. The keymap
   drift test keeps `docs/KEYMAP.md` and `keymap.rs` in agreement.
+  The scope is held by `state/board/tests.rs`:
+  `a_view_from_the_other_scope_never_lands_in_the_board_slot` (a context board and a worktree
+  board name the same context, and only `worktree_id` tells them apart),
+  `a_scope_switched_away_from_and_back_rejects_the_answer_it_left_behind` (A → B → A through the
+  one generation counter), `a_board_changed_event_only_makes_the_board_on_screen_stale`, and
+  `a_daemon_without_worktree_boards_refuses_the_scope_and_keeps_the_board_it_shows`.
+  The pane's key context is held by `state/navigation/tests.rs`
+  (`the_board_pane_publishes_its_own_key_context`, `only_the_board_tab_publishes_the_board_word`),
+  and `ctrl-s b` itself by `screens/workspace/tests.rs`
+  (`the_board_key_selects_the_tab_the_session_already_has`,
+  `the_board_key_creates_the_tab_and_selects_the_reply`,
+  `the_board_tab_is_recognised_by_its_command_not_its_name`,
+  `the_board_key_says_why_a_session_without_a_worktree_opens_nothing`,
+  `the_board_band_needs_a_worktree_to_be_the_board_of`,
+  `selecting_another_tab_ends_a_pending_board_claim`,
+  `the_reserved_command_decides_the_native_tab_kind`).
+  Five `shell/root/tests.rs` tests drive the real shell end to end — the refusal on an old daemon,
+  the palette row reaching the same handler, the pane binding every board key while `ctrl-s` stays
+  the prefix, the scope going back to the context on the way out, and `o` refusing the worktree
+  the pane is standing in
+  (`real_shell_board_key_refuses_a_daemon_without_worktree_boards`,
+  `real_shell_board_palette_row_reaches_the_same_handler`,
+  `real_shell_board_pane_binds_the_board_keys_and_keeps_the_prefix`,
+  `real_shell_board_pane_gives_the_prefix_and_the_scope_back`,
+  `real_shell_board_pane_refuses_to_reopen_its_own_worktree`). The palette row's own gate is
+  `the_board_tab_row_needs_a_worktree_session_on_screen`, and the reserved command is pinned in
+  `fleet-core` by `only_the_process_backed_reserved_command_degrades_when_proxied` and in the
+  settings dialog by `every_reserved_window_command_reads_as_built_in`.
+- **Harness** drives the tab as a user does: `scenarios/workspace/board-tab.scenario` opens a
+  worktree session, presses `ctrl-s b`, and asserts the new tab, its `native` badge, the
+  `Workspace > Native > Board` key context, this worktree's own cards, a `]` that reaches the
+  pane, a second `ctrl-s b` that creates no fourth tab, and — after `ctrl-s s` and `g b` — the
+  Hub still showing the **context** board, unmoved. The `board` fixture preset is what makes that
+  last part an oracle: it seeds a context board of `FLT-…` cards and the worktree's own `FEA-…`
+  board under the same context, so the card set alone says which of the two a surface is drawing.
+  The Hub's `scenarios/board/*` keep covering the context board on its own.
 
 The board's own surfaces answer the same standing rule the rest of the kit does: a state that is
 not in `cargo run -p fleet-ui-kit --example gallery_board` is not implemented.
