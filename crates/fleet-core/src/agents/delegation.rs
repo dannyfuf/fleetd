@@ -3,11 +3,14 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::{AgentKind, DelegationId, ItemId, Seq, ThreadId, TurnId};
+use super::{AgentKind, DelegationId, ItemId, Seq, ThreadId, TurnId, Usage};
 
 /// The durable link between a caller thread and the child it spawned. The token is never on this
 /// type: the daemon stores its SHA-256 and only `RequestBody::DelegationComplete` carries plaintext.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Not `Eq`: [`usage`](Self::usage) carries provider floats, and a cost that compares equal by bit
+/// pattern is not a guarantee this type can honestly make.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Delegation {
     /// Delegation identity.
@@ -55,6 +58,17 @@ pub struct Delegation {
     /// Latest concise child activity description.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub headline: Option<String>,
+    /// What the child's own thread has spent, **computed on read and never persisted**.
+    ///
+    /// The store decodes this as `None`, `EncodedDelegation` ignores it, and the record
+    /// `publish_changed` broadcasts carries `None`: only the daemon's `get`, `list` and `wait`
+    /// read paths fill it, from the child thread's own turns. Do not add a column for it — a
+    /// persisted copy would be a second, staler answer to a question SQL already answers, and it
+    /// would have to be rewritten on every token-usage event the child emits.
+    ///
+    /// The numbers are the **child thread's own**; a grandchild's spend is not summed in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<DelegationUsage>,
 }
 
 impl Delegation {
@@ -63,6 +77,25 @@ impl Delegation {
     pub fn elapsed(&self, now: DateTime<Utc>) -> chrono::Duration {
         self.finished.unwrap_or(now) - self.created
     }
+}
+
+/// What a delegated child's own thread has spent so far.
+///
+/// The same three numbers `ThreadProjection` shows in the GUI, over the child thread alone:
+/// [`Usage`] rather than eight restated counters, so the CLI and the GUI cannot drift on the
+/// arithmetic.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DelegationUsage {
+    /// Cumulative provider token usage over the child's settled turns, plus its live turn.
+    #[serde(default)]
+    pub usage: Usage,
+    /// Latest cumulative provider cost, when the provider reports one.
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
+    /// Latest context-window utilization percentage.
+    #[serde(default)]
+    pub context_pct: f32,
 }
 
 /// Current state of a delegated child.
@@ -158,6 +191,12 @@ pub enum DeliveryState {
         /// Caller turn that received the result.
         turn: TurnId,
     },
+    /// The caller already read the result itself, so it is never appended to its transcript.
+    ///
+    /// Set when a caller waits on its own child and is handed the terminal record: injecting the
+    /// same text again once the caller's turn settles is the duplicate this state exists to stop.
+    /// Terminal like `Delivered`, and reached only from `Pending`.
+    Consumed,
     /// Delivery cannot be completed automatically.
     Undeliverable {
         /// Human-readable reason.
@@ -178,6 +217,7 @@ impl DeliveryState {
         match self {
             Self::Pending => "pending",
             Self::Delivered { .. } => "delivered",
+            Self::Consumed => "consumed",
             Self::Undeliverable { .. } => "undeliverable",
         }
     }
@@ -196,6 +236,18 @@ mod tests {
         let json = serde_json::to_string(&value).unwrap_or_else(|error| panic!("{error}"));
         let decoded: T = serde_json::from_str(&json).unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(decoded, value);
+    }
+
+    /// Round trip for a value whose floats make `assert_eq!` a bit-pattern comparison: the JSON
+    /// text is what has to match, because that is what crosses the wire.
+    fn assert_round_trip_debug<T>(value: T)
+    where
+        T: Serialize + DeserializeOwned + std::fmt::Debug,
+    {
+        let json = serde_json::to_string(&value).unwrap_or_else(|error| panic!("{error}"));
+        let decoded: T = serde_json::from_str(&json).unwrap_or_else(|error| panic!("{error}"));
+        let again = serde_json::to_string(&decoded).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(again, json);
     }
 
     #[test]
@@ -227,8 +279,76 @@ mod tests {
             seq: Seq(7),
             turn: TurnId::new(),
         });
+        assert_round_trip(DeliveryState::Consumed);
         assert_round_trip(DeliveryState::Undeliverable {
             reason: "caller stopped".to_owned(),
         });
+    }
+
+    #[test]
+    fn delivery_state_words_are_distinct() {
+        let words = [
+            DeliveryState::Pending.word(),
+            DeliveryState::Delivered {
+                seq: Seq(1),
+                turn: TurnId::new(),
+            }
+            .word(),
+            DeliveryState::Consumed.word(),
+            DeliveryState::Undeliverable {
+                reason: String::new(),
+            }
+            .word(),
+        ];
+        let unique: std::collections::BTreeSet<_> = words.iter().collect();
+        assert_eq!(unique.len(), words.len(), "{words:?}");
+    }
+
+    #[test]
+    fn a_consumed_delivery_is_not_pending() {
+        assert!(!DeliveryState::Consumed.is_pending());
+    }
+
+    #[test]
+    fn delegation_usage_round_trips() {
+        assert_round_trip_debug(DelegationUsage::default());
+        assert_round_trip_debug(DelegationUsage {
+            usage: Usage {
+                input_tokens: 11,
+                output_tokens: 22,
+                total_tokens: 33,
+                ..Usage::default()
+            },
+            cost_usd: Some(0.125),
+            context_pct: 12.5,
+        });
+    }
+
+    #[test]
+    fn a_delegation_without_usage_serializes_without_the_key() {
+        let delegation = Delegation {
+            id: DelegationId::new(),
+            caller: ThreadId::new(),
+            caller_turn: TurnId::new(),
+            caller_item: ItemId::new(),
+            child: ThreadId::new(),
+            provider: AgentKind::Codex,
+            depth: 1,
+            brief: "brief".to_owned(),
+            expectation: "expectation".to_owned(),
+            eager: false,
+            status: DelegationStatus::Starting,
+            status_payload: None,
+            result: None,
+            nudges: 0,
+            recoveries: 0,
+            delivery: DeliveryState::Pending,
+            created: DateTime::<Utc>::from_timestamp(0, 0).unwrap_or_default(),
+            finished: None,
+            headline: None,
+            usage: None,
+        };
+        let json = serde_json::to_string(&delegation).unwrap_or_else(|error| panic!("{error}"));
+        assert!(!json.contains("usage"), "{json}");
     }
 }

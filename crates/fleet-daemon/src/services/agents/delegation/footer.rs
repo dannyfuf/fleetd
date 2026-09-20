@@ -6,36 +6,53 @@ use chrono::{DateTime, Utc};
 use fleet_core::agents::{AgentKind, Delegation, DelegationId, DelegationStatus};
 
 /// The completion footer appended to the child's first message (design doc, verbatim).
+///
+/// `{fleet}` is the program the child must invoke. It is an absolute path whenever the daemon
+/// resolved one, because the child reading this footer is the one surface where a bare name that
+/// does not resolve costs the whole delegation.
 pub(crate) const FOOTER_TEMPLATE: &str = "--- Fleet delegation {id} ---\n\
 You are running as a subagent. No human is watching this session.\n\
 The caller expects: {expectation}\n\
 When the work is fully finished and verified, report it with exactly one command:\n  \
-fleet subagent complete --result-file <path-to-your-report.md>\n\
+{fleet} subagent complete --result-file <path-to-your-report.md>\n\
 Write the report first, then run the command. Do not run it before you are done.\n\
 If you are blocked and cannot finish, run:\n  \
-fleet subagent complete --blocked --result-file <path-with-what-you-need>\n\
+{fleet} subagent complete --blocked --result-file <path-with-what-you-need>\n\
 Do not ask the user questions; state assumptions in the report instead.";
+
+/// The program named in the footer when the daemon could not resolve an absolute `fleet`.
+pub(crate) const BARE_FLEET: &str = "fleet";
 
 /// Sent to a child that settled a turn without reporting a result.
 pub(crate) const NUDGE: &str = "You have not reported a result. If the work is done, run `fleet subagent complete --result-file <path>`. If not, continue.";
 /// Sent to a child whose provider exited and was resumed.
 pub(crate) const RESUME_NUDGE: &str =
     "The session was restarted. Continue, and report with `fleet subagent complete` when done.";
-/// Returned beside `DelegationStarted` when the child shares the caller's worktree.
-pub(crate) const SAME_WORKTREE_WARNING: &str =
-    "the child edits the caller's worktree; end your turn before it works, or pass --worktree";
+/// Returned beside `DelegationStarted` when the child inherits the caller's worktree by default.
+///
+/// Only the implicit default is warned about: a caller that passed `--worktree` naming its own
+/// worktree chose that, which is what an orchestrator with disjoint file ownership does.
+pub(crate) const SAME_WORKTREE_WARNING: &str = "no --worktree was passed, so the child edits the caller's worktree by default; end your turn before it works, or pass --worktree to isolate it";
 
-/// Renders the completion footer with this delegation's identity and expectation.
-pub(crate) fn footer(id: DelegationId, expectation: &str) -> String {
+/// Renders the completion footer with this delegation's identity, expectation and `fleet` program.
+pub(crate) fn footer(id: DelegationId, expectation: &str, fleet: &str) -> String {
+    // `{fleet}` first and `{expectation}` last: only the expectation is caller-supplied text, so
+    // it can never introduce a placeholder that a later pass would substitute.
     FOOTER_TEMPLATE
+        .replace("{fleet}", fleet)
         .replace("{id}", &id.to_string())
         .replace("{expectation}", expectation)
 }
 
 /// Builds the first child message from its brief and completion footer.
-pub(crate) fn first_message(brief: &str, id: DelegationId, expectation: &str) -> String {
+pub(crate) fn first_message(
+    brief: &str,
+    id: DelegationId,
+    expectation: &str,
+    fleet: &str,
+) -> String {
     let brief = brief.trim_end_matches(['\r', '\n']);
-    format!("{brief}\n\n{}", footer(id, expectation))
+    format!("{brief}\n\n{}", footer(id, expectation, fleet))
 }
 
 /// Formats a terminal delegation result for delivery into the caller's thread.
@@ -134,14 +151,15 @@ mod tests {
             created,
             finished: Some(created + Duration::seconds(842)),
             headline: None,
+            usage: None,
         }
     }
 
     #[test]
-    fn footer_matches_the_contract_text() {
+    fn footer_matches_the_contract_text_with_a_bare_program() {
         let id = DelegationId::new();
         assert_eq!(
-            footer(id, "tests pass"),
+            footer(id, "tests pass", BARE_FLEET),
             format!(
                 "--- Fleet delegation {id} ---\n\
 You are running as a subagent. No human is watching this session.\n\
@@ -157,11 +175,37 @@ Do not ask the user questions; state assumptions in the report instead."
     }
 
     #[test]
+    fn footer_names_the_resolved_absolute_path_in_both_commands() {
+        let id = DelegationId::new();
+        assert_eq!(
+            footer(id, "tests pass", "/opt/fleet/bin/fleet"),
+            format!(
+                "--- Fleet delegation {id} ---\n\
+You are running as a subagent. No human is watching this session.\n\
+The caller expects: tests pass\n\
+When the work is fully finished and verified, report it with exactly one command:\n  \
+/opt/fleet/bin/fleet subagent complete --result-file <path-to-your-report.md>\n\
+Write the report first, then run the command. Do not run it before you are done.\n\
+If you are blocked and cannot finish, run:\n  \
+/opt/fleet/bin/fleet subagent complete --blocked --result-file <path-with-what-you-need>\n\
+Do not ask the user questions; state assumptions in the report instead."
+            )
+        );
+    }
+
+    #[test]
+    fn an_expectation_naming_a_placeholder_is_never_substituted_again() {
+        let id = DelegationId::new();
+        let rendered = footer(id, "keep {fleet} and {id} literal", "/opt/fleet/bin/fleet");
+        assert!(rendered.contains("The caller expects: keep {fleet} and {id} literal"));
+    }
+
+    #[test]
     fn first_message_separates_the_brief_and_footer() {
         let id = DelegationId::new();
         assert_eq!(
-            first_message("Do the work", id, "ship it"),
-            format!("Do the work\n\n{}", footer(id, "ship it"))
+            first_message("Do the work", id, "ship it", BARE_FLEET),
+            format!("Do the work\n\n{}", footer(id, "ship it", BARE_FLEET))
         );
     }
 
@@ -169,8 +213,8 @@ Do not ask the user questions; state assumptions in the report instead."
     fn first_message_normalizes_a_newline_terminated_brief() {
         let id = DelegationId::new();
         assert_eq!(
-            first_message("Do the work\r\n", id, "ship it"),
-            format!("Do the work\n\n{}", footer(id, "ship it"))
+            first_message("Do the work\r\n", id, "ship it", BARE_FLEET),
+            format!("Do the work\n\n{}", footer(id, "ship it", BARE_FLEET))
         );
     }
 

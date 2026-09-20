@@ -84,8 +84,15 @@ cargo test -p fleet-daemon --features real-agents delegation::live
 ```
 
 They are excluded from the ordinary workspace suite. `make doctor` checks the other half of this
-path and should include `subagent fleet CLI ok <resolved-path>`; a child that cannot resolve that
-CLI cannot report its result.
+path: a child that cannot reach the `fleet` CLI cannot report its result, and the
+`subagent fleet CLI` line says whether it can and what makes that true. When a login shell
+resolves the CLI the line reads `subagent fleet CLI ok <resolved-path>`. When a `fleet` sits
+beside this `fleetd`, the line also names that directory, which Fleet prepends to a subagent
+child's `PATH` — the child inherits it with no configuration of yours. A `fleet` the login shell
+cannot resolve is therefore still a pass while the sibling exists; the check fails, and asks you
+to fix `PATH`, only when neither is there. The line speaks for that daemon-side fallback alone:
+doctor runs with no delegation in flight, so it cannot see the `fleet` path a caller sends with
+its own `fleet subagent run`.
 
 Direct Cargo equivalents work as usual. Build artifacts use Cargo's default target directory,
 `target/` inside this repository. Sharing that repository-local directory between commands in

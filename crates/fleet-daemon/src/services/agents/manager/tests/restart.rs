@@ -83,6 +83,30 @@ fn hydration_seed_preserves_a_delegated_child_parent() {
     );
 }
 
+/// A resumed child keeps a `fleet` on its `PATH`; a resumed ordinary thread still gets nothing.
+///
+/// The bug this pins: the resume path rebuilt `StartRequest` with `path_prepend: None`, so a
+/// child recovered after a provider exit could no longer run `fleet subagent complete` — the one
+/// thing the recovery nudge then asks it to do.
+#[test]
+fn a_resumed_delegated_child_keeps_the_daemon_sibling_on_its_path() {
+    use crate::services::agents::manager::resumed_path_prepend;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let bin = temp.path().join("bin");
+    std::fs::create_dir_all(&bin).expect("bin directory");
+    let fleetd = bin.join("fleetd");
+    std::fs::write(&fleetd, b"").expect("fleetd stand-in");
+
+    // No sibling `fleet` yet: nothing to inject, and that is not an error.
+    assert_eq!(resumed_path_prepend(true, Some(&fleetd)), None);
+
+    std::fs::write(bin.join("fleet"), b"").expect("fleet stand-in");
+    assert_eq!(resumed_path_prepend(true, Some(&fleetd)), Some(bin.clone()));
+    // Only a delegated child is expected to report, so only a child gets the injection.
+    assert_eq!(resumed_path_prepend(false, Some(&fleetd)), None);
+}
+
 #[tokio::test]
 async fn codex_resume_rebuilds_turn_controls_from_the_persisted_mode() {
     let harness = Harness::start(full()).await;

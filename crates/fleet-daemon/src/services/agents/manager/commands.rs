@@ -66,6 +66,11 @@ pub struct CreateOptions {
     /// already extend their overrides with `StartRequest::env`, so nothing harness-specific is
     /// needed to carry a secret the child alone may use.
     pub extra_env: BTreeMap<String, String>,
+    /// Directory prepended to the child's `PATH`, when the daemon resolved one.
+    ///
+    /// Carried separately from `extra_env` on purpose: both adapters treat an `env` entry as a
+    /// whole-value override, so a `PATH` there would discard the login shell's own.
+    pub path_prepend: Option<PathBuf>,
 }
 
 impl CreateOptions {
@@ -83,6 +88,7 @@ impl CreateOptions {
             parent: None,
             delegation: None,
             extra_env: BTreeMap::new(),
+            path_prepend: None,
         }
     }
 }
@@ -121,6 +127,7 @@ impl AgentSessionManager {
             parent,
             delegation,
             extra_env,
+            path_prepend,
         } = options;
         let remote_host = self
             .inner
@@ -157,19 +164,7 @@ impl AgentSessionManager {
                 provider_kind.display_name()
             )));
         }
-        let model = match model {
-            Some(mut selection) => {
-                if selection.effort.is_none() {
-                    selection.effort.clone_from(&defaults.effort);
-                }
-                Some(selection)
-            }
-            None => defaults.model.as_ref().map(|model| ModelSelection {
-                model: model.clone(),
-                effort: defaults.effort.clone(),
-                provider: None,
-            }),
-        };
+        let model = resolve_model_selection(model, defaults);
         let (sandbox, approval_policy) = controls_for_mode(mode);
         let request = StartRequest {
             thread,
@@ -184,6 +179,7 @@ impl AgentSessionManager {
             approval_policy,
             permission_profile: None,
             title: title.clone(),
+            path_prepend,
         };
         let command = binaries.binary(provider_kind).to_owned();
         let worktree_path = request.worktree_path.clone();
@@ -991,5 +987,98 @@ fn snapshot_response(
         Ok(body)
     } else {
         Err(snapshot_ceiling_error(thread, bytes))
+    }
+}
+
+/// Resolves a requested model selection against the harness's configured defaults.
+///
+/// Two sentinels meet here and they mean different things. A selection of `None` is "no opinion
+/// at all", and becomes the configured default model and effort, or nothing when neither is
+/// configured. A `Some` whose `model` is empty is "this effort, whatever model the harness would
+/// have used" — the shape `fleet subagent run --effort high` produces with no `--model` — and
+/// keeps the caller's effort while borrowing only the model from the defaults. Blank-but-present
+/// models are normalised to the empty string so that every adapter can test `is_empty()` alone.
+fn resolve_model_selection(
+    model: Option<ModelSelection>,
+    defaults: &fleet_core::config::NativeAgentDefaults,
+) -> Option<ModelSelection> {
+    match model {
+        Some(mut selection) => {
+            if selection.effort.is_none() {
+                selection.effort.clone_from(&defaults.effort);
+            }
+            if selection.model.trim().is_empty() {
+                match defaults.model.as_ref() {
+                    Some(model) => selection.model.clone_from(model),
+                    None => selection.model.clear(),
+                }
+            }
+            Some(selection)
+        }
+        None => defaults.model.as_ref().map(|model| ModelSelection {
+            model: model.clone(),
+            effort: defaults.effort.clone(),
+            provider: None,
+        }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use fleet_core::config::NativeAgentDefaults;
+
+    use super::{ModelSelection, resolve_model_selection};
+
+    fn defaults(model: Option<&str>, effort: Option<&str>) -> NativeAgentDefaults {
+        NativeAgentDefaults {
+            model: model.map(str::to_owned),
+            effort: effort.map(str::to_owned),
+            ..NativeAgentDefaults::default()
+        }
+    }
+
+    fn selection(model: &str, effort: Option<&str>) -> ModelSelection {
+        ModelSelection {
+            model: model.to_owned(),
+            effort: effort.map(str::to_owned),
+            provider: None,
+        }
+    }
+
+    /// The four shapes `--model` / `--effort` can arrive in, against configured defaults.
+    #[test]
+    fn a_model_selection_resolves_against_the_configured_defaults() {
+        let defaults = defaults(Some("gpt-5"), Some("medium"));
+        // No opinion at all: both come from the defaults.
+        assert_eq!(
+            resolve_model_selection(None, &defaults),
+            Some(selection("gpt-5", Some("medium")))
+        );
+        // An explicit model keeps the default effort.
+        assert_eq!(
+            resolve_model_selection(Some(selection("opus", None)), &defaults),
+            Some(selection("opus", Some("medium")))
+        );
+        // Both explicit: neither default applies.
+        assert_eq!(
+            resolve_model_selection(Some(selection("opus", Some("high"))), &defaults),
+            Some(selection("opus", Some("high")))
+        );
+        // Effort only: the caller's effort survives, the model comes from the defaults.
+        assert_eq!(
+            resolve_model_selection(Some(selection("", Some("high"))), &defaults),
+            Some(selection("gpt-5", Some("high")))
+        );
+    }
+
+    /// Effort only with nothing configured leaves an empty model for the adapters to skip.
+    #[test]
+    fn an_effort_only_selection_survives_a_harness_with_no_default_model() {
+        let resolved = resolve_model_selection(
+            Some(selection("   ", Some("high"))),
+            &defaults(None, Some("medium")),
+        );
+        // Blank is normalised to empty so an adapter only ever tests `is_empty()`.
+        assert_eq!(resolved, Some(selection("", Some("high"))));
     }
 }

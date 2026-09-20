@@ -59,6 +59,7 @@ fn start_request() -> StartRequest {
         approval_policy: ApprovalPolicy::Untrusted,
         permission_profile: None,
         title: None,
+        path_prepend: None,
     }
 }
 

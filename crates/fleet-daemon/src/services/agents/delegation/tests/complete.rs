@@ -173,7 +173,12 @@ impl Harness {
         }
         self.store
             .delegation_write("insert complete-test delegation", move |tx| {
-                delegations::insert(tx, &delegation, &sha256(TOKEN))?;
+                delegations::insert(
+                    tx,
+                    &delegation,
+                    &sha256(TOKEN),
+                    &std::collections::BTreeMap::new(),
+                )?;
                 Ok(((), false))
             })
             .await
@@ -255,6 +260,7 @@ fn delegation(status: DelegationStatus) -> Delegation {
         created: stamp(1),
         finished: status.is_terminal().then(|| stamp(2)),
         headline: None,
+        usage: None,
     }
 }
 

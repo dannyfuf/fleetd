@@ -1,7 +1,11 @@
 //! Environment and installation diagnostics.
 
 use std::{
-    collections::HashMap, ffi::OsString, os::unix::fs::PermissionsExt, path::PathBuf, sync::Arc,
+    collections::HashMap,
+    ffi::OsString,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 
@@ -453,28 +457,67 @@ fn agent_binary_check(prefix: &str, binary: &str, available: Option<bool>) -> Do
 
 async fn check_subagent_fleet(cwd: PathBuf) -> DoctorCheck {
     let environment = process::login_environment(&cwd).await;
-    subagent_fleet_check(&environment)
+    let daemon_exe = std::env::current_exe().ok();
+    subagent_fleet_check(&environment, daemon_exe.as_deref())
 }
 
-fn subagent_fleet_check(environment: &HashMap<OsString, OsString>) -> DoctorCheck {
+/// The directory holding a `fleet` beside the given `fleetd`, when one is installed there.
+fn sibling_fleet_directory(daemon_exe: &Path) -> Option<&Path> {
+    let directory = daemon_exe.parent()?;
+    directory.join("fleet").is_file().then_some(directory)
+}
+
+/// Reports whether a subagent child can reach the `fleet` CLI it must call to deliver a result,
+/// and which directory this daemon would prepend to the child's `PATH` to make that true.
+///
+/// `daemon_exe` is this daemon's own executable — `fleetd` — because the only path doctor can
+/// speak for is the `fleet` installed beside it. A live delegation also carries the path of the
+/// `fleet` process that started it, and doctor never sees that one: no delegation is in flight
+/// while the check runs. A pass here is therefore a statement about the daemon-side fallback,
+/// not a guarantee about every caller.
+#[must_use]
+pub fn subagent_fleet_check(
+    environment: &HashMap<OsString, OsString>,
+    daemon_exe: Option<&Path>,
+) -> DoctorCheck {
     let program = OsString::from("fleet");
     let resolved = process::resolve_program(program.clone(), environment);
-    if resolved == program {
-        DoctorCheck {
-            check: "subagent fleet CLI".to_owned(),
-            status: DoctorStatus::Fail,
-            detail: concat!(
-                "subagents cannot report: fleet is not on the harness child's PATH; ",
-                "put the built fleet on PATH or symlink it into a directory already there"
+    let found = (resolved != program).then(|| PathBuf::from(resolved));
+    let injectable = daemon_exe.and_then(sibling_fleet_directory);
+    // A child inherits the injected directory whether or not the login shell resolves `fleet`,
+    // so a sibling alone is enough for the child to report — advice about PATH would be noise.
+    let (status, detail) = match (found, injectable) {
+        (Some(path), Some(directory)) => (
+            DoctorStatus::Ok,
+            format!(
+                "{} · children also get {} prepended to PATH",
+                path.display(),
+                directory.display()
+            ),
+        ),
+        (Some(path), None) => (DoctorStatus::Ok, path.display().to_string()),
+        (None, Some(directory)) => (
+            DoctorStatus::Ok,
+            format!(
+                "not on the login shell PATH, but children get {} prepended to PATH, \
+                 where this daemon's own fleet sits",
+                directory.display()
+            ),
+        ),
+        (None, None) => (
+            DoctorStatus::Fail,
+            concat!(
+                "subagents cannot report: fleet is not on the harness child's PATH and there ",
+                "is none beside fleetd to inject; put the built fleet on PATH or symlink it ",
+                "into a directory already there"
             )
             .to_owned(),
-        }
-    } else {
-        DoctorCheck {
-            check: "subagent fleet CLI".to_owned(),
-            status: DoctorStatus::Ok,
-            detail: PathBuf::from(resolved).display().to_string(),
-        }
+        ),
+    };
+    DoctorCheck {
+        check: "subagent fleet CLI".to_owned(),
+        status,
+        detail,
     }
 }
 
@@ -691,50 +734,13 @@ const fn copy_detail() -> &'static str {
 mod tests {
     use super::{
         DoctorStatus, command_failure, configured_identity_check, existing_identity_count,
-        subagent_fleet_check,
     };
-    use std::{collections::HashMap, ffi::OsString, os::unix::fs::PermissionsExt};
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn command_failure_prefers_stderr() {
         assert_eq!(command_failure(2, "bad\n", "ignored\n"), "exit 2: bad");
         assert_eq!(command_failure(1, "", "usage\n"), "exit 1: usage");
-    }
-
-    #[test]
-    fn subagent_fleet_check_reports_the_resolved_child_path() {
-        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
-        let fleet = temp.path().join("fleet");
-        std::fs::write(&fleet, b"#!/bin/sh\n").unwrap_or_else(|error| panic!("{error}"));
-        let environment = HashMap::from([(
-            OsString::from("PATH"),
-            temp.path().as_os_str().to_os_string(),
-        )]);
-
-        let check = subagent_fleet_check(&environment);
-
-        assert_eq!(check.status, DoctorStatus::Ok);
-        assert_eq!(check.detail, fleet.display().to_string());
-    }
-
-    #[test]
-    fn subagent_fleet_check_explains_how_to_make_the_cli_reachable() {
-        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
-        let environment = HashMap::from([(
-            OsString::from("PATH"),
-            temp.path().as_os_str().to_os_string(),
-        )]);
-
-        let check = subagent_fleet_check(&environment);
-
-        assert_eq!(check.status, DoctorStatus::Fail);
-        assert_eq!(
-            check.detail,
-            concat!(
-                "subagents cannot report: fleet is not on the harness child's PATH; ",
-                "put the built fleet on PATH or symlink it into a directory already there"
-            )
-        );
     }
 
     /// Stock OpenSSH names four to seven default identity files whether or not any of them

@@ -1,11 +1,14 @@
-use std::sync::Arc;
+use std::{collections::HashMap, ffi::OsString, path::Path, sync::Arc};
 
 use fleet_daemon::{
     adapters::shell::ShellResult,
     machines::{
         ExecOutput, MachineAddress, MachineProvider, ProbeReport, RemoteEndpoint, RemoteHello,
     },
-    services::{Services, doctor::Doctor},
+    services::{
+        Services,
+        doctor::{Doctor, subagent_fleet_check},
+    },
     stores::config::ConfigStore,
     testing::fakes::{FakeFiles, FakeGithub, FakeShell},
     testing::{FakeMachine, FakeRemote},
@@ -179,6 +182,102 @@ async fn doctor_reports_provider_address_version_link_and_protocol_for_ready_mac
         format!(
             "provider command · address 100.77.28.11 · version {} · link ready",
             Services::version()
+        )
+    );
+}
+
+/// A login environment whose `PATH` holds exactly one directory.
+fn path_environment(directory: &Path) -> HashMap<OsString, OsString> {
+    HashMap::from([(OsString::from("PATH"), directory.as_os_str().to_os_string())])
+}
+
+/// Writes an empty file where a binary would be; `resolve_program` only asks whether the
+/// candidate is a file, so no execute bit is needed to stand in for one.
+fn touch_binary(directory: &Path, name: &str) -> std::path::PathBuf {
+    let path = directory.join(name);
+    std::fs::write(&path, b"#!/bin/sh\n").unwrap_or_else(|error| panic!("{error}"));
+    path
+}
+
+#[test]
+fn subagent_fleet_check_reports_the_resolved_child_path() {
+    let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+    let on_path = temp.path().join("bin");
+    std::fs::create_dir_all(&on_path).unwrap_or_else(|error| panic!("{error}"));
+    let fleet = touch_binary(&on_path, "fleet");
+    let environment = path_environment(&on_path);
+
+    let check = subagent_fleet_check(&environment, None);
+
+    assert_eq!(check.check, "subagent fleet CLI");
+    assert_eq!(check.status, DoctorStatus::Ok);
+    assert_eq!(check.detail, fleet.display().to_string());
+
+    let libexec = temp.path().join("libexec");
+    std::fs::create_dir_all(&libexec).unwrap_or_else(|error| panic!("{error}"));
+    touch_binary(&libexec, "fleet");
+    let daemon_exe = libexec.join("fleetd");
+
+    let check = subagent_fleet_check(&environment, Some(&daemon_exe));
+
+    assert_eq!(check.status, DoctorStatus::Ok);
+    assert!(
+        check.detail.starts_with(&fleet.display().to_string()),
+        "the resolved path stays first: {}",
+        check.detail
+    );
+    assert!(
+        check.detail.contains(&libexec.display().to_string()),
+        "the injected directory is named too: {}",
+        check.detail
+    );
+}
+
+/// The case the daemon-side fallback exists for: the login shell knows nothing about `fleet`,
+/// yet a child still reports because Fleet prepends the directory holding `fleetd`'s sibling.
+#[test]
+fn subagent_fleet_check_passes_on_the_injectable_directory_alone() {
+    let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+    let empty = temp.path().join("bin");
+    std::fs::create_dir_all(&empty).unwrap_or_else(|error| panic!("{error}"));
+    let libexec = temp.path().join("libexec");
+    std::fs::create_dir_all(&libexec).unwrap_or_else(|error| panic!("{error}"));
+    touch_binary(&libexec, "fleet");
+    let daemon_exe = libexec.join("fleetd");
+
+    let check = subagent_fleet_check(&path_environment(&empty), Some(&daemon_exe));
+
+    assert_eq!(check.check, "subagent fleet CLI");
+    assert_eq!(check.status, DoctorStatus::Ok);
+    assert!(
+        check.detail.contains(&libexec.display().to_string()),
+        "the injected directory is named: {}",
+        check.detail
+    );
+    assert!(
+        !check.detail.contains("symlink"),
+        "nothing to fix, so no PATH advice: {}",
+        check.detail
+    );
+}
+
+#[test]
+fn subagent_fleet_check_fails_only_when_there_is_nothing_to_inject() {
+    let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+    let empty = temp.path().join("bin");
+    std::fs::create_dir_all(&empty).unwrap_or_else(|error| panic!("{error}"));
+    let daemon_exe = temp.path().join("libexec").join("fleetd");
+
+    let check = subagent_fleet_check(&path_environment(&empty), Some(&daemon_exe));
+
+    assert_eq!(check.check, "subagent fleet CLI");
+    assert_eq!(check.status, DoctorStatus::Fail);
+    assert_eq!(
+        check.detail,
+        concat!(
+            "subagents cannot report: fleet is not on the harness child's PATH and there ",
+            "is none beside fleetd to inject; put the built fleet on PATH or symlink it ",
+            "into a directory already there"
         )
     );
 }

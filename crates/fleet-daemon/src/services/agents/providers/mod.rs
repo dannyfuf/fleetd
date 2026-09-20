@@ -515,6 +515,7 @@ mod tests {
             approval_policy: fleet_core::agents::ApprovalPolicy::default(),
             permission_profile: None,
             title: None,
+            path_prepend: None,
         }
     }
 

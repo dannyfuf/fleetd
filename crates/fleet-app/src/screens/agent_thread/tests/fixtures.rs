@@ -177,6 +177,7 @@ pub(super) fn delegation_record(status: DelegationStatus) -> Delegation {
         created: at(0),
         finished: Some(at(840)),
         headline: Some("checking the Windows failure".to_owned()),
+        usage: None,
     }
 }
 

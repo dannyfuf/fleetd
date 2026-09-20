@@ -667,6 +667,8 @@ impl Services {
                 mode,
                 model,
                 title,
+                fleet_path,
+                env,
                 eager,
             } => {
                 let request = agents::delegation::RunRequest {
@@ -678,6 +680,8 @@ impl Services {
                     mode,
                     model,
                     title,
+                    fleet_path,
+                    env,
                     eager,
                 };
                 let answer = self.delegation_service()?.run(request).await;
@@ -715,10 +719,11 @@ impl Services {
             RequestBody::DelegationWait {
                 delegation,
                 timeout_ms,
+                caller,
             } => {
                 let answer = self
                     .delegation_service()?
-                    .wait(delegation, timeout_ms)
+                    .wait(delegation, timeout_ms, caller)
                     .await;
                 self.agent_response(answer)
             }

@@ -21,17 +21,19 @@ mod support;
 #[path = "agent_compatibility/legacy.rs"]
 mod legacy;
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use fleet_core::{
     agents::{
         AbortReason, AccountInfo, AccountKind, AccountStatus, AgentEvent, AgentKind,
         AgentThreadSummary, Attention, AttentionKind, CheckpointKind, Delegation, DelegationId,
-        DelegationResult, DelegationStatus, DeliveryState, FileDelta, GateAnswer, GateId, GateKind,
-        GateResolver, Item, ItemId, ItemKind, ItemPatch, ItemPayloadPatch, ItemStatus,
-        MessageOrigin, ModelDescriptor, ModelSelection, PermissionChoice, PermissionMode,
-        PlanAnswer, ProviderOptionId, Question, QuestionOption, ReasoningEffortDescriptor,
-        ResultSource, Seq, SeqEvent, SessionState, StreamKind, ThreadId, ThreadProjection,
-        ToolCall, ToolKind, TurnId, TurnOutcome, TurnState, Usage, UserInput,
+        DelegationResult, DelegationStatus, DelegationUsage, DeliveryState, FileDelta, GateAnswer,
+        GateId, GateKind, GateResolver, Item, ItemId, ItemKind, ItemPatch, ItemPayloadPatch,
+        ItemStatus, MessageOrigin, ModelDescriptor, ModelSelection, PermissionChoice,
+        PermissionMode, PlanAnswer, ProviderOptionId, Question, QuestionOption,
+        ReasoningEffortDescriptor, ResultSource, Seq, SeqEvent, SessionState, StreamKind, ThreadId,
+        ThreadProjection, ToolCall, ToolKind, TurnId, TurnOutcome, TurnState, Usage, UserInput,
     },
     ids::WorktreeId,
 };
@@ -322,6 +324,7 @@ fn delegation_value_types_have_one_wire_golden_per_variant() {
         },
         r#"{"type":"delivered","data":{"seq":42,"turn":"aaaaaaaa-2222-4333-8444-555555555555"}}"#,
     );
+    assert_frame(DeliveryState::Consumed, r#"{"type":"consumed"}"#);
     assert_frame(
         DeliveryState::Undeliverable {
             reason: "the caller thread was deleted".to_owned(),
@@ -351,6 +354,24 @@ fn delegation_value_types_have_one_wire_golden_per_variant() {
     assert_frame(
         starting_delegation(),
         r#"{"id":"dddddddd-2222-4333-8444-555555555555","caller":"11111111-2222-4333-8444-555555555555","callerTurn":"aaaaaaaa-2222-4333-8444-555555555555","callerItem":"bbbbbbbb-2222-4333-8444-555555555555","child":"22222222-3333-4444-8555-666666666666","provider":"codex","depth":1,"brief":"write protocol goldens","expectation":"all wire bytes are pinned","status":"starting","nudges":0,"recoveries":0,"delivery":{"type":"pending"},"created":"2026-09-07T12:00:00Z"}"#,
+    );
+
+    // The child's own spend, which only the three daemon read verbs ever attach. `Usage` is
+    // reused rather than restated, so this golden also pins that the CLI and the GUI fold the
+    // same eight counters.
+    assert_frame(
+        delegation_usage(),
+        r#"{"usage":{"inputTokens":1200,"outputTokens":340,"reasoningTokens":0,"cacheReadTokens":9000,"cacheWriteTokens":0,"totalTokens":10540,"webSearchRequests":0,"toolUses":7},"costUsd":0.42,"contextPct":12.5}"#,
+    );
+
+    // And its position on `Delegation`: last, after `headline`, so a record that carries it is a
+    // superset of the bytes every persisted golden above pins.
+    assert_frame(
+        Delegation {
+            usage: Some(delegation_usage()),
+            ..starting_delegation()
+        },
+        r#"{"id":"dddddddd-2222-4333-8444-555555555555","caller":"11111111-2222-4333-8444-555555555555","callerTurn":"aaaaaaaa-2222-4333-8444-555555555555","callerItem":"bbbbbbbb-2222-4333-8444-555555555555","child":"22222222-3333-4444-8555-666666666666","provider":"codex","depth":1,"brief":"write protocol goldens","expectation":"all wire bytes are pinned","status":"starting","nudges":0,"recoveries":0,"delivery":{"type":"pending"},"created":"2026-09-07T12:00:00Z","usage":{"usage":{"inputTokens":1200,"outputTokens":340,"reasoningTokens":0,"cacheReadTokens":9000,"cacheWriteTokens":0,"totalTokens":10540,"webSearchRequests":0,"toolUses":7},"costUsd":0.42,"contextPct":12.5}}"#,
     );
 }
 
@@ -382,6 +403,58 @@ fn a_delegated_child_carries_its_parent_on_the_wire() {
 #[test]
 fn the_delegation_capability_string_is_pinned() {
     assert_eq!(fleet_proto::AGENT_DELEGATION_CAPABILITY, "agent.delegation");
+}
+
+/// `fleet_path` is advisory, and the only thing that makes an advisory field safe to add is that
+/// its absence is indistinguishable from the payload a peer sent before it existed. The golden
+/// pair pins the encode side of that; this pins the decode side, which is the half a daemon
+/// facing an un-upgraded `fleet` actually runs.
+#[test]
+fn a_delegation_run_written_before_the_fleet_path_hint_still_decodes() {
+    let request: Request = serde_json::from_str(
+        r#"{"id":26,"body":{"type":"delegation_run","caller":"11111111-2222-4333-8444-555555555555","provider":"claude","brief":"summarize the diff","expectation":"one paragraph"}}"#,
+    )
+    .unwrap_or_else(|error| panic!("pre-fleet-path delegation run: {error}"));
+
+    assert!(matches!(
+        request.body,
+        RequestBody::DelegationRun {
+            fleet_path: None,
+            ..
+        }
+    ));
+}
+
+/// `env` is the second advisory field on `delegation_run`, and it carries the same promise: a
+/// caller that never sets one sends the bytes a version-7 peer sent. The golden pair above pins
+/// the encode side; this pins the decode side a daemon facing an un-upgraded `fleet` runs.
+#[test]
+fn a_delegation_run_written_before_the_child_environment_still_decodes() {
+    let request: Request = serde_json::from_str(
+        r#"{"id":26,"body":{"type":"delegation_run","caller":"11111111-2222-4333-8444-555555555555","provider":"claude","brief":"summarize the diff","expectation":"one paragraph","fleet_path":"/opt/fleet/bin/fleet"}}"#,
+    )
+    .unwrap_or_else(|error| panic!("pre-env delegation run: {error}"));
+
+    let RequestBody::DelegationRun { env, .. } = request.body else {
+        panic!("expected a delegation run");
+    };
+    assert!(env.is_empty(), "{env:?}");
+}
+
+/// `caller` decides whether a terminal answer also consumes the delivery, so a daemon facing an
+/// un-upgraded `fleet` must read the field as absent rather than refuse the wait. Absent means
+/// "consume nothing", which is exactly what every peer did before the field existed.
+#[test]
+fn a_delegation_wait_written_before_the_caller_hint_still_decodes() {
+    let request: Request = serde_json::from_str(
+        r#"{"id":25,"body":{"type":"delegation_wait","delegation":"dddddddd-2222-4333-8444-555555555555","timeout_ms":30000}}"#,
+    )
+    .unwrap_or_else(|error| panic!("pre-caller delegation wait: {error}"));
+
+    assert!(matches!(
+        request.body,
+        RequestBody::DelegationWait { caller: None, .. }
+    ));
 }
 
 #[test]
@@ -512,6 +585,9 @@ fn delegation() -> Delegation {
         created: at(),
         finished: Some(at()),
         headline: Some("Pinned delegation wire shapes".to_owned()),
+        // `usage` is computed on read and never persisted, so the record every golden below
+        // pins — the one the store decodes and `publish_changed` broadcasts — carries `None`.
+        usage: None,
     }
 }
 
@@ -529,6 +605,33 @@ fn starting_delegation() -> Delegation {
         headline: None,
         ..delegation()
     }
+}
+
+/// A child's own spend, as the three daemon read verbs attach it.
+fn delegation_usage() -> DelegationUsage {
+    DelegationUsage {
+        usage: Usage {
+            input_tokens: 1_200,
+            output_tokens: 340,
+            cache_read_tokens: 9_000,
+            total_tokens: 10_540,
+            tool_uses: 7,
+            ..Usage::default()
+        },
+        cost_usd: Some(0.42),
+        context_pct: 12.5,
+    }
+}
+
+/// The reason `env` exists: two children in one worktree that must not share a build lock.
+fn child_env() -> BTreeMap<String, String> {
+    BTreeMap::from([
+        (
+            "CARGO_TARGET_DIR".to_owned(),
+            "/work/target-child".to_owned(),
+        ),
+        ("RUSTFLAGS".to_owned(), "-D warnings".to_owned()),
+    ])
 }
 
 fn summary() -> AgentThreadSummary {
@@ -812,10 +915,12 @@ fn request_goldens() -> Vec<(Request, &'static str)> {
                     mode: Some(PermissionMode::FullAccess),
                     model: Some(model()),
                     title: Some("Golden writer".to_owned()),
+                    fleet_path: Some("/opt/fleet/bin/fleet".to_owned()),
+                    env: child_env(),
                     eager: true,
                 },
             },
-            r#"{"id":20,"body":{"type":"delegation_run","caller":"11111111-2222-4333-8444-555555555555","provider":"codex","brief":"write protocol goldens","expectation":"all wire bytes are pinned","worktree":"acme/api#native-agents","mode":"full_access","model":{"model":"gpt-5-codex","effort":"high"},"title":"Golden writer","eager":true}}"#,
+            r#"{"id":20,"body":{"type":"delegation_run","caller":"11111111-2222-4333-8444-555555555555","provider":"codex","brief":"write protocol goldens","expectation":"all wire bytes are pinned","worktree":"acme/api#native-agents","mode":"full_access","model":{"model":"gpt-5-codex","effort":"high"},"title":"Golden writer","fleet_path":"/opt/fleet/bin/fleet","env":{"CARGO_TARGET_DIR":"/work/target-child","RUSTFLAGS":"-D warnings"},"eager":true}}"#,
         ),
         (
             Request {
@@ -863,11 +968,12 @@ fn request_goldens() -> Vec<(Request, &'static str)> {
                 body: RequestBody::DelegationWait {
                     delegation: delegation_id(),
                     timeout_ms: 30_000,
+                    caller: Some(thread),
                 },
             },
-            r#"{"id":25,"body":{"type":"delegation_wait","delegation":"dddddddd-2222-4333-8444-555555555555","timeout_ms":30000}}"#,
+            r#"{"id":25,"body":{"type":"delegation_wait","delegation":"dddddddd-2222-4333-8444-555555555555","timeout_ms":30000,"caller":"11111111-2222-4333-8444-555555555555"}}"#,
         ),
-        // The three delegation requests that carry optional fields, with every option absent: a
+        // The four delegation requests that carry optional fields, with every option absent: a
         // missing `skip_serializing_if` would show up here as a `null` or a `false` a version-7
         // peer never sent, and nowhere else.
         (
@@ -882,9 +988,14 @@ fn request_goldens() -> Vec<(Request, &'static str)> {
                     mode: None,
                     model: None,
                     title: None,
+                    fleet_path: None,
+                    env: BTreeMap::new(),
                     eager: false,
                 },
             },
+            // Byte-identical to what a version-7 peer sent before `fleet_path` and `env` existed:
+            // the literal is deliberately unchanged, and that is the whole proof both fields are
+            // optional rather than merely defaulted.
             r#"{"id":26,"body":{"type":"delegation_run","caller":"11111111-2222-4333-8444-555555555555","provider":"claude","brief":"summarize the diff","expectation":"one paragraph"}}"#,
         ),
         (
@@ -906,6 +1017,19 @@ fn request_goldens() -> Vec<(Request, &'static str)> {
                 body: RequestBody::DelegationList { caller: None },
             },
             r#"{"id":28,"body":{"type":"delegation_list"}}"#,
+        ),
+        (
+            Request {
+                id: 31,
+                body: RequestBody::DelegationWait {
+                    delegation: delegation_id(),
+                    timeout_ms: 30_000,
+                    caller: None,
+                },
+            },
+            // Byte-identical to what a version-7 peer sent before `caller` existed, which is the
+            // whole proof that a waiter with no session of its own is still the old shape.
+            r#"{"id":31,"body":{"type":"delegation_wait","delegation":"dddddddd-2222-4333-8444-555555555555","timeout_ms":30000}}"#,
         ),
         // Delivery of a child's result to its caller is an ordinary `AgentSend` whose input is
         // marked; request 8 above pins the same shape with the mark absent.

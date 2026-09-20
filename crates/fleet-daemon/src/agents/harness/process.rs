@@ -244,6 +244,37 @@ pub fn filter_environment(
     environment
 }
 
+/// Prepends `directory` to `PATH` in an already-merged child environment.
+///
+/// Called after [`filter_environment`] so it extends the value the child will really get rather
+/// than replacing it: a delegated child needs `fleet` on `PATH` *and* everything its login shell
+/// put there. Idempotent, because a directory that is already first would otherwise accumulate
+/// on every resume. `PATH` is rebuilt with [`std::env::join_paths`] so the separator is never
+/// hand-rolled; a value that cannot be rejoined (an entry containing the separator) is left
+/// untouched rather than silently corrupted.
+pub fn prepend_path(environment: &mut HashMap<OsString, OsString>, directory: &Path) {
+    let key = OsString::from("PATH");
+    let Some(current) = environment.get(&key) else {
+        environment.insert(key, directory.as_os_str().to_os_string());
+        return;
+    };
+    let existing: Vec<std::path::PathBuf> = std::env::split_paths(current).collect();
+    if existing.first().is_some_and(|first| first == directory) {
+        return;
+    }
+    let joined = std::iter::once(directory.to_path_buf()).chain(existing);
+    match std::env::join_paths(joined) {
+        Ok(value) => {
+            environment.insert(key, value);
+        }
+        Err(error) => tracing::warn!(
+            %error,
+            directory = %directory.display(),
+            "could not prepend the directory to PATH; leaving the inherited value alone"
+        ),
+    }
+}
+
 /// Expands a leading `~` manually.
 ///
 /// `Command::env` performs no shell expansion, so `CODEX_HOME=~/.codex_work` reaches Codex
@@ -474,6 +505,59 @@ mod tests {
         assert_eq!(
             filtered.get(OsStr::new("PATH")),
             Some(&OsString::from("/opt/bin"))
+        );
+    }
+
+    #[test]
+    fn prepending_puts_the_directory_first_and_keeps_the_rest_in_order() {
+        let mut environment = HashMap::from([(
+            OsString::from("PATH"),
+            OsString::from("/usr/bin:/bin:/opt/homebrew/bin"),
+        )]);
+        prepend_path(&mut environment, Path::new("/fleet/bin"));
+        assert_eq!(
+            environment.get(OsStr::new("PATH")),
+            Some(&OsString::from(
+                "/fleet/bin:/usr/bin:/bin:/opt/homebrew/bin"
+            ))
+        );
+    }
+
+    #[test]
+    fn prepending_a_directory_that_is_already_first_changes_nothing() {
+        let mut environment = HashMap::from([(
+            OsString::from("PATH"),
+            OsString::from("/fleet/bin:/usr/bin"),
+        )]);
+        prepend_path(&mut environment, Path::new("/fleet/bin"));
+        prepend_path(&mut environment, Path::new("/fleet/bin"));
+        assert_eq!(
+            environment.get(OsStr::new("PATH")),
+            Some(&OsString::from("/fleet/bin:/usr/bin"))
+        );
+    }
+
+    #[test]
+    fn prepending_without_an_inherited_path_sets_the_directory_alone() {
+        let mut environment = HashMap::new();
+        prepend_path(&mut environment, Path::new("/fleet/bin"));
+        assert_eq!(
+            environment.get(OsStr::new("PATH")),
+            Some(&OsString::from("/fleet/bin"))
+        );
+    }
+
+    #[test]
+    fn a_directory_present_later_in_path_is_still_moved_to_the_front() {
+        let mut environment = HashMap::from([(
+            OsString::from("PATH"),
+            OsString::from("/usr/bin:/fleet/bin"),
+        )]);
+        prepend_path(&mut environment, Path::new("/fleet/bin"));
+        // The child resolves `fleet` through the first match, so winning the race is the point.
+        assert_eq!(
+            environment.get(OsStr::new("PATH")),
+            Some(&OsString::from("/fleet/bin:/usr/bin:/fleet/bin"))
         );
     }
 

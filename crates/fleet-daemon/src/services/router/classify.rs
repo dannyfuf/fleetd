@@ -525,6 +525,8 @@ mod tests {
                 mode: None,
                 model: None,
                 title: None,
+                fleet_path: None,
+                env: std::collections::BTreeMap::new(),
                 eager: false,
             },
             RequestBody::DelegationComplete {
@@ -542,6 +544,7 @@ mod tests {
             RequestBody::DelegationWait {
                 delegation,
                 timeout_ms: 1,
+                caller: None,
             },
         ];
 

@@ -1,6 +1,6 @@
 //! `DelegationRun`: validate, mint the token, create the child, seed the transcript.
 
-use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use fleet_core::agents::{
@@ -23,9 +23,64 @@ use crate::{
 
 use super::{
     DelegationService, RunRequest,
-    footer::{SAME_WORKTREE_WARNING, child_title, first_message},
+    footer::{BARE_FLEET, SAME_WORKTREE_WARNING, child_title, first_message},
     limits::{MAX_DEPTH, MAX_LIVE_CHILDREN_PER_CALLER, MAX_LIVE_DELEGATIONS},
 };
+
+/// The child-environment keys Fleet mints itself and a caller may never set.
+///
+/// They are the child's delegation identity: whatever a request carries under these names is
+/// dropped, because a child that reports against a delegation it was not started for would be
+/// completing someone else's work. `pub(in crate::services::agents)` so the resume path can
+/// enforce the same rule on the environment it replays.
+pub(in crate::services::agents) const FLEET_OWNED_CHILD_ENV: [&str; 2] =
+    ["FLEET_DELEGATION", "FLEET_DELEGATION_TOKEN"];
+
+/// Where a `fleet` the child can execute lives, and which rule found it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::services::agents) struct FleetProgram {
+    /// Prepended to the child's `PATH`, so bare `fleet` resolves.
+    pub(in crate::services::agents) directory: PathBuf,
+    /// Named verbatim in the child's footer, so a `PATH` that still fails is survivable.
+    pub(in crate::services::agents) program: PathBuf,
+    /// Which rule below chose it, for the daemon log.
+    pub(in crate::services::agents) source: &'static str,
+}
+
+/// Picks the `fleet` a delegated child should use, preferring the caller's own.
+///
+/// A child that cannot run `fleet subagent complete` is this feature's worst failure mode, so the
+/// order is: the binary the caller itself ran, when that exact file also exists here — which is
+/// both the same-host case and the only one where wire compatibility is guaranteed; then a `fleet`
+/// sitting next to this daemon's own `fleetd`, which is what a remote bootstrap leaves behind;
+/// then nothing, and the child falls back to whatever its login shell's `PATH` holds.
+///
+/// `pub(in crate::services::agents)` rather than `pub(super)` because the resume path in
+/// [`crate::services::agents::manager`] re-runs rule 2 for a child it is restarting: the caller's
+/// hint is not durable, but the daemon's own sibling does not depend on a request at all.
+pub(in crate::services::agents) fn resolve_fleet_program(
+    caller_hint: Option<&str>,
+    daemon_exe: Option<&Path>,
+) -> Option<FleetProgram> {
+    if let Some(hint) = caller_hint.map(Path::new)
+        && hint.is_file()
+        && let Some(directory) = hint.parent()
+    {
+        return Some(FleetProgram {
+            directory: directory.to_path_buf(),
+            program: hint.to_path_buf(),
+            source: "caller",
+        });
+    }
+    // `current_exe` is `fleetd`, so the sibling is the interesting file, not the parent alone.
+    let directory = daemon_exe.and_then(Path::parent)?;
+    let sibling = directory.join("fleet");
+    sibling.is_file().then(|| FleetProgram {
+        directory: directory.to_path_buf(),
+        program: sibling,
+        source: "daemon-sibling",
+    })
+}
 
 impl DelegationService {
     /// Starts one delegation: a child thread, a durable record, and a row in the caller's
@@ -122,6 +177,9 @@ impl DelegationService {
         })?;
 
         let caller_record = self.inner.manager.record(caller).await?;
+        // Read before `unwrap_or_else` consumes it: an explicitly named worktree is a decision,
+        // and only the implicit default is warned about below.
+        let explicit_worktree = request.worktree.is_some();
         let worktree = request
             .worktree
             .clone()
@@ -143,10 +201,51 @@ impl DelegationService {
             .title
             .clone()
             .unwrap_or_else(|| child_title(request.provider, &request.brief));
-        let extra_env = BTreeMap::from([
-            ("FLEET_DELEGATION".to_owned(), delegation_id.to_string()),
-            ("FLEET_DELEGATION_TOKEN".to_owned(), token),
-        ]);
+        // Caller variables first, Fleet identity second: `insert` overwrites, so a request that
+        // carries `FLEET_DELEGATION` or `FLEET_DELEGATION_TOKEN` — by accident or to impersonate
+        // another delegation — loses to the values this run just minted. The CLI rejects those
+        // keys too, but the daemon must not depend on one client to enforce it.
+        let mut extra_env = request.env.clone();
+        let overridden: Vec<&str> = FLEET_OWNED_CHILD_ENV
+            .iter()
+            .copied()
+            .filter(|key| extra_env.contains_key(*key))
+            .collect();
+        if !overridden.is_empty() {
+            tracing::warn!(
+                delegation = %delegation_id,
+                keys = ?overridden,
+                "ignoring caller-supplied Fleet identity variables for the delegated child"
+            );
+        }
+        extra_env.insert("FLEET_DELEGATION".to_owned(), delegation_id.to_string());
+        extra_env.insert("FLEET_DELEGATION_TOKEN".to_owned(), token);
+        let daemon_exe = std::env::current_exe()
+            .inspect_err(
+                |error| tracing::debug!(%error, "the daemon cannot locate its own executable"),
+            )
+            .ok();
+        let fleet = resolve_fleet_program(request.fleet_path.as_deref(), daemon_exe.as_deref());
+        match &fleet {
+            Some(fleet) => tracing::info!(
+                delegation = %delegation_id,
+                source = fleet.source,
+                directory = %fleet.directory.display(),
+                "prepending a fleet directory to the delegated child's PATH"
+            ),
+            None => tracing::warn!(
+                delegation = %delegation_id,
+                caller_hint = request.fleet_path.as_deref().unwrap_or("<none>"),
+                "no fleet executable resolved for the delegated child; it must find one on its \
+                 own PATH to report a result"
+            ),
+        }
+        // Quoted because the footer is a command line the child copies: a Fleet installed under a
+        // path with a space must still produce something runnable.
+        let fleet_program = fleet.as_ref().map_or_else(
+            || BARE_FLEET.to_owned(),
+            |fleet| shell_words::quote(&fleet.program.to_string_lossy()).into_owned(),
+        );
         let child = fleet_core::agents::ThreadId::new();
         let caller_item = ItemId::new();
         let delegation = Delegation {
@@ -169,9 +268,12 @@ impl DelegationService {
             created: Utc::now(),
             finished: None,
             headline: None,
+            usage: None,
         };
 
         let stored = delegation.clone();
+        // Kept so a resume replays it; `reserve` drops the Fleet identity keys on the way in.
+        let stored_env = extra_env.clone();
         let refused = self
             .inner
             .store
@@ -180,6 +282,7 @@ impl DelegationService {
                     tx,
                     &stored,
                     &token_sha256,
+                    &stored_env,
                     MAX_LIVE_CHILDREN_PER_CALLER,
                     MAX_LIVE_DELEGATIONS,
                 )?;
@@ -205,6 +308,7 @@ impl DelegationService {
                 parent: Some(caller),
                 delegation: Some(delegation_id),
                 extra_env,
+                path_prepend: fleet.map(|fleet| fleet.directory),
             })
             .await;
         let created = match created {
@@ -252,7 +356,12 @@ impl DelegationService {
             .send(
                 child,
                 UserInput {
-                    text: first_message(&delegation.brief, delegation.id, &delegation.expectation),
+                    text: first_message(
+                        &delegation.brief,
+                        delegation.id,
+                        &delegation.expectation,
+                        &fleet_program,
+                    ),
                     origin: MessageOrigin::User,
                     ..UserInput::default()
                 },
@@ -265,8 +374,8 @@ impl DelegationService {
             return Err(with_cleanup(error, cleanup));
         }
 
-        let warning =
-            (worktree == caller_record.worktree).then(|| SAME_WORKTREE_WARNING.to_owned());
+        let warning = (!explicit_worktree && worktree == caller_record.worktree)
+            .then(|| SAME_WORKTREE_WARNING.to_owned());
         Ok(ResponseBody::DelegationStarted {
             delegation,
             warning,

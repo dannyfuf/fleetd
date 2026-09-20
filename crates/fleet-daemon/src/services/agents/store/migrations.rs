@@ -84,6 +84,13 @@ pub(super) const MIGRATIONS: &[Migration] = &[
         source: schema::CLOSED_THREADS,
         sha256: "c9c1a945245b02b513ba45ebc9cb38230b4870660adf4c3c1da6e9e07ec2e9ef",
     },
+    Migration {
+        id: 6,
+        name: "delegation_env",
+        run: m006::run,
+        source: m006::SOURCE,
+        sha256: "9e8ed2c5c48dfc55d259b890ddf3862a76fd5ad9f9b86b97097d04b6b3d809b7",
+    },
 ];
 
 /// Slot 001 — create the log and every read model derived from it.
@@ -279,6 +286,33 @@ mod m005 {
     }
 }
 
+/// Slot 006 — keep the user environment a delegated child was started with.
+///
+/// Nullable because every row written before this slot has none, and because the column stays
+/// NULL for the overwhelmingly common child that was given no extra variables: a pre-slot-006 row
+/// and a slot-006 row with an empty environment must read back identically.
+///
+/// It lives beside the delegation's token digest rather than on `fleet_core::agents::Delegation`
+/// on purpose. A user variable may hold a secret, so it is never put on the wire, never rendered
+/// by the CLI and never logged; the resume path in `services::agents::manager` is its only reader.
+mod m006 {
+    use rusqlite::Transaction;
+
+    pub(super) const SOURCE: &str = "ALTER TABLE delegations ADD COLUMN env_json TEXT";
+
+    pub(super) fn run(transaction: &Transaction<'_>) -> rusqlite::Result<()> {
+        let mut statement = transaction.prepare("PRAGMA table_info(delegations)")?;
+        let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+        for column in columns {
+            if column? == "env_json" {
+                return Ok(());
+            }
+        }
+        drop(statement);
+        transaction.execute_batch(SOURCE)
+    }
+}
+
 /// Configures the connection and applies every pending migration in one transaction.
 ///
 /// Called once at store construction, before the manager exists. A failure here is fatal at
@@ -460,8 +494,10 @@ mod tests {
     use std::collections::BTreeSet;
 
     use anyhow::Context;
+    use fleet_core::agents::DelegationId;
     use rusqlite::{Connection, params};
 
+    use super::super::delegations;
     use super::schema::{REQUIRED_DELEGATION_COLUMNS, REQUIRED_INDEXES, REQUIRED_TABLES};
     use super::{DOMAIN, MIGRATIONS, run, sha256};
 
@@ -472,7 +508,7 @@ mod tests {
         run(&mut conn, None)?;
 
         assert_eq!(objects(&conn, "table")?, expected(REQUIRED_TABLES));
-        assert_eq!(applied_slots(&conn)?, vec![1, 2, 3, 4, 5]);
+        assert_eq!(applied_slots(&conn)?, vec![1, 2, 3, 4, 5, 6]);
         Ok(())
     }
 
@@ -618,6 +654,19 @@ mod tests {
             .collect()
     }
 
+    /// The columns `delegations` carries once slots up to and including `slot` have been applied.
+    ///
+    /// Derived from [`REQUIRED_DELEGATION_COLUMNS`] for the same reason [`tables_at_slot`] is
+    /// derived from [`REQUIRED_TABLES`]: a column added to head without a note here fails loudly
+    /// instead of being quietly assumed to have existed since slot 003.
+    fn delegation_columns_at_slot(slot: u32) -> Vec<&'static str> {
+        REQUIRED_DELEGATION_COLUMNS
+            .iter()
+            .filter(|column| slot >= 6 || **column != "env_json")
+            .copied()
+            .collect()
+    }
+
     #[test]
     fn slot_002_adds_the_model_catalogue_to_an_existing_session_table() -> anyhow::Result<()> {
         let mut conn = memory_database()?;
@@ -645,7 +694,7 @@ mod tests {
         assert!(tables.contains("delegation_outbox"));
         assert_eq!(
             table_columns(&conn, "delegations")?,
-            expected(REQUIRED_DELEGATION_COLUMNS)
+            expected(&delegation_columns_at_slot(3))
         );
         let columns = table_columns(&conn, "threads")?;
         assert!(columns.contains("parent_thread_id"));
@@ -670,7 +719,7 @@ mod tests {
         assert!(objects(&conn, "table")?.contains("delegations"));
         assert_eq!(
             table_columns(&conn, "delegations")?,
-            expected(REQUIRED_DELEGATION_COLUMNS)
+            expected(&delegation_columns_at_slot(3))
         );
         assert!(table_columns(&conn, "threads")?.contains("stop_cause"));
         Ok(())
@@ -703,6 +752,53 @@ mod tests {
             expected(&["client_id", "closed_at", "thread_id"])
         );
         assert_eq!(applied_slots(&conn)?, vec![1, 2, 3, 4, 5]);
+        Ok(())
+    }
+
+    #[test]
+    fn slot_006_adds_the_child_environment_to_the_slot_005_schema() -> anyhow::Result<()> {
+        let mut conn = memory_database()?;
+        run(&mut conn, Some(5))?;
+        assert!(!table_columns(&conn, "delegations")?.contains("env_json"));
+
+        run(&mut conn, Some(6))?;
+
+        assert_eq!(
+            table_columns(&conn, "delegations")?,
+            expected(&delegation_columns_at_slot(6))
+        );
+        assert_eq!(applied_slots(&conn)?, vec![1, 2, 3, 4, 5, 6]);
+        Ok(())
+    }
+
+    /// A delegation written before slot 006 reads back with no environment rather than failing.
+    ///
+    /// That is what makes the slot safe to apply to a database a delegated child is already
+    /// running against: its row keeps every column it had, and the resume path sees an empty map
+    /// exactly as it did before the column existed.
+    #[test]
+    fn a_delegation_written_before_slot_006_reads_an_empty_environment() -> anyhow::Result<()> {
+        let mut conn = memory_database()?;
+        run(&mut conn, Some(5))?;
+        let id = DelegationId::new();
+        seed_delegation(&conn, id)?;
+
+        run(&mut conn, Some(6))?;
+
+        assert!(delegations::env(&conn, id)?.is_empty());
+        Ok(())
+    }
+
+    /// Writes the smallest `delegations` row slot 003's NOT NULL columns accept.
+    fn seed_delegation(conn: &Connection, id: DelegationId) -> anyhow::Result<()> {
+        conn.execute(
+            "INSERT INTO delegations (id, token_sha256, caller_thread, caller_turn, caller_item, \
+             child_thread, provider, depth, brief, expectation, status, delivery, created) \
+             VALUES (?1, 'hash', 'caller', 'turn', 'item', 'child', 'claude', 1, \
+                     'brief', 'expectation', 'starting', 'pending', '1970-01-01T00:00:00Z')",
+            params![id.to_string()],
+        )
+        .context("seed a pre-slot-006 delegation")?;
         Ok(())
     }
 
@@ -791,7 +887,7 @@ mod tests {
 
         run(&mut conn, None)?;
 
-        assert_eq!(applied_slots(&conn)?, vec![1, 2, 3, 4, 5]);
+        assert_eq!(applied_slots(&conn)?, vec![1, 2, 3, 4, 5, 6]);
         Ok(())
     }
 

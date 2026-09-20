@@ -174,6 +174,7 @@ mod tests {
             created: chrono::DateTime::UNIX_EPOCH,
             finished: None,
             headline: None,
+            usage: None,
         });
         let subscriptions = HashSet::from([EventKind::AgentSummary]);
         let capable = HelloClient {

@@ -109,7 +109,8 @@ impl ClaudeHarness {
         })
     }
 
-    /// The child environment: the login shell's, minus Claude's own inherited variables.
+    /// The child environment: the login shell's, minus Claude's own inherited variables, plus
+    /// any directory the request asks to be prepended to `PATH`.
     async fn environment(
         &self,
         request: &OpenSession,
@@ -136,11 +137,17 @@ impl ClaudeHarness {
         overrides.extend(request.start.env.clone());
         overrides.insert("FLEET_SESSION".to_owned(), request.start.thread.to_string());
         overrides.insert("FLEET_TERMINAL".to_owned(), "claude".to_owned());
-        process::filter_environment(
+        let mut environment = process::filter_environment(
             inherited,
             crate::agents::harness::probe::strip_list(AgentKind::Claude),
             &overrides,
-        )
+        );
+        // After the merge, so the prepend extends the `PATH` the child really gets. A delegated
+        // child needs `fleet` on it to report its result at all.
+        if let Some(directory) = &request.start.path_prepend {
+            process::prepend_path(&mut environment, directory);
+        }
+        environment
     }
 
     /// Writes the interrupt control request, respecting the declared capabilities.

@@ -95,6 +95,14 @@ pub struct StartRequest {
     /// Optional thread title.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Directory prepended to the child's `PATH`, rather than replacing it.
+    ///
+    /// A delegated child must be able to run bare `fleet subagent complete`, and the login shell
+    /// `PATH` it inherits need not contain the `fleet` the daemon is wire-compatible with. This is
+    /// deliberately not an `env` entry: `env` overrides a variable whole, which would discard the
+    /// login shell's own `PATH` instead of extending it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_prepend: Option<PathBuf>,
 }
 
 /// A user message submitted to a provider.

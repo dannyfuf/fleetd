@@ -1,6 +1,6 @@
 //! Client-to-daemon request messages.
 
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
 
 use fleet_core::{
     agents::{
@@ -340,6 +340,35 @@ pub enum RequestBody {
         /// Optional child-thread title.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
+        /// Absolute path to the `fleet` executable that issued this request, on the **caller's**
+        /// host.
+        ///
+        /// A hint, not an instruction. It exists so the daemon can put a wire-compatible `fleet`
+        /// on a delegated child's `PATH`, which is what lets the child run a bare
+        /// `fleet subagent complete` instead of needing an absolute path spelled out in its
+        /// brief. The daemon must treat it as advisory and tolerate all three ways it can be
+        /// useless: absent, because the caller could not resolve its own executable or is an
+        /// older peer; stale, because the binary moved or was rebuilt elsewhere since; or
+        /// meaningless here, because the caller is on another host and this path names nothing
+        /// on the daemon's filesystem. In every one of those cases the daemon falls back to what
+        /// it did before this field existed — it never refuses a delegation over it.
+        ///
+        /// The file name is whatever the caller was invoked as; consumers want the directory.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fleet_path: Option<String>,
+        /// Extra environment variables for the child's provider process.
+        ///
+        /// The caller's variables, not the daemon's: this is how four children sharing one
+        /// worktree get four `CARGO_TARGET_DIR`s instead of serialising on one build lock. The
+        /// daemon merges them **under** its own `FLEET_DELEGATION` and `FLEET_DELEGATION_TOKEN`,
+        /// which always win, because a peer that sets those either by accident or on purpose must
+        /// not be able to make a child report against another delegation. Everything else is
+        /// passed through verbatim and unvalidated — a variable that means nothing on this host is
+        /// the caller's mistake to make, not a reason to refuse the delegation.
+        ///
+        /// A `BTreeMap` so the wire bytes are ordered and a golden can pin them.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        env: BTreeMap<String, String>,
         /// Deliver completion as soon as possible.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         eager: bool,
@@ -380,6 +409,20 @@ pub enum RequestBody {
         delegation: DelegationId,
         /// Service-side wait deadline in milliseconds.
         timeout_ms: u64,
+        /// Thread on whose behalf this wait is issued, when the waiter knows its own.
+        ///
+        /// Advisory **identity**, never authorisation: it decides whether the delegation's result
+        /// is marked read, and nothing else. Any peer may wait on any delegation, and the answer
+        /// is byte-identical whatever this field says.
+        ///
+        /// When it names the delegation's own caller, a terminal answer also moves the delivery
+        /// from `pending` to `consumed`, because a caller that has just been handed the result
+        /// must not be sent it a second time as a user message when its turn settles. When it is
+        /// absent — an older `fleet`, or a `wait` from a shell with no session of its own — or
+        /// when it names a third party, nothing is consumed and delivery proceeds exactly as it
+        /// did before this field existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caller: Option<ThreadId>,
     },
     /// List boards.
     ListBoards {
