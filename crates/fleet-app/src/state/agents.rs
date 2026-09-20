@@ -90,8 +90,8 @@ pub struct AgentThreads {
     question_cursor: HashMap<ThreadId, usize>,
     /// The last cursor re-reported to the daemon for a thread it had forgotten.
     reported: HashMap<ThreadId, Seq>,
-    /// Threads whose tab `^s x` closed. The daemon keeps listing them (§6 leaves every
-    /// thread browsable), so the closed set is what actually takes the tab out of the strip.
+    /// Threads whose tab `^s x` closed. The daemon seeds this set on Hello, and snapshots never
+    /// prune it, so an omitted thread stays closed if the daemon lists it again later.
     closed: HashSet<ThreadId>,
     /// Threads whose transcript has a row focused inside scroll mode.
     ///
@@ -1061,10 +1061,9 @@ impl AgentThreads {
         self.reported.retain(|thread, _| live.contains(thread));
         self.active.retain(|_, thread| live.contains(thread));
         let attached_before = self.attached.len();
-        let closed_before = self.closed.len();
+        // Attached children are snapshot-local; closed callers persist across incomplete snapshots.
         self.attached.retain(|thread| live.contains(thread));
-        self.closed.retain(|thread| live.contains(thread));
-        if self.attached.len() != attached_before || self.closed.len() != closed_before {
+        if self.attached.len() != attached_before {
             self.bump_attached_revision();
         }
         if self
@@ -1081,6 +1080,15 @@ impl AgentThreads {
         }
         self.prepare_attention_counts();
         self.prepare_strip_offsets();
+    }
+
+    /// Replaces the installation's daemon-persisted closed set.
+    pub fn seed_closed(&mut self, threads: Vec<ThreadId>) {
+        let closed = threads.into_iter().collect();
+        if self.closed != closed {
+            self.closed = closed;
+            self.bump_attached_revision();
+        }
     }
 
     /// The threads that just entered an attention worth a notification, and their tab labels.

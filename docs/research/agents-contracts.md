@@ -65,13 +65,23 @@ Delegation {
     created: DateTime<Utc>,
     finished: Option<DateTime<Utc>>,
     headline: Option<String>,
+    usage: Option<DelegationUsage>,
 }
 ```
 
 The JSON keys are `callerTurn`, `callerItem`, `statusPayload` and so on. `eager: false`, `None`
 optional fields and an empty result file list are omitted; `nudges` and `recoveries` default to
 zero when absent. The bearer token is intentionally not on this type: the daemon persists its
-SHA-256, while only `RequestBody::DelegationComplete` carries the plaintext token.
+SHA-256, while only `RequestBody::DelegationComplete` carries the plaintext token. The child's
+environment is not on it either: `--env` is persisted in `delegations.env_json` and read only by
+the resume path, never serialized here.
+
+`usage` is `#[serde(default, skip_serializing_if = "Option::is_none")]` and is **computed on read,
+never persisted and never broadcast**. `RawDelegation::decode` produces `None`, `EncodedDelegation`
+ignores it, and `Event::DelegationChanged` carries `None`; only the `DelegationGet`,
+`DelegationList` and `DelegationWait` responses fill it, from a SQL read over the child thread's
+own `turns.usage_json` rows plus its newest `token_usage` event. A `Delegation` golden written
+before this field is byte-identical to one with `usage: None`.
 
 - `DelegationStatus = Starting | Running | Blocked | Settling | Succeeded | Incomplete | Failed |
   Cancelled` serializes as snake-case strings. `is_terminal` is true for the final four,
@@ -80,10 +90,21 @@ SHA-256, while only `RequestBody::DelegationComplete` carries the plaintext toke
 - `DelegationResult { text: String, files_changed: Vec<String>, source: ResultSource,
   elided: bool }` is camel-case. `ResultSource = Reported | LastAssistantText` serializes as
   `reported | last_assistant_text`.
-- `DeliveryState = Pending | Delivered { seq: Seq, turn: TurnId } | Undeliverable {
+- `DeliveryState = Pending | Delivered { seq: Seq, turn: TurnId } | Consumed | Undeliverable {
   reason: String }` uses the tagged shape `{ "type": snake_case, "data": ... }`.
-  `is_pending` and `word() -> "pending" | "delivered" | "undeliverable"` are the compact
-  projection helpers.
+  `is_pending` and `word() -> "pending" | "delivered" | "consumed" | "undeliverable"` are the
+  compact projection helpers; `is_pending` matches `Pending` only. `Consumed` carries no payload
+  and is set when a caller's own `fleet subagent wait` takes the result before the delivery worker
+  injects it. It is stored in the existing `delegations.delivery` TEXT column — there is no `CHECK`
+  constraint, so no migration — leaving `delivered_seq`, `delivered_turn` and `delivery_reason`
+  NULL. Because `RawDelegation::decode` rejects an unknown delivery word, a `fleetd` older than
+  this variant cannot open a database holding a `consumed` row; that is a downgrade hazard of the
+  same shape the three original words already have, not an upgrade one.
+- `DelegationUsage { usage: Usage, cost_usd: Option<f64>, context_pct: f32 }` is camel-case and
+  reuses `fleet_core::agents::Usage` so the CLI shows the same arithmetic the app's turn footer
+  does. It covers the child's **own thread only, descendants excluded**, and is the child's settled
+  turns plus the in-flight turn's latest report. `cost_usd` and `context_pct` are the latest
+  *reported* values, never blanked by a frame that omits them.
 - `Delegation::elapsed(now)` measures `created` to `finished`, or to `now` while live.
 
 ### State — `crates/fleet-core/src/agents/state.rs`
@@ -341,13 +362,14 @@ AgentCheckpoints { thread: ThreadId }
 AgentRevert { thread: ThreadId, checkpoint: CheckpointId }
 DelegationRun { caller: ThreadId, provider: AgentKind, brief: String,
     expectation: String, worktree: Option<WorktreeId>, mode: Option<PermissionMode>,
-    model: Option<ModelSelection>, title: Option<String>, eager: bool }
+    model: Option<ModelSelection>, title: Option<String>, fleet_path: Option<String>,
+    env: BTreeMap<String, String>, eager: bool }
 DelegationComplete { delegation: DelegationId, child: ThreadId, token: String,
     result: String, blocked: bool }
 DelegationList { caller: Option<ThreadId> }
 DelegationGet { delegation: DelegationId }
 DelegationCancel { delegation: DelegationId }
-DelegationWait { delegation: DelegationId, timeout_ms: u64 }
+DelegationWait { delegation: DelegationId, timeout_ms: u64, caller: Option<ThreadId> }
 ```
 
 `AgentThreadCreate` intentionally carries published `WorktreeId`; the daemon resolves the trusted,
@@ -367,6 +389,16 @@ optional fields and false booleans are defaulted and omitted. `DelegationRun` an
 `agent_request_is_serialized`. On the wire, `RequestBody` uses an internal `type` tag with
 snake-case values (`delegation_run` through `delegation_wait`); its fields retain the exact
 snake-case spellings above, including `timeout_ms`.
+
+`DelegationRun.fleet_path`, `DelegationRun.env` and `DelegationWait.caller` are additive and carry
+no capability string and no `PROTOCOL_VERSION` bump: an absent optional field is
+byte-indistinguishable from an older peer's payload, so there is nothing to negotiate. `fleet_path`
+is an advisory hint at the caller's own executable (§15 of `NATIVE-AGENTS.md`). `env` is
+`#[serde(default, skip_serializing_if = "BTreeMap::is_empty")]` and is merged into the child's
+environment **before** `FLEET_DELEGATION` and `FLEET_DELEGATION_TOKEN`, by the daemon rather than by
+the CLI, so no peer can override the identity variables. `caller` is `Option<ThreadId>`, advisory
+identity rather than authorisation: it decides only whether the wait consumes the delivery, and an
+older client that omits it consumes nothing, which is the pre-existing behaviour.
 
 ### Responses, events, snapshot
 
@@ -516,12 +548,24 @@ ALTER TABLE threads ADD COLUMN delegation_id TEXT;
 ALTER TABLE threads ADD COLUMN stop_cause TEXT;
 ```
 
-The three `ALTER TABLE` operations use the migration ladder's `PRAGMA table_info` guard, as slot
-2 does. Status/delivery values are snake-case, `result_files` is a JSON array, and timestamps use
-the database's RFC 3339 encoding. Thread insert/read/list paths carry all three columns, and every
-metadata write persists `stop_cause`. `rebuild_thread` and `quarantine_after` never recreate,
-delete or truncate delegation records: the delegation is separate durable truth, while only its
-status columns are derived from thread events.
+Migration slot 6 is named `delegation_env` and adds one nullable column:
+
+```sql
+ALTER TABLE delegations ADD COLUMN env_json TEXT;
+```
+
+It holds the `--env` map the caller passed to `DelegationRun`, encoded as a JSON object, and is
+named in `REQUIRED_DELEGATION_COLUMNS` so the column-set test protects it. It is read only by the
+resume path, through a targeted `SELECT env_json` rather than the ordinary `RawDelegation` decode,
+so it never reaches `Delegation`, the wire, the CLI or a log line. A row written before slot 6 reads
+as an empty map. Slot 5 is `closed_threads`; slots are never renumbered or edited after shipping.
+
+The three `ALTER TABLE` operations of slot 3 use the migration ladder's `PRAGMA table_info` guard,
+as slot 2 does. Status/delivery values are snake-case, `result_files` is a JSON array, and
+timestamps use the database's RFC 3339 encoding. Thread insert/read/list paths carry all three
+columns, and every metadata write persists `stop_cause`. `rebuild_thread` and `quarantine_after`
+never recreate, delete or truncate delegation records: the delegation is separate durable truth,
+while only its status columns are derived from thread events.
 
 ### Manager/service — `crates/fleet-daemon/src/services/agents/{manager.rs,thread.rs,mod.rs}`
 
@@ -592,14 +636,17 @@ Typed methods live in `crates/fleet-client/src/api/agents.rs`; mirror types live
   `agent_mark_seen(ThreadId, Seq) -> Result<()>`, and `agent_stop(ThreadId) -> Result<()>`.
   Every method is async and validates its exact agent response variant.
 - `DelegationRunRequest { caller, provider, brief, expectation, worktree, mode, model, title,
-  eager }` mirrors `RequestBody::DelegationRun`. `Client` adds
+  fleet_path, env, eager }` mirrors `RequestBody::DelegationRun`; `fleet_path` is an
+  `Option<String>` rather than a `PathBuf` because that is the wire shape, and `env` is a
+  `BTreeMap<String, String>`. `Client` adds
   `delegation_run(DelegationRunRequest) -> Result<(Delegation, Option<String>)>`,
   `delegation_complete(DelegationId, ThreadId, String, String, bool) -> Result<Delegation>`,
   `delegation_list(Option<ThreadId>) -> Result<Vec<Delegation>>`,
   `delegation_get(DelegationId) -> Result<Delegation>`,
   `delegation_cancel(DelegationId) -> Result<Delegation>`, and
-  `delegation_wait(DelegationId, u64) -> Result<Delegation>`. All are async and validate the
-  response variant described above.
+  `delegation_wait(DelegationId, u64, Option<ThreadId>) -> Result<Delegation>` — three arguments,
+  the third being the waiting caller. All are async and validate the response variant described
+  above.
 - `MirrorOutcome = Applied | Duplicate { applied: Seq } | Gap { expected: Seq, got: Seq } |
   Rejected { seq: Seq }` reports ordered delivery. `Duplicate` is a replay, which a cursored open
   produces by construction (§4.3) and which no resync repairs; `Rejected` is a continuous event
@@ -638,7 +685,7 @@ Typed methods live in `crates/fleet-client/src/api/agents.rs`; mirror types live
   `set_focus_visible`, `set_read_only`, `focus_handle`, `push_history`, `submit`,
   `replace_and_mark_text_in_range`, `recall_previous(&mut self, &mut Context<Self>) -> bool`, and
   `caret_up` / `caret_down`, both `-> bool` so an owner can fall through to prompt history.
-  The composer owns an `Entity<TextInput>` (ADR 0019): editing, selection, undo, IME, pointer
+  The composer owns an `Entity<TextInput>` (ADR 0020): editing, selection, undo, IME, pointer
   geometry and scrolling belong to that shared input, and `InputBuffer` — the editable text model
   with selection, word motion and UTF-16 offsets for IME — lives in `components/input/buffer.rs`.
   This wrapper keeps only prompt history, completion triggers, submit/escape events, read-only
@@ -782,31 +829,85 @@ stack, so `fleet-ui-kit` gains no `fleet-git` dependency: the payload rows come 
 `commands/agents.rs`: `list`, `new <WORKTREE> --provider <claude|codex> [--model M]
 [--mode ask|accept-edits|plan|auto|dont-ask|full-access]`, `send <THREAD> <TEXT>`,
 `respond <THREAD> <GATE> <ANSWER…>`, `interrupt <THREAD>`, `stop <THREAD>`,
-`tail <THREAD> [--replay]`, and `terminal [claude|codex]` — the last being the former
+`tail <THREAD> [--replay] [--no-follow] [--last N]`, and `terminal [claude|codex]` — the last being the former
 `fleet agent [claude|codex]`, kept under its own verb as the §10 PTY fallback. Read-only verbs
 open with `Some(Seq(0))` so looking at a thread never triggers the §6 lazy resume.
+
+`tail` prints one JSON `SeqEvent` per line, flushed per line. Without `--replay` the retained
+history is folded into the projection and only future events print, so a tail killed by its
+caller's timeout before the thread said anything new printed nothing at all. `--no-follow` prints
+the retained history and exits 0 instead of entering the follow loop, and `--last N` keeps only
+the newest N of it; both **imply `--replay`**, because a flag that printed nothing would repeat
+the bug they exist to fix. `--last` is a client-side trim of the history the cursored open
+already returned, never a paginated request, and it bounds the replay only — the trimmed prefix
+is still applied to the projection, and a tail that goes on to follow still prints every live
+event.
 
 `fleet subagent` is implemented in `commands/subagents.rs`. Every verb accepts `--json`; human
 output otherwise follows the exact copy in `NATIVE-AGENTS.md` §15.
 
 - `run --provider <claude|codex> [--brief-file F] --expect <text> [--worktree W] [--mode M]
-  [--model M] [--title T] [--eager] [--caller <thread>]` reads the brief from the file or stdin.
-  Caller selection is `--caller`, then `FLEET_SESSION`; neither being present is a validation
-  error.
+  [--model M] [--effort E] [--title T] [--eager] [--caller <thread>] [--env KEY=VALUE]...` reads the
+  brief from the file or stdin. Caller selection is `--caller`, then `FLEET_SESSION`; neither being
+  present is a validation error. `--effort` is free text, never a clap enum — the legal ladder is
+  per provider and per model and is published by the harness — and it **stands alone**: passed
+  without `--model`, the child runs the model configured as that provider's default at the requested
+  effort. The CLI sends that as a `ModelSelection` whose `model` is the empty string, which is that
+  field's documented "keep the configured default" sentinel; `create_with` fills it from
+  `config.nativeAgents.<provider>.model`, and an adapter still handed an empty one names no model
+  and spends the effort alone (Claude's `--effort` is a session flag in its own right, Codex's
+  `model_reasoning_effort` a separate config key). A *blank* `--model ""` is still a validation
+  error: the caller typed the flag, so reading it as "the default" would hide a quoting mistake.
+  `--env` is repeatable and is parsed into the `BTreeMap<String, String>` the request carries. Five
+  refusals are validation errors, each naming what it rejected: a value with no `=`, an empty key,
+  a key given twice, a key beginning `FLEET_`, and `PATH`. `PATH` is refused because both adapters
+  treat an `env` entry as a whole-value override, so one here would discard the login shell's own
+  rather than extend it — `StartRequest::path_prepend` is the extending mechanism, and the message
+  says so.
 - `complete [<id>] [--result-file F] [--blocked] [--json-result]` reads the result from the file
   or stdin. Its id is the argument or `FLEET_DELEGATION`; its child is `FLEET_SESSION`; its bearer
   token is `FLEET_DELEGATION_TOKEN`. All three are required after fallback. `--json-result`
   validates the result as JSON but does not change its wire type.
-- `wait <id> [--timeout S]` defaults to 540 seconds and caps the flag at 540; timeout exits 2 and
-  a terminal record exits 0.
-- `status <id>` prints one delegation.
-- `list [--caller T]` prints all delegations or those belonging to one caller.
-- `cancel <id>` cancels one live delegation.
+- `wait <id> [--timeout S] [--caller <thread>]` defaults to 540 seconds — the Claude Code shell-tool
+  ceiling, so the common caller outlives its own wait — and imposes **no upper bound**: a larger
+  value is accepted, though the caller's own tool timeout may still kill the wait first. A timeout
+  exits 2 and prints a distinct single line naming the delegation, its live status and its elapsed
+  time; it never renders the terminal "finished:" template. A terminal record exits 0 and returns
+  the child's report body, in human output and as `delegation.result.text` in the JSON envelope. The
+  `--json` output is identical in both cases: callers read `delegation.status`. The caller is
+  `--caller`, else `FLEET_SESSION`; unlike `run`, a missing caller is **not** a validation error —
+  the wait proceeds and simply consumes nothing. A wait whose caller equals the delegation's caller
+  leaves the record `delivery: "consumed"` and suppresses the duplicate delivered user message
+  (`NATIVE-AGENTS.md` §15.2).
+- `status <id>` prints the fixed-field line, then the brief, then the child's usage, then — for a
+  terminal delegation — the report body rendered through the same `human::delivered_message`
+  template `wait` uses, elision suffix included. A child with no usage prints no usage line rather
+  than zeros. Its `--json` envelope keeps the brief whole.
+- `list [--caller T]` prints all delegations or those belonging to one caller, one fixed-field
+  tab-separated line each. The line is **eight** fields, not the original six: id, status, provider,
+  child, duration, total tokens, cost, delivery, with `-` for an unknown token total or cost.
+- `cancel <id>` cancels one live delegation. It shares `whole_envelope`'s JSON path with
+  `status`, and therefore keeps the whole brief in its envelope, but its human output remains the
+  single word `cancelled` — it never acquires the brief, the usage or the report body.
+
+`SubagentEnvelope { protocol, delegation, warning, brief_elided }` and
+`SubagentsEnvelope { protocol, delegations, brief_elided }` carry `briefElided: bool` with
+`#[serde(skip_serializing_if = "std::ops::Not::not")]`, so it is absent when false. `run`, `wait`
+and `list` replace `delegation.brief` with its first 200 characters on a character boundary **when
+it is longer than that**, and set `briefElided: true` only when bytes were actually removed: a brief
+of 200 characters or fewer is carried whole and the key is absent, not `false`, so a consumer may
+trust `delegation.brief` whenever it does not see the flag. `list` cuts every row of its page and
+ORs the flags, never short-circuiting on the first long brief, so `briefElided: true` can never sit
+beside a row still carrying a whole one. `status`, `cancel` and `complete` serialize the brief
+whole. The elision is done at render time in the CLI over a cloned `Delegation`, so the wire is
+untouched, and `PROTOCOL` stays `1` because the field is additive and omitted when false. Human
+output is unchanged by it.
 
 The environment contract is therefore deliberately narrow: `FLEET_SESSION` is the `run` caller
-fallback and the mandatory `complete` child; `FLEET_DELEGATION` is the `complete` id fallback;
-and `FLEET_DELEGATION_TOKEN` authenticates `complete`. No other subagent verb reads delegation
-environment state.
+fallback, the `wait` caller fallback and the mandatory `complete` child; `FLEET_DELEGATION` is the
+`complete` id fallback; and `FLEET_DELEGATION_TOKEN` authenticates `complete`. No other subagent
+verb reads delegation environment state. What `--env` sends travels the other way — into the
+child's environment, never back out of one.
 
 ## Additions after the Stage 0 freeze
 

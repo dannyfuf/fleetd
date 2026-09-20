@@ -56,16 +56,20 @@ mod read;
 mod schema;
 #[cfg(test)]
 mod tests;
+mod usage;
 mod writer;
 
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
 use anyhow::Context;
 use fleet_core::{
-    agents::{AgentThreadSummary, Delegation, DelegationId, Seq, SeqEvent, ThreadId},
+    agents::{
+        AgentThreadSummary, Delegation, DelegationId, DelegationUsage, Seq, SeqEvent, ThreadId,
+    },
     ids::HostId,
 };
 use fleet_proto::agents::AgentSeenCursor;
@@ -291,6 +295,52 @@ impl SqliteAgentStore {
             .await
     }
 
+    /// What one delegated child's own thread has spent, or `None` when it has spent nothing.
+    ///
+    /// Fills [`Delegation::usage`] on the `get` and `wait` read paths. The numbers are the child
+    /// thread's **own** — a grandchild's spend is not summed in — and cover its **settled** turns
+    /// plus, while a turn is in flight, that turn's latest report. That is the definition
+    /// `ThreadProjection` shows in the GUI footer, reached without hydrating the thread:
+    /// `manager.projection()` would replay a cold child's whole event log to answer it.
+    pub(crate) async fn delegation_usage(
+        &self,
+        child: ThreadId,
+    ) -> anyhow::Result<Option<DelegationUsage>> {
+        self.inner
+            .readers
+            .read("read a delegated child's usage", move |conn| {
+                usage::thread_usage(conn, child)
+            })
+            .await
+    }
+
+    /// [`Self::delegation_usage`] for many children, in **one** trip to the reader pool.
+    ///
+    /// A child that has spent nothing is absent from the map rather than present as a zero. `list`
+    /// calls this once per page, so the statements run N times but the pool is entered once; N is
+    /// bounded by the `LIMIT` every delegation read carries, and delegation rows are few by
+    /// construction — the depth and concurrency ceilings are what keep them so.
+    pub(crate) async fn delegation_usages(
+        &self,
+        children: Vec<ThreadId>,
+    ) -> anyhow::Result<HashMap<ThreadId, DelegationUsage>> {
+        self.inner
+            .readers
+            .read("read delegated children's usage", move |conn| {
+                let mut answers = HashMap::with_capacity(children.len());
+                for child in children {
+                    if answers.contains_key(&child) {
+                        continue;
+                    }
+                    if let Some(usage) = usage::thread_usage(conn, child)? {
+                        answers.insert(child, usage);
+                    }
+                }
+                Ok(answers)
+            })
+            .await
+    }
+
     /// Every unfinished outbox row in id order — the durable work list the worker drains.
     pub(crate) async fn delegation_outbox(&self) -> anyhow::Result<Vec<OutboxRow>> {
         self.inner
@@ -438,6 +488,38 @@ impl SqliteAgentStore {
             .readers
             .read("read native-agent seen cursors", move |conn| {
                 read::seen_cursors(conn, &client_id)
+            })
+            .await
+    }
+
+    /// Marks one native-agent thread closed for one installation.
+    pub(crate) async fn mark_closed(
+        &self,
+        client_id: String,
+        thread: ThreadId,
+        closed_at: i64,
+    ) -> anyhow::Result<()> {
+        self.inner
+            .writer
+            .mark_closed(client_id, thread, closed_at)
+            .await
+    }
+
+    /// Clears one installation's closed marker for a native-agent thread.
+    pub(crate) async fn clear_closed(
+        &self,
+        client_id: String,
+        thread: ThreadId,
+    ) -> anyhow::Result<()> {
+        self.inner.writer.clear_closed(client_id, thread).await
+    }
+
+    /// Reads the installation-wide closed-thread census used once after Hello.
+    pub(crate) async fn closed_threads(&self, client_id: String) -> anyhow::Result<Vec<ThreadId>> {
+        self.inner
+            .readers
+            .read("read native-agent closed threads", move |conn| {
+                read::closed_threads(conn, &client_id)
             })
             .await
     }
@@ -590,7 +672,7 @@ impl SqliteAgentStore {
     ///
     /// Retained for the same reason as [`SqliteAgentStore::read_index`]: hiding a thread by
     /// omission is the only delete semantics the store has, and the thread-delete verb §8 owes is
-    /// what will call it.
+    /// what will call it. That verb must also delete the thread's rows from `closed_threads`.
     #[allow(dead_code)]
     pub(crate) async fn write_index(&self, index: &AgentIndex) -> anyhow::Result<()> {
         self.inner.writer.write_index(index).await

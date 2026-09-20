@@ -332,9 +332,12 @@ the scenario that hits them:
 
 Fixture presets are `empty` (first run), `one-repo` (one clean repository and worktree), `busy`
 (several repositories, worktrees and pull requests, one worktree degraded), `board` (two boards
-with cards, plus fake `acli`), and `agents` (native-agent configuration plus scripted
-transcripts). Each gets a private `FLEET_HOME`, child-only `HOME`, real local Git repositories,
-and fake `gh`/`acli`; it never reads the developer's Fleet home.
+with cards, plus fake `acli`), and `agents` (native-agent configuration plus scripted transcripts). Each gets a
+private `FLEET_HOME`, child-only `HOME`, real local Git repositories, and fake `gh`/`acli`; it
+never reads the developer's Fleet home. Every child also starts with the variables an *outer*
+fleetd exports — `FLEET_DELEGATION`, `FLEET_DELEGATION_TOKEN`, `FLEET_SESSION`, `FLEET_TERMINAL`,
+`FLEET_TERMINAL_ID` and `FLEET_STATUS_PATH` — cleared, so a run launched from a Fleet terminal or
+from inside a delegation sees the same environment as a run launched from a bare shell.
 
 A preset is applied by driving a private `fleetd` through `fleet-client`'s own typed operations
 before the run's daemon starts, so nothing is written to a Fleet file by hand. Four consequences
@@ -415,7 +418,8 @@ so `^s A` reaches the Claude-child blocked path. Both seed `acme/api#agent` and
 `acme/api#other`. Each caller writes a brief to a temporary file and invokes the hermetic
 `fleet subagent run`; the other-worktree variant passes `--worktree acme/api#other`.
 
-The launcher chooses by role. With `FLEET_DELEGATION` unset it plays the preset transcript. With
+The launcher chooses by role. With `FLEET_DELEGATION` unset it plays the preset transcript —
+§4 clears an inherited one, so only this run's own daemon can set it. With
 the variable set, Codex plays `subagent-child.json`, which writes a temporary report and runs
 `fleet subagent complete`; Claude plays `subagent-child-blocked.json`, whose available permission
 gate stands in for the blocked child's clarification question. The fixture installs `fleet`

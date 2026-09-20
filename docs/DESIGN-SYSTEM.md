@@ -366,7 +366,7 @@ under background updates impossible to reason about.
 
 There are exactly three exceptions, and they are gpui **entities** the surface holds:
 `TextInput` (§6.4), which owns a caret, a selection, an undo history, a painted-layout cache and
-an IME session (ADR 0019), and `TranscriptList` and `MultilineInput` (§6.6), which own measured
+an IME session (ADR 0020), and `TranscriptList` and `MultilineInput` (§6.6), which own measured
 row geometry, a scroll machine, and — for the composer — the `TextInput` it wraps. Nothing else
 in the kit implements `Render`.
 
@@ -731,7 +731,7 @@ Amber by default, because "in flight" is amber everywhere.
 
 Inputs are live entities owned by the surface. The caller holds an `Entity<TextInput>`, focuses
 its `FocusHandle`, reads `text()`, and handles no editing keys around it. There is exactly one
-input component (ADR 0019); a value that cannot be edited is not an input at all but a read-only
+input component (ADR 0020); a value that cannot be edited is not an input at all but a read-only
 `FactRow` or a `Label`, with no box — and so is a resting row of a list where only the row under
 the cursor is edited at a time (Settings, Board settings). `MarkdownText` is grouped here because it is the read half
 of the description surface a multi-line `TextInput` edits.

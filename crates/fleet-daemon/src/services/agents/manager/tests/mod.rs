@@ -17,11 +17,11 @@ use std::{
 use async_trait::async_trait;
 use fleet_core::{
     agents::{
-        AbortReason, Attention, AttentionKind, ControlCost, DelegationId, DelegationStatus,
-        GateAnswer, GateId, GateKind, HarnessCapabilities, InterruptSupport, ItemKind, ItemPatch,
-        ItemPayloadPatch, MessageOrigin, ModelSelection, PermissionChoice, PermissionMode,
-        ResumeSupport, Seq, SeqEvent, SteerSupport, StreamKind, ThreadProjection, ToolKind,
-        TurnOutcome, Usage,
+        AbortReason, Attention, AttentionKind, ControlCost, Delegation, DelegationId,
+        DelegationStatus, DeliveryState, GateAnswer, GateId, GateKind, HarnessCapabilities,
+        InterruptSupport, ItemKind, ItemPatch, ItemPayloadPatch, MessageOrigin, ModelSelection,
+        PermissionChoice, PermissionMode, ResumeSupport, Seq, SeqEvent, SteerSupport, StreamKind,
+        ThreadProjection, ToolKind, TurnOutcome, Usage,
     },
     ids::{ContextId, RepoId},
     model::{Context as ContextRecord, Repo, RepoHooks, Worktree},
@@ -603,6 +603,55 @@ impl Harness {
             ResponseBody::AgentThreadCreated(summary) => summary,
             other => panic!("expected AgentThreadCreated, got {other:?}"),
         }
+    }
+
+    /// Seeds the durable delegation row a delegated child's resume path reads, with `env` as the
+    /// user environment the child was started with.
+    ///
+    /// `create_delegated` writes the *thread* record; the `delegations` row is written by the
+    /// delegation service in production, which no manager test composes. Without it a resume
+    /// cannot rotate the child's token, which is the shape the real path has too.
+    pub(crate) async fn seed_delegation(
+        &self,
+        caller: ThreadId,
+        id: DelegationId,
+        child: ThreadId,
+        token: &str,
+        env: BTreeMap<String, String>,
+    ) {
+        let row = Delegation {
+            id,
+            caller,
+            caller_turn: TurnId::new(),
+            caller_item: ItemId::new(),
+            child,
+            provider: AgentKind::Claude,
+            depth: 1,
+            brief: "keep the child environment across a resume".to_owned(),
+            expectation: "report the recovered result".to_owned(),
+            eager: true,
+            status: DelegationStatus::Starting,
+            status_payload: None,
+            result: None,
+            nudges: 0,
+            recoveries: 0,
+            delivery: DeliveryState::Pending,
+            created: Utc::now(),
+            finished: None,
+            headline: None,
+            usage: None,
+        };
+        let token_sha256 = format!("{:x}", Sha256::digest(token.as_bytes()));
+        self.manager
+            .inner
+            .store()
+            .expect("the manager test store is open")
+            .delegation_write("seed manager-test delegation", move |tx| {
+                super::super::store::delegations::insert(tx, &row, &token_sha256, &env)?;
+                Ok(((), false))
+            })
+            .await
+            .expect("seed the manager-test delegation row");
     }
 
     async fn projection(&self, thread: ThreadId) -> ThreadProjection {

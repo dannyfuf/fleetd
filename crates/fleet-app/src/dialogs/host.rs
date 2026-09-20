@@ -269,16 +269,24 @@ pub(crate) fn open_agent_thread_worktree<T: SessionTransport>(
         agent: None,
         sleep_previous: true,
     });
+    let reopen_transport = transport.clone();
     complete_request(state, cx, async move |state, cx| {
         let result = reply.recv().await;
         cx.update(|cx| {
             let Some(state) = state.upgrade() else { return };
             match result {
-                Ok(Ok(ResponseBody::Session(session))) => state.update(cx, |app, cx| {
-                    crate::presentation::enter_session(app, session.id);
-                    app.select_agent_thread(thread);
-                    cx.notify();
-                }),
+                Ok(Ok(ResponseBody::Session(session))) => {
+                    state.update(cx, |app, cx| {
+                        crate::presentation::enter_session(app, session.id);
+                        cx.notify();
+                    });
+                    crate::screens::workspace::reopen_agent_tab(
+                        &state,
+                        thread,
+                        move |command| reopen_transport.send(command.into()),
+                        cx,
+                    );
+                }
                 Ok(Ok(_)) => report_session_failure(
                     &state,
                     "daemon returned an unexpected ensure-session response",

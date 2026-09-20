@@ -46,6 +46,9 @@ pub const AGENT_CODEX_CAPABILITY: &str = "agent.codex";
 /// Capability advertised by daemons that persist read cursors per Fleet installation.
 pub const AGENT_SEEN_CAPABILITY: &str = "agent.seen";
 
+/// Capability advertised by daemons that persist closed threads per Fleet installation.
+pub const AGENT_CLOSED_CAPABILITY: &str = "agent.closed";
+
 /// Capability advertised by daemons that can sign a harness in and out of its provider account.
 ///
 /// [`RequestBody`](request::RequestBody) is internally tagged with no catch-all arm, so a daemon
@@ -78,6 +81,7 @@ pub const AGENT_CAPABILITIES: &[&str] = &[
     AGENT_CHECKPOINTS_CAPABILITY,
     AGENT_CODEX_CAPABILITY,
     AGENT_SEEN_CAPABILITY,
+    AGENT_CLOSED_CAPABILITY,
     AGENT_ACCOUNT_CAPABILITY,
     AGENT_DELEGATION_CAPABILITY,
 ];

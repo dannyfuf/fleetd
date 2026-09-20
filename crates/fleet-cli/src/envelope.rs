@@ -103,18 +103,30 @@ pub struct AgentStatusEnvelope<'a> {
 
 /// One delegation returned by a `fleet subagent` operation.
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SubagentEnvelope<'a> {
     pub protocol: u32,
     pub delegation: &'a Delegation,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<&'a str>,
+    /// Whether `delegation.brief` was cut to a preview before being serialized.
+    ///
+    /// `run` and `wait` set it; `status`, `cancel` and `complete` never do, and answer the brief
+    /// whole. Absent rather than `false` when nothing was cut, which is what keeps an envelope
+    /// for a short brief byte-identical to the one this field did not exist for.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub brief_elided: bool,
 }
 
 /// A delegation-list result.
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SubagentsEnvelope<'a> {
     pub protocol: u32,
     pub delegations: &'a [Delegation],
+    /// Whether **any** listed delegation had its brief cut to a preview.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub brief_elided: bool,
 }
 
 /// A sleep result compatible with swarm protocol one.

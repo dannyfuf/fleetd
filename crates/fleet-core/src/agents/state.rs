@@ -199,7 +199,19 @@ pub enum PermissionMode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelSelection {
-    /// Harness-native model identifier.
+    /// Harness-native model identifier, or **the empty string for "the configured default".**
+    ///
+    /// The empty string is the sentinel a caller uses to select a reasoning effort without
+    /// naming a model — `fleet subagent run --effort high` with no `--model`. The field stays a
+    /// required `String` rather than becoming an `Option` because it is on the wire with
+    /// byte-exact goldens, and an absent selection already means something else: `None` for the
+    /// whole `ModelSelection` is "no opinion at all", while `Some` with an empty `model` is "this
+    /// effort, whatever model the harness would have used".
+    ///
+    /// `AgentSessionManager::create_with` resolves it against the per-harness configured default
+    /// and leaves it empty only when there is no configured model either. Every adapter must
+    /// therefore treat an empty `model` as "say nothing about the model" and still honour
+    /// `effort` (`docs/NATIVE-AGENTS.md` §15).
     pub model: String,
     /// Optional harness-native reasoning effort or variant.
     #[serde(default, skip_serializing_if = "Option::is_none")]

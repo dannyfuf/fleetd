@@ -480,21 +480,29 @@ impl WorkspaceScreen {
             })
         };
         let root = {
-            let state = state.clone();
+            let (_, bridge, state) = self.handles(bridge, state);
             let views = Rc::clone(&self.agent_views);
             root.on_action(move |_: &prefix::UpToCaller, window, cx| {
-                let caller = state.update(cx, |app, cx| {
+                let caller = state.update(cx, |app, _| {
                     app.leave_prefix();
-                    let caller = up_to_caller(app);
-                    if caller.is_some() {
-                        cx.notify();
-                    } else {
+                    up_to_caller(app)
+                });
+                let Some(caller) = caller else {
+                    state.update(cx, |app, cx| {
                         app.toast_short("^s u is not bound here", Icon::Info, Instant::now());
                         cx.notify();
-                    }
-                    caller
-                });
-                let Some(caller) = caller else { return };
+                    });
+                    return;
+                };
+                let reopen_bridge = bridge.clone();
+                if !super::agent::requests::reopen_agent_tab(
+                    &state,
+                    caller,
+                    move |command| reopen_bridge.send_agent(command),
+                    cx,
+                ) {
+                    return;
+                }
                 let Some(view) = views.borrow().get(&caller).map(|tab| tab.view.clone()) else {
                     return;
                 };
@@ -767,11 +775,10 @@ impl WorkspaceScreen {
     }
 }
 
-/// Selects the active delegated thread's caller, attaching it first when this window hid it.
+/// Returns the active delegated thread's caller.
 pub(super) fn up_to_caller(app: &mut AppState) -> Option<ThreadId> {
     let child = app.active_agent_thread()?;
-    let caller = app.agents.caller_of(child)?;
-    app.select_agent_thread(caller).then_some(caller)
+    app.agents.caller_of(child)
 }
 
 /// Asks fleetd for one more tab in the session's worktree path and selects the answer.

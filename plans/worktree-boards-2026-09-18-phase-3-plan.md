@@ -151,7 +151,7 @@ phase 2 was rejected: the component is app-wide and would double that phase's si
 - `crates/fleet-lazygit/src/root/overlays.rs`, `overlays.rs`.
 - `docs/DESIGN-SYSTEM.md` §6.4 §6.6, `docs/KEYMAP.md` (Dialogs and text inputs, Filter,
   Palette, board dialog rows), `docs/APP-CONTRACTS.md` §3, `docs/UX-SPEC.md` §3.8 dialog
-  frame, `docs/decisions/0019-single-text-input.md`, scenarios under `scenarios/`.
+  frame, `docs/decisions/0020-single-text-input.md`, scenarios under `scenarios/`.
 
 ## Tasks
 
@@ -301,11 +301,11 @@ phase 2 was rejected: the component is app-wide and would double that phase's si
 - **Intent:** Leave one input in the kit and one rule in the design system.
 - **Touches:** `crates/fleet-ui-kit/src/components/{text_field*,text_area*}`,
   `components/mod.rs`, `examples/kit_gallery.rs`, `docs/DESIGN-SYSTEM.md`,
-  `docs/decisions/0019-single-text-input.md`, `docs/README.md` if it indexes ADRs.
+  `docs/decisions/0020-single-text-input.md`, `docs/README.md` if it indexes ADRs.
 - **Steps:**
   - Remove `TextField`, `TextFieldState`, `TextInput` (old), `TextArea`, `TextAreaState` and
     their gallery sections; move any read-only display to `Label`.
-  - ADR 0019: why inputs became live entities, why one engine, the word and line rules, the
+  - ADR 0020: why inputs became live entities, why one engine, the word and line rules, the
     key-ownership rule, undo grouping, what was rejected (presentational fields with
     caller-owned keys; `NoAction` shadowing).
   - DESIGN-SYSTEM: §6.4 final text, inventory tables, the "a state not in the gallery is not
@@ -354,7 +354,7 @@ Targeted while iterating: `cargo test -p fleet-ui-kit`, `cargo test -p fleet-app
 - [x] `make harness` passes, including the agent and board scenarios that existed before.
 - [x] One input component in the kit; `TextFieldState`, `TextAreaState`, `dialogs/input.rs`
       and the `filter::`/`palette::`/`dialog::` editing actions are gone.
-- [x] KEYMAP, DESIGN-SYSTEM, APP-CONTRACTS, UX-SPEC and ADR 0019 agree with the code.
+- [x] KEYMAP, DESIGN-SYSTEM, APP-CONTRACTS, UX-SPEC and ADR 0020 agree with the code.
 - [x] No mention of the reference implementation's origin anywhere in the diff.
 - [x] No IO or `cx.notify` in `render`; no bare `.detach()`; no `unwrap`; tokens only in the kit.
 - [x] Follow-ups (cursor blink, Linux clipboard keys, masking) captured in the tracker.

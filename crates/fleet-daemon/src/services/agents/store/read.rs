@@ -45,6 +45,9 @@ const REPLAY_CHUNK: usize = 512;
 /// Defensive ceiling on the installation-wide cursor census returned after Hello.
 const SEEN_CURSOR_LIMIT: i64 = 100_000;
 
+/// Defensive ceiling on the installation-wide closed-thread census returned after Hello.
+const CLOSED_THREAD_LIMIT: i64 = 100_000;
+
 /// Reads one installation's cursor for one thread.
 pub(super) fn seen_seq(
     conn: &Connection,
@@ -98,6 +101,31 @@ pub(super) fn seen_cursors(
         });
     }
     Ok(cursors)
+}
+
+/// Reads every closed thread belonging to one installation for the post-Hello census.
+pub(super) fn closed_threads(conn: &Connection, client_id: &str) -> anyhow::Result<Vec<ThreadId>> {
+    let mut statement = conn
+        .prepare_cached(
+            "SELECT thread_id FROM closed_threads WHERE client_id = ?1 \
+             ORDER BY thread_id LIMIT ?2",
+        )
+        .context("prepare the native-agent closed-thread census")?;
+    let rows = statement
+        .query_map(params![client_id, CLOSED_THREAD_LIMIT], |row| {
+            row.get::<_, String>(0)
+        })
+        .context("query native-agent closed threads")?;
+    let mut threads = Vec::new();
+    for row in rows {
+        let thread = row.context("read a native-agent closed thread")?;
+        threads.push(
+            thread
+                .parse::<ThreadId>()
+                .with_context(|| format!("decode closed thread `{thread}`"))?,
+        );
+    }
+    Ok(threads)
 }
 
 /// The bounded page read. Hoisted so a test can assert its query plan against the exact text the

@@ -1,7 +1,7 @@
 use super::{
     connection::{
-        Failure, HealthCheckError, Link, check_health, daemon_identity, open, refresh_agent_seen,
-        refresh_delegations,
+        Failure, HealthCheckError, Link, check_health, daemon_identity, open, refresh_agent_closed,
+        refresh_agent_seen, refresh_delegations,
     },
     requests, *,
 };
@@ -216,6 +216,19 @@ pub(super) async fn run_with_intervals(
                         }
                         Ok(None) => {}
                         Err(error) => tracing::warn!(%error, "could not refresh native-agent seen cursors"),
+                    }
+                    match refresh_agent_closed(&client).await {
+                        Ok(Some(threads)) => {
+                            if events
+                                .send(BridgeEvent::AgentClosedThreads(threads))
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(error) => tracing::warn!(%error, "could not refresh closed native-agent threads"),
                     }
                     match refresh_delegations(&client).await {
                         Ok(Some(delegations)) => {

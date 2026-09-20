@@ -9,7 +9,7 @@ changes in the same pass. Where the code and this file disagree, the code is the
 
 - [ADR 0008](decisions/0008-board-model-and-sync.md) establishes the backend-agnostic core, pure
   reconciliation engine, and original board wire family.
-- [ADR 0018](decisions/0018-worktree-scoped-boards.md) adds the optional worktree scope, field-based
+- [ADR 0019](decisions/0019-worktree-scoped-boards.md) adds the optional worktree scope, field-based
   lookup, deletion cascade, and capability-gated requests.
 
 ## 0. What we are building
@@ -703,7 +703,7 @@ card show` prints `Local key:` for exactly the cards that answer to one.
 ## 7. UI-kit components (`fleet-ui-kit`, gpui only, tokens only)
 
 ```rust
-// input.rs — the one text editor, single-line and multi-line modes of the same entity (ADR 0019).
+// input.rs — the one text editor, single-line and multi-line modes of the same entity (ADR 0020).
 // A description or a comment is an `Entity<TextInput>` the dialog owns; DESIGN-SYSTEM §6.4 is its contract.
 pub struct TextInput { /* focus handle, InputBuffer, selection, undo, IME bridge, layout cache, scroll */ }
 impl TextInput {
@@ -896,7 +896,7 @@ reuses the settings row keys. Delete uses `ConfirmRequest::DeleteCard`. These su
 keys are listed in KEYMAP; create-and-open exists only as that chord inside the dialog and has no
 palette command.
 Description/comment editors are multi-line `TextInput` entities the dialog creates when an edit
-begins and drops when it ends; no surface decodes editing keys (ADR 0019). Card tiles suppress None priority, while standalone
+begins and drops when it ends; no surface decodes editing keys (ADR 0020). Card tiles suppress None priority, while standalone
 PriorityGlyph still renders it. Label colors remain token names.
 
 ## 9. What the tests hold

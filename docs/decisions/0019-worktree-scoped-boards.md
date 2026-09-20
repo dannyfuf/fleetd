@@ -1,4 +1,4 @@
-# 0018 — Boards may be scoped to a worktree
+# 0019 — Boards may be scoped to a worktree
 
 **Adopted** for `fleet-core::board`, the daemon's `Boards` and `Worktrees` services, the board
 protocol family, `fleet-client`, and `fleet board`. A context keeps its existing unscoped board

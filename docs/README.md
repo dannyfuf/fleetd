@@ -46,5 +46,6 @@ what was rejected and why, and cites the research it was distilled from.
 | [0015](decisions/0015-detached-pty-holders.md) | Terminals live in detached holder processes, not in `fleetd` |
 | [0016](decisions/0016-e2e-harness.md) | The end-to-end GUI harness: a socket driver, a snapshot oracle, and an isolated virtual output |
 | [0017](decisions/0017-native-subagents.md) | Native subagents are delegated native threads with durable, transactional result delivery |
-| [0018](decisions/0018-worktree-scoped-boards.md) | Optional worktree-scoped boards with field-based lookup and deletion cascade |
-| [0019](decisions/0019-single-text-input.md) | One live `TextInput` for every text surface: one engine, entity-owned inputs, key ownership by context word |
+| [0018](decisions/0018-durable-closed-agent-tabs.md) | Closed native-agent tabs are durable per Fleet installation |
+| [0019](decisions/0019-worktree-scoped-boards.md) | Optional worktree-scoped boards with field-based lookup and deletion cascade |
+| [0020](decisions/0020-single-text-input.md) | One live `TextInput` for every text surface: one engine, entity-owned inputs, key ownership by context word |

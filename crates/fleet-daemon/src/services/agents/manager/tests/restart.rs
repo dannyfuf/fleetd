@@ -7,6 +7,55 @@
 
 use super::*;
 
+#[tokio::test]
+async fn closed_threads_are_isolated_cleared_and_survive_a_manager_restart() {
+    let harness = Harness::start(full()).await;
+    let thread = harness.create(None).await.thread;
+
+    harness
+        .manager
+        .mark_closed_for("client-a".to_owned(), thread)
+        .await
+        .expect("mark thread closed for client A");
+    assert_eq!(
+        harness
+            .manager
+            .closed_threads("client-a".to_owned())
+            .await
+            .expect("read client A closed threads"),
+        vec![thread]
+    );
+    assert!(
+        harness
+            .manager
+            .closed_threads("client-b".to_owned())
+            .await
+            .expect("read client B closed threads")
+            .is_empty()
+    );
+
+    let restarted = harness.restart().await;
+    assert_eq!(
+        restarted
+            .closed_threads("client-a".to_owned())
+            .await
+            .expect("read closed threads after restart"),
+        vec![thread]
+    );
+
+    restarted
+        .clear_closed_for("client-a".to_owned(), thread)
+        .await
+        .expect("clear client A closed thread");
+    assert!(
+        restarted
+            .closed_threads("client-a".to_owned())
+            .await
+            .expect("read cleared closed threads")
+            .is_empty()
+    );
+}
+
 #[test]
 fn hydration_seed_preserves_a_delegated_child_parent() {
     let thread = ThreadId::new();
@@ -32,6 +81,30 @@ fn hydration_seed_preserves_a_delegated_child_parent() {
         super::super::hydrate::projection_seed(&record).parent,
         Some(parent)
     );
+}
+
+/// A resumed child keeps a `fleet` on its `PATH`; a resumed ordinary thread still gets nothing.
+///
+/// The bug this pins: the resume path rebuilt `StartRequest` with `path_prepend: None`, so a
+/// child recovered after a provider exit could no longer run `fleet subagent complete` — the one
+/// thing the recovery nudge then asks it to do.
+#[test]
+fn a_resumed_delegated_child_keeps_the_daemon_sibling_on_its_path() {
+    use crate::services::agents::manager::resumed_path_prepend;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let bin = temp.path().join("bin");
+    std::fs::create_dir_all(&bin).expect("bin directory");
+    let fleetd = bin.join("fleetd");
+    std::fs::write(&fleetd, b"").expect("fleetd stand-in");
+
+    // No sibling `fleet` yet: nothing to inject, and that is not an error.
+    assert_eq!(resumed_path_prepend(true, Some(&fleetd)), None);
+
+    std::fs::write(bin.join("fleet"), b"").expect("fleet stand-in");
+    assert_eq!(resumed_path_prepend(true, Some(&fleetd)), Some(bin.clone()));
+    // Only a delegated child is expected to report, so only a child gets the injection.
+    assert_eq!(resumed_path_prepend(false, Some(&fleetd)), None);
 }
 
 #[tokio::test]

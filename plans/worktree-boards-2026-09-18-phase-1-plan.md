@@ -125,7 +125,7 @@ path as the daemon cascade and the protocol goldens.
 - `crates/fleet-client/src/api/boards.rs` (+ its round-trip test).
 - `crates/fleet-cli/src/args.rs`, `commands/board.rs`, `commands/board/tests.rs`, `human.rs`.
 - `docs/BOARD.md` §0, §1, §2, §4, §5, §6, §9; `README.md` board paragraph;
-  `docs/decisions/0018-worktree-scoped-boards.md`; `docs/README.md` if it indexes ADRs.
+  `docs/decisions/0019-worktree-scoped-boards.md`; `docs/README.md` if it indexes ADRs.
 
 ## Tasks
 
@@ -280,11 +280,11 @@ path as the daemon cascade and the protocol goldens.
 
 ### P1-T08 — Record the decision and finish the docs
 - **Intent:** Write the ADR and reconcile every doc this phase touched.
-- **Touches:** `docs/decisions/0018-worktree-scoped-boards.md`, `docs/BOARD.md` (§9 tests
+- **Touches:** `docs/decisions/0019-worktree-scoped-boards.md`, `docs/BOARD.md` (§9 tests
   paragraph, §Decision records), `docs/README.md` if it indexes ADRs, `docs/ARCHITECTURE.md`
   if it describes boards.
 - **Steps:**
-  - ADR 0018: context, decision (scope field on `Board`, one board per worktree, derived id
+  - ADR 0019: context, decision (scope field on `Board`, one board per worktree, derived id
     with lookup by field, late-bound cascade observer, capability instead of version bump),
     alternatives rejected, consequences (phase 2's single `BoardState` assumption).
   - BOARD.md §9: add what the new tests hold per layer. Link the ADR from BOARD.md's
@@ -292,7 +292,7 @@ path as the daemon cascade and the protocol goldens.
   - Run the `zed-quality-review` skill over the phase's diff and fix what it finds.
 - **Verification:** `make lint`; `make test`; a read-through of `docs/BOARD.md` against the code
   for every signature this phase added.
-- **Done when:** A reader of `docs/BOARD.md` and ADR 0018 can explain worktree boards without
+- **Done when:** A reader of `docs/BOARD.md` and ADR 0019 can explain worktree boards without
   reading this plan.
 
 ## Verification
@@ -315,7 +315,7 @@ boards_service`, `cargo test -p fleet-proto`, `cargo test -p fleet-client`,
 - [x] `make lint` is clean.
 - [x] `make test` passes (this repo has no separate type-check step; clippy `-D warnings` is it).
 - [x] `make restart` has been run and the manual CLI check in P1-T07 was done against it.
-- [x] `docs/BOARD.md`, `README.md` and ADR 0018 agree with the code.
+- [x] `docs/BOARD.md`, `README.md` and ADR 0019 agree with the code.
 - [x] No `unwrap`, `todo!`, `dbg!`, `TODO`, bare `.detach()` or `let _ =` on a fallible call
       in the diff.
 - [x] Follow-ups (e.g. `fleet board delete`) are captured in the tracker.

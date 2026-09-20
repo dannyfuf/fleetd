@@ -54,10 +54,11 @@ The canvas fixes these decisions; do not relitigate them in code.
 - **Agents are workspace tabs, not a separate screen.** A Claude or Codex session is a numbered
   tab in the same strip as terminals: `[2] claude — rounding fix`, `[6] codex — tz shifts`.
   `^s a` starts Claude, `^s A` starts Codex, `^s 1–9` selects, `^s x` closes the *tab*, not the
-  thread — §8 keeps every thread browsable, so the daemon goes on listing one this window has
-  closed and the strip is what forgets it. No thread-list sidebar, no inspector, no detached diff
-  pane. Wide windows leave the right side empty on purpose; the content measure is 760 px with a
-  16 px inset.
+  thread. §8 keeps every thread browsable. The installation remembers the close, the daemon
+  persists it beside the read cursor, and the `AGENTS` picker reopens it. The marker is daemon-side
+  because §9.2 permits no app-side on-disk mirror or cache. No thread-list sidebar, no inspector,
+  no detached diff pane. Wide windows leave the right side empty on purpose; the content measure
+  is 760 px with a 16 px inset.
   A child thread is in the strip only when attached; detaching it changes this window's tab set,
   not the daemon-owned thread or its durable delegation.
 - **The pane is a transcript above a docked composer.** The transcript is bottom-anchored. The
@@ -1016,6 +1017,11 @@ does not report a default effort, so `None` means the harness default. A later C
 | Instance (different driver) | **rejected** — a Claude thread cannot become a Codex thread | same | never | never | — |
 | Account | not offered — Claude has no account method Fleet can drive | `/login` opens Codex's ChatGPT browser flow, `/logout` signs out; no restart, and the account is **process-wide** for that `CODEX_HOME` rather than per thread | yes | no | `/login`, `/logout` |
 
+`fleet subagent run --effort <EFFORT>` sets the same reasoning-effort control on a delegated child
+at launch. It takes a free string rather than an enum for the reason above, and it is accepted
+**without** `--model`: the child then keeps the provider's default model and gets the requested
+effort (§15).
+
 The access picker is capability-driven. Claude declares `Ask`, `AcceptEdits`, `Plan`, `Auto`,
 `DontAsk`, `FullAccess`; Codex declares `Ask`, `AcceptEdits`, `Plan`, `FullAccess`. The labels are
 `asks before edits`, `accepts edits`, `plans before editing`, `auto-approves safe actions`,
@@ -1129,7 +1135,8 @@ list read never touches `items`, `turns` or `gates`), `turns`, `items` (with app
 `reasoning` columns concatenated **in SQL**, which collapses thousands of delta rows into one row
 for reads while the log keeps every delta for replay), `gates`, `checkpoints`, `sessions`,
 `item_attachments`, `seen` (the monotonic per-installation read cursors written by
-`AgentMarkSeen`), `agent_events_quarantine`, and `fleet_migrations`. No foreign keys — deletes are explicit
+`AgentMarkSeen`), `closed_threads` (the per-installation closed-tab markers),
+`agent_events_quarantine`, and `fleet_migrations`. No foreign keys — deletes are explicit
 multi-table statements in the projector, which is what you want when you also have to delete
 files.
 
@@ -1143,6 +1150,9 @@ result and delivery state; nudge/recovery counters; headline; and creation/finis
 relationship and distinguish a user Stop from a provider exit. The delegation record is not
 rebuilt from the transcript log: rebuild and quarantine leave both delegation tables alone, while
 the service derives and advances only the lifecycle status columns from thread events.
+
+Migration 4 adds the delegation submission state. Migration 5 adds `closed_threads`, keyed by
+`(client_id, thread_id)` with `closed_at`, so one installation's strip does not change another's.
 
 Three columns exist to keep the denormalized `attention` byte-identical to what
 `ThreadProjection::attention` derives, rather than approximately equal to it: `threads.retrying_json`
@@ -1415,6 +1425,12 @@ the app's health pass refreshes it after a transparent client reconnect. Every b
 separate from `AgentThreadSummary`: summary broadcasts remain one shared O(1) fan-out, instead of
 performing a per-connection database lookup for every summary event. Cursor upserts are monotonic.
 
+`agent.closed` gates the per-installation closed-tab set without a protocol-version bump. A capable
+client asks with `AgentClosedThreads` after Hello and receives `Vec<ThreadId>` before the first
+snapshot. `AgentThreadClose` records the marker before routing, and `AgentThreadReopen` clears it
+when the picker or top-level navigation restores the tab. An older client keeps ack-only close
+behaviour. An older daemon leaves the app on its in-memory set.
+
 Two additive fields close seams that used to be guesses rather than answers. `UserInput.item`
 carries the identity the client already drew its optimistic bubble under, and the adapter adopts
 it — Claude's announced `TurnStarted.user_item`, Codex's `clientUserMessageId` — so reconciliation
@@ -1463,13 +1479,19 @@ Requests are internally tagged by `type`; their wire names are `delegation_run`,
 
 ```text
 DelegationRun { caller, provider, brief, expectation,
-    worktree?, mode?, model?, title?, eager=false }
+    worktree?, mode?, model?, title?, fleet_path?, env={}, eager=false }
 DelegationComplete { delegation, child, token, result, blocked=false }
 DelegationList { caller? }
 DelegationGet { delegation }
 DelegationCancel { delegation }
-DelegationWait { delegation, timeout_ms }
+DelegationWait { delegation, timeout_ms, caller? }
 ```
+
+Three of those fields are additive and arrived after phase 2, each omitted from JSON when it is
+absent or empty so an older peer's payload is byte-identical: `fleet_path` is the caller's
+`fleet` directory hint (§15 preamble), `env` is the child environment map (§15 preamble) and
+`caller` is the waiting thread that consumes a delivery (§15.2). None of the three bumped
+`PROTOCOL_VERSION` or added a capability string.
 
 `DelegationRun` answers `DelegationStarted { delegation, warning? }`.
 `DelegationList` answers `Delegations(Vec<Delegation>)`; complete, get, cancel and wait each answer
@@ -1570,7 +1592,7 @@ this build does not do**, named here rather than softened in the section that sp
 | 1 | **Domain.** New item/event model in `fleet-core::agents`, indexed projection replacing the O(n²) scans, `projection.rs` split under ~900 lines, `should_apply_lifecycle` | **done**; `providers/opencode/**` was deleted with it. `ItemKind::UserMessage` later gained `steered` and `UserInput` gained `item`, both additive and both with a producer |
 | 2 | **Storage.** `rusqlite`, the schema, the owned writer thread, the read pool, the migration ladder, `FleetHome::agents_*`, the one-shot NDJSON import, the one-`SELECT` thread list, lazy hydration and the background boot repair | **done**. The `seen` table has a monotonic owned-writer upsert and bounded per-install census. Owed: `item_attachments` has no writer because attachments are not built |
 | 3 | **Harnesses.** The `Harness` trait and probe; Claude stream-json; Codex app-server; scripted fixtures | **done** against Claude 2.1.275 and Codex 0.154.0. Claude discovers `initialize.models` (with `list_models` and a static fallback), publishes per-model effort ladders, and restarts with resume for every model/effort/mode change. Codex discovers every `model/list` page, sends launch effort through `config.model_reasoning_effort`, and updates effort plus permissions in place. Both adapters publish their supported mode lists. The manager reads the adapter's `Submitted::JoinedActive { turn }` versus `Submitted::QueuedNew { turn }` answer, so a steer is distinguishable from a queued turn. **Owed**: the per-thread raw NDJSON log, Codex cold rehydration from its own store, and per-instance homes (multi-account is out of scope per §14). |
-| 4 | **Protocol.** Windowed open, `AgentItemBody`, the sync/resync events, real `AgentMarkSeen`, byte-exact goldens, per-request timeouts, the capability strings | **done**. Nine `agent.*` capabilities are advertised and served — `agent.delegation` is the newest, gating the six delegation requests and `DelegationChanged`; `agent.account` gates `AgentAccountLogin`/`AgentAccountLogout`. `agent.seen` added `HelloClient.client_id`, `AgentSeenCursors`, `AgentThreadWindow.seen_seq`, and a monotonic store write additively in protocol 7; anonymous peers retain validate-only compatibility. Protocol 8 is the later exact-version boundary for defaulted agent creates and the expanded permission enum. The app seeds its cursor map after every Hello, so reconnecting does not restore a cleared amber dot |
+| 4 | **Protocol.** Windowed open, `AgentItemBody`, the sync/resync events, real `AgentMarkSeen`, durable closed tabs, byte-exact goldens, per-request timeouts, the capability strings | **done**. Ten `agent.*` capabilities are advertised and served. `agent.delegation` gates the six delegation requests and `DelegationChanged`; `agent.account` gates `AgentAccountLogin`/`AgentAccountLogout`. `agent.seen` added `HelloClient.client_id`, `AgentSeenCursors`, `AgentThreadWindow.seen_seq`, and a monotonic store write additively in protocol 7; anonymous peers retain validate-only compatibility. `agent.closed` additively gates `AgentClosedThreads` and `AgentThreadReopen` without changing protocol 8. The app seeds its cursor and closed sets after every Hello, so reconnecting neither restores a cleared amber dot nor a closed tab. Protocol 8 remains the exact-version boundary for defaulted agent creates and the expanded permission enum |
 | 5 | **Transcript.** The flat row model, the eighteen row kinds, `TranscriptList`, `ToolRow`, the fold and group logic, the scroll machine, `gallery_agent` | **done**. Kit (5a): the flat `TranscriptRow`, all eighteen kinds, `TranscriptList` over `list` with the three-state scroll machine and its generation counter, the six-state `ToolRow`, the group summarizer, the streaming-safe `Markdown` with its highlight cache, `gallery_agent`. Screen (5b): `screens/agent_thread/rows/` projects a thread into those rows — the §B1.4 emission order, the fold exemption table, the live-activity tail walk and its present-tense rule, the group summarizer's inputs, and the settled-gate record — memoised behind a `RowsKey` so a stream chunk rewrites one row and re-runs no grouping. Scroll-back paging is closed end to end: `TranscriptEvent::ReachedOldest` reports the gesture, the workspace asks the mirror for a page cursor, and `merge_older_page` prepends the answer. Deferred scroll refresh no longer borrows list state from inside its own callback; the two-turn `scroll-wheel.scenario` exercises wheel input up and back at a 600-pixel viewport |
 | 6 | **Decisions and controls.** `DecisionDock`, the three gate kinds, the composer, the control cluster and pickers, `MetadataRow` overflow | **done**. Kit (5a): `DecisionDock` with its attachment seam, the `Decision` priority ladder and key vocabulary, `MetadataRow` with its per-width fit memo, `MultilineInput`'s three trigger reports. Screen (6): `/login` and `/logout` join the `/` built-ins on a Codex thread and nowhere else, and the metadata row's last trailing segment is the account — `signed out`, or the email, or the plan, or nothing at all; the docked drawer wired to daemon state so a gate owns the keyboard in the same frame, `⏎` unbound on a permission, the question wizard with per-question drafts, the plan verbs on the composer, `ComposerMode`'s capability table, the three control tiers with the restart rule, six completion surfaces, provider-described Codex effort rows and refreshed `$` skills, and the §12 key contexts including row focus inside scroll mode. The harness projects a prepared decision on each thread as `{kind,title,paths,has_diff}`, and the regular corpus proves a Codex file approval joins its exact item. **Not built**: attachments (nothing uploads one, so `--add-dir` is not granted either — granting a directory nothing can put a file in is an affordance with no behaviour behind it) and the `$`-to-`/` skill rewrite (the daemon's adapter boundary owns it) |
 | 7 | **Remote.** The mirror column and its authority rules, snapshot-then-delta, the admission ladder | **done**: `store/mirror.rs` owns the `owner_host` columns and the only statements that write them, `manager/mirror.rs` the read-through cache, `router/agents.rs` the `AgentMirror` seam the link hangs on, and `manager/window.rs` the windowed open and the admission ladder. All four authority rules have a test. The app sends window fields on every open, so the warm-mirror path is reachable from the UI. **Owed**: the SQL-native window read of spec-C C.2.5 — the window's *content* still comes from the reducer's projection, so a windowed open of a cold thread replays its log once — and `mirror_oldest_seq` stays `NULL` because the mirror only ever stores prefixes from sequence 1 |
@@ -1666,9 +1688,72 @@ contract. Rebuilding a thread never deletes or recreates that record.
 an `ItemKind::Delegation` under that turn, then sends the first message. The default worktree is
 the caller's. An omitted mode resolves through the configured default for the selected harness
 (which is `full_access` when unset); `--mode` accepts `ask`, `accept-edits`, `plan`, `auto`,
-`dont-ask`, and `full-access`. The default child title is
+`dont-ask`, and `full-access`. `--model` and `--effort` are independent: `--effort` may be passed
+without `--model`, in which case the child keeps the provider's configured default model
+(`config.nativeAgents.<provider>.model`) and gets the requested effort. That pairing travels as a
+`ModelSelection` whose `model` is **the empty string** — the sentinel documented on the field for
+"keep the configured default" — which `create_with` fills from the defaults; when the provider has
+no configured model either, the selection reaches the adapter still empty and the adapter names no
+model at all while still spending the effort. A blank `--model ""` remains a validation error: the
+flag was typed, so reading it as the default would hide a quoting mistake. Fleet never validates
+the effort string — the legal ladder is per provider and per model (§7.1), so a bad value is the
+provider's error to report. The default child title is
 `↳ <provider> — <first line of the brief, cut at 48 characters>`. A caller on a remote mirror is
 refused: phase 3 runs children only on the daemon that owns the caller.
+
+**The child gets a `fleet` on its `PATH`.** A child that cannot run `fleet subagent complete` can
+never report, so the daemon resolves one directory and prepends it to the child's environment,
+in this order:
+
+1. the directory of the `fleet` the caller itself ran — `fleet subagent run` puts its own
+   canonicalised `std::env::current_exe()` on the request — **when that exact file also exists on
+   the daemon's host**. This is the same-host case, and the only one where wire compatibility is
+   guaranteed;
+2. otherwise a `fleet` sitting next to this daemon's own `fleetd`, which is what `make build` and
+   a remote bootstrap both leave behind;
+3. otherwise nothing: the child keeps whatever its login shell's `PATH` holds, exactly as before.
+
+The hint is advisory. It describes the caller's host, so it may be absent, stale or name a path
+the daemon does not have, and every one of those degrades to the next rule rather than refusing
+the delegation. The prepend **extends** `PATH` rather than replacing it — it is carried as
+`StartRequest::path_prepend`, not as an `env` entry, because both adapters treat an `env` entry as
+a whole-value override and a `PATH` there would discard the login shell's own. Prepending is
+idempotent. The daemon logs which directory it injected and which rule chose it at `info`, and
+warns when no rule matched. `fleet doctor` reports the same daemon-side directory (§"subagent
+fleet CLI").
+
+**A resumed child keeps it.** Restarting a thread or resuming it lazily rebuilds its
+`StartRequest` from the durable record, and there is no caller request there to read a hint from,
+so rule 1 is unavailable — the hint describes a process that has already exited and is
+deliberately not persisted. Rule 2 does not depend on a request, so the resume path re-runs it for
+any thread that has a delegation, and logs the outcome the same way. A resumed thread with no
+delegation is injected nothing, as before: only a child is expected to report. The practical
+consequence is that a child recovered after a provider exit can still run the
+`fleet subagent complete` the recovery nudge asks it for, even though the directory it gets may
+differ from the one it was first started with.
+
+**The caller may hand the child environment variables.** `fleet subagent run --env KEY=VALUE` is
+repeatable, reaches the daemon as `RequestBody::DelegationRun.env`, and is merged into the child's
+environment **before** Fleet's own identity variables, so `FLEET_DELEGATION` and
+`FLEET_DELEGATION_TOKEN` always win. The daemon enforces that order itself rather than trusting the
+CLI to have done it: any peer can send the field. The CLI refuses five things, each with a
+validation error naming what it rejected: a value with no `=`, an empty key, a key given twice —
+silently keeping the last would hide a typo — any key beginning `FLEET_`, and `PATH`. `PATH` is refused because both adapters
+treat an `env` entry as a **whole-value override**, so one here would discard the login shell's own
+rather than extend it; extending is what the `path_prepend` above is for. The motivating case is
+several children sharing one worktree: giving each its own `CARGO_TARGET_DIR` is what stops them
+serialising on a single cargo build lock. Fleet suggests nothing of the sort on its own — the
+delegation footer stays generic and cargo advice belongs in the orchestrator's brief.
+
+**A resumed child keeps its environment too.** The map is persisted beside the delegation
+(`delegations.env_json`, migration slot 6) and restored on resume ahead of the freshly rotated
+identity variables, with the same precedence and for the same reason. Without that, a child
+recovered after a provider exit would silently lose its `CARGO_TARGET_DIR` and rejoin the build-lock
+fight in the one situation where nobody is watching. A delegation row written before slot 6 reads as
+an empty environment. The map is deliberately **not** a field on `Delegation`: it is never put on
+the wire, never rendered by the CLI, never echoed in a `--json` envelope and never logged, because a
+user variable may hold a secret and because echoing it back would be exactly the context bloat the
+elided brief exists to stop. It lives in the same database as the delegation token hash.
 
 ### 15.1 State and completion
 
@@ -1764,15 +1849,63 @@ is committed, `project_event` sets `delivery = Delivered { seq, turn }` and mark
 outbox row done in the same transaction. This caller-item rule is the exactly-once boundary: the
 message's durable identity, not a successful function return, proves delivery.
 
+**A caller that already took the result consumes the delivery.** `fleet subagent wait` names the
+waiting thread on the wire as `DelegationWait.caller`. When the wait resolves a **terminal** record
+whose `caller` is exactly that thread, the same write sets `delivery = Consumed`, marks the open
+`Deliver` row done, and publishes the changed record so the app repaints; the wait then returns the
+record it just changed, so the very response that consumed the delivery already reads
+`"delivery": "consumed"`. The worker afterwards still terminally patches the caller's delegation
+transcript item — the row has to stop saying "working" — and still closes its outbox row, but it
+sends **no** user message, and logs the skip once at `info` naming the delegation and the caller.
+
+`caller` is advisory *identity*, never authorisation: it decides whether a delivery is consumed,
+never whether the wait is answered. A `wait` that carries no caller — an older `fleet`, or one typed
+in a shell with no `FLEET_SESSION` — consumes nothing, and neither does a `wait` from any thread
+other than the delegation's own caller; both are answered in full and both still get the ordinary
+delivered user message. Consuming is best effort and idempotent: a record already `Delivered`,
+`Undeliverable` or `Consumed` is left exactly as it is and the wait answers anyway, so a `wait` that
+races the delivery worker and loses simply sees `delivered`, which is correct rather than an error.
+The guarantee is unchanged in strength and only sharper in wording: **a result reaches its caller at
+most once, by whichever of `wait` and the delivery worker gets there first.** The motivating failure
+was an orchestrator that waited on eight children and then, when its turn settled, received all
+eight results a second time as user messages.
+
 ### 15.3 Limits and bearer token
 
 - Delegation depth is at most 3; a caller at depth 3 cannot spawn another child.
 - One caller may have at most 4 live children, and one daemon at most 8 live delegations.
 - A child receives at most 2 missing-result nudges.
 - `SETTLE_GRACE` is 30 seconds; the retry tick is 60 seconds.
-- Results are capped at `ITEM_BODY_MAX_CHUNK_BYTES` (256 KiB). Truncation sets `elided` and is
-  named in both CLI stderr and the delivered message.
-- `fleet subagent wait` defaults to 540 seconds and refuses a larger timeout.
+- Results are capped at `ITEM_BODY_MAX_CHUNK_BYTES` (256 KiB). The cap applies **at ingest**: the
+  tail above it is discarded when `complete` stores the report and nothing anywhere keeps it.
+  Truncation sets `elided` and is named in CLI stderr, in the delivered message and wherever the
+  report is rendered afterwards. Below the cap the stored report is the whole report, and both
+  `fleet subagent wait` and `fleet subagent status` return it in full — on the wire and in their
+  human output. There is no second verb, no `--full` flag and no separate fetch: a caller that
+  wants the body reads it from either of those two, never from a file the child happened to leave
+  behind.
+- `fleet subagent wait` defaults to 540 seconds, chosen to sit under the Claude Code shell-tool
+  ceiling, and imposes **no upper bound of its own**: a larger `--timeout` is accepted, though the
+  caller's own tool timeout may still kill the wait. A wait that reaches its timeout exits 2 and
+  prints a distinct non-terminal line naming the delegation, its current status and the elapsed
+  wait; it never claims a running child finished. A terminal record exits 0, and the child's
+  report body is returned on success in both human output and the JSON envelope's `result.text`.
+  `--json` output is identical either way. `wait` also names the waiting thread — `--caller`, else
+  `FLEET_SESSION` — so a caller waiting on its own child consumes the delivery (§15.2); the flag is
+  never required, and a wait with no caller behaves exactly as it always did.
+- `fleet subagent status` and `fleet subagent list` report the child's token usage, its dollar cost
+  when the provider reported one, and its context percentage. The numbers are the child's **own
+  thread only, descendants excluded** — a delegation tree is never summed — and they are its settled
+  turns plus the in-flight turn's latest report, which is the same definition the app's turn footer
+  uses, computed from the same recorded values. They are computed on read, so they are never
+  persisted on the delegation record and never carried by `DelegationChanged`; a child that has
+  reported no usage at all renders `-` rather than a zero. `fleet agent list` is unchanged: showing
+  usage there needs a `threads`-table migration and a projector change, and that is deferred.
+- `fleet agent tail <THREAD>` follows a child's event stream. `--no-follow` prints the retained
+  snapshot and exits 0 without entering the follow loop, and `--last <N>` trims that snapshot to
+  the last N events; both imply `--replay`, because a tail that printed nothing is the bug they
+  exist to fix. Neither adds paginated history to the protocol — the trim is client-side, over
+  what the cursored open already returned.
 
 The token is two concatenated `Uuid::new_v4().simple()` values: 64 lowercase hexadecimal
 characters, or 32 random bytes. Only its SHA-256 hex digest is stored. `complete` hashes the
@@ -1782,20 +1915,31 @@ only in the child's `FLEET_DELEGATION_TOKEN`; the delegation id is separately av
 
 ### 15.4 Exact child and caller copy
 
-The child's first message is its brief, one blank line, then this footer with `{id}` and
-`{expectation}` substituted:
+The child's first message is its brief, one blank line, then this footer with `{id}`,
+`{expectation}` and `{fleet}` substituted:
 
 ```text
 --- Fleet delegation {id} ---
 You are running as a subagent. No human is watching this session.
 The caller expects: {expectation}
 When the work is fully finished and verified, report it with exactly one command:
-  fleet subagent complete --result-file <path-to-your-report.md>
+  {fleet} subagent complete --result-file <path-to-your-report.md>
 Write the report first, then run the command. Do not run it before you are done.
 If you are blocked and cannot finish, run:
-  fleet subagent complete --blocked --result-file <path-with-what-you-need>
+  {fleet} subagent complete --blocked --result-file <path-with-what-you-need>
 Do not ask the user questions; state assumptions in the report instead.
 ```
+
+`{fleet}` is the **absolute path** of the executable rules 1 and 2 above resolved, shell-quoted so
+a Fleet installed under a path with a space still yields a runnable command line:
+
+```text
+  /Users/you/fleetd/target/debug/fleet subagent complete --result-file <path-to-your-report.md>
+```
+
+It is the literal `fleet` only when rule 3 applied and no path is known. Naming the path is not
+redundant with the `PATH` prepend: it is the one surface where a name that does not resolve costs
+the entire delegation, so the child is given both.
 
 The missing-result nudge is exactly:
 
@@ -1809,11 +1953,18 @@ The recovery nudge is exactly:
 The session was restarted. Continue, and report with `fleet subagent complete` when done.
 ```
 
-When the child shares the caller's worktree, `run` returns this warning:
+When the child inherits the caller's worktree **by default** — that is, when `--worktree` was
+omitted — `run` returns this warning:
 
 ```text
-the child edits the caller's worktree; end your turn before it works, or pass --worktree
+no --worktree was passed, so the child edits the caller's worktree by default; end your turn before it works, or pass --worktree to isolate it
 ```
+
+A caller that passed `--worktree` gets **no** warning, even when the worktree it named is the
+caller's own. Naming it is a decision, not an accident: an orchestrator that hands its children
+disjoint file ownership inside one worktree does exactly this, and warning it every time would
+train the warning out of being read. Only the implicit default is warned about. The warning is
+appended to human output and carried in the JSON `warning` field.
 
 The delivered message is:
 
@@ -1826,6 +1977,41 @@ provider: codex, thread: <child>, duration: 14m 02s, files changed: 6
 
 The status word is `succeeded`, `incomplete`, `failed` or `cancelled`. An elided result adds one
 blank line and `(report elided at <n> bytes)`.
+
+A `fleet subagent wait` that reaches its timeout prints one line and nothing else, and exits 2:
+
+```text
+[fleet subagent <id> still running after 9m 47s, status: running, thread: <child>]
+```
+
+It is deliberately not the delivered message's shape: the bracketed prefix matches so a caller
+can scan for it, but there is no `finished:` and no body, because there is nothing to report yet.
+Its status word is the delegation-status name (`starting`, `running`, `blocked`, …) rather than
+the transcript row vocabulary, for the same reason the delivered line's is.
+
+`fleet subagent list` prints one fixed-field tab-separated line per delegation, now **eight** fields
+rather than six — id, status, provider, child, duration, total tokens, cost, delivery — with `-` in
+the tokens and cost fields when the child has reported no usage. Nothing else about the line moved;
+the two new fields sit after `duration` and before `delivery`.
+
+`fleet subagent status` is no longer that same row. It prints, in order: the fixed-field line, the
+brief, the child's usage, and — for a terminal delegation — the report, rendered through the exact
+delivered-message template above, elision suffix included. Rendering it through that one template is
+the point: a caller that greps `wait`'s output and a caller that greps `status`'s are reading the
+same bytes for the same record. The usage line names total tokens, input and output, cache reads and
+writes, `context N%`, and `$X.XX` when a cost was reported; a child with no usage prints no line at
+all rather than a row of zeros. `fleet subagent cancel` is untouched — its human output remains the
+single word `cancelled`, with no brief, no usage and no report body.
+
+`run`, `wait` and `list` **elide the brief from their `--json` envelopes**, replacing a brief longer
+than 200 characters with its first 200 on a character boundary and setting `briefElided: true`
+beside it. The flag is truthful rather than a marker of which verb answered: a brief of 200
+characters or fewer is carried whole and the key is omitted entirely, not set to `false`, so a
+caller may trust `delegation.brief` whenever it does not see the flag. A brief is
+written by the orchestrator, so echoing a 250-line one back costs it 250 lines of its own context to
+learn nothing. The elision is a rendering rule in the CLI: the wire still carries the whole brief,
+and `status` (with `cancel`, which shares its envelope) still prints it whole, which is where a
+caller goes when it genuinely wants to read a brief back. Human output is unchanged everywhere.
 
 ### 15.5 UI: rows, attachment and attention
 

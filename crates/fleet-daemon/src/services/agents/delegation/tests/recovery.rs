@@ -228,12 +228,18 @@ async fn seed_running_delegation(
         created: now,
         finished: None,
         headline: None,
+        usage: None,
     };
     let stored = delegation.clone();
     let token_sha256 = format!("{:x}", Sha256::digest(token.as_bytes()));
     store
         .delegation_write("seed restart-matrix delegation", move |tx| {
-            delegations::insert(tx, &stored, &token_sha256)?;
+            delegations::insert(
+                tx,
+                &stored,
+                &token_sha256,
+                &std::collections::BTreeMap::new(),
+            )?;
             Ok(((), false))
         })
         .await

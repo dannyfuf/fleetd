@@ -1,5 +1,6 @@
 use super::lifecycle::invalidate_history_epoch;
 use crate::{
+    bridge::BridgeCommand,
     state::MirrorGrid,
     terminal::{AbsoluteCellPoint, AbsoluteCellSelection, cached_grid_row, grid_size},
 };
@@ -264,17 +265,36 @@ fn a_closed_agent_tab_leaves_the_strip_and_stays_gone() {
     assert!(app.agents.is_closed(thread));
 }
 
-#[test]
-fn ctrl_s_u_selects_the_caller_attaching_it_first_when_hidden() {
+#[gpui::test]
+fn ctrl_s_u_from_an_attached_child_reopens_its_closed_caller_once(cx: &mut gpui::TestAppContext) {
     let (mut app, worktree, caller, child) = app_showing_a_child_tab();
     assert_eq!(app.active_agent_thread(), Some(child));
     assert!(app.agents.close(caller));
     assert!(!app.agents.is_attached(caller));
+    let state = cx.new(|_| app);
+    let commands = RefCell::new(Vec::new());
 
-    assert_eq!(up_to_caller(&mut app), Some(caller));
+    cx.update(|cx| {
+        let target = state.update(cx, |app, _| up_to_caller(app));
+        assert_eq!(target, Some(caller));
+        assert!(super::agent::requests::reopen_agent_tab(
+            &state,
+            caller,
+            |command| commands.borrow_mut().push(command),
+            cx,
+        ));
+    });
 
-    assert!(app.agents.is_attached(caller));
-    assert_eq!(app.agents.active(&worktree), Some(caller));
+    let commands = commands.into_inner();
+    assert_eq!(commands.len(), 1);
+    assert!(matches!(
+        commands.as_slice(),
+        [BridgeCommand::AgentThreadReopen { thread }] if *thread == caller
+    ));
+    state.read_with(cx, |app, _| {
+        assert!(app.agents.is_attached(caller));
+        assert_eq!(app.agents.active(&worktree), Some(caller));
+    });
 }
 
 #[test]

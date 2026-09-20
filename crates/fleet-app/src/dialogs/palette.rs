@@ -1449,11 +1449,16 @@ fn run_selected<T: SessionTransport>(
     });
     match entry.run {
         Run::OpenAgentThread(thread) => {
-            let worktree = state.update(cx, |app, cx| {
-                if app.select_agent_thread(thread) {
-                    cx.notify();
-                    None
-                } else {
+            let reopen_transport = transport.clone();
+            let worktree = if crate::screens::workspace::reopen_agent_tab(
+                state,
+                thread,
+                move |command| reopen_transport.send(command.into()),
+                cx,
+            ) {
+                None
+            } else {
+                state.update(cx, |app, _| {
                     app.agents.summary(thread).and_then(|summary| {
                         let worktree = summary.worktree.clone();
                         // `select_agent_thread` also returns false when the combined strip is
@@ -1463,8 +1468,8 @@ fn run_selected<T: SessionTransport>(
                             || app.workspace_has_tab_capacity(&worktree))
                         .then_some(worktree)
                     })
-                }
-            });
+                })
+            };
             if let Some(worktree) = worktree {
                 open_agent_thread_worktree(worktree, thread, state, transport, cx);
             }
@@ -1749,7 +1754,7 @@ mod tests {
         Result<fleet_proto::response::ResponseBody, fleet_proto::error::ProtoError>,
     >;
 
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq)]
     enum RecordedRequest {
         Sent(RequestBody),
         Requested(RequestBody),
@@ -2168,6 +2173,82 @@ mod tests {
             "a full strip must not issue EnsureSession"
         );
         cx.read(|cx| assert!(!state.read(cx).agents.is_attached(target)));
+    }
+
+    #[gpui::test]
+    fn reopening_a_closed_caller_from_the_picker_sends_agent_thread_reopen(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (mut app, summaries) = agents_picker_state();
+        let target = summaries
+            .iter()
+            .find(|summary| summary.title == "closed caller")
+            .expect("closed caller fixture")
+            .thread;
+        app.overlay = Some(Overlay::Palette);
+        let rows = candidates(&app, "agents", None, None);
+        let cursor = rows
+            .iter()
+            .position(|row| row.run == Run::OpenAgentThread(target))
+            .expect("closed caller palette row");
+        let state = cx.new(|_| app);
+        cx.update(|cx| {
+            with_host(&state, cx, |host| {
+                host.palette.rows = rows.into();
+                host.palette.cursor = cursor;
+            });
+        });
+        let transport = FakeTransport::default();
+        let window = cx.add_window(|_, _| PaletteFixture);
+
+        window
+            .update(cx, |_, window, cx| {
+                run_selected(&state, &transport, window, cx)
+            })
+            .expect("run closed caller selection");
+
+        assert_eq!(
+            transport.requests.borrow().as_slice(),
+            [RecordedRequest::Sent(RequestBody::AgentThreadReopen {
+                thread: target
+            })]
+        );
+        cx.read(|cx| assert!(!state.read(cx).agents.is_closed(target)));
+    }
+
+    #[gpui::test]
+    fn selecting_an_already_open_top_level_thread_from_the_picker_sends_nothing(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (mut app, summaries) = agents_picker_state();
+        let target = summaries
+            .iter()
+            .find(|summary| summary.title == "current caller")
+            .expect("current caller fixture")
+            .thread;
+        app.overlay = Some(Overlay::Palette);
+        let rows = candidates(&app, "agents", None, None);
+        let cursor = rows
+            .iter()
+            .position(|row| row.run == Run::OpenAgentThread(target))
+            .expect("current caller palette row");
+        let state = cx.new(|_| app);
+        cx.update(|cx| {
+            with_host(&state, cx, |host| {
+                host.palette.rows = rows.into();
+                host.palette.cursor = cursor;
+            });
+        });
+        let transport = FakeTransport::default();
+        let window = cx.add_window(|_, _| PaletteFixture);
+
+        window
+            .update(cx, |_, window, cx| {
+                run_selected(&state, &transport, window, cx)
+            })
+            .expect("run open caller selection");
+
+        assert!(transport.requests.borrow().is_empty());
     }
 
     #[test]

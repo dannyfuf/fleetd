@@ -112,6 +112,7 @@ impl Services {
     ) -> DaemonResult<ResponseBody> {
         match body {
             RequestBody::AgentSeenCursors => Ok(ResponseBody::AgentSeenCursors(Vec::new())),
+            RequestBody::AgentClosedThreads => Ok(ResponseBody::AgentClosedThreads(Vec::new())),
             RequestBody::AgentThreadList => self.agent_response(self.agents.list().await),
             RequestBody::AgentThreadCreate {
                 worktree,
@@ -148,6 +149,9 @@ impl Services {
             }
             RequestBody::AgentThreadClose { thread } => {
                 self.agent_response(self.agents.close(thread).await)
+            }
+            RequestBody::AgentThreadReopen { thread } => {
+                self.agent_response(self.agents.reopen(thread).await)
             }
             RequestBody::AgentSend { thread, input } => {
                 self.agent_response(self.agents.send(thread, input).await)
@@ -676,6 +680,8 @@ impl Services {
                 mode,
                 model,
                 title,
+                fleet_path,
+                env,
                 eager,
             } => {
                 let request = agents::delegation::RunRequest {
@@ -687,6 +693,8 @@ impl Services {
                     mode,
                     model,
                     title,
+                    fleet_path,
+                    env,
                     eager,
                 };
                 let answer = self.delegation_service()?.run(request).await;
@@ -724,10 +732,11 @@ impl Services {
             RequestBody::DelegationWait {
                 delegation,
                 timeout_ms,
+                caller,
             } => {
                 let answer = self
                     .delegation_service()?
-                    .wait(delegation, timeout_ms)
+                    .wait(delegation, timeout_ms, caller)
                     .await;
                 self.agent_response(answer)
             }

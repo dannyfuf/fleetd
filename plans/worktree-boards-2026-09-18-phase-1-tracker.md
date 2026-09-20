@@ -104,7 +104,7 @@
   `Board` (not a separate store or a scope enum); one board per worktree; board id derived from
   the worktree id but never trusted for lookup; deletion cascade via a late-bound observer on
   `Worktrees`; `board.worktree` capability, `PROTOCOL_VERSION` stays 8.
-- 2026-09-19 — P1-T08 added ADR 0018 and reconciled the board, architecture, README, and decision
+- 2026-09-19 — P1-T08 added ADR 0019 and reconciled the board, architecture, README, and decision
   indexes. The phase review pinned both worktree-board request timeout policies, made duplicate
   errors scope-neutral, narrowed composition-only daemon seams, and corrected protocol/path drift.
   Final `make lint` and `make test` both passed; the intermittent headless and GitHub-cache failures

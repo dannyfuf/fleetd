@@ -930,8 +930,11 @@ pub(crate) struct Client {
     pub(crate) title: String,
     /// The id of the monitor the window is on, matching [`Monitor::id`].
     pub(crate) monitor: i64,
-    /// Top-left corner in logical compositor coordinates; `capture::window_rect` reads it
-    /// on every platform but macOS.
+    /// Top-left corner in logical compositor coordinates, gated to the platforms that read
+    /// it: `capture::window_rect` is the only consumer and is a stub on macOS, where no
+    /// compositor answers `hyprctl` anyway. Parsing it there would be dead weight, and this
+    /// struct keeps only the fields the lanes act on.
+    #[cfg(not(target_os = "macos"))]
     pub(crate) at: [i32; 2],
     /// Logical size.
     pub(crate) size: [i32; 2],
@@ -1147,6 +1150,8 @@ mod tests {
         assert_eq!(clients[0].title, window_title("abc"));
         assert_eq!(clients[0].monitor, isolated.id);
         assert_eq!(clients[0].size, [1440, 900]);
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(clients[0].at, [1280, 0]);
 
         assert!(
             parse_monitors("[]").is_err(),

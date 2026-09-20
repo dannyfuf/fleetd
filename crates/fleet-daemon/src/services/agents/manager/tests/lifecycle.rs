@@ -1218,6 +1218,87 @@ async fn a_delegated_child_starts_with_its_extra_environment_and_its_caller() {
     assert!(harness.script.start_env(plain.thread).is_empty());
 }
 
+/// A child recovered after its provider exits comes back with the environment it was started
+/// with, beneath a *rotated* delegation token.
+///
+/// The resume path rebuilds `StartRequest::env` from scratch, so without slot 006 every user
+/// variable is dropped exactly where nobody is watching: a recovered child that lost its
+/// `CARGO_TARGET_DIR` starts fighting its siblings over a build lock (`NATIVE-AGENTS.md` §15).
+/// The token must still rotate — one run's secret is never replayed into another's process.
+#[tokio::test]
+async fn a_resumed_delegated_child_keeps_its_environment_and_gets_a_fresh_token() {
+    let harness = Harness::start(full()).await;
+    let caller = harness.create(None).await.thread;
+    let delegation = DelegationId::new();
+    let token = "1a".repeat(32);
+    let child = harness
+        .create_delegated(caller, delegation, Some("child-cursor".to_owned()), &token)
+        .await
+        .thread;
+    harness
+        .seed_delegation(
+            caller,
+            delegation,
+            child,
+            &token,
+            BTreeMap::from([(
+                "CARGO_TARGET_DIR".to_owned(),
+                "/tmp/child-target".to_owned(),
+            )]),
+        )
+        .await;
+    let first_start = harness.started_env(child);
+    assert_eq!(
+        first_start
+            .get("FLEET_DELEGATION_TOKEN")
+            .map(String::as_str),
+        Some(token.as_str())
+    );
+
+    harness.drop_provider(child).await;
+    harness
+        .manager
+        .open(&open_body(child))
+        .await
+        .expect("opening a stopped delegated child resumes it");
+
+    let resumed = harness.started_env(child);
+    assert_eq!(
+        resumed.get("CARGO_TARGET_DIR").map(String::as_str),
+        Some("/tmp/child-target"),
+        "the resumed child keeps the environment it was started with: {resumed:?}"
+    );
+    assert_eq!(
+        resumed.get("FLEET_DELEGATION").map(String::as_str),
+        Some(delegation.to_string().as_str())
+    );
+    let rotated = resumed
+        .get("FLEET_DELEGATION_TOKEN")
+        .expect("the resumed child carries a delegation token");
+    assert_ne!(
+        rotated.as_str(),
+        token.as_str(),
+        "the resumed child must be given a freshly minted token"
+    );
+    assert_eq!(rotated.len(), token.len());
+}
+
+/// An ordinary thread's resume still hands the harness nothing, delegated or not.
+#[tokio::test]
+async fn a_resumed_thread_without_a_delegation_gets_no_environment() {
+    let harness = Harness::start(full()).await;
+    let thread = harness.create(Some("plain-cursor".to_owned())).await.thread;
+    harness.drop_provider(thread).await;
+
+    harness
+        .manager
+        .open(&open_body(thread))
+        .await
+        .expect("opening a stopped thread resumes it");
+
+    assert!(harness.started_env(thread).is_empty());
+}
+
 /// The delegation row lands in the caller's running turn, and only there.
 #[tokio::test]
 async fn a_delegation_row_is_appended_to_the_running_turn_and_refused_outside_one() {

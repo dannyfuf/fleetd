@@ -136,6 +136,14 @@ enum Work {
         seq: Seq,
         at: i64,
     },
+    /// Mark one native-agent thread closed for one installation.
+    MarkClosed {
+        client_id: String,
+        thread: ThreadId,
+        closed_at: i64,
+    },
+    /// Clear one installation's closed marker for a native-agent thread.
+    ClearClosed { client_id: String, thread: ThreadId },
 }
 
 /// A handle on the owned writer thread.
@@ -374,6 +382,30 @@ impl Writer {
             at,
         })
         .await
+    }
+
+    /// Marks one native-agent thread closed for one installation.
+    pub(super) async fn mark_closed(
+        &self,
+        client_id: String,
+        thread: ThreadId,
+        closed_at: i64,
+    ) -> anyhow::Result<()> {
+        self.request(Work::MarkClosed {
+            client_id,
+            thread,
+            closed_at,
+        })
+        .await
+    }
+
+    /// Clears one installation's closed marker for a native-agent thread.
+    pub(super) async fn clear_closed(
+        &self,
+        client_id: String,
+        thread: ThreadId,
+    ) -> anyhow::Result<()> {
+        self.request(Work::ClearClosed { client_id, thread }).await
     }
 
     /// Queues one command and awaits the commit it produces.
@@ -662,6 +694,29 @@ fn transact<'work>(
                     )
                     .context("upsert a native-agent seen cursor")?;
             }
+            Work::MarkClosed {
+                client_id,
+                thread,
+                closed_at,
+            } => {
+                transaction
+                    .execute(
+                        "INSERT INTO closed_threads(client_id, thread_id, closed_at) \
+                         VALUES (?1, ?2, ?3) \
+                         ON CONFLICT(client_id, thread_id) DO UPDATE SET \
+                           closed_at = excluded.closed_at",
+                        rusqlite::params![client_id, thread.to_string(), closed_at],
+                    )
+                    .context("upsert a native-agent closed marker")?;
+            }
+            Work::ClearClosed { client_id, thread } => {
+                transaction
+                    .execute(
+                        "DELETE FROM closed_threads WHERE client_id = ?1 AND thread_id = ?2",
+                        rusqlite::params![client_id, thread.to_string()],
+                    )
+                    .context("delete a native-agent closed marker")?;
+            }
         }
     }
     transaction
@@ -807,7 +862,7 @@ fn needs_durability(work: &Work) -> bool {
             )
         }),
         Work::MirrorClaim { .. } | Work::MirrorDiscard { .. } => true,
-        Work::MarkSeen { .. } => true,
+        Work::MarkSeen { .. } | Work::MarkClosed { .. } | Work::ClearClosed { .. } => true,
         // A rebuild derives rows that are already derivable from a durable log, and a failed
         // session is re-derived by the next start's census from the same rows.
         Work::Rebuild { .. } | Work::FailSession { .. } => false,
@@ -831,7 +886,9 @@ fn size_of_work(work: &Work) -> usize {
         | Work::FailSession { .. }
         | Work::MirrorClaim { .. }
         | Work::MirrorDiscard { .. }
-        | Work::MarkSeen { .. } => WRITE_BATCH_MAX_BYTES,
+        | Work::MarkSeen { .. }
+        | Work::MarkClosed { .. }
+        | Work::ClearClosed { .. } => WRITE_BATCH_MAX_BYTES,
     }
 }
 

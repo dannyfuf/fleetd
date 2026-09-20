@@ -66,6 +66,7 @@ fn delegation(caller: ThreadId, child: ThreadId, status: DelegationStatus) -> De
         created: chrono::DateTime::UNIX_EPOCH,
         finished: None,
         headline: None,
+        usage: None,
     }
 }
 
@@ -511,9 +512,12 @@ fn the_daemon_banner_never_wraps_the_agent_composer() {
 #[test]
 fn a_snapshot_forgets_threads_the_daemon_no_longer_lists() {
     let thread = summary("feat", Attention::Idle, 1);
-    let mut state = state_with(vec![thread.clone()]);
+    let child = child_summary("feat", Attention::Idle, 1, thread.thread);
+    let mut state = state_with(vec![thread.clone(), child.clone()]);
     state.agents.activate(worktree("feat"), thread.thread);
     state.agents.mark_seen(thread.thread, Seq(1));
+    assert!(state.agents.attach(child.thread));
+    assert!(state.agents.close(thread.thread));
     state.agents.set_decision(
         thread.thread,
         crate::screens::agent_thread::PreparedDecisionObservable {
@@ -532,6 +536,8 @@ fn a_snapshot_forgets_threads_the_daemon_no_longer_lists() {
     assert!(state.agents.decision(thread.thread).is_none());
     assert_eq!(state.agents.seen(thread.thread), Seq::default());
     assert_eq!(state.agents.counts(), AgentCounts::default());
+    assert!(!state.agents.attached.contains(&child.thread));
+    assert!(state.agents.is_closed(thread.thread));
 }
 
 #[test]

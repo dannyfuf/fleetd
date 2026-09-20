@@ -782,9 +782,10 @@ prefix.
 
 A Claude Code or Codex session is a numbered tab in the **same strip** as the terminals —
 `[2] claude — rounding fix`, `[6] codex — tz shifts` — drawn by Fleet rather than by a PTY.
-`^s a` starts Claude, `^s A` starts Codex, `^s x` closes the tab and keeps the transcript, and
-`^s F` opens the PTY popup below as the explicit fallback. There is no thread-list sidebar, no
-inspector and no detached diff pane. `docs/NATIVE-AGENTS.md` is the authority for the event
+`^s a` starts Claude, `^s A` starts Codex, `^s x` closes the tab and keeps the transcript, the
+close survives a relaunch and a daemon restart, and `^s F` opens the PTY popup below as the
+explicit fallback. There is no thread-list sidebar, no inspector and no detached diff pane.
+`docs/NATIVE-AGENTS.md` is the authority for the event
 model and the state machine, `docs/KEYMAP.md` for exactly which `^s` keys an agent tab binds;
 this section is what the screen shows.
 
@@ -1849,7 +1850,7 @@ each component's full API. `Modal` is an alias of `Dialog` and `TabBar` an alias
 
 | Component | Responsibility | Used by |
 | --- | --- | --- |
-| `TextInput` | The one editor (ADR 0019): the whole editing vocabulary, selection, undo, IME and clipboard, in single-line and multi-line modes | every text surface — Create, Clone, Context, Rename, Hooks, Settings, board dialogs, Filter, Palette, agent composer, lazygit prompt |
+| `TextInput` | The one editor (ADR 0020): the whole editing vocabulary, selection, undo, IME and clipboard, in single-line and multi-line modes | every text surface — Create, Clone, Context, Rename, Hooks, Settings, board dialogs, Filter, Palette, agent composer, lazygit prompt |
 | `FuzzyList` | Debounced query → ranked rows, capped, `ctrl-n`/`ctrl-p` + arrows (and `j`/`k` **only** when no text input is present) | Clone results, Create base list, Palette, Assign |
 | `FilterBar` | In-place pane-header replacement with live `shown/total`, two-stage `Esc`, retained chip | every list (§3.10) |
 | `Cycler` | `◂ value ▸`, `←`/`→` | host selector, Settings choices |

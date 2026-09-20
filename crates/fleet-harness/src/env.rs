@@ -45,6 +45,24 @@ const REAP_TIMEOUT: Duration = Duration::from_secs(2);
 const REAP_INTERVAL: Duration = Duration::from_millis(5);
 /// The `RUST_LOG` both children inherit when the run does not choose one.
 const DEFAULT_RUST_LOG: &str = "info";
+
+/// Variables an outer fleetd exports into the shell a harness run may be launched from.
+///
+/// Each one names a *live* session of somebody else's daemon: the delegation a subagent is
+/// answering, the thread a native agent is streaming into, the terminal `watch_discovery`
+/// attributes a process to. A private run that inherits them is no longer hermetic — the
+/// fixture's scripted `claude` reads `FLEET_DELEGATION` to decide whether it is playing a
+/// caller or a delegated child, so a harness invoked from inside a Fleet delegation silently
+/// plays every caller as a child. `docs/TESTING-HARNESS.md` §4: children see this environment
+/// and nothing outside it.
+const INHERITED_SESSION_VARIABLES: [&str; 6] = [
+    "FLEET_DELEGATION",
+    "FLEET_DELEGATION_TOKEN",
+    "FLEET_SESSION",
+    "FLEET_TERMINAL",
+    "FLEET_TERMINAL_ID",
+    "FLEET_STATUS_PATH",
+];
 /// Records Fleet's PID before replacing the wrapper with the real application process.
 const APP_PID_WRAPPER: &str = "printf '%s\\n' \"$$\" > \"$1\" || exit 70\nshift\nexec \"$@\"\n";
 
@@ -186,6 +204,9 @@ impl HarnessEnv {
 
     /// Points one child at this environment and at nothing outside it, without wrapping it.
     pub fn apply(&self, command: &mut Command) {
+        for variable in INHERITED_SESSION_VARIABLES {
+            command.env_remove(variable);
+        }
         command
             .env("FLEET_HOME", &self.fleet_home)
             .env("HOME", &self.child_home)
@@ -653,6 +674,28 @@ mod tests {
             std::env::var_os("HOME").map(PathBuf::from),
             "HOME must not be the developer's"
         );
+    }
+
+    #[test]
+    fn a_child_never_inherits_the_outer_daemons_session_variables() {
+        let root = tempfile::tempdir().expect("temporary root");
+        let environment = HarnessEnv::rooted(root.path()).expect("lay the environment out");
+        let mut command = Command::new("sh");
+
+        environment.apply(&mut command);
+
+        let cleared: Vec<&str> = command
+            .as_std()
+            .get_envs()
+            .filter_map(|(key, value)| value.is_none().then(|| key.to_str()).flatten())
+            .collect();
+        for variable in INHERITED_SESSION_VARIABLES {
+            assert!(
+                cleared.contains(&variable),
+                "{variable} must be cleared: a harness run launched from inside a Fleet \
+                 delegation would otherwise play every scripted caller as a delegated child"
+            );
+        }
     }
 
     #[tokio::test]

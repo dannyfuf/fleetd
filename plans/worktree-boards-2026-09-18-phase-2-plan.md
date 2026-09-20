@@ -223,7 +223,7 @@ work.
 - **Touches:** `docs/UX-SPEC.md` §3.6 (native tab rows, states table line "currently `lg`",
   keyboard line) and §Board "Placement"; `docs/KEYMAP.md` (already touched by P2-T03/T04,
   final pass); `docs/APP-CONTRACTS.md` (board extension points, key context table row for the
-  pane); `docs/BOARD.md` §8 and §9; ADR 0018 consequences paragraph if phase 2 changed an
+  pane); `docs/BOARD.md` §8 and §9; ADR 0019 consequences paragraph if phase 2 changed an
   assumption.
 - **Steps:**
   - UX-SPEC: the board tab is a native tab like `lg`; placement paragraph gains "or, inside a

@@ -59,6 +59,15 @@ CREATE TABLE IF NOT EXISTS fleet_migrations (
 ) WITHOUT ROWID;
 ";
 
+/// Slot 005 — per-installation native-agent threads hidden from the tab strip.
+pub(super) const CLOSED_THREADS: &str = r#"CREATE TABLE closed_threads (
+  client_id TEXT    NOT NULL,
+  thread_id TEXT    NOT NULL,
+  closed_at INTEGER NOT NULL,
+  PRIMARY KEY (client_id, thread_id)
+) WITHOUT ROWID;
+"#;
+
 /// Slot 001 — the append-only log and every read model derived from it.
 ///
 /// Conventions this text follows, and every later slot must too: timestamps are `INTEGER` unix
@@ -342,6 +351,7 @@ pub(super) const REQUIRED_TABLES: &[&str] = &[
     "agent_events",
     "agent_events_quarantine",
     "checkpoints",
+    "closed_threads",
     "delegation_outbox",
     "delegations",
     "fleet_migrations",
@@ -354,7 +364,10 @@ pub(super) const REQUIRED_TABLES: &[&str] = &[
     "turns",
 ];
 
-/// Every column migration slot 003 adds to the durable delegation record.
+/// Every column the durable delegation record carries at head.
+///
+/// Slot 003 created all of them but `env_json`, which slot 006 adds. The set is asserted by name
+/// so a column added without a slot fails loudly.
 #[cfg(test)]
 pub(super) const REQUIRED_DELEGATION_COLUMNS: &[&str] = &[
     "brief",
@@ -369,6 +382,7 @@ pub(super) const REQUIRED_DELEGATION_COLUMNS: &[&str] = &[
     "delivery_reason",
     "depth",
     "eager",
+    "env_json",
     "expectation",
     "finished",
     "headline",

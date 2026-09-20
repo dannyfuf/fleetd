@@ -532,6 +532,7 @@ pub(crate) fn render(
         .flex()
         .flex_col()
         .gap(gap)
+        .size_full()
         .child(paragraph)
         .child(clipboard)
         .child(Divider::horizontal())
@@ -540,12 +541,14 @@ pub(crate) fn render(
                 .id("keymap-columns")
                 .flex()
                 .flex_row()
+                .flex_1()
                 .items_start()
                 .gap(gap)
                 .w_full()
                 .min_h_0()
-                // The whole table is taller than 620 px; the wheel reaches the rest rather
-                // than the bottom rows being silently unreachable.
+                // The whole table is taller than 620 px; `size_full` bounds the body and
+                // `flex_1` keeps the scroller from taking its content height and leaving
+                // `max_offset` at zero, so the wheel reaches the rest instead of clipping it.
                 .overflow_y_scroll()
                 .track_scroll(&scroll)
                 .children(column_elements),

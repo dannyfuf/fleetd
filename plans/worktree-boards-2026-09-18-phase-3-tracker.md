@@ -65,7 +65,7 @@
   - verified: `make lint`, `make test` (3262 passed, 0 failed on a quiet run; the agent's five
     daemon failures were load flakes), `make harness` 59 of 59 (agent run `20260919-205151` and an
     independent run). `text_field*`/`text_area*` deleted; `input.rs` split into
-    `input/{handlers,pointer,geometry,chrome}.rs` (all under 900 lines); ADR 0019 written and
+    `input/{handlers,pointer,geometry,chrome}.rs` (all under 900 lines); ADR 0020 written and
     indexed. Resting settings/board-settings text rows are `FactRow`s per DESIGN-SYSTEM §6.4.
 - [x] P3-T08 — Drive typing, selection and undo in the harness
   - verified: five scenarios (`board/card-create-editing`, `board/filter-columns`, `hub/filter-editing`,

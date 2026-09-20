@@ -259,6 +259,33 @@ impl Harness {
         }
     }
 
+    /// Waits until the worker has closed every open outbox row.
+    ///
+    /// Subscribe before the first read so a row closed between the read and the wait still wakes
+    /// this loop: every path that closes a row publishes the changed delegation on the same bus.
+    /// A counted number of yields would instead pass or fail on how the whole-crate run happened
+    /// to schedule the worker task.
+    pub(crate) async fn wait_for_empty_outbox(&self) {
+        let mut events = self.events.subscribe();
+        loop {
+            if self
+                .store
+                .delegation_outbox()
+                .await
+                .expect("read the delegation outbox")
+                .is_empty()
+            {
+                return;
+            }
+            match events.recv().await {
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    panic!("event bus closed while waiting for the delegation outbox to drain")
+                }
+            }
+        }
+    }
+
     pub(crate) async fn caller_with_delegations(
         &self,
         count: usize,
@@ -318,7 +345,12 @@ impl Harness {
         let stored = delegation.clone();
         self.store
             .delegation_write("insert worker-test delegation", move |tx| {
-                delegations::insert(tx, &stored, "test-token")?;
+                delegations::insert(
+                    tx,
+                    &stored,
+                    "test-token",
+                    &std::collections::BTreeMap::new(),
+                )?;
                 delegations::enqueue(tx, stored.id, action, Utc::now())?;
                 Ok(((), false))
             })
@@ -475,6 +507,7 @@ fn finished_delegation(
         created: now,
         finished: Some(now),
         headline: None,
+        usage: None,
     }
 }
 
@@ -658,27 +691,11 @@ async fn retry_tick_sends_and_counts_the_nudge() {
     let worker = harness.worker.take().expect("worker is available");
     let shutdown = CancellationToken::new();
     let task = tokio::spawn(worker.run(shutdown.clone()));
-    for _ in 0..200 {
-        if harness
-            .store
-            .delegation_outbox()
-            .await
-            .expect("read startup rows")
-            .is_empty()
-        {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
-    assert!(
-        harness
-            .store
-            .delegation_outbox()
-            .await
-            .expect("read drained startup rows")
-            .is_empty()
-    );
+    // The worker's startup pass owns the Recover row, and resuming the child is an OS process, so
+    // let both run on real scheduler time and wait on the row actually closing. A counted number
+    // of yields instead passed or failed on how the whole-crate run happened to schedule them.
     tokio::time::resume();
+    harness.wait_for_empty_outbox().await;
     harness
         .wait_for(child, |projection| {
             projection.items.iter().any(|item| {

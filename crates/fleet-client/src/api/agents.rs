@@ -8,6 +8,8 @@ pub use events::AgentEvents;
 pub use mirror::{AgentMirror, MirrorOutcome, PageOutcome, WindowState};
 pub use window::{AgentWindowRequest, applied_seq, projection_from_window};
 
+use std::collections::BTreeMap;
+
 use super::{Result, unexpected};
 use crate::Client;
 use fleet_core::{
@@ -72,6 +74,20 @@ pub struct DelegationRunRequest {
     pub model: Option<ModelSelection>,
     /// Optional child-thread title.
     pub title: Option<String>,
+    /// Absolute path to the caller's own `fleet` executable, if it could resolve one.
+    ///
+    /// Advisory: see [`RequestBody::DelegationRun`]'s field of the same name for what the daemon
+    /// may and may not assume about it. A `String` rather than a `PathBuf` because that is the
+    /// wire shape, and converting at one end only keeps a non-UTF-8 path from being silently
+    /// mangled somewhere in the middle — the caller decides what to do about one, and sends
+    /// `None` if it cannot express it.
+    pub fleet_path: Option<String>,
+    /// Extra environment variables for the child's provider process.
+    ///
+    /// Merged under the daemon's own `FLEET_DELEGATION` and `FLEET_DELEGATION_TOKEN`: see
+    /// [`RequestBody::DelegationRun`]'s field of the same name for what the daemon guarantees.
+    /// Empty is the shape every caller sent before this field existed.
+    pub env: BTreeMap<String, String>,
     /// Deliver completion as soon as possible.
     pub eager: bool,
 }
@@ -111,6 +127,8 @@ impl Client {
                 mode: request.mode,
                 model: request.model,
                 title: request.title,
+                fleet_path: request.fleet_path,
+                env: request.env,
                 eager: request.eager,
             })
             .await?
@@ -178,15 +196,22 @@ impl Client {
     }
 
     /// Waits for one delegation to become terminal or the deadline to expire.
+    ///
+    /// `caller` names the thread this wait is issued for, when the waiter knows its own. It is
+    /// advisory identity, not authorisation: passing the delegation's own caller is what marks a
+    /// terminal result read, so the daemon never injects it into that thread a second time.
+    /// `None` — a shell with no session of its own — waits exactly as this call always has.
     pub async fn delegation_wait(
         &self,
         delegation: DelegationId,
         timeout_ms: u64,
+        caller: Option<ThreadId>,
     ) -> Result<Delegation> {
         match self
             .request(RequestBody::DelegationWait {
                 delegation,
                 timeout_ms,
+                caller,
             })
             .await?
         {
@@ -203,6 +228,17 @@ impl Client {
         match self.request(RequestBody::AgentSeenCursors).await? {
             ResponseBody::AgentSeenCursors(cursors) => Ok(cursors),
             response => Err(unexpected("agent_seen_cursors", response)),
+        }
+    }
+
+    /// Reads the stable installation's closed thread set after capability negotiation.
+    pub async fn agent_closed_threads(&self) -> Result<Vec<ThreadId>> {
+        if !self.supports_capability(fleet_proto::AGENT_CLOSED_CAPABILITY) {
+            return Ok(Vec::new());
+        }
+        match self.request(RequestBody::AgentClosedThreads).await? {
+            ResponseBody::AgentClosedThreads(threads) => Ok(threads),
+            response => Err(unexpected("agent_closed_threads", response)),
         }
     }
 
@@ -352,6 +388,15 @@ impl Client {
         expect_agent_ack(
             "agent_thread_close",
             self.request(RequestBody::AgentThreadClose { thread })
+                .await?,
+        )
+    }
+
+    /// Re-registers this installation's interest in a native-agent thread.
+    pub async fn agent_thread_reopen(&self, thread: ThreadId) -> Result<()> {
+        expect_agent_ack(
+            "agent_thread_reopen",
+            self.request(RequestBody::AgentThreadReopen { thread })
                 .await?,
         )
     }

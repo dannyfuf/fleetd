@@ -1,4 +1,4 @@
-# 0019 — One live text input for the whole app
+# 0020 — One live text input for the whole app
 
 **Adopted** for `fleet-ui-kit`'s `components/input*`, the `text_input::*` action family, every
 text surface in `fleet-app`, and the single-line prompt of `fleet-lazygit`. The kit has one

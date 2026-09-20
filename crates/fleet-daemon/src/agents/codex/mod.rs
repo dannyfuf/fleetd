@@ -125,7 +125,8 @@ impl CodexHarness {
         })
     }
 
-    /// The child environment. `CODEX_HOME` selects which `config.toml` Codex reads.
+    /// The child environment. `CODEX_HOME` selects which `config.toml` Codex reads, and
+    /// `path_prepend` extends `PATH` without replacing the login shell's own.
     async fn environment(
         &self,
         request: &OpenSession,
@@ -145,11 +146,17 @@ impl CodexHarness {
         overrides.extend(request.start.env.clone());
         overrides.insert("FLEET_SESSION".to_owned(), request.start.thread.to_string());
         overrides.insert("FLEET_TERMINAL".to_owned(), "codex".to_owned());
-        process::filter_environment(
+        let mut environment = process::filter_environment(
             inherited,
             crate::agents::harness::probe::strip_list(AgentKind::Codex),
             &overrides,
-        )
+        );
+        // After the merge, so the prepend extends the `PATH` the child really gets. A delegated
+        // child needs `fleet` on it to report its result at all.
+        if let Some(directory) = &request.start.path_prepend {
+            process::prepend_path(&mut environment, directory);
+        }
+        environment
     }
 
     /// Interrupts every live child first, then the parent.

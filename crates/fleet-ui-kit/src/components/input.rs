@@ -2,7 +2,7 @@
 //!
 //! The entity owns the focus handle, selection, undo history, platform input bridge, layout
 //! cache and scroll position that must survive frames. Callers hold one `Entity<TextInput>` and
-//! never decode editing keys around it; it is the only input the kit has (ADR 0019).
+//! never decode editing keys around it; it is the only input the kit has (ADR 0020).
 //!
 //! This file keeps the entity, its fields and its public API. The action handlers live in
 //! [`handlers`], mouse and wheel input in [`pointer`], the painted-layout arithmetic in

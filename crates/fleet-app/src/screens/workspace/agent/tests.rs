@@ -1,14 +1,20 @@
-use std::cell::{Cell, RefCell};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 
 use gpui::AppContext as _;
 use gpui::{Context, Render, Window, div};
 
 use super::*;
 
-#[derive(Default)]
+type AgentReply = Result<ResponseBody, fleet_proto::error::ProtoError>;
+
+#[derive(Clone, Default)]
 struct RecordingRequester {
-    requests: Cell<usize>,
-    command: RefCell<Option<BridgeCommand>>,
+    requests: Rc<Cell<usize>>,
+    command: Rc<RefCell<Option<BridgeCommand>>>,
+    pending_reply: Rc<RefCell<Option<async_channel::Sender<AgentReply>>>>,
 }
 
 impl AgentThreadRequester for RecordingRequester {
@@ -18,9 +24,25 @@ impl AgentThreadRequester for RecordingRequester {
     ) -> async_channel::Receiver<Result<ResponseBody, fleet_proto::error::ProtoError>> {
         self.requests.set(self.requests.get() + 1);
         self.command.replace(Some(command));
-        let (_reply, answer) = async_channel::bounded(1);
+        let (reply, answer) = async_channel::bounded(1);
+        self.pending_reply.replace(Some(reply));
         answer
     }
+}
+
+#[gpui::test]
+fn an_in_flight_open_thread_does_not_retain_app_state(cx: &mut gpui::TestAppContext) {
+    let requester = RecordingRequester::default();
+    let state = cx.new(|_| AppState::new("/tmp/fleet-agent-open-release", Instant::now()));
+    let weak_state = state.downgrade();
+
+    cx.update(|cx| open_thread(&requester, &state, ThreadId::new(), None, cx));
+    drop(state);
+    cx.run_until_parked();
+    // Resources are retained until the end of the effect cycle, so one empty update flushes it.
+    cx.update(|_| {});
+
+    weak_state.assert_released();
 }
 
 #[gpui::test]
@@ -205,6 +227,7 @@ fn delegation_fixture(caller: ThreadId, child: ThreadId) -> fleet_core::agents::
         created: chrono::Utc::now(),
         finished: None,
         headline: None,
+        usage: None,
     }
 }
 
@@ -292,6 +315,31 @@ fn enter_on_a_delegation_row_attaches_and_selects_the_child(cx: &mut gpui::TestA
         assert!(app.agents.is_attached(record.child));
         assert_eq!(app.agents.active(&worktree), Some(record.child));
     });
+}
+
+#[gpui::test]
+fn selecting_an_attached_child_sends_no_agent_thread_reopen(cx: &mut gpui::TestAppContext) {
+    let worktree: WorktreeId = "fleet/app#delegation-no-reopen"
+        .parse()
+        .unwrap_or_else(|error| panic!("invalid test worktree: {error}"));
+    let record = delegation_fixture(ThreadId::new(), ThreadId::new());
+    let state = delegating_state(cx, &worktree, &record);
+    let commands = RefCell::new(Vec::new());
+
+    cx.update(|cx| {
+        assert_eq!(
+            attach_delegation_child(&state, record.id, cx),
+            Some(record.child)
+        );
+        assert!(reopen_agent_tab(
+            &state,
+            record.child,
+            |command| commands.borrow_mut().push(command),
+            cx,
+        ));
+    });
+
+    assert!(commands.into_inner().is_empty());
 }
 
 /// `x` on a delegation row never cancels on the spot: it names the child in the Confirm dialog

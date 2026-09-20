@@ -1,4 +1,4 @@
-use std::{os::unix::fs::PermissionsExt as _, sync::Arc};
+use std::{collections::BTreeMap, os::unix::fs::PermissionsExt as _, sync::Arc};
 
 use chrono::Utc;
 use fleet_core::{
@@ -28,7 +28,8 @@ use crate::{
 
 use super::super::{
     DelegationService, RunRequest,
-    footer::{SAME_WORKTREE_WARNING, first_message},
+    footer::{BARE_FLEET, SAME_WORKTREE_WARNING, first_message},
+    run::resolve_fleet_program,
 };
 
 pub(crate) struct Harness {
@@ -36,12 +37,14 @@ pub(crate) struct Harness {
     environment_log: std::path::PathBuf,
     input_log: std::path::PathBuf,
     executable: String,
+    fleet_path: std::path::PathBuf,
     config: Arc<ConfigStore>,
     events: BroadcastBus,
     manager: AgentSessionManager,
     store: SqliteAgentStore,
     service: DelegationService,
     worktree: WorktreeId,
+    other_worktree: WorktreeId,
 }
 
 impl Harness {
@@ -50,8 +53,10 @@ impl Harness {
         let home = directory.path().join("fleet");
         let repos = home.join("repos");
         let worktree_path = home.join("worktrees/owner/repo/feature");
+        let other_worktree_path = home.join("worktrees/owner/repo/other");
         std::fs::create_dir_all(&repos).expect("create repositories directory");
         std::fs::create_dir_all(&worktree_path).expect("create worktree directory");
+        std::fs::create_dir_all(&other_worktree_path).expect("create second worktree directory");
 
         let environment_log = home.join("provider-environment.log");
         let input_log = home.join("provider-input.log");
@@ -69,6 +74,12 @@ impl Harness {
             .expect("make scripted provider executable");
         let executable = executable_path.display().to_string();
 
+        // A stand-in for the caller's own `fleet`, so the hint on the request names a file that
+        // really exists and the resolution is not at the mercy of the test runner's layout.
+        let fleet_path = home.join("bin/fleet");
+        std::fs::create_dir_all(home.join("bin")).expect("create fleet bin directory");
+        std::fs::write(&fleet_path, "#!/bin/sh\nexit 0\n").expect("write stand-in fleet");
+
         let files = Arc::new(RealFiles::new(
             home.join("trash"),
             [repos.clone(), home.join("worktrees")],
@@ -82,6 +93,7 @@ impl Harness {
         let context = ContextId::try_from("team").expect("context id");
         let repo = RepoId::try_from("owner/repo").expect("repo id");
         let worktree = WorktreeId::try_from("owner/repo#feature").expect("worktree id");
+        let other_worktree = WorktreeId::try_from("owner/repo#other").expect("second worktree id");
         let mut persisted = default_state();
         persisted.contexts.push(Context {
             id: context.clone(),
@@ -102,12 +114,25 @@ impl Harness {
         });
         persisted.worktrees.push(Worktree {
             id: worktree.clone(),
-            repo_id: repo,
+            repo_id: repo.clone(),
             slug: "feature".to_owned(),
             branch: "feature".to_owned(),
             base_ref: "main".to_owned(),
             path: worktree_path.display().to_string(),
             session: "owner/repo/feature".to_owned(),
+            host: None,
+            created_at: Utc::now().to_rfc3339(),
+            last_opened_at: None,
+            degraded: None,
+        });
+        persisted.worktrees.push(Worktree {
+            id: other_worktree.clone(),
+            repo_id: repo,
+            slug: "other".to_owned(),
+            branch: "other".to_owned(),
+            base_ref: "main".to_owned(),
+            path: other_worktree_path.display().to_string(),
+            session: "owner/repo/other".to_owned(),
             host: None,
             created_at: Utc::now().to_rfc3339(),
             last_opened_at: None,
@@ -144,12 +169,14 @@ impl Harness {
             environment_log,
             input_log,
             executable,
+            fleet_path,
             config,
             events: events.clone(),
             manager,
             store,
             service,
             worktree,
+            other_worktree,
         }
     }
 
@@ -408,6 +435,7 @@ impl Harness {
             created: Utc::now(),
             finished: None,
             headline: None,
+            usage: None,
         };
         self.store
             .delegation_write("seed run-test delegation", move |tx| {
@@ -415,6 +443,7 @@ impl Harness {
                     tx,
                     &delegation,
                     "test-token-hash",
+                    &BTreeMap::new(),
                 )?;
                 Ok(((), false))
             })
@@ -442,7 +471,7 @@ fn provider_script(environment_log: &std::path::Path, input_log: &std::path::Pat
 case " $* " in
   *" --version "*) printf '%s\n' '2.1.266 (Claude Code)'; exit 0 ;;
 esac
-printf '%s|%s|%s\n' "$FLEET_SESSION" "$FLEET_DELEGATION" "$FLEET_DELEGATION_TOKEN" >> '{}'
+printf '%s|%s|%s|%s|%s\n' "$FLEET_SESSION" "$FLEET_DELEGATION" "$FLEET_DELEGATION_TOKEN" "$PATH" "$FLEET_ENV_PROBE" >> '{}'
 printf '%s\n' '{{"type":"system","subtype":"init","session_id":"run-cursor","model":"test","tools":[],"slash_commands":[],"capabilities":["interrupt_receipt_v1","interrupt_cancel_queued_v1","msg_lifecycle_v1"]}}'
 count=0
 while IFS= read -r line; do
@@ -480,6 +509,8 @@ pub(crate) fn request(caller: ThreadId) -> RunRequest {
         mode: None,
         model: None,
         title: None,
+        fleet_path: None,
+        env: BTreeMap::new(),
         eager: false,
     }
 }
@@ -559,9 +590,11 @@ async fn run_carries_the_token_and_seeds_both_transcripts() {
     let harness = Harness::start().await;
     let (caller, caller_turn) = harness.running_caller().await;
 
+    let mut started_request = request(caller);
+    started_request.fleet_path = Some(harness.fleet_path.display().to_string());
     let (delegation, warning) = started(
         harness
-            .run(request(caller))
+            .run(started_request)
             .await
             .expect("start delegation"),
     );
@@ -615,7 +648,12 @@ async fn run_carries_the_token_and_seeds_both_transcripts() {
         })
     );
 
-    let expected_message = first_message(&delegation.brief, delegation.id, &delegation.expectation);
+    let expected_message = first_message(
+        &delegation.brief,
+        delegation.id,
+        &delegation.expectation,
+        &harness.fleet_path.display().to_string(),
+    );
     let child_projection = harness
         .wait_for(delegation.child, |projection| {
             projection.items.iter().any(|item| {
@@ -732,4 +770,221 @@ async fn run_refusals_follow_the_validation_order_and_name_each_rule() {
         "worktree-resolution rule",
     )
     .await;
+}
+
+#[test]
+fn the_callers_own_fleet_wins_when_that_exact_file_exists_here() {
+    let directory = tempfile::tempdir().expect("create resolution test directory");
+    let caller_fleet = directory.path().join("caller/fleet");
+    std::fs::create_dir_all(directory.path().join("caller")).expect("create caller bin directory");
+    std::fs::write(&caller_fleet, "").expect("write caller fleet");
+    let daemon_exe = directory.path().join("daemon/fleetd");
+    std::fs::create_dir_all(directory.path().join("daemon")).expect("create daemon bin directory");
+    std::fs::write(directory.path().join("daemon/fleet"), "").expect("write daemon-sibling fleet");
+
+    let resolved =
+        resolve_fleet_program(Some(&caller_fleet.display().to_string()), Some(&daemon_exe))
+            .expect("the caller's own fleet resolves");
+    assert_eq!(resolved.source, "caller");
+    assert_eq!(resolved.program, caller_fleet);
+    assert_eq!(resolved.directory, directory.path().join("caller"));
+}
+
+#[test]
+fn a_hint_this_host_does_not_have_falls_back_to_the_daemons_sibling() {
+    let directory = tempfile::tempdir().expect("create resolution test directory");
+    let daemon_exe = directory.path().join("daemon/fleetd");
+    std::fs::create_dir_all(directory.path().join("daemon")).expect("create daemon bin directory");
+    std::fs::write(directory.path().join("daemon/fleet"), "").expect("write daemon-sibling fleet");
+
+    let resolved = resolve_fleet_program(Some("/nowhere/on/this/host/fleet"), Some(&daemon_exe))
+        .expect("the daemon sibling resolves");
+    assert_eq!(resolved.source, "daemon-sibling");
+    assert_eq!(resolved.program, directory.path().join("daemon/fleet"));
+    assert_eq!(resolved.directory, directory.path().join("daemon"));
+}
+
+#[test]
+fn nothing_resolves_when_neither_the_hint_nor_a_sibling_exists() {
+    let directory = tempfile::tempdir().expect("create resolution test directory");
+    let daemon_exe = directory.path().join("fleetd");
+    assert_eq!(
+        resolve_fleet_program(Some("/nowhere/on/this/host/fleet"), Some(&daemon_exe)),
+        None
+    );
+    assert_eq!(resolve_fleet_program(None, None), None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_child_path_begins_with_the_resolved_fleet_directory() {
+    let harness = Harness::start().await;
+    let (caller, _) = harness.running_caller().await;
+
+    let mut with_hint = request(caller);
+    with_hint.fleet_path = Some(harness.fleet_path.display().to_string());
+    let (delegation, _) = started(harness.run(with_hint).await.expect("start delegation"));
+
+    let environment = harness
+        .wait_for_log(&harness.environment_log, &delegation.id.to_string())
+        .await;
+    let child_path = environment
+        .lines()
+        .find(|line| line.starts_with(&delegation.child.to_string()))
+        .and_then(|line| line.split('|').nth(3))
+        .expect("the child environment carries its PATH");
+    let fleet_directory = harness
+        .fleet_path
+        .parent()
+        .expect("the stand-in fleet has a parent");
+    assert_eq!(
+        std::env::split_paths(child_path).next().as_deref(),
+        Some(fleet_directory),
+        "the injected directory must win the child's PATH lookup: {child_path}"
+    );
+    // The login shell's own entries survive: this extends `PATH`, it does not replace it.
+    assert!(
+        std::env::split_paths(child_path).count() > 1,
+        "{child_path}"
+    );
+}
+
+/// The reason `env` exists: four children in one worktree need four `CARGO_TARGET_DIR`s. The
+/// probe variable stands in for one, and the forged `FLEET_DELEGATION` proves the merge order —
+/// caller variables go in first, Fleet's identity second, so a peer cannot make a child report
+/// against a delegation it was not started for.
+#[tokio::test(start_paused = true)]
+async fn the_child_environment_carries_caller_variables_and_fleet_identity_still_wins() {
+    let harness = Harness::start().await;
+    let (caller, _) = harness.running_caller().await;
+
+    let mut with_env = request(caller);
+    with_env.env = BTreeMap::from([
+        ("FLEET_ENV_PROBE".to_owned(), "child-a".to_owned()),
+        (
+            "FLEET_DELEGATION".to_owned(),
+            "forged-delegation".to_owned(),
+        ),
+        (
+            "FLEET_DELEGATION_TOKEN".to_owned(),
+            "forged-token".to_owned(),
+        ),
+    ]);
+    let (delegation, _) = started(harness.run(with_env).await.expect("start delegation"));
+
+    let environment = harness
+        .wait_for_log(&harness.environment_log, &delegation.id.to_string())
+        .await;
+    let child_environment = environment
+        .lines()
+        .find(|line| line.starts_with(&delegation.child.to_string()))
+        .expect("child environment was logged");
+    let fields: Vec<&str> = child_environment.split('|').collect();
+
+    assert_eq!(
+        fields.get(1).copied(),
+        Some(delegation.id.to_string().as_str()),
+        "the caller must not be able to forge the child's delegation: {child_environment}"
+    );
+    let token = fields.get(2).copied().expect("the child carries a token");
+    assert_ne!(token, "forged-token");
+    assert_eq!(token.len(), 64);
+    assert_eq!(
+        fields.get(4).copied(),
+        Some("child-a"),
+        "an ordinary caller variable reaches the child verbatim: {child_environment}"
+    );
+}
+
+/// A caller that sends nothing gets exactly the environment it got before `env` existed.
+#[tokio::test(start_paused = true)]
+async fn a_child_started_without_caller_variables_sees_none() {
+    let harness = Harness::start().await;
+    let (caller, _) = harness.running_caller().await;
+
+    let (delegation, _) = started(
+        harness
+            .run(request(caller))
+            .await
+            .expect("start delegation"),
+    );
+
+    let environment = harness
+        .wait_for_log(&harness.environment_log, &delegation.id.to_string())
+        .await;
+    let child_environment = environment
+        .lines()
+        .find(|line| line.starts_with(&delegation.child.to_string()))
+        .expect("child environment was logged");
+    assert_eq!(
+        child_environment.split('|').nth(4),
+        Some(""),
+        "{child_environment}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_implicit_same_worktree_run_warns_and_an_explicit_one_does_not() {
+    let harness = Harness::start().await;
+    let (caller, _) = harness.running_caller().await;
+
+    let (_, implicit) = started(
+        harness
+            .run(request(caller))
+            .await
+            .expect("start the implicit delegation"),
+    );
+    assert_eq!(implicit.as_deref(), Some(SAME_WORKTREE_WARNING));
+
+    let mut same_by_name = request(caller);
+    same_by_name.worktree = Some(harness.worktree.clone());
+    let (_, explicit) = started(
+        harness
+            .run(same_by_name)
+            .await
+            .expect("start the explicitly-same delegation"),
+    );
+    assert_eq!(
+        explicit, None,
+        "naming the caller's own worktree is a choice, not an accident"
+    );
+
+    let mut elsewhere = request(caller);
+    elsewhere.worktree = Some(harness.other_worktree.clone());
+    let (_, isolated) = started(
+        harness
+            .run(elsewhere)
+            .await
+            .expect("start the isolated delegation"),
+    );
+    assert_eq!(isolated, None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_unusable_hint_never_reaches_the_child_footer() {
+    let harness = Harness::start().await;
+    let (caller, _) = harness.running_caller().await;
+
+    let mut unresolvable = request(caller);
+    unresolvable.fleet_path = Some("/nowhere/on/this/host/fleet".to_owned());
+    let (delegation, _) = started(
+        harness
+            .run(unresolvable)
+            .await
+            .expect("start delegation with an unusable hint"),
+    );
+
+    let child_input = harness
+        .wait_for_log(&harness.input_log, &delegation.id.to_string())
+        .await;
+    assert!(
+        !child_input.contains("/nowhere/on/this/host/fleet"),
+        "a path this host does not have must never be handed to the child: {child_input}"
+    );
+    // Whatever the fallback picked, the child still reads a runnable `subagent complete`.
+    assert!(
+        child_input.contains("fleet subagent complete --result-file"),
+        "{child_input}"
+    );
+    let bare = first_message("brief", delegation.id, "expectation", BARE_FLEET);
+    assert!(bare.contains("\n  fleet subagent complete --result-file"));
 }
