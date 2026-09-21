@@ -440,9 +440,9 @@ impl Harness for ClaudeHarness {
         // Resolved before the turn is announced: a harness that is not running must fail the
         // submit without having started anything.
         let writer = self.transport()?.writer.clone();
-        let announced = {
+        let (announced, landed_in) = {
             let mut session = self.session.lock().await;
-            match req.intent {
+            let announced = match req.intent {
                 // A steer joins the running turn; the CLI coalesces it and reports how many were
                 // folded in on the settling `result`.
                 SubmitIntent::Steer | SubmitIntent::AnswerAsMessage => {
@@ -452,7 +452,11 @@ impl Harness for ClaudeHarness {
                 // The client's own id when it sent one, so the optimistic bubble it already
                 // drew and the transcript row are one item for the row's whole life (§9.4).
                 SubmitIntent::Fresh => session.begin_turn(req.turn, user_item)?,
-            }
+            };
+            // The turn the message actually landed in, which is **not** `req.turn` when the
+            // running turn is one the CLI opened for itself (§4.1): the caller mirrored no id
+            // for a turn no submit created, so the manager is told the adapter's own.
+            (announced, session.active_turn().unwrap_or(req.turn))
         };
         // `TurnStarted` reaches the channel *before* the write, or the opening item of a fast
         // turn can overtake it and be rejected for naming a turn nothing has started.
@@ -486,7 +490,7 @@ impl Harness for ClaudeHarness {
         // many were folded in; a prompt accepted while idle starts its own turn and is recorded
         // when its `TurnStarted` announcement arrives.
         Ok(if joined_active {
-            Submitted::JoinedActive { turn: req.turn }
+            Submitted::JoinedActive { turn: landed_in }
         } else {
             Submitted::QueuedNew { turn: req.turn }
         })

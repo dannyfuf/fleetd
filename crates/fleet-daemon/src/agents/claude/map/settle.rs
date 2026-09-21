@@ -97,6 +97,7 @@ pub(in crate::agents::claude) fn result(
     }
 
     session.active_turn = None;
+    session.harness_turn = None;
     session.pending_start = None;
     let mut events = Vec::new();
     // Close every open item *in that turn* — not every open item there is. A background task is
@@ -174,6 +175,9 @@ pub(in crate::agents::claude) fn result(
     session.tool_uses = 0;
     session.pending_steers = 0;
     session.failure_latch = None;
+    // The notification belonged to the turn that just ended; a later init must not inherit a
+    // reason from a background task nobody is still waiting on.
+    session.last_task_notification = None;
     session.announced_windows.clear();
     session.prune_settled_items();
     MapOutput::from(events)

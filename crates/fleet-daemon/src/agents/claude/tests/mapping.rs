@@ -8,7 +8,10 @@ use fleet_core::agents::ItemId;
 fn the_basic_capture_maps_to_one_turn_and_one_settlement() {
     let (_, events) = replay(BASIC);
     let mapped = names(&events);
-    assert_eq!(mapped.first().copied(), Some("session_configured"));
+    // `submit` announces the turn before the prompt is written, so the turn leads the capture
+    // and the handshake follows it.
+    assert_eq!(mapped.first().copied(), Some("turn_started"));
+    assert_eq!(mapped.get(1).copied(), Some("session_configured"));
     assert_eq!(mapped.last().copied(), Some("turn_settled"));
     assert!(mapped.contains(&"content_delta"));
     // The capture carries a `rate_limit_event`, which is now mapped rather than ignored.
@@ -659,7 +662,8 @@ fn the_live_capture_maps_without_a_single_unknown_frame() {
         !mapped.contains(&"unknown"),
         "every frame in the ground-truth capture has a mapping: {mapped:?}"
     );
-    assert_eq!(mapped.first().copied(), Some("session_configured"));
+    assert_eq!(mapped.first().copied(), Some("turn_started"));
+    assert_eq!(mapped.get(1).copied(), Some("session_configured"));
     assert_eq!(mapped.last().copied(), Some("turn_settled"));
     // `system/status` and `system/thinking_tokens` are the truthful spinner sub-labels.
     assert!(

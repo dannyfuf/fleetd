@@ -9,8 +9,8 @@ use std::collections::HashSet;
 
 use chrono::{TimeZone as _, Utc};
 use fleet_core::agents::{
-    AgentEvent, AgentKind, CheckpointKind, ItemKind, ItemPatch, ItemPayloadPatch, ItemStatus,
-    ModelSelection, SessionState, ToolPatch, WaitingReason,
+    AgentEvent, AgentKind, CheckpointKind, ItemId, ItemKind, ItemPatch, ItemPayloadPatch,
+    ItemStatus, ModelSelection, SessionState, ToolPatch, TurnId, WaitingReason,
 };
 use serde_json::{Value, json};
 
@@ -159,8 +159,15 @@ pub(in crate::agents::claude) fn system(
     MapOutput::from(events)
 }
 
+/// The sentence every harness-initiated turn's explanatory row opens with.
+const HARNESS_TURN_NOTICE: &str = "Claude Code started this turn on its own; Fleet sent no prompt.";
+
 /// `system/init`: the handshake. Six fields are read and the rest is ignored.
 fn init(session: &mut ClaudeSession, frame: &SystemFrame, events: &mut Vec<AgentEvent>) {
+    // Before anything else this frame can produce, and **outside** the `initialized` guard
+    // below: one init lands per turn, and an init with no turn open is a turn the CLI started
+    // for itself. Without the turn every frame behind it is dropped for naming no turn.
+    harness_turn(session, events);
     session.declared = frame
         .fields
         .get("capabilities")
@@ -211,6 +218,52 @@ fn init(session: &mut ClaudeSession, frame: &SystemFrame, events: &mut Vec<Agent
         skills: string_list(frame.fields.get("skills")),
     });
     events.push(AgentEvent::SessionStateChanged(SessionState::Ready));
+}
+
+/// Opens the turn behind an `init` that no Fleet submit asked for.
+///
+/// Fleet's own `submit` sets the active turn *before* the prompt reaches Claude's stdin, so an
+/// init arriving with no turn open, once a turn has already run, cannot be Fleet's: today it is
+/// the auto-resume that follows a finished background task (§4.1). The turn carries one
+/// explanatory row before the assistant output, because a report with no visible cause reads as
+/// an answer to a question nobody asked.
+///
+/// Only `init` opens a turn, and only once a turn has already run: the CLI resumes itself over
+/// work an earlier turn started, so before the first turn there is nothing to resume, and a CLI
+/// that publishes its init at spawn — the harness fake does — would otherwise open a phantom
+/// turn nothing ever settles. An assistant snapshot must not open one either: a late one after a
+/// `result` has the same phantom-turn shape.
+fn harness_turn(session: &mut ClaudeSession, events: &mut Vec<AgentEvent>) {
+    // `last_turn`, not `initialized`: a background task can only have been started by a turn, so
+    // "a turn has run" is the condition itself, and it also refuses a process that greets with
+    // two inits before any prompt, which `initialized` alone would take for a resume.
+    if session.active_turn().is_some() || session.last_turn.is_none() {
+        return;
+    }
+    let turn = TurnId::new();
+    // The turn's `user_item` is the explanatory row itself: no user wrote this turn, and naming
+    // an item that never arrives would leave the record pointing at nothing.
+    let item = ItemId::new();
+    let text = session.last_task_notification.take().map_or_else(
+        || HARNESS_TURN_NOTICE.to_owned(),
+        |summary| format!("{HARNESS_TURN_NOTICE} A background task finished: {summary}"),
+    );
+    tracing::info!(
+        target: "fleet::agents::claude",
+        %turn,
+        "Claude Code started a turn with no Fleet submit behind it"
+    );
+    events.push(session.begin_harness_turn(turn, item));
+    events.push(AgentEvent::ItemStarted {
+        turn,
+        item,
+        kind: ItemKind::Notice { text },
+        parent: None,
+    });
+    events.push(AgentEvent::ItemCompleted {
+        item,
+        status: ItemStatus::Completed,
+    });
 }
 
 /// `rate_limit_event`, and the parked turn it announces.
@@ -439,13 +492,17 @@ fn task_notification(
         Some("stopped") => ItemStatus::Stopped,
         _ => return,
     };
+    let summary = string_field(&frame.fields, "summary");
+    // Claude reports the finished task and then opens a turn of its own to talk about it. The
+    // summary is the only field in that sequence that says why, so the next init borrows it.
+    session.last_task_notification.clone_from(&summary);
     events.push(AgentEvent::ItemUpdated {
         item,
         patch: ItemPatch {
             payload: Some(ItemPayloadPatch::Subagent {
                 name: None,
                 description: None,
-                result: string_field(&frame.fields, "summary").map(Value::String),
+                result: summary.map(Value::String),
             }),
             status: Some(status),
         },

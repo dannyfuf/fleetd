@@ -159,7 +159,7 @@ fn item_text(item: &Item) -> Option<&str> {
             .next()
             .or_else(|| raw.values().next())
             .map(String::as_str),
-        ItemKind::Error { message } => Some(message),
+        ItemKind::Error { message } | ItemKind::Notice { text: message } => Some(message),
         ItemKind::Tool(_) | ItemKind::Subagent { .. } | ItemKind::Delegation { .. } => None,
     }
 }

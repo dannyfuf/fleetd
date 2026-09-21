@@ -124,6 +124,18 @@ pub(super) struct ClaudeSession {
     /// Models and selector aliases discovered through the bidirectional control protocol.
     pub(super) catalogue: Catalogue,
     pub(super) active_turn: Option<TurnId>,
+    /// The active turn when the CLI, not Fleet, opened it.
+    ///
+    /// A harness-initiated turn is nobody's submit, so a `Fresh` submit arriving into one is not
+    /// the caller bug [`ClaudeSession::begin_turn`] refuses — it is a second `user` line the CLI
+    /// will coalesce, exactly like a steer.
+    pub(super) harness_turn: Option<TurnId>,
+    /// The summary of the last `system/task_notification`, until an init consumes it.
+    ///
+    /// Claude announces a finished background task and *then* opens a turn of its own to report
+    /// on it. The summary is the only thing in that sequence that says why, so it is held for
+    /// exactly one init and dropped on the settling `result`.
+    pub(super) last_task_notification: Option<String>,
     /// A submit Fleet has written that the CLI has not confirmed yet.
     pub(super) pending_start: Option<TurnId>,
     pub(super) last_turn: Option<TurnId>,
@@ -232,6 +244,9 @@ impl ClaudeSession {
         user_item: ItemId,
     ) -> HarnessResult<Option<AgentEvent>> {
         match self.active_turn {
+            // A turn the CLI opened for itself never came from a submit, so a prompt arriving
+            // into one is a steer and not a caller that submitted twice.
+            Some(active) if active != turn && self.harness_turn == Some(active) => Ok(None),
             Some(active) if active != turn => Err(HarnessError::Request {
                 method: "submit".to_owned(),
                 code: None,
@@ -239,19 +254,42 @@ impl ClaudeSession {
             }),
             Some(_) => Ok(None),
             None => {
-                self.active_turn = Some(turn);
+                self.open_turn(turn);
                 self.pending_start = Some(turn);
-                self.last_turn = Some(turn);
-                self.announced_windows.clear();
                 Ok(Some(AgentEvent::TurnStarted { turn, user_item }))
             }
         }
+    }
+
+    /// Opens a turn the CLI started on its own, with no Fleet submit behind it.
+    ///
+    /// Claude sends one `system/init` per turn and [`ClaudeSession::begin_turn`] runs before the
+    /// prompt is written, so an init with no turn open, once a turn has already run in the
+    /// session, is by definition harness-initiated — today, the auto-resume that follows a
+    /// finished background task (§4.1). Before any turn has run an init is the handshake and
+    /// opens nothing. Without this the whole turn is dropped frame by frame and its `result`
+    /// settles nothing.
+    ///
+    /// `pending_start` is deliberately **not** set: there is no write in flight to confirm, and
+    /// the turn is already the one [`ClaudeSession::may_settle`] attributes a `result` to.
+    pub(super) fn begin_harness_turn(&mut self, turn: TurnId, user_item: ItemId) -> AgentEvent {
+        self.open_turn(turn);
+        self.harness_turn = Some(turn);
+        AgentEvent::TurnStarted { turn, user_item }
+    }
+
+    /// The bookkeeping every turn start shares.
+    fn open_turn(&mut self, turn: TurnId) {
+        self.active_turn = Some(turn);
+        self.last_turn = Some(turn);
+        self.announced_windows.clear();
     }
 
     /// Un-announces a turn whose prompt could not be written.
     pub(super) fn rollback_turn_start(&mut self, turn: TurnId) {
         if self.active_turn == Some(turn) {
             self.active_turn = None;
+            self.harness_turn = None;
             self.pending_start = None;
             self.pending_steers = 0;
         }
@@ -307,6 +345,7 @@ impl ClaudeSession {
         }
         events.push(AgentEvent::SessionExited { code, expected });
         self.active_turn = None;
+        self.harness_turn = None;
         self.pending_start = None;
         self.pending_steers = 0;
         self.stream_blocks.clear();
@@ -512,6 +551,23 @@ mod tests {
         );
         // A *different* turn while one runs is a caller bug, not a steer.
         assert!(session.begin_turn(TurnId::new(), ItemId::new()).is_err());
+    }
+
+    #[test]
+    fn a_submit_into_a_turn_the_cli_opened_for_itself_is_a_steer_and_not_a_refusal() {
+        let mut session = ClaudeSession::default();
+        let harness = TurnId::new();
+        session.begin_harness_turn(harness, ItemId::new());
+        assert_eq!(session.active_turn(), Some(harness));
+        // The manager mints an id for a turn it never saw start, and the CLI coalesces the
+        // prompt into the turn it is already running. Refusing the send would be a dead end.
+        assert!(
+            session
+                .begin_turn(TurnId::new(), ItemId::new())
+                .unwrap_or_else(|error| panic!("{error}"))
+                .is_none()
+        );
+        assert_eq!(session.active_turn(), Some(harness), "still one turn");
     }
 
     #[test]

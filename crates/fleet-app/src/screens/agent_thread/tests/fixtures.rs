@@ -139,6 +139,17 @@ pub(super) fn plan(turn: TurnId, markdown: &str) -> Item {
     )
 }
 
+/// The row a turn the harness opened for itself carries instead of a user bubble.
+pub(super) fn notice(turn: TurnId, text: &str) -> Item {
+    item(
+        turn,
+        ItemKind::Notice {
+            text: text.to_owned(),
+        },
+        ItemStatus::Completed,
+    )
+}
+
 pub(super) fn subagent(turn: TurnId, status: ItemStatus) -> Item {
     item(
         turn,

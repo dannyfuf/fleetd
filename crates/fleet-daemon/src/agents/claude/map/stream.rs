@@ -42,8 +42,14 @@ pub(in crate::agents::claude) fn assistant(
         session.failure_latch = Some(error.clone());
     }
     let Some(turn) = session.active_turn() else {
+        // Dropped on purpose: only `system/init` opens a turn. A late top-level snapshot after a
+        // `result` would otherwise open a phantom turn nothing ever settles. The fields are what
+        // the next diagnosis needs — whose stream it was, and what shape it had.
         tracing::warn!(
             target: "fleet::agents::claude",
+            frame = "assistant",
+            parent = frame.parent_tool_use_id.is_some(),
+            blocks = frame.message.content.as_array().map_or(0, Vec::len),
             "Claude assistant output arrived with no active turn"
         );
         return MapOutput::default();
@@ -255,6 +261,9 @@ pub(in crate::agents::claude) fn user(session: &mut ClaudeSession, frame: UserFr
         let Some(item) = session.tool_items.get(provider_id).copied() else {
             tracing::warn!(
                 target: "fleet::agents::claude",
+                frame = "user/tool_result",
+                parent = frame.parent_tool_use_id.is_some(),
+                turn_open = session.active_turn().is_some(),
                 "Claude returned a result for a tool this thread never opened"
             );
             continue;

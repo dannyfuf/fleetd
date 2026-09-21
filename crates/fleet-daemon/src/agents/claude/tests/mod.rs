@@ -63,6 +63,12 @@ const LIVE_PERMISSION: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/agents/claude/claude-permission-live.ndjson"
 ));
+/// The 2.1.266 capture of the CLI resuming itself when a background task finished: two inits,
+/// two results, and only the first turn behind a Fleet submit.
+const BACKGROUND_TASK: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/agents/claude/claude-background-task.ndjson"
+));
 
 fn start_request() -> StartRequest {
     StartRequest {
@@ -101,7 +107,12 @@ fn harness(command: String) -> ClaudeHarness {
     )
 }
 
-/// Replays a captured stream through the mapper, opening a turn once init lands.
+/// Replays a captured stream through the mapper, standing in for Fleet's own first submit.
+///
+/// The turn is opened **before** the first `init` is handled, which is the production order:
+/// `submit` announces the turn and only then writes the prompt Claude answers with an init. A
+/// later init with no turn open is left alone on purpose — that is the harness-initiated turn
+/// the mapper has to open for itself (§4.1).
 fn replay(fixture: &str) -> (ClaudeSession, Vec<AgentEvent>) {
     let mut session = ClaudeSession::default();
     let mut events = Vec::new();
@@ -111,9 +122,7 @@ fn replay(fixture: &str) -> (ClaudeSession, Vec<AgentEvent>) {
             panic!("every captured line must decode");
         };
         let frame = *frame;
-        let is_init = matches!(&frame, Frame::System(system) if system.subtype == "init");
-        events.extend(map::handle(&mut session, frame).events);
-        if is_init && !started {
+        if !started && matches!(&frame, Frame::System(system) if system.subtype == "init") {
             started = true;
             if let Some(event) = session
                 .begin_turn(TurnId::new(), ItemId::new())
@@ -122,6 +131,7 @@ fn replay(fixture: &str) -> (ClaudeSession, Vec<AgentEvent>) {
                 events.push(event);
             }
         }
+        events.extend(map::handle(&mut session, frame).events);
     }
     (session, events)
 }
