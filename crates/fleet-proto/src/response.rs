@@ -58,6 +58,14 @@ pub const SNAPSHOT_REVISION_CAPABILITY: &str = "snapshot.revision";
 /// remote daemon to upgrade in lockstep.
 pub const BOARD_WORKTREE_CAPABILITY: &str = "board.worktree";
 
+/// Capability advertised by daemons that run board automation.
+///
+/// It gates the three card-run requests, `MoveCard.cancel_run`, and the card-called delegation
+/// events and listings a client would otherwise see without being able to explain them.
+/// Defined in phase 1, advertised in phase 3: a daemon that knows the string but not the verbs
+/// must not claim it.
+pub const BOARD_AUTOMATION_CAPABILITY: &str = "board.automation";
+
 /// Capability name for committing only the worktree IDs reviewed by a prune dry run.
 pub const PRUNE_REVIEWED_IDS_CAPABILITY: &str = "prune.reviewed_ids";
 
