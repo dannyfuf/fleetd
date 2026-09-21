@@ -103,6 +103,13 @@
   (`real_shell_board_pane_refuses_to_reopen_its_own_worktree` leaked-handle check, and
   `github_service::concurrent_misses_share_fetch`) pass three of three in isolation and touch no
   phase-1 file; both ran while another worktree's build was hogging the CPU.
+- 2026-09-21 — Landed as `ed99c68` (proto), `87f6e3c` (core + store + docs) and `dad1816`
+  (plans); FEA-10 cherry-picked on top as `648ddee`. Gate: `make lint` green; across three
+  `make test` runs every suite passed at least once and every failure was a load-only flake
+  (`real_shell_*` leaked-handle checks in fleet-app, `github_service::concurrent_misses_share_fetch`,
+  `delegation::recovery::a_manager_restart_resumes_once_then_succeeds_and_delivers_once` on a
+  wall-clock `Elapsed`), each passing three of three alone; the daemon suite (844) and the
+  fleet-app real-shell family (26, serial) were then run clean on a quiet machine.
 
 ## Follow-ups
 - Phase 3 owns the `automation` refusal sentences of contracts §1.7 (worktree-only, local-only,
