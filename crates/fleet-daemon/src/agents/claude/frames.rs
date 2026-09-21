@@ -49,6 +49,12 @@ pub struct AssistantFrame {
 pub struct UserFrame {
     /// The message envelope, carrying `tool_result` content blocks.
     pub message: MessageBody,
+    /// The subagent whose stream this result belongs to, when it is not the top-level one.
+    ///
+    /// Read only by the diagnostic that reports a result Fleet could not attribute: a dropped
+    /// subagent result and a dropped top-level one have different causes.
+    #[serde(default)]
+    pub parent_tool_use_id: Option<String>,
     /// The **structured** result, which is what a `Read` row's line count is computed from.
     #[serde(default)]
     pub tool_use_result: Option<Value>,

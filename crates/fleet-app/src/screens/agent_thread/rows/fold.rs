@@ -130,6 +130,11 @@ fn folds(
     if matches!(item.kind, ItemKind::UserMessage { .. }) {
         return false;
     }
+    // Why a turn exists outranks what it cost: a harness-initiated turn's only statement of
+    // provenance must not go behind the same fold that hides its scaffolding.
+    if matches!(item.kind, ItemKind::Notice { .. }) {
+        return false;
+    }
     if terminal == Some(index) {
         return false;
     }

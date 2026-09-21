@@ -11,8 +11,8 @@ use fleet_ui_kit::{
 
 use super::fixtures::{
     Locals, assistant, command, delegation_item, delegation_record, delegation_result, edit, item,
-    pending, permission_gate, plan, projection, question, question_gate, reasoning, running_turn,
-    settled_turn, subagent, tool, user,
+    notice, pending, permission_gate, plan, projection, question, question_gate, reasoning,
+    running_turn, settled_turn, subagent, tool, user,
 };
 use crate::screens::agent_thread::rows::{ResolvedGate, build_rows, fold, group, live};
 use crate::screens::agent_thread::{RowsKey, composer::ComposerMode};
@@ -872,4 +872,55 @@ fn the_provider_word_comes_from_the_projection() {
         panic!("a dead session is an error card");
     };
     assert_eq!(row.message, "codex exited 1");
+}
+
+/// A turn Claude opened for itself has no user bubble: its `user_item` names the explanatory
+/// row instead (`docs/NATIVE-AGENTS.md` §4.1). It must still draw as a whole turn.
+#[test]
+fn a_turn_with_no_user_message_still_folds_and_closes() {
+    let turn = TurnId::new();
+    let explanation = notice(turn, "Claude Code started this turn on its own.");
+    let mut projection = projection();
+    projection.turns = vec![settled_turn(turn, explanation.id, TurnOutcome::Completed)];
+    projection.turn = TurnState::Settled(turn, TurnOutcome::Completed);
+    projection.items = vec![
+        explanation,
+        command(turn, ItemStatus::Completed, "cargo test"),
+        assistant(turn, "BACKGROUND FINISHED", ItemStatus::Completed),
+    ];
+    let locals = Locals::default();
+
+    let built = build_rows(&locals.inputs(&projection));
+
+    assert_eq!(
+        kinds(&built.rows),
+        ["notice", "fold", "assistant", "meta", "footer"],
+        "the explanation leads the turn and the turn still closes"
+    );
+    let TranscriptRowKind::Notice(row) = &built.rows[0].kind else {
+        panic!("the explanation is the quiet notice line");
+    };
+    assert_eq!(row.text, "Claude Code started this turn on its own.");
+}
+
+/// `TurnSettled` for a turn Fleet never saw start records `user_item: None`, and that record is
+/// the one the rows are built from. It must not skip the turn or panic.
+#[test]
+fn a_turn_record_with_no_user_item_at_all_still_draws() {
+    let turn = TurnId::new();
+    let mut record = settled_turn(
+        turn,
+        fleet_core::agents::ItemId::new(),
+        TurnOutcome::Completed,
+    );
+    record.user_item = None;
+    let mut projection = projection();
+    projection.turns = vec![record];
+    projection.turn = TurnState::Settled(turn, TurnOutcome::Completed);
+    projection.items = vec![assistant(turn, "recovered", ItemStatus::Completed)];
+    let locals = Locals::default();
+
+    let built = build_rows(&locals.inputs(&projection));
+
+    assert_eq!(kinds(&built.rows), ["assistant", "meta", "footer"]);
 }

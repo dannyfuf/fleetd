@@ -1496,3 +1496,92 @@ async fn a_delivered_message_keeps_its_delegation_origin_on_both_paths() {
         .expect("projection");
     assert_eq!(origins(&projection).last(), Some(&MessageOrigin::User));
 }
+
+/// Claude opens a turn for itself when a background task finishes (§4.1): nothing was submitted,
+/// so `drain_inputs_applied` finds nothing pending and the turn must still run and settle.
+///
+/// The gap this test also pins: `capture_turn_checkpoint` runs only in `send`, so a
+/// harness-initiated turn takes **no** turn-scope checkpoint and draws no `[u] revert turn`.
+#[tokio::test]
+async fn a_turn_the_manager_never_submitted_runs_and_settles() {
+    let harness = Harness::start(full()).await;
+    let thread = harness.create(None).await.thread;
+    let turn = TurnId::new();
+    // The adapter names the explanatory row as the turn's item: nobody wrote a user message.
+    let notice = ItemId::new();
+    harness
+        .script
+        .emit(AgentEvent::TurnStarted {
+            turn,
+            user_item: notice,
+        })
+        .await;
+    harness
+        .script
+        .emit(AgentEvent::ItemStarted {
+            turn,
+            item: notice,
+            kind: ItemKind::Notice {
+                text: "Claude Code started this turn on its own.".to_owned(),
+            },
+            parent: None,
+        })
+        .await;
+    harness
+        .script
+        .emit(AgentEvent::ItemCompleted {
+            item: notice,
+            status: ItemStatus::Completed,
+        })
+        .await;
+
+    let running = harness
+        .settle(thread, "a running turn", |projection| {
+            projection.turn == TurnState::Running(turn)
+        })
+        .await;
+    assert!(
+        running
+            .turns
+            .iter()
+            .any(|record| record.id == turn && record.user_item == Some(notice)),
+        "the turn is recorded even though no submit opened it"
+    );
+    assert!(
+        !running
+            .items
+            .iter()
+            .any(|item| matches!(item.kind, ItemKind::UserMessage { .. })),
+        "there was nothing pending to drain into a bubble"
+    );
+
+    harness.script.emit(completed(turn)).await;
+    let settled = harness
+        .settle(thread, "a completed turn", |projection| {
+            matches!(projection.turn, TurnState::Settled(finished, _) if finished == turn)
+        })
+        .await;
+    assert_eq!(
+        settled.turn,
+        TurnState::Settled(turn, TurnOutcome::Completed)
+    );
+    let summary = harness
+        .manager
+        .summaries()
+        .await
+        .pop()
+        .expect("one thread summary");
+    assert_eq!(
+        summary.attention,
+        Attention::NeedsYou(AttentionKind::Finished),
+        "the report the user never asked for is still unread work"
+    );
+    assert!(
+        !harness
+            .script
+            .calls()
+            .iter()
+            .any(|call| matches!(call, FakeCall::Send(..))),
+        "nothing was ever sent"
+    );
+}

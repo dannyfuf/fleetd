@@ -198,6 +198,19 @@ pub enum ItemKind {
         #[serde(default)]
         message: String,
     },
+    /// A plain note about the session, positioned in the turn it explains.
+    ///
+    /// Not the harness speaking and not the user: this is Fleet stating something about the
+    /// conversation that the conversation itself never says. It exists because a turn the
+    /// harness opened on its own — Claude resuming when a background task finishes (§4.1) —
+    /// otherwise renders as an answer to a question nobody asked. A thread-level
+    /// [`super::NoticeRecord`] cannot say it: that one hangs off the turn it *follows*, and this
+    /// belongs to the turn it *opens*.
+    Notice {
+        /// One-line explanation, already sanitized by the adapter.
+        #[serde(default)]
+        text: String,
+    },
     /// A delegated child represented in its caller's transcript.
     Delegation {
         /// Delegation identity.

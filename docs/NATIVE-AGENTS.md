@@ -429,8 +429,34 @@ the log.
   back as `SessionOpened.resume_cursor`, and the manager writes it into the thread record before
   the harness has said a word. A daemon that goes away between the first prompt and init still
   comes back to the same conversation.
-- Repeated inits configure the session **once**: the mapper ignores every init after the first,
-  and the cursor keeps following durable frames as before.
+- Repeated inits configure the session **once**: the mapper republishes the session vocabulary
+  only on the first, and the cursor keeps following durable frames as before. A later init is not
+  ignored altogether, though — it is the signal that a turn opened, which is the next paragraph.
+
+**A finished background task makes the CLI start a turn nobody prompted.** Observed on 2.1.266:
+after the previous turn's `result`, the CLI emits `system/background_tasks_changed`,
+`system/task_updated`, `system/task_notification {task_id, status, summary}`, then a fresh
+`system/init`, then the `assistant` frames carrying its report, then a second `result` — **and no
+`user` frame anywhere**. Fleet's `submit` sets the active turn before the prompt reaches stdin, so
+an init with no turn open cannot be Fleet's. The mapper therefore opens a synthetic turn there,
+emitting `TurnStarted` before anything else that init produces, and the ordinary `result` path
+settles it unchanged; without it every frame of that turn is dropped for naming no turn, its
+`result` hits the usage-only tripwire, and the user never sees the report. Two limits keep this
+from opening a phantom turn nothing ever settles. Only `system/init` starts a turn this way — a
+late `assistant` snapshot after a `result` must not. And only once a turn has already run in the
+session: a background task can only have been started by a turn, so before the first one an init
+is the plain handshake (§4.4, "Session ready"), however many times it arrives. The second limit is
+also what keeps the harness fake, which publishes its one init at spawn rather than with the first
+prompt, from leaving a fresh thread stuck on a turn that never settles.
+
+The synthetic turn leads with one `ItemKind::Notice` row, which is also the turn's `user_item`
+because no user wrote one: it says the harness started the turn itself and carries the `summary`
+of the `task_notification` that preceded the init, so the transcript states why a turn exists
+rather than presenting an answer to no question. Two consequences are named rather than papered
+over: `capture_turn_checkpoint` runs only in `send`, so a harness-initiated turn takes **no**
+turn-scope checkpoint and its footer draws no `[u] revert turn`; and a prompt sent while one is
+running coalesces into it exactly as a steer does, because the CLI folds a second `user` line into
+the turn it is already running.
 
 `--resume <cursor>` for a session the CLI never wrote a conversation for prints `No conversation
 found with session ID`, emits one `result` with `is_error: true` and exits 0. The manager never
@@ -651,7 +677,7 @@ allowed to make the UI more truthful and is forbidden from changing the state ma
 | --- | --- | --- | --- |
 | Session ready | the child surviving its spawn window (`system/init` only lands with the first prompt, and re-affirms `Ready` when it does; §4.1) | `initialize` result **and** `thread/start`/`resume` result | a spawn that has not yet outlived the window |
 | Resume cursor | `session_id` on any **durable** frame | the Codex thread id | any `session_id` on `hook_started`/`hook_progress`/`hook_response` — those are **transient** and adopting one corrupts the cursor |
-| Turn started | Fleet's own `submit` wrote a `user` frame with no turn open; or synthetic | `turn/started`, or the `turn/start` response | `thread/status/changed{active}`, which fires **before** `turn/started`; `session_state_changed{running}` |
+| Turn started | Fleet's own `submit` wrote a `user` frame with no turn open; **or `system/init` with no turn open after a turn has already run**, which is the CLI opening a turn for itself (§4.1); or synthetic | `turn/started`, or the `turn/start` response | `thread/status/changed{active}`, which fires **before** `turn/started`; `session_state_changed{running}`; an `assistant` snapshot with no turn open, or an `init` before any turn has run — either would open a phantom turn nothing settles |
 | Streaming text | `content_block_delta{text_delta}` | `item/agentMessage/delta` | `assistant` snapshot frames (they backfill, never stream) |
 | Streaming reasoning | `thinking_delta` | `item/reasoning/{summaryTextDelta,textDelta}` | `signature_delta` — **never display text** |
 | Command output | `tool_result` text on a `user` frame | `item/commandExecution/outputDelta` (plain, untagged) | `command/exec/outputDelta` — a different family, base64, client-initiated |

@@ -168,6 +168,17 @@ pub(crate) fn rows_for(
             ),
             None,
         )],
+        // The one item Fleet itself authors: it draws as the same quiet line a harness notice
+        // does, so nothing about it can read as the model speaking.
+        ItemKind::Notice { text } => vec![(
+            TranscriptRow::new(
+                id,
+                TranscriptRowKind::Notice(fleet_ui_kit::NoticeRow {
+                    text: SharedString::new(text.as_str()),
+                }),
+            ),
+            None,
+        )],
         ItemKind::Subagent { .. } => vec![(
             TranscriptRow::new(
                 id,
@@ -741,7 +752,7 @@ pub(crate) fn item_text(item: &Item) -> String {
                 .collect::<Vec<_>>()
                 .join("\n\n")
         }
-        ItemKind::Error { message } => message.clone(),
+        ItemKind::Error { message } | ItemKind::Notice { text: message } => message.clone(),
         ItemKind::Tool(_) | ItemKind::Subagent { .. } | ItemKind::Delegation { .. } => {
             String::new()
         }
