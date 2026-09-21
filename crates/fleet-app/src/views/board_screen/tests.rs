@@ -45,7 +45,11 @@ fn view() -> BoardView {
         .unwrap_or_else(|error| panic!("{error}"));
         cards.push(card);
     }
-    BoardView { board, cards }
+    BoardView {
+        board,
+        cards,
+        live_runs: Vec::new(),
+    }
 }
 
 #[test]

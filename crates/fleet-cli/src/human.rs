@@ -558,7 +558,9 @@ fn board_header(
         }
     }
     if !backend.is_local() {
-        let summary = fleet_core::board::summarize(&view.board, &view.cards);
+        // The header prints the dirty and conflict counts only, and `now` here is epoch
+        // seconds rather than an RFC 3339 stamp.
+        let summary = fleet_core::board::summarize(&view.board, &view.cards, &[], "");
         parts.push(synced_age(view.board.sync.last_synced_at.as_deref(), now));
         parts.push(format!("{} dirty", summary.dirty_count));
         parts.push(format!("{} conflict", summary.conflict_count));

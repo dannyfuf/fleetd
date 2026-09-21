@@ -1,6 +1,13 @@
 use super::*;
 
-/// Checks the board's prefix and unique schema identifiers.
+/// Environment-variable names a column may never set on its runs.
+///
+/// The same prefix `fleet subagent run --env` refuses: `FLEET_*` is the delegation's own
+/// identity, the daemon writes those variables itself, and a column that set one would only be
+/// overwritten without a word.
+const RESERVED_ENV_PREFIX: &str = "FLEET_";
+
+/// Checks the board's prefix, its unique schema identifiers and its column automation.
 pub fn validate_board(board: &Board) -> Result<(), BoardError> {
     if board.name.trim().is_empty() {
         return Err(invalid("name", "must not be empty"));
@@ -47,7 +54,165 @@ pub fn validate_board(board: &Board) -> Result<(), BoardError> {
     if board.properties.iter().any(|p| p.name.trim().is_empty()) {
         return Err(invalid("properties", "property names must not be empty"));
     }
+    validate_automation(board)?;
     Ok(())
+}
+
+/// Checks every column's automation block and the board's live-run throttle.
+///
+/// Routing may only ever point forward. A column that sent a card back would let one run's
+/// success start the run of a column the card had already passed, and the pair would trade the
+/// card between them for as long as the runs kept succeeding — a loop no refusal further down
+/// can break, because every individual move in it is legal.
+pub fn validate_automation(board: &Board) -> Result<(), BoardError> {
+    for (index, status) in board.statuses.iter().enumerate() {
+        let Some(automation) = status.automation.as_ref() else {
+            continue;
+        };
+        for (field, target) in [
+            ("on_success", automation.on_success.as_ref()),
+            (
+                "advance_when_unblocked",
+                automation.advance_when_unblocked.as_ref(),
+            ),
+        ] {
+            let Some(target) = target else { continue };
+            let Some(position) = board.statuses.iter().position(|s| s.id == *target) else {
+                return Err(invalid(field, "must name a status on this board"));
+            };
+            if position == index {
+                return Err(invalid(field, "may not name its own column"));
+            }
+            if position < index {
+                return Err(invalid(field, "must name a later column"));
+            }
+        }
+        if let Some(action) = automation.on_enter.as_ref() {
+            if let ActionKind::Skill { name, .. } = &action.kind {
+                if name.trim().is_empty() {
+                    return Err(invalid("on_enter", "a skill action needs a name"));
+                }
+                // Skills are a Claude concept: Codex has no verb that takes one, so a column
+                // asking for both is asking for something no provider can serve.
+                if action.agent.provider == Some(AgentKind::Codex) {
+                    return Err(invalid(
+                        "on_enter",
+                        "skill actions run on claude only; put the invocation in the column's instructions for codex",
+                    ));
+                }
+            }
+            validate_env(&action.env)?;
+        }
+    }
+    if board
+        .settings
+        .max_live_runs
+        .is_some_and(|runs| !(1..=MAX_LIVE_RUNS_PER_BOARD).contains(&runs))
+    {
+        return Err(invalid(
+            "max_live_runs",
+            &format!("must be between 1 and {MAX_LIVE_RUNS_PER_BOARD}"),
+        ));
+    }
+    Ok(())
+}
+
+/// Checks the `KEY=VALUE` entries a column hands its runs.
+///
+/// These are the five rules `fleet subagent run --env` already applies, restated here without
+/// the flag name: a column's env reaches a child through the daemon rather than through the
+/// CLI, and a board settings dialog must be able to refuse the same pair with the same words.
+pub fn validate_env(env: &[String]) -> Result<(), BoardError> {
+    let mut seen = HashSet::new();
+    for pair in env {
+        let Some((key, _)) = pair.split_once('=') else {
+            return Err(invalid(
+                "env",
+                &format!("{pair} is not KEY=VALUE: every entry needs an `=`"),
+            ));
+        };
+        if key.is_empty() {
+            return Err(invalid("env", &format!("{pair} has an empty key")));
+        }
+        if key.starts_with(RESERVED_ENV_PREFIX) {
+            return Err(invalid(
+                "env",
+                &format!(
+                    "{key} is refused: {RESERVED_ENV_PREFIX}* names are the delegation's own identity and the daemon sets them itself"
+                ),
+            ));
+        }
+        if key == "PATH" {
+            return Err(invalid(
+                "env",
+                "PATH is refused: an entry replaces the value outright rather than extending the login shell's, and Fleet already prepends the directory holding this fleet so the child can run `fleet subagent complete`",
+            ));
+        }
+        if !seen.insert(key) {
+            return Err(invalid("env", &format!("{key} is given twice")));
+        }
+    }
+    Ok(())
+}
+
+/// Checks one card's blockers against the board's card set.
+///
+/// Pure, and separate from [`validate_card`] because it needs every card rather than one: the
+/// daemon calls it beside its parent check on the write paths that can set links.
+pub fn validate_links(board: &Board, cards: &[Card], card: &Card) -> Result<(), BoardError> {
+    for blocker in &card.blocked_by {
+        if *blocker == card.id {
+            return Err(invalid("blocked_by", "a card cannot block itself"));
+        }
+        if !cards.iter().any(|other| other.id == *blocker) {
+            return Err(invalid(
+                "blocked_by",
+                &format!("{blocker} is not on this board"),
+            ));
+        }
+    }
+    let mut path = vec![card.display_key(board)];
+    let mut seen = HashSet::new();
+    if let Some(cycle) = closing_cycle(board, cards, card, &card.id, &mut path, &mut seen) {
+        return Err(invalid(
+            "blocked_by",
+            &format!("would close a cycle: {}", cycle.join(" → ")),
+        ));
+    }
+    Ok(())
+}
+
+/// The display-key path from `card` back to `target`, when following blockers reaches it.
+///
+/// `seen` keeps a diamond from being walked twice and makes a cycle that does not involve
+/// `target` — one a broken document could already hold — terminate instead of recursing forever.
+fn closing_cycle(
+    board: &Board,
+    cards: &[Card],
+    card: &Card,
+    target: &CardId,
+    path: &mut Vec<String>,
+    seen: &mut HashSet<CardId>,
+) -> Option<Vec<String>> {
+    for blocker in &card.blocked_by {
+        if blocker == target {
+            let mut closed = path.clone();
+            closed.push(path[0].clone());
+            return Some(closed);
+        }
+        if !seen.insert(blocker.clone()) {
+            continue;
+        }
+        let Some(next) = cards.iter().find(|other| other.id == *blocker) else {
+            continue;
+        };
+        path.push(next.display_key(board));
+        if let Some(closed) = closing_cycle(board, cards, next, target, path, seen) {
+            return Some(closed);
+        }
+        path.pop();
+    }
+    None
 }
 
 /// Checks card references, schema value types, and ISO calendar dates.

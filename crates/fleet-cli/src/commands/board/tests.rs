@@ -471,13 +471,19 @@ mod parsing {
         BoardView {
             board,
             cards: vec![card],
+            live_runs: Vec::new(),
         }
     }
 
     #[test]
     fn board_and_card_envelopes_have_exact_protocol_one_shapes() {
         let view = view();
-        let summaries = vec![summarize(&view.board, &view.cards)];
+        let summaries = vec![summarize(
+            &view.board,
+            &view.cards,
+            &[],
+            "2026-09-06T12:00:00Z",
+        )];
         for (actual, expected) in [
             (
                 to_json(&BoardEnvelope {
@@ -548,7 +554,7 @@ mod parsing {
             retryable: false,
         };
         let view = view();
-        let summary = summarize(&view.board, &view.cards);
+        let summary = summarize(&view.board, &view.cards, &[], "2026-09-06T12:00:00Z");
         assert_eq!(
             to_json(&BoardSyncEnvelope {
                 protocol: PROTOCOL,
@@ -724,7 +730,7 @@ mod parsing {
             "sprint".into(),
             PropertyValue::Text("Sprint 9 \u{1b}[5m".into()),
         );
-        let mut summary = summarize(&view.board, &view.cards);
+        let mut summary = summarize(&view.board, &view.cards, &[], "2026-09-06T12:00:00Z");
         summary.last_error = Some("acli said \u{1b}[2Jboom".into());
         let job = JobRecord {
             id: "sync-1".parse().unwrap(),
@@ -752,7 +758,7 @@ mod parsing {
     #[test]
     fn board_list_pads_every_column_to_the_widest_cell() {
         let view = view();
-        let mut short = summarize(&view.board, &view.cards);
+        let mut short = summarize(&view.board, &view.cards, &[], "2026-09-06T12:00:00Z");
         short.id = "ops".parse().unwrap();
         short.name = "Ops".into();
         let mut long = short.clone();
@@ -783,7 +789,7 @@ mod parsing {
     #[test]
     fn board_list_names_context_and_worktree_scopes() {
         let view = view();
-        let context = summarize(&view.board, &view.cards);
+        let context = summarize(&view.board, &view.cards, &[], "2026-09-06T12:00:00Z");
         let mut worktree = context.clone();
         worktree.id = "wt-feature".parse().unwrap();
         worktree.worktree_id = Some("acme/api#feature".parse().unwrap());
@@ -1267,6 +1273,7 @@ mod orchestration {
         BoardView {
             board,
             cards: vec![card],
+            live_runs: Vec::new(),
         }
     }
 
@@ -1720,6 +1727,8 @@ mod orchestration {
                 Ok(ResponseBody::Boards(vec![summarize(
                     &view.board,
                     &view.cards,
+                    &[],
+                    "2026-09-06T12:00:00Z",
                 )])),
             )],
         )
@@ -1948,7 +1957,7 @@ mod orchestration {
     #[tokio::test]
     async fn list_create_board_and_new_card_use_typed_requests() {
         let mut view = view();
-        let summary = summarize(&view.board, &view.cards);
+        let summary = summarize(&view.board, &view.cards, &[], "2026-09-06T12:00:00Z");
         let output = run(
             &["list", "--json"],
             vec![(

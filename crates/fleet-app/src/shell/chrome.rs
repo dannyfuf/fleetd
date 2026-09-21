@@ -393,7 +393,11 @@ mod tests {
             .position(|status| status.id == cards[0].status_id)
             .unwrap_or_else(|| panic!("no column"));
         let keys: Vec<String> = cards.iter().map(|card| card.display_key(&board)).collect();
-        state.board.view = Some(fleet_core::board::BoardView { board, cards });
+        state.board.view = Some(fleet_core::board::BoardView {
+            board,
+            cards,
+            live_runs: Vec::new(),
+        });
         state.board.focus = crate::state::BoardFocus { column, row: 0 };
         // Stale by construction: the status bar is built before the body, so a row the board's
         // render caches always names the previously selected card.

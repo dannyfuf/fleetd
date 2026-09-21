@@ -862,7 +862,9 @@ async fn sync(
     }
     let job = wait_for_sync(client, &job_id).await?;
     let view = client.get_board(board_id).await?;
-    let summary = summarize(&view.board, &view.cards);
+    // No live runs are joined into a CLI-side summary and this command has no RFC 3339 clock:
+    // it reads the sync counts, and the daemon's own summaries carry the run counts.
+    let summary = summarize(&view.board, &view.cards, &[], "");
     match &job.status {
         JobStatus::Cancelled => {
             return Err(ProtoError {

@@ -322,6 +322,7 @@ pub(super) fn merge_comments(card: &mut Card, remote: &RemoteCard) {
                 body: remote_comment.body.clone(),
                 created_at: remote_comment.created_at.clone(),
                 remote_id: Some(remote_comment.id.clone()),
+                run_id: None,
             });
         }
     }

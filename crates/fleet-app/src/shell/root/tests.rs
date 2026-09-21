@@ -420,6 +420,7 @@ fn board_view(context: &FleetContext) -> BoardView {
     BoardView {
         board,
         cards: vec![card],
+        live_runs: Vec::new(),
     }
 }
 
@@ -1255,7 +1256,11 @@ fn worktree_board_view(context: &FleetContext, worktree: &Worktree) -> BoardView
     for (index, card) in cards.iter_mut().enumerate() {
         card.status_id = board.statuses[index].id.clone();
     }
-    BoardView { board, cards }
+    BoardView {
+        board,
+        cards,
+        live_runs: Vec::new(),
+    }
 }
 
 /// Stages the worktree session the board pane lives in, on a daemon that serves its board.

@@ -9,17 +9,24 @@ pub mod sync;
 mod tests;
 
 pub use defaults::{
-    BOARD_ID_MAX_LEN, default_statuses, new_board, new_worktree_board, worktree_board_id,
+    BOARD_ID_MAX_LEN, PRESET_EXPECT_IMPLEMENT, PRESET_EXPECT_REVIEW, PRESET_INSTRUCTIONS_IMPLEMENT,
+    PRESET_REVIEW_SKILL, apply_workflow_preset, default_statuses, new_board, new_worktree_board,
+    render_template, workflow_preset, worktree_board_id,
 };
 pub use model::{
-    Activity, ActivityKind, BOARD_DOCUMENT_VERSION, BackendRef, Board, BoardDocument,
-    BoardSettings, BoardSummary, BoardView, Card, Comment, Conflict, ConflictPolicy, Label,
-    Priority, RemoteLink, Status, StatusCategory, SyncState, field_label,
+    Action, ActionKind, Activity, ActivityKind, BOARD_DOCUMENT_MIN_VERSION, BOARD_DOCUMENT_VERSION,
+    BackendRef, Board, BoardDocument, BoardSettings, BoardSummary, BoardView, Card, CardAgentPrefs,
+    CardRun, ColumnAgentPrefs, ColumnAutomation, Comment, Conflict, ConflictPolicy, Label, LiveRun,
+    MAX_LIVE_RUNS_PER_BOARD, MAX_REPORT_COMMENTS_PER_CARD, MAX_RUNS_PER_CARD,
+    PENDING_AMBER_AFTER_SECS, PendingRun, Priority, REPORT_EXCERPT_CAP_BYTES, RemoteLink,
+    RunOutcome, Status, StatusCategory, SyncState, document_version, field_label,
 };
 pub use ops::{
-    BoardError, BoardPatch, CardDraft, CardPatch, add_comment, apply_board_patch, apply_card_patch,
-    check_draft_writable, column_cards, create_card, first_status_in, merge_settings, move_card,
-    push_activity, summarize, valid_date, validate_board, validate_card, worktree_slug,
+    Blocked, BlockedTone, BoardError, BoardPatch, CardDraft, CardPatch, add_comment,
+    apply_board_patch, apply_card_patch, attention, blocked, blocks, check_draft_writable,
+    column_cards, create_card, first_status_in, is_satisfied, latest_run, merge_settings,
+    move_card, normalise_automation, push_activity, summarize, valid_date, validate_automation,
+    validate_board, validate_card, validate_env, validate_links, worktree_slug,
 };
 pub use property::{
     PropertyKind, PropertyOption, PropertySchema, PropertySource, PropertyValue, REQUIRED_MARKER,

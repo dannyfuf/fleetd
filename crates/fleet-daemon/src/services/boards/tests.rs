@@ -651,7 +651,7 @@ async fn stale_hosted_board(
     let record: fleet_core::model::Worktree =
         serde_json::from_value(remote_worktree(worktree)).unwrap();
     let board = new_worktree_board(&context, &record, "now");
-    let cards = (1..=cards)
+    let cards: Vec<Card> = (1..=cards)
         .map(|number| {
             serde_json::from_value(serde_json::json!({
                 "id": format!("card-{number}"), "boardId": board.id, "number": number,
@@ -661,8 +661,10 @@ async fn stale_hosted_board(
             .unwrap()
         })
         .collect();
+    // Stamped the way the store stamps it: a document nobody automated is written at 1, and the
+    // caller compares this value against the file the store wrote.
     let doc = BoardDocument {
-        version: BOARD_DOCUMENT_VERSION,
+        version: fleet_core::board::document_version(&board, &cards),
         board,
         cards,
     };

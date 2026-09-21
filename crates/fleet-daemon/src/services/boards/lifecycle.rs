@@ -33,7 +33,7 @@ impl Boards {
                 .write()
                 .await
                 .extend(doc.cards.iter().map(|c| (c.id.clone(), id.clone())));
-            summaries.push(summarize(&doc.board, &doc.cards));
+            summaries.push(summarize(&doc.board, &doc.cards, &[], &self.now()));
         }
         Ok(summaries)
     }
@@ -66,6 +66,8 @@ impl Boards {
         Ok(BoardView {
             board: doc.board,
             cards: doc.cards,
+            // Joined on read from the delegation store once automation exists (phase 3).
+            live_runs: Vec::new(),
         })
     }
 
@@ -102,6 +104,8 @@ impl Boards {
         Ok(BoardView {
             board: doc.board,
             cards: doc.cards,
+            // Joined on read from the delegation store once automation exists (phase 3).
+            live_runs: Vec::new(),
         })
     }
 
@@ -142,6 +146,8 @@ impl Boards {
         Ok(BoardView {
             board: doc.board,
             cards: doc.cards,
+            // Joined on read from the delegation store once automation exists (phase 3).
+            live_runs: Vec::new(),
         })
     }
 
@@ -187,7 +193,7 @@ impl Boards {
                         .write()
                         .await
                         .extend(doc.cards.iter().map(|c| (c.id.clone(), id.clone())));
-                    let summary = summarize(&doc.board, &doc.cards);
+                    let summary = summarize(&doc.board, &doc.cards, &[], &self.now());
                     if let Some(stamp) = stamp {
                         self.summaries
                             .write()

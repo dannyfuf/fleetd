@@ -50,3 +50,4 @@ what was rejected and why, and cites the research it was distilled from.
 | [0019](decisions/0019-worktree-scoped-boards.md) | Optional worktree-scoped boards with field-based lookup and deletion cascade |
 | [0020](decisions/0020-single-text-input.md) | One live `TextInput` for every text surface: one engine, entity-owned inputs, key ownership by context word |
 | [0021](decisions/0021-hosted-worktree-boards-route-to-owner.md) | A hosted worktree's board routes to the daemon that owns the worktree (supersedes 0019's addendum) |
+| [0022](decisions/0022-board-workflows.md) | The worktree board is a control plane: a column runs a card as a native subagent, and the document version bumps lazily |

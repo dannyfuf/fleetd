@@ -35,7 +35,11 @@ fn view_of(context: &Context) -> BoardView {
         .unwrap_or_else(|error| panic!("{error}"));
         cards.push(card);
     }
-    BoardView { board, cards }
+    BoardView {
+        board,
+        cards,
+        live_runs: Vec::new(),
+    }
 }
 
 fn view() -> BoardView {
@@ -71,6 +75,7 @@ fn worktree_view(worktree: &Worktree) -> BoardView {
     BoardView {
         board: new_worktree_board(&context("work"), worktree, "2026-09-06T12:00:00Z"),
         cards: Vec::new(),
+        live_runs: Vec::new(),
     }
 }
 

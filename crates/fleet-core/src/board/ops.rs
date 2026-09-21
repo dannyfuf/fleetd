@@ -2,12 +2,17 @@
 
 use super::{
     model::{
-        Activity, ActivityKind, BackendRef, Board, BoardSettings, BoardSummary, Card, Comment,
-        Label, Priority, Status, StatusCategory,
+        ActionKind, Activity, ActivityKind, BackendRef, Board, BoardSettings, BoardSummary, Card,
+        CardAgentPrefs, CardRun, ColumnAutomation, Comment, Label, LiveRun,
+        MAX_LIVE_RUNS_PER_BOARD, PENDING_AMBER_AFTER_SECS, Priority, RunOutcome, Status,
+        StatusCategory,
     },
     property::{PropertySchema, PropertyValue},
 };
-use crate::ids::{CardId, LabelId, RepoId, StatusId};
+use crate::{
+    agents::AgentKind,
+    ids::{CardId, LabelId, RepoId, StatusId},
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 
@@ -19,9 +24,15 @@ mod tests;
 mod validation;
 
 pub use cards::{add_comment, create_card, move_card, push_activity};
-pub use patches::{apply_board_patch, apply_card_patch, merge_settings};
-pub use query::{column_cards, first_status_in, summarize, worktree_slug};
-pub use validation::{check_draft_writable, valid_date, validate_board, validate_card};
+pub use patches::{apply_board_patch, apply_card_patch, merge_settings, normalise_automation};
+pub use query::{
+    Blocked, BlockedTone, attention, blocked, blocks, column_cards, first_status_in, is_satisfied,
+    latest_run, summarize, worktree_slug,
+};
+pub use validation::{
+    check_draft_writable, valid_date, validate_automation, validate_board, validate_card,
+    validate_env, validate_links,
+};
 
 use cards::dedupe_labels;
 use validation::{check_editable, check_writable};
@@ -62,6 +73,12 @@ pub struct CardDraft {
     /// Properties.
     #[serde(default)]
     pub properties: BTreeMap<String, PropertyValue>,
+    /// Agent preferences.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<CardAgentPrefs>,
+    /// Cards that must be completed before this one may start.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked_by: Vec<CardId>,
 }
 
 /// `None` = leave unchanged; `Some(None)` = clear. All fields optional.
@@ -118,6 +135,15 @@ pub struct CardPatch {
     pub properties: Option<BTreeMap<String, PropertyValue>>, /* merge; Null removes */
     /// Archived.
     pub archived: Option<bool>,
+    /// Agent preferences; `Some(None)` clears them.
+    #[serde(
+        default,
+        deserialize_with = "nested_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub agent: Option<Option<CardAgentPrefs>>,
+    /// The whole blocker set; `Some(vec![])` clears it.
+    pub blocked_by: Option<Vec<CardId>>,
 }
 impl CardPatch {
     /// Whether every patch field is absent.
@@ -223,6 +249,11 @@ fn invalid(field: &str, reason: &str) -> BoardError {
 #[must_use]
 pub fn default_true() -> bool {
     true
+}
+/// Serde skip predicate for a count no surface prints when it is zero.
+#[must_use]
+pub fn is_zero(count: &u32) -> bool {
+    *count == 0
 }
 /// Default worktree branch naming template.
 #[must_use]

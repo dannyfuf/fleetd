@@ -349,3 +349,93 @@ fn settings_pairs_merge_as_json_when_they_parse_and_as_text_otherwise() {
         Err(BoardError::Invalid { .. })
     ));
 }
+
+#[test]
+fn a_board_patch_drops_a_column_automation_block_a_user_emptied() {
+    let mut board = board();
+    let mut statuses = board.statuses.clone();
+    statuses[2].automation = Some(ColumnAutomation::default());
+    statuses[3].automation = Some(ColumnAutomation {
+        advance_when_unblocked: Some("canceled".parse().unwrap()),
+        ..ColumnAutomation::default()
+    });
+
+    let changed = apply_board_patch(
+        &mut board,
+        BoardPatch {
+            statuses: Some(statuses),
+            ..BoardPatch::default()
+        },
+        LATER,
+    )
+    .unwrap();
+
+    assert!(changed);
+    assert_eq!(board.statuses[2].automation, None);
+    assert!(board.statuses[3].automation.is_some());
+}
+
+#[test]
+fn a_patch_sets_and_clears_the_agent_and_the_whole_blocker_set() {
+    let mut board = board();
+    let mut card = create(&mut board, &[], "a");
+    let blocker: CardId = "b".parse().unwrap();
+
+    let changed = apply_card_patch(
+        &board,
+        &mut card,
+        CardPatch {
+            agent: Some(Some(CardAgentPrefs {
+                provider: Some(crate::agents::AgentKind::Codex),
+                ..CardAgentPrefs::default()
+            })),
+            blocked_by: Some(vec![blocker.clone()]),
+            ..CardPatch::default()
+        },
+        LATER,
+    )
+    .unwrap();
+
+    assert_eq!(changed, ["agent", "blocked_by"]);
+    assert_eq!(card.blocked_by, vec![blocker]);
+    assert_eq!(
+        card.activity.last().unwrap().message,
+        "Updated agent, blocked_by"
+    );
+
+    let cleared = apply_card_patch(
+        &board,
+        &mut card,
+        CardPatch {
+            agent: Some(None),
+            blocked_by: Some(Vec::new()),
+            ..CardPatch::default()
+        },
+        LATER,
+    )
+    .unwrap();
+
+    assert_eq!(cleared, ["agent", "blocked_by"]);
+    assert_eq!(card.agent, None);
+    assert!(card.blocked_by.is_empty());
+}
+
+#[test]
+fn an_agent_patch_that_changes_nothing_is_not_a_mutation() {
+    let mut board = board();
+    let mut card = create(&mut board, &[], "a");
+    let patch = CardPatch {
+        agent: Some(None),
+        blocked_by: Some(Vec::new()),
+        ..CardPatch::default()
+    };
+
+    assert!(!patch.is_empty());
+    assert!(CardPatch::default().is_empty());
+    assert!(
+        apply_card_patch(&board, &mut card, patch, LATER)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(card.updated_at, NOW);
+}

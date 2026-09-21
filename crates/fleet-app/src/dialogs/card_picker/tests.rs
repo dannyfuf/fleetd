@@ -325,7 +325,11 @@ fn board_with_assignees() -> AppState {
         cards.push(card);
     }
     let mut state = AppState::new("/tmp/fleet-card-picker", std::time::Instant::now());
-    state.board.view = Some(fleet_core::board::BoardView { board, cards });
+    state.board.view = Some(fleet_core::board::BoardView {
+        board,
+        cards,
+        live_runs: Vec::new(),
+    });
     state
 }
 

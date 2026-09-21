@@ -65,6 +65,10 @@ pub fn create_card(
         dirty: !board.backend.is_local(),
         archived: false,
         position,
+        agent: draft.agent,
+        blocked_by: draft.blocked_by,
+        pending_run: None,
+        runs: Vec::new(),
         created_at: now.into(),
         updated_at: now.into(),
     };
@@ -176,6 +180,7 @@ pub fn add_comment(
         body,
         created_at: now.into(),
         remote_id: None,
+        run_id: None,
     });
     card.dirty |= card.remote.is_some();
     push_activity(

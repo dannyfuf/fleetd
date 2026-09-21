@@ -723,8 +723,12 @@ status map and the backend's read-only list keep describing the remote the board
 pull under the mutation gate. If that fails, the persisted acknowledgement remains recoverable,
 and further edits wait for sync to restore its baseline.
 
-On disk, `$FLEET_HOME/boards/<board-id>.json` contains a `BoardDocument` with version 1,
-board metadata, and cards. `BoardStore` validates complete documents and writes via
-`Files::atomic_write_text`. Malformed documents are renamed beside the original as
+On disk, `$FLEET_HOME/boards/<board-id>.json` contains a `BoardDocument`, its board metadata, and
+its cards. `BoardStore` validates complete documents and writes via `Files::atomic_write_text`.
+The document version is stamped on save from the document's own contents
+(`fleet_core::board::document_version`), so a board that never opted into automation keeps
+writing 1 and a daemon built before that feature keeps reading it, while a board that has opted
+in writes 2; the store reads `1..=2` and refuses anything outside that range by name without
+quarantining the file (`docs/BOARD.md` §2). Malformed documents are renamed beside the original as
 `<board-id>.json.broken-<uuid>`; deletion moves the document to
 `$FLEET_HOME/trash/board-<board-id>-<uuid>.json` for recovery.

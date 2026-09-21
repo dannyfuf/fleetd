@@ -518,6 +518,9 @@ fn readopt_pulled_statuses(
             name,
             category: declared.unwrap_or(StatusCategory::Unstarted),
             color: None,
+            // A column adopted from a remote schema runs nothing: automation is refused on a
+            // board with a backend.
+            automation: None,
         };
         // A board reads left to right in workflow order, and appending put a *started* column
         // to the right of the completed one the moment a project gained a status between two

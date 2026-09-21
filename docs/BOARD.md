@@ -11,6 +11,10 @@ changes in the same pass. Where the code and this file disagree, the code is the
   reconciliation engine, and original board wire family.
 - [ADR 0019](decisions/0019-worktree-scoped-boards.md) adds the optional worktree scope, field-based
   lookup, deletion cascade, and capability-gated requests.
+- [ADR 0021](decisions/0021-hosted-worktree-boards-route-to-owner.md) routes a hosted worktree's
+  board to the daemon that owns the worktree.
+- [ADR 0022](decisions/0022-board-workflows.md) turns the worktree board into a control plane: a
+  column may run a card, a card carries links and a run history, and §11 is its model.
 
 ## 0. What we are building
 
@@ -105,7 +109,49 @@ impl BackendRef { pub const LOCAL: &'static str = "local"; pub fn is_local(&self
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Status { pub id: StatusId, pub name: String, pub category: StatusCategory,
-                    #[serde(default)] pub color: Option<String> /* token name, e.g. "accent" */ }
+                    #[serde(default)] pub color: Option<String>, /* token name, e.g. "accent" */
+                    /// What this column does to a card entering it. `None` on every column until
+                    /// someone opts in. See §11.
+                    #[serde(default, skip_serializing_if = "Option::is_none")] pub automation: Option<ColumnAutomation> }
+
+// The automation types below borrow `AgentKind`, `PermissionMode`, `DelegationId`, `ThreadId`
+// and `DelegationStatus` from `fleet_core::agents` — same crate, so no new crate edge appears.
+
+/// §11. An all-default block is not automation: `ops::normalise_automation` turns one into `None`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ColumnAutomation {
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub on_enter: Option<Action>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub on_success: Option<StatusId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub advance_when_unblocked: Option<StatusId>,
+}
+impl ColumnAutomation { pub fn is_empty(&self) -> bool; }
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Action {
+    pub kind: ActionKind,
+    /// Prepended to the brief. Markdown. `{key}` and `{title}` are substituted.
+    #[serde(default, skip_serializing_if = "String::is_empty")] pub instructions: String,
+    /// Printed in the run's footer as `The card expects: …`. May be empty.
+    #[serde(default, skip_serializing_if = "String::is_empty")] pub expect: String,
+    #[serde(default, skip_serializing_if = "ColumnAgentPrefs::is_empty")] pub agent: ColumnAgentPrefs,
+    /// `KEY=VALUE`; `{key}` substituted in the value. `validate_env` applies the five `--env` rules.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")] pub env: Vec<String>,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ActionKind { Prompt, Skill { name: String, #[serde(default, skip_serializing_if = "String::is_empty")] args: String } }
+impl ActionKind { pub fn word(&self) -> String; }   // "run card" | "run skill deep-review"
+
+/// Permission mode is a workflow policy, so it lives on the column and never on a card.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ColumnAgentPrefs { #[serde(default, skip_serializing_if = "Option::is_none")] pub provider: Option<AgentKind>,
+                              #[serde(default, skip_serializing_if = "Option::is_none")] pub model: Option<String>,
+                              #[serde(default, skip_serializing_if = "Option::is_none")] pub effort: Option<String>,
+                              #[serde(default, skip_serializing_if = "Option::is_none")] pub mode: Option<PermissionMode> }
+impl ColumnAgentPrefs { pub fn is_empty(&self) -> bool; }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -148,9 +194,66 @@ pub struct Card {
     #[serde(default)] pub archived: bool,
     /// Sort key inside its column; renumbered by `ops::move_card`.
     #[serde(default)] pub position: u64,
+    /// The agent this card asks for, overriding what its column asks for. §11.
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub agent: Option<CardAgentPrefs>,
+    /// Cards that must reach a `Completed` column before this one may start. §11.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")] pub blocked_by: Vec<CardId>,
+    /// A run this card is waiting for a free slot to start. §11.
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub pending_run: Option<PendingRun>,
+    /// Runs this card has had, oldest first, capped at `MAX_RUNS_PER_CARD`. §11.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")] pub runs: Vec<CardRun>,
     pub created_at: String,
     pub updated_at: String,
 }
+
+/// A card carries no permission mode: the mode is its column's policy over every card that
+/// passes through it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CardAgentPrefs { #[serde(default, skip_serializing_if = "Option::is_none")] pub provider: Option<AgentKind>,
+                            #[serde(default, skip_serializing_if = "Option::is_none")] pub model: Option<String>,
+                            #[serde(default, skip_serializing_if = "Option::is_none")] pub effort: Option<String> }
+impl CardAgentPrefs { pub fn is_empty(&self) -> bool; }
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingRun { pub status_id: StatusId, pub since: String /* RFC 3339, the board clock */ }
+
+/// Identity plus terminal facts. Written twice: when the delegation exists and when it ends.
+/// Live progress is never stored here — it belongs to the delegation (§11).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CardRun {
+    pub id: DelegationId,
+    /// `None` only when the start failed before a thread existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub thread_id: Option<ThreadId>,
+    pub status_id: StatusId,
+    pub action: ActionKind,
+    pub provider: AgentKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub effort: Option<String>,
+    pub started_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub ended_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub outcome: Option<RunOutcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub report_comment_id: Option<String>,
+    #[serde(default, skip_serializing_if = "is_zero")] pub files_changed: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub cost_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub tokens: Option<u64>,
+}
+impl CardRun { pub fn is_live(&self) -> bool; pub fn failed_to_start(&self) -> bool; }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunOutcome { Succeeded, NeedsYou, Failed, Incomplete, Cancelled }
+impl RunOutcome { pub const fn word(self) -> &'static str; pub const fn needs_attention(self) -> bool; }
+
+pub const MAX_RUNS_PER_CARD: usize = 20;
+pub const MAX_REPORT_COMMENTS_PER_CARD: usize = 3;
+pub const REPORT_EXCERPT_CAP_BYTES: usize = 8 * 1024;
+pub const PENDING_AMBER_AFTER_SECS: u64 = 60;
+/// Equal to the daemon's `MAX_LIVE_DELEGATIONS`; a daemon test asserts they agree.
+pub const MAX_LIVE_RUNS_PER_BOARD: u32 = 8;
 impl Card {
     /// `remote.key` when linked (e.g. "PROJ-123"), else `"{prefix}-{number}"`.
     pub fn display_key(&self, board: &Board) -> String;
@@ -160,14 +263,18 @@ impl Card {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Comment { pub id: String, #[serde(default)] pub author: Option<String>, pub body: String,
-                     pub created_at: String, #[serde(default)] pub remote_id: Option<String> }
+                     pub created_at: String, #[serde(default)] pub remote_id: Option<String>,
+                     /// Set on a run's report excerpt; renders with a run badge instead of an author.
+                     #[serde(default, skip_serializing_if = "Option::is_none")] pub run_id: Option<DelegationId> }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Activity { pub at: String, pub kind: ActivityKind, #[serde(default)] pub actor: Option<String>, pub message: String }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ActivityKind { Created, Updated, Moved, Commented, WorktreeCreated, Synced, ConflictDetected, ConflictResolved }
+pub enum ActivityKind { Created, Updated, Moved, Commented, WorktreeCreated, Synced, ConflictDetected, ConflictResolved,
+                        /// §11. `Moved` stays a human's or the CLI's move; automation writes `AutoMoved`.
+                        RunStarted, RunEnded, AutoMoved }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -189,7 +296,11 @@ pub struct BoardSettings {
     #[serde(default)] pub conflict_policy: ConflictPolicy,
     /// Create remote issues for local-only cards on push (only if backend supports it).
     #[serde(default)] pub push_new_cards: bool,
+    /// Live runs allowed at once across this board. `None` is one. Validated `1..=MAX_LIVE_RUNS_PER_BOARD`.
+    /// A board property rather than a column one: every run of one board shares one checkout.
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub max_live_runs: Option<u32>,
 }
+impl BoardSettings { pub fn max_live_runs(&self) -> u32; }   // unwrap_or(1)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ConflictPolicy { #[default] Manual, RemoteWins, LocalWins }
@@ -204,6 +315,9 @@ pub struct SyncState {
     #[serde(default)] pub last_error: Option<String>,
     /// remote status id/name → local StatusId, and the inverse, kept by `sync::adopt_schema`.
     #[serde(default)] pub status_map: StatusMap,
+    /// Standard card fields this board's backend cannot write back, copied from
+    /// `BackendSchema::readonly_fields` by `sync::adopt_schema`. §10.
+    #[serde(default)] pub readonly_fields: Vec<String>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -217,19 +331,45 @@ pub struct BoardSummary { pub id: BoardId, pub context_id: ContextId,
                           pub name: String, pub prefix: String,
                           pub backend_kind: String, pub card_count: usize, pub open_count: usize,
                           pub dirty_count: usize, pub conflict_count: usize,
+                          /// Cards with a live or pending run, and cards whose last run wants a human.
+                          #[serde(default, skip_serializing_if = "is_zero")] pub working_count: u32,
+                          #[serde(default, skip_serializing_if = "is_zero")] pub attention_count: u32,
                           pub last_synced_at: Option<String>, pub last_error: Option<String> }
 
 /// Full board payload for the UI/CLI.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BoardView { pub board: Board, pub cards: Vec<Card> }
+pub struct BoardView { pub board: Board, pub cards: Vec<Card>,
+                       /// Joined from the delegation store on read. Never persisted.
+                       #[serde(default, skip_serializing_if = "Vec::is_empty")] pub live_runs: Vec<LiveRun> }
+
+/// What a live run is doing right now, joined onto a board view on read.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveRun { pub card_id: CardId, pub run: DelegationId, pub status: DelegationStatus,
+                     #[serde(default, skip_serializing_if = "Option::is_none")] pub headline: Option<String>,
+                     pub started: String }
 
 /// On-disk document: `$FLEET_HOME/boards/<board-id>.json`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BoardDocument { pub version: u32 /* = 1 */, pub board: Board, pub cards: Vec<Card> }
-pub const BOARD_DOCUMENT_VERSION: u32 = 1;
+pub struct BoardDocument { pub version: u32, pub board: Board, pub cards: Vec<Card> }
+/// Newest version this build writes, and the oldest it reads.
+pub const BOARD_DOCUMENT_VERSION: u32 = 2;
+pub const BOARD_DOCUMENT_MIN_VERSION: u32 = 1;
+/// 2 when any column carries `automation`, the settings carry `max_live_runs`, or any card carries
+/// `blocked_by`, `agent`, a `pending_run`, `runs`, or a comment with `run_id`; else 1.
+pub fn document_version(board: &Board, cards: &[Card]) -> u32;
 ```
+
+**The document version bumps lazily.** `BoardStore::save` stamps
+`doc.version = document_version(&doc.board, &doc.cards)` before it validates, so a board nobody
+automated goes on writing version 1 and a daemon built before this feature goes on reading it. A
+board that has opted in writes 2, and keeps writing 2 for as long as any card still carries a link
+or a run: an older daemon cannot represent either and would drop the history on its next save.
+`load` and `peek` accept `BOARD_DOCUMENT_MIN_VERSION..=BOARD_DOCUMENT_VERSION` and refuse anything
+else by name — `board {id} uses document version {v} (this build reads 1..=2)` — without
+quarantining the file, because a document this build is too old to read is intact, not damaged.
 
 ```rust
 // crates/fleet-core/src/board/property.rs — backend-agnostic custom properties
@@ -264,6 +404,18 @@ pub fn default_prefix(context: &Context) -> String;   // first 3 alnum chars of 
 pub fn new_board(context: &Context, now: &str) -> Board; // id = context.id as BoardId, name = context.name, default statuses, next_number = 1
 pub fn worktree_board_id(worktree: &WorktreeId) -> BoardId; // wt-<owner>-<repo>-<slug>, slugified and capped at 64 bytes
 pub fn new_worktree_board(context: &Context, worktree: &Worktree, now: &str) -> Board; // worktree scope, slug name/prefix, worktree repo default
+
+// §11 — the one workflow preset and its text.
+pub const PRESET_INSTRUCTIONS_IMPLEMENT: &str = "Implement this card in the current worktree. Do not commit.";
+pub const PRESET_EXPECT_IMPLEMENT: &str = "make lint and make test pass";
+pub const PRESET_EXPECT_REVIEW: &str = "the review finds no blocking issue";
+pub const PRESET_REVIEW_SKILL: &str = "deep-review";
+pub fn workflow_preset() -> Vec<Status>;          // backlog, todo, ready, in-progress, in-review, done, canceled
+/// Adds the preset columns missing **by `StatusId`**, in preset order relative to the neighbours
+/// already present; never touches an existing column. `true` when it changed anything.
+pub fn apply_workflow_preset(board: &mut Board) -> bool;
+/// `{key}` then `{title}`; anything else in braces is left alone.
+pub fn render_template(text: &str, key: &str, title: &str) -> String;
 ```
 
 ```rust
@@ -275,7 +427,9 @@ pub struct CardDraft { pub title: String, #[serde(default)] pub description: Str
     #[serde(default)] pub labels: Vec<LabelId>, #[serde(default)] pub assignee: Option<String>,
     #[serde(default)] pub estimate: Option<u32>, #[serde(default)] pub due_date: Option<String>,
     #[serde(default)] pub parent_id: Option<CardId>, #[serde(default)] pub repo_id: Option<RepoId>,
-    #[serde(default)] pub properties: BTreeMap<String, PropertyValue> }
+    #[serde(default)] pub properties: BTreeMap<String, PropertyValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub agent: Option<CardAgentPrefs>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")] pub blocked_by: Vec<CardId> }
 
 /// `None` = leave unchanged; `Some(None)` = clear. All fields optional.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -284,7 +438,9 @@ pub struct CardPatch { pub title: Option<String>, pub description: Option<String
     pub status_id: Option<StatusId>, pub priority: Option<Priority>, pub labels: Option<Vec<LabelId>>,
     pub assignee: Option<Option<String>>, pub estimate: Option<Option<u32>>, pub due_date: Option<Option<String>>,
     pub parent_id: Option<Option<CardId>>, pub repo_id: Option<Option<RepoId>>,
-    pub properties: Option<BTreeMap<String, PropertyValue>> /* merge; Null removes */, pub archived: Option<bool> }
+    pub properties: Option<BTreeMap<String, PropertyValue>> /* merge; Null removes */, pub archived: Option<bool>,
+    /// `Some(None)` clears the card's agent preferences; the whole `blocked_by` set is replaced.
+    pub agent: Option<Option<CardAgentPrefs>>, pub blocked_by: Option<Vec<CardId>> }
 impl CardPatch { pub fn is_empty(&self) -> bool; }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -307,8 +463,15 @@ pub enum BoardError {
     #[error("card {0} has an unresolved conflict")] Conflicted(String),
 }
 
-pub fn validate_board(board: &Board) -> Result<(), BoardError>;   // prefix, unique status/label ids, ≥1 status, unique property keys, nonempty status/label/property names
+pub fn validate_board(board: &Board) -> Result<(), BoardError>;   // prefix, unique status/label ids, ≥1 status, unique property keys, nonempty status/label/property names, then validate_automation
 pub fn validate_card(board: &Board, card: &Card) -> Result<(), BoardError>; // status/labels exist, property kinds match schema, `Date` property values and `due_date` are real dates
+/// Called by `validate_board`: every column's automation block and `settings.max_live_runs` (§11).
+pub fn validate_automation(board: &Board) -> Result<(), BoardError>;
+/// The five `--env` rules of `fleet subagent run`, without the flag name (§11).
+pub fn validate_env(env: &[String]) -> Result<(), BoardError>;
+/// One card's `blocked_by` against the board's card set; the daemon calls it beside its parent
+/// check on every write path that can set links (§11).
+pub fn validate_links(board: &Board, cards: &[Card], card: &Card) -> Result<(), BoardError>;
 pub fn valid_date(date: &str) -> bool;  // real YYYY-MM-DD calendar day; every surface offering a due date uses this one
 /// The `bool` is whether anything changed: a patch that leaves every field as it found it is not
 /// a mutation, so it stamps nothing and the service does not save or announce it.
@@ -335,8 +498,21 @@ pub fn first_status_in(board: &Board, category: StatusCategory) -> Option<&Statu
 /// "{key}-{slug}" rendering used for worktree slug/branch; slugified, ≤ 48 chars, never empty,
 /// and never dotted — the same string names a Git branch, where `.` is illegal in several positions.
 pub fn worktree_slug(board: &Board, card: &Card) -> String;
-pub fn summarize(board: &Board, cards: &[Card]) -> BoardSummary;
-pub fn default_true() -> bool; pub fn default_branch_template() -> String;
+/// `live` is the delegation join a board view carries; a caller with nothing joined passes `&[]`
+/// and still counts the runs the cards themselves record. `now` is RFC 3339, for `attention`.
+pub fn summarize(board: &Board, cards: &[Card], live: &[LiveRun], now: &str) -> BoardSummary;
+/// Derived reads shared by the app, the CLI and the engine (§11).
+pub fn blocks<'a>(cards: &'a [Card], card: &CardId) -> Vec<&'a Card>;
+pub fn is_satisfied(board: &Board, cards: &[Card], blocker: &CardId) -> bool;
+pub struct Blocked { pub unsatisfied: u32, pub tone: BlockedTone }
+pub enum BlockedTone { Muted, Warning }
+pub fn blocked(board: &Board, cards: &[Card], card: &Card) -> Option<Blocked>;
+pub fn latest_run(card: &Card) -> Option<&CardRun>;
+pub fn attention(card: &Card, now: &str) -> bool;
+/// Drops an automation block that asks for nothing; `apply_board_patch` and
+/// `apply_workflow_preset` both call it after they set `statuses`.
+pub fn normalise_automation(statuses: &mut [Status]);
+pub fn default_true() -> bool; pub fn default_branch_template() -> String; pub fn is_zero(count: &u32) -> bool;
 ```
 
 ## 3. Sync engine (`fleet_core::board::sync`) — pure, no I/O
@@ -1043,3 +1219,145 @@ time-window incremental pulls and pure ADF⇄markdown conversion are all consequ
 limits, kept inside the adapter: the core, the store and the UI stay backend-agnostic, and outside
 `adapters/board/jira/` the word "jira" appears in `fleet-app` only in tests and doc comments —
 never in a rendered string or a branch.
+
+## 11. Automation — the model
+
+**What this section covers.** Everything below is *the model*: the shapes a board document may
+now hold, the rules that refuse a bad one, and the reads every surface derives from them. Nothing
+in this build serves it. The engine that acts on a card entering an automated column, and the
+three run requests that let a client start, cancel and wait for a run, arrive in **phase 3**; the
+`fleet board` verbs that drive them in **phase 5**; the tile marks, the card-detail run row and
+the Board settings Columns pane in **phases 6 to 8**. `board.automation`
+(`fleet_proto::response::BOARD_AUTOMATION_CAPABILITY`) is defined and deliberately **not**
+advertised, so a daemon built from this phase behaves for every client exactly as the one before
+it did. [ADR 0022](decisions/0022-board-workflows.md) records why.
+
+### 11.1 What a column does
+
+A `Status` may carry one optional `ColumnAutomation` (§2). It has three independent parts:
+
+| Field | Meaning |
+| --- | --- |
+| `on_enter` | The `Action` to run on a card that enters this column. |
+| `on_success` | Where the card goes when that run succeeds. |
+| `advance_when_unblocked` | Where a card *waiting here* goes once every card blocking it is satisfied. |
+
+An `Action` is either `ActionKind::Prompt` — run the card's own brief — or
+`ActionKind::Skill { name, args }`, which invokes one of the agent's skills. `instructions` is
+prepended to the brief and `expect` is printed in the run's footer as `The card expects: …`.
+`render_template` substitutes `{key}` and `{title}` in `instructions` and in each `env` value;
+`expect` is printed as written.
+`agent` (`ColumnAgentPrefs`) is what the column asks for; a card's own `agent` (`CardAgentPrefs`)
+wins over it. Permission `mode` exists only on the column: it is the column's policy over every
+card that passes through it, and a card able to widen it would be a card able to grant itself
+access its column deliberately withheld.
+
+A block whose every field is empty is not automation. `ops::normalise_automation` turns one into
+`None`, so a column a user has just cleared stops answering `automation.is_some()` and stops
+holding the document at version 2. `apply_board_patch` and `apply_workflow_preset` both call it.
+
+`settings.max_live_runs` is the board's throttle, `None` meaning one. It is a property of the
+board rather than of a column because every run of one board edits the same checkout.
+
+### 11.2 What a card remembers
+
+`agent`, `blocked_by`, `pending_run` and `runs` (§2). `runs` is oldest first, capped at
+`MAX_RUNS_PER_CARD` (20) with the oldest dropped. A `CardRun` is written twice — once when the
+delegation exists, once when it ends — so a run is visible while it works and legible long after.
+
+Live progress is never stored on the card. It belongs to the delegation, and a card is not a
+mirror of one: what is live arrives joined onto `BoardView.live_runs` on read and is never
+persisted. A run whose start failed has `thread_id: None` (`failed_to_start()`), which is the one
+case where a `CardRun` exists with no thread to attach to.
+
+Report excerpts live in the card's comments, with `Comment.run_id` set. A body is capped at
+`REPORT_EXCERPT_CAP_BYTES` (8 KiB) and a card keeps at most `MAX_REPORT_COMMENTS_PER_CARD` (3);
+the oldest is dropped past that, clearing its run's `report_comment_id`.
+
+### 11.3 The activity sentences
+
+`ActivityKind` gains `RunStarted`, `RunEnded` and `AutoMoved`. The exact text, so every writer
+copies rather than invents it:
+
+| Kind | Message |
+| --- | --- |
+| `RunStarted` | `Run started · {provider} · {model} · {effort}` — a missing model or effort drops with its separator; provider is `AgentKind::executable()`. |
+| `RunEnded` | `Run ended · {outcome word} · {Nm SSs}`, plus ` · ${cost:.2}` when the cost is known. |
+| `AutoMoved` | `Moved to {column name}: unblocked by {KEY} reaching {column name}`. |
+| `Updated` | `Run canceled: {column name} no longer runs an action`, when a column loses its action. |
+| `Updated` | `Unblocked: {KEY} was deleted`, when a blocker is deleted. |
+
+`Moved` keeps today's text and is written **only** by a human's or the CLI's move. An outcome move
+is an `AutoMoved` reading `Moved to {column name}: run succeeded`. That separation is what lets
+`attention` tell the two apart: a card wants a human while its latest run needs one and no `Moved`
+entry is newer than that run's `ended_at`.
+
+### 11.4 The refusals
+
+Every one is `BoardError::Invalid { field, reason }`, and every surface prints the sentence
+verbatim.
+
+| field | reason |
+| --- | --- |
+| `on_success` / `advance_when_unblocked` | `must name a status on this board` · `may not name its own column` · `must name a later column` |
+| `on_enter` | `a skill action needs a name` · `skill actions run on claude only; put the invocation in the column's instructions for codex` |
+| `env` | the five `fleet subagent run --env` sentences with `--env ` dropped: not `KEY=VALUE`, an empty key, a `FLEET_`-prefixed key, `PATH`, the same key twice |
+| `max_live_runs` | `must be between 1 and 8` |
+| `blocked_by` | `{KEY} is not on this board` · `a card cannot block itself` · `would close a cycle: {KEY} → {KEY} → {KEY}` |
+| `automation` | `automation is available on worktree boards only` · `automation is available on local boards only` · `automation is unavailable on a worktree owned by host {host}` |
+
+Routing may only ever point forward. A column that sent a card back would let one run's success
+start the run of a column the card had already passed, and the pair would trade the card between
+them for as long as the runs kept succeeding — a loop no later refusal can break, because every
+individual move in it is legal.
+
+The cycle sentence lists the path in display keys from the card being written back to itself, so a
+two-card cycle reads `would close a cycle: FLT-1 → FLT-2 → FLT-1`. A blocker that is not on this
+board is named by its card id, which is the only name the board has for it.
+
+The three `automation` sentences are raised by the daemon (phase 3), not by `fleet-core`; they are
+fixed here so the app and the CLI show the same words. `fleet-cli`'s own `child_environment` keeps
+its `--env `-prefixed sentences and is not changed by this feature.
+
+### 11.5 The derived reads
+
+None of these is persisted; all are pure functions of a board and its cards.
+
+| Read | Answers |
+| --- | --- |
+| `blocks(cards, card)` | The cards this one blocks — the reverse of everyone's `blocked_by`. |
+| `is_satisfied(board, cards, blocker)` | Whether a blocker has reached a `Completed` column. A canceled card is a decision not to do the work, not a report that it is done, so it never satisfies. |
+| `blocked(board, cards, card)` | `Some(Blocked { unsatisfied, tone })` while any blocker is unsatisfied. `tone` is `Warning` when one of them is canceled, archived or no longer on the board — nothing will release this card on its own — and `Muted` otherwise. |
+| `latest_run(card)` | `runs.last()`. |
+| `attention(card, now)` | Whether a person has to look: the latest run's outcome `needs_attention()` with no later manual `Moved`, or a `pending_run` older than `PENDING_AMBER_AFTER_SECS` (60). |
+
+`summarize` fills `BoardSummary.working_count` (a live or pending run) and `attention_count` from
+the same two, which is how the board list and the pane header count them.
+
+### 11.6 The workflow preset
+
+`workflow_preset()` is the one shipped pipeline; `apply_workflow_preset(board)` adds the columns a
+board is missing **by `StatusId`**, in preset order relative to the neighbours already present,
+and never touches an existing column's name, category, colour or automation.
+
+| id | Name | Category | On enter | On success | When unblocked |
+| --- | --- | --- | --- | --- | --- |
+| `backlog` | Backlog | Backlog | — | — | — |
+| `todo` | Todo | Unstarted | — | — | — |
+| `ready` | Ready | Unstarted | — | — | `in-progress` |
+| `in-progress` | In Progress | Started | prompt, `PRESET_INSTRUCTIONS_IMPLEMENT`, expects `PRESET_EXPECT_IMPLEMENT` | `in-review` | — |
+| `in-review` | In review | Started | skill `deep-review`, expects `PRESET_EXPECT_REVIEW` | `done` | — |
+| `done` | Done | Completed | — | — | — |
+| `canceled` | Canceled | Canceled | — | — | — |
+
+Todo stays human on purpose and Ready is the routing column: a card is put in Ready once it is
+meant to run, and `advance_when_unblocked` releases it into In Progress as soon as every card
+blocking it is done. Nothing a person leaves in Todo can start itself. The preset sets no
+`max_live_runs`, which leaves the board at one live run — a second concurrent run over one
+checkout is a decision its owner makes deliberately.
+
+Because an existing column is never rewritten, applying the preset to a board built from
+`default_statuses()` adds Ready and In review but leaves the shipped `in-progress` column with
+**no** `on_enter` action: that column already exists, and its automation is its owner's. A board
+that wants the whole pipeline either starts from `workflow_preset()` or edits `in-progress`
+afterwards.

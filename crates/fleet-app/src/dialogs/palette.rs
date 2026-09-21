@@ -2454,6 +2454,7 @@ mod tests {
         state.board.view = Some(fleet_core::board::BoardView {
             board,
             cards: vec![card],
+            live_runs: Vec::new(),
         });
         state.board.focus = crate::state::BoardFocus { column, row: 0 };
         state

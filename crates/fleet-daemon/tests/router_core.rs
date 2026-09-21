@@ -1178,6 +1178,8 @@ fn board_summary(id: &BoardId, worktree: Option<&WorktreeId>) -> BoardSummary {
         open_count: 11,
         dirty_count: 0,
         conflict_count: 0,
+        working_count: 0,
+        attention_count: 0,
         last_synced_at: None,
         last_error: None,
     }
@@ -1228,10 +1230,15 @@ fn board_view(id: &BoardId, worktree: Option<&WorktreeId>, cards: &[CardId]) -> 
                 dirty: false,
                 archived: false,
                 position: 0,
+                agent: None,
+                blocked_by: Vec::new(),
+                pending_run: None,
+                runs: Vec::new(),
                 created_at: "2026-09-20T12:00:00Z".to_owned(),
                 updated_at: "2026-09-20T12:00:00Z".to_owned(),
             })
             .collect(),
+        live_runs: Vec::new(),
     }
 }
 

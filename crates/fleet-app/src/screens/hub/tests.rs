@@ -254,6 +254,8 @@ fn board_tab_summary_ignores_worktree_boards_in_the_active_context() {
         name: id.to_owned(),
         prefix: "ZED".to_owned(),
         backend_kind: "local".to_owned(),
+        working_count: 0,
+        attention_count: 0,
         card_count: open_count,
         open_count,
         dirty_count: 0,
