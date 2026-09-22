@@ -104,6 +104,7 @@ impl Services {
             tokio::spawn(run_pool_refresh(Arc::clone(self), events, shutdown.clone())),
             tokio::spawn(checkpoints::run_sweep(Arc::clone(self), shutdown.clone())),
             tokio::spawn(run_delegation_outbox(Arc::clone(self), shutdown.clone())),
+            tokio::spawn(run_board_automation(Arc::clone(self), shutdown.clone())),
             tokio::spawn(run_pr_cache_expiry(Arc::clone(self), shutdown)),
         ];
         Ok(PeriodicTasks { handles })
@@ -437,6 +438,60 @@ async fn run_delegation_outbox(services: Arc<Services>, shutdown: CancellationTo
         return;
     };
     worker.run(shutdown).await;
+}
+
+/// Boot recovery for column automation, and then every freed run slot handed on.
+///
+/// Two jobs in one task because both serve the same memo: [`Boards::resume_automation`] adopts or
+/// closes whatever a restart left behind, and from then on each terminal delegation offers the
+/// slot it frees to the board that has waited longest for one.
+///
+/// The outbox worker's first drain is not waited for. It publishes no signal for one, and boot
+/// recovery does not need it: a run row whose delegation is terminal and whose delivery the outbox
+/// still owes is *adopted*, so the drain closes it exactly as it would have, and only a delivery
+/// nothing will ever perform again is recorded by the sweep itself.
+async fn run_board_automation(services: Arc<Services>, shutdown: CancellationToken) {
+    // Subscribed before the sweep: this is a broadcast, so a subscription taken after boot
+    // recovery had walked the boards would start at the next event and miss every run that ended
+    // while it walked.
+    let mut events = services.events.subscribe();
+    if let Err(error) = services.boards.resume_automation().await {
+        tracing::warn!(%error, "board automation could not be resumed after the restart");
+    }
+    loop {
+        let event = tokio::select! {
+            biased;
+            () = shutdown.cancelled() => break,
+            event = events.recv() => event,
+        };
+        match event {
+            // The slot is freed by the card's *row* closing, which `on_run_delivered` does after
+            // the delegation is terminal — and that delivery publishes the delegation again. The
+            // second event is therefore the one that finds a slot; the first costs a memo read.
+            Ok(Event::DelegationChanged(delegation)) if delegation.status.is_terminal() => {
+                hand_on_freed_slot(&services).await;
+            }
+            Ok(_) => {}
+            // Lag drops events, so the memo is asked instead of the event: every board still
+            // waiting is re-evaluated, which is what the missed terminal delegation would have
+            // asked for.
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                hand_on_freed_slot(&services).await;
+            }
+            // Every sender is gone, which happens only as the daemon drops its services.
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        }
+    }
+}
+
+/// Offers the slot a finished run freed to the next card parked behind a board's ceiling.
+///
+/// While no board is waiting this is one mutex read, which is the common case: the memo is
+/// written only where a `pending_run` is set or cleared.
+async fn hand_on_freed_slot(services: &Services) {
+    if let Err(error) = services.boards.on_slot_released().await {
+        tracing::warn!(%error, "a freed run slot could not be handed to the next card");
+    }
 }
 
 async fn run_pr_cache_expiry(services: Arc<Services>, shutdown: CancellationToken) {

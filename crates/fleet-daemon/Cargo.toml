@@ -48,6 +48,13 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 uuid.workspace = true
 
 [dev-dependencies]
+# The end-to-end suites talk to their private `fleetd` the way every other peer does,
+# over the typed client, rather than through a second hand-rolled socket helper.
+fleet-client.workspace = true
 fleet-daemon = { workspace = true, features = ["test-support"] }
+# The end-to-end automation suite boots a private `fleetd` and a scripted provider.
+# No cycle: `fleet-harness` depends on `fleet-client`, `fleet-core`, `fleet-drive` and
+# `fleet-proto` only.
+fleet-harness.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

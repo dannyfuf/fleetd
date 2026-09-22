@@ -21,7 +21,7 @@ use crate::adapters::shell::{
     DetachedProcess, LineCallback, RealShell, Shell, ShellCommand, ShellResult,
 };
 
-use super::{CheckpointError, Checkpoints};
+use super::{ChangeKind, ChangedFile, CheckpointError, Checkpoints};
 
 /// A real shell with the developer's own Git configuration switched off.
 ///
@@ -744,5 +744,119 @@ async fn a_worktree_that_is_no_longer_a_repository_refuses_a_capture_and_lists_n
             .await
             .unwrap_or_else(|error| panic!("{error}")),
         0
+    );
+}
+
+#[tokio::test]
+async fn changed_since_reports_modified_added_and_deleted_paths() {
+    let fixture = Fixture::new().await;
+    fixture
+        .checkpoints
+        .capture_turn(fixture.path(), fixture.thread, fixture.turn)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+
+    // What a run does to a worktree: rewrite a tracked file, generate a new one, remove a third.
+    fixture.write("a.txt", "the agent's version\n");
+    fixture.write("generated/out.rs", "fn main() {}\n");
+    std::fs::remove_file(fixture.path().join("sub/b.txt"))
+        .unwrap_or_else(|error| panic!("{error}"));
+
+    let changed = fixture
+        .checkpoints
+        .changed_since(fixture.path(), &fixture.thread)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+
+    assert_eq!(
+        changed,
+        vec![
+            ChangedFile {
+                path: "a.txt".to_owned(),
+                kind: ChangeKind::Modified,
+            },
+            ChangedFile {
+                path: "generated/out.rs".to_owned(),
+                kind: ChangeKind::Added,
+            },
+            ChangedFile {
+                path: "sub/b.txt".to_owned(),
+                kind: ChangeKind::Deleted,
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn changed_since_on_a_directory_that_is_not_a_git_worktree_is_empty() {
+    let directory = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+    let checkpoints = Checkpoints::new(Arc::new(IsolatedShell { inner: RealShell }));
+
+    // The answer a run gets when its worktree was never a repository, or is gone: an empty list,
+    // never an error. A delivery must not fail because there is nothing to describe.
+    assert_eq!(
+        checkpoints
+            .changed_since(directory.path(), &ThreadId::new())
+            .await
+            .unwrap_or_else(|error| panic!("{error}")),
+        Vec::new()
+    );
+}
+
+#[tokio::test]
+async fn changed_since_without_a_checkpoint_is_empty() {
+    let fixture = Fixture::new().await;
+    // Edited, but never checkpointed: a provider that ran no turn has nothing to diff against,
+    // and that is normal rather than a failure.
+    fixture.write("a.txt", "edited with no checkpoint behind it\n");
+
+    assert_eq!(
+        fixture
+            .checkpoints
+            .changed_since(fixture.path(), &fixture.thread)
+            .await
+            .unwrap_or_else(|error| panic!("{error}")),
+        Vec::new()
+    );
+}
+
+#[tokio::test]
+async fn changed_since_uses_the_first_checkpoint_not_the_latest() {
+    let fixture = Fixture::new().await;
+    fixture
+        .checkpoints
+        .capture_turn(fixture.path(), fixture.thread, fixture.turn)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    fixture.write("a.txt", "what the first turn wrote\n");
+
+    let second = fixture
+        .checkpoints
+        .capture_turn(fixture.path(), fixture.thread, TurnId::new())
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    fixture.write("generated/out.rs", "fn main() {}\n");
+
+    let changed = fixture
+        .checkpoints
+        .changed_since(fixture.path(), &fixture.thread)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+
+    // Both turns are in the list. Diffing the *latest* checkpoint would report only the second
+    // turn's file, which is the whole reason a run's report says "since this run started".
+    assert_eq!(second.ordinal, 2);
+    assert_eq!(
+        changed,
+        vec![
+            ChangedFile {
+                path: "a.txt".to_owned(),
+                kind: ChangeKind::Modified,
+            },
+            ChangedFile {
+                path: "generated/out.rs".to_owned(),
+                kind: ChangeKind::Added,
+            },
+        ]
     );
 }

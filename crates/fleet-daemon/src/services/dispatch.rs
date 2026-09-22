@@ -264,8 +264,23 @@ impl Services {
                 card_id,
                 status_id,
                 index,
+                cancel_run,
             } => Ok(ResponseBody::Card(
-                self.boards.move_card(&card_id, &status_id, index).await?,
+                self.boards
+                    .move_card(&card_id, &status_id, index, cancel_run)
+                    .await?,
+            )),
+            RequestBody::CardRunStart { card_id } => {
+                Ok(ResponseBody::Card(self.boards.start_run(&card_id).await?))
+            }
+            RequestBody::CardRunCancel { card_id } => {
+                Ok(ResponseBody::Card(self.boards.cancel_run(&card_id).await?))
+            }
+            RequestBody::CardRunWait {
+                card_id,
+                timeout_ms,
+            } => Ok(ResponseBody::Card(
+                self.boards.wait_run(&card_id, timeout_ms).await?,
             )),
             RequestBody::DeleteCard { card_id } => {
                 self.boards.delete_card(&card_id).await?;

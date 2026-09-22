@@ -178,6 +178,7 @@ impl Fixture {
             self.jobs.clone(),
             self.worktrees.clone(),
             self.events.clone(),
+            None,
         )
     }
 
@@ -925,7 +926,7 @@ async fn card_lifecycle_persists_and_rebuilds_index_after_restart() {
         .unwrap();
     assert_eq!(edited.updated_at, "2026-09-06T13:00:00+00:00");
     let moved = reopened
-        .move_card(&card.id, &"in-progress".parse().unwrap(), Some(0))
+        .move_card(&card.id, &"in-progress".parse().unwrap(), Some(0), false)
         .await
         .unwrap();
     assert_eq!(moved.status_id.as_str(), "in-progress");
@@ -1596,7 +1597,7 @@ async fn push_create_update_transition_and_comments_reach_backend_and_acks_persi
         .await
         .unwrap();
     f.boards
-        .move_card(&card.id, &"doing".parse().unwrap(), None)
+        .move_card(&card.id, &"doing".parse().unwrap(), None, false)
         .await
         .unwrap();
     let commented = f
@@ -1979,7 +1980,7 @@ async fn invalid_card_mutations_leave_document_and_events_unchanged() {
     );
     assert!(
         f.boards
-            .move_card(&card.id, &"unknown".parse().unwrap(), None)
+            .move_card(&card.id, &"unknown".parse().unwrap(), None, false)
             .await
             .is_err()
     );
@@ -2360,7 +2361,7 @@ async fn incremental_omission_fetches_baseline_and_pushes_pending_transition() {
     assert_eq!(f.sync(&board.id).await.status, JobStatus::Succeeded);
     let card = f.boards.get(&board.id).await.unwrap().cards.remove(0);
     f.boards
-        .move_card(&card.id, &"doing".parse().unwrap(), None)
+        .move_card(&card.id, &"doing".parse().unwrap(), None, false)
         .await
         .unwrap();
     f.pull(vec![], Some("next"));
@@ -2834,7 +2835,10 @@ async fn a_patched_status_appends_the_card_to_its_new_column() {
     let first = f.card(&board.id, "First").await;
     let second = f.card(&board.id, "Second").await;
     let done: fleet_core::ids::StatusId = "done".parse().unwrap();
-    f.boards.move_card(&second.id, &done, None).await.unwrap();
+    f.boards
+        .move_card(&second.id, &done, None, false)
+        .await
+        .unwrap();
     // Only `move_card` renumbers a column. A status set by a patch used to keep the position
     // it held in the column it left, interleaving it with cards it never met.
     let moved = f
@@ -2928,7 +2932,7 @@ async fn an_archived_card_is_refused_by_the_patch_path_as_well_as_by_move() {
     let done: fleet_core::ids::StatusId = "done".parse().unwrap();
     assert!(
         f.boards
-            .move_card(&card.id, &done, Some(0))
+            .move_card(&card.id, &done, Some(0), false)
             .await
             .unwrap_err()
             .to_string()
@@ -3086,7 +3090,7 @@ async fn a_move_that_changes_nothing_writes_no_document_and_no_history() {
     for _ in 0..3 {
         let moved = f
             .boards
-            .move_card(&card.id, &card.status_id, Some(0))
+            .move_card(&card.id, &card.status_id, Some(0), false)
             .await
             .unwrap();
         assert_eq!(moved.updated_at, card.updated_at);
@@ -3432,7 +3436,7 @@ async fn read_only_backend_fields_are_refused_with_the_daemon_message_intact() {
     );
     let error = f
         .boards
-        .move_card(&card.id, &"doing".parse().unwrap(), None)
+        .move_card(&card.id, &"doing".parse().unwrap(), None, false)
         .await
         .unwrap_err();
     assert!(
@@ -3442,7 +3446,7 @@ async fn read_only_backend_fields_are_refused_with_the_daemon_message_intact() {
     );
     // Reordering inside the column the card already sits in is no transition and still works.
     f.boards
-        .move_card(&card.id, &card.status_id, Some(0))
+        .move_card(&card.id, &card.status_id, Some(0), false)
         .await
         .unwrap();
     let after = f.boards.get(&board.id).await.unwrap();

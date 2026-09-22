@@ -84,11 +84,18 @@ pub struct Boards {
     /// The mirror of the worktrees other hosts own, installed once composition has built it.
     /// Absent in unit tests that compose `Boards` alone, which then see local worktrees only.
     remote_worktrees: Arc<std::sync::OnceLock<Arc<dyn RemoteWorktrees>>>,
+    /// Column automation, or `None` when this daemon has no native-agent database.
+    ///
+    /// `Arc` because `Boards` is `Clone` and the reservation inside must be one set across every
+    /// clone; `Option` because a daemon that cannot run agents still serves every other board
+    /// verb, and only the run verbs refuse.
+    automation: Option<Arc<Automation>>,
 }
 
 /// The size and modification time a summary was parsed from.
 type DocumentStamp = (u64, std::time::SystemTime);
 
+mod automation;
 mod cards;
 mod documents;
 mod lifecycle;
@@ -97,11 +104,17 @@ mod sync;
 mod tests;
 mod worktree;
 
+pub use automation::Automation;
 use cards::{awaiting_push_baseline, new_card_id, require_push_baseline, validate_parent};
 use worktree::scrub_repo;
 
 impl Boards {
     /// Constructs board orchestration around shared daemon services and event bus.
+    ///
+    /// Every argument is a distinct collaborator composition owns; a parameter struct here would
+    /// be the same list behind one more name, and the only caller outside composition is a test
+    /// fixture that spells them out anyway.
+    #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn new(
         store: Arc<BoardStore>,
@@ -111,8 +124,10 @@ impl Boards {
         jobs: Arc<JobManager>,
         worktrees: Arc<Worktrees>,
         events: BroadcastBus,
+        automation: Option<Automation>,
     ) -> Self {
         Self {
+            automation: automation.map(Arc::new),
             store,
             state_store,
             backends,
@@ -127,6 +142,14 @@ impl Boards {
             summaries: Arc::new(RwLock::new(HashMap::new())),
             remote_worktrees: Arc::new(std::sync::OnceLock::new()),
         }
+    }
+
+    /// Column automation, or `None` when this daemon has no native-agent database.
+    ///
+    /// Every trigger site asks this first: with `None` a board behaves exactly as it did before
+    /// automation existed, and only the three run verbs turn the absence into a refusal.
+    pub(crate) fn automation(&self) -> Option<&Automation> {
+        self.automation.as_deref()
     }
 
     /// Installs the mirrored view of remote worktrees, once composition has built the mirror.

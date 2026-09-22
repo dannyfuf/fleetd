@@ -145,6 +145,9 @@ pub fn to_remote(
         | CreateCard { .. }
         | UpdateCard { .. }
         | MoveCard { .. }
+        | CardRunStart { .. }
+        | CardRunCancel { .. }
+        | CardRunWait { .. }
         | DeleteCard { .. }
         | AddCardComment { .. }
         | SyncBoard { .. }
@@ -707,6 +710,9 @@ pub(crate) fn unavailable_fanout_response(
         | RequestBody::CreateCard { .. }
         | RequestBody::UpdateCard { .. }
         | RequestBody::MoveCard { .. }
+        | RequestBody::CardRunStart { .. }
+        | RequestBody::CardRunCancel { .. }
+        | RequestBody::CardRunWait { .. }
         | RequestBody::DeleteCard { .. }
         | RequestBody::AddCardComment { .. }
         | RequestBody::CreateWorktreeFromCard { .. }

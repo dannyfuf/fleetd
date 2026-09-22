@@ -142,6 +142,7 @@ fn classifies_local_host_and_fanout_requests() {
                 card_id: card("card-one"),
                 status_id: status(),
                 index: None,
+                cancel_run: false,
             },
             &resolver,
         ),
@@ -1056,6 +1057,7 @@ async fn a_hosted_worktree_board_is_forwarded_and_its_cards_become_routable() {
             card_id,
             status_id: status(),
             index: None,
+            cancel_run: false,
         }),
         Target::Host(host)
     );

@@ -8,6 +8,9 @@ use fleet_core::{model::Context, paths::FleetHome, state::default_state};
 
 use super::worktree::ARCHIVED_CARD;
 
+mod refusals;
+mod triggers;
+
 async fn fixture() -> (
     tempfile::TempDir,
     Services,

@@ -209,6 +209,24 @@ impl Worktrees {
         Ok(path.to_string_lossy().into_owned())
     }
 
+    /// The host owning this worktree, for a refusal whose sentence must name it.
+    ///
+    /// `None` is a worktree this daemon owns. Separate from [`Worktrees::path`], which refuses a
+    /// hosted worktree without saying whose it is.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` when no worktree carries `id`, and the state store's own read failure.
+    pub async fn host_of(&self, id: WorktreeId) -> DaemonResult<Option<String>> {
+        let state = self.state.load().await?;
+        state
+            .worktrees
+            .into_iter()
+            .find(|worktree| worktree.id == id)
+            .ok_or_else(|| DaemonError::NotFound(format!("worktree {id}")))
+            .map(|worktree| worktree.host.map(|host| host.to_string()))
+    }
+
     async fn repo_and_config(&self, id: &RepoId) -> DaemonResult<(Repo, Config)> {
         let config = self.config.load().await?;
         let state = self.state.load().await?;

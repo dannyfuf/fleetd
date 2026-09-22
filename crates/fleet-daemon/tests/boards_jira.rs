@@ -1710,6 +1710,7 @@ impl Fixture {
             jobs.clone(),
             worktrees,
             BroadcastBus::default(),
+            None,
         );
         Self {
             _temp: temp,
@@ -1978,7 +1979,10 @@ async fn a_local_edit_a_move_and_a_comment_reach_jira_as_edit_transition_and_com
         )
         .await
         .unwrap();
-    f.boards.move_card(&card.id, &done, None).await.unwrap();
+    f.boards
+        .move_card(&card.id, &done, None, false)
+        .await
+        .unwrap();
     f.boards
         .add_comment(&card.id, "Pushing this now".into())
         .await

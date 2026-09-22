@@ -3,7 +3,7 @@ use super::*;
 impl Boards {
     /// Allocates a UUID and local number, then persists a validated card.
     pub async fn create_card(&self, board: &BoardId, draft: CardDraft) -> DaemonResult<Card> {
-        let _guard = self.gate(board).await;
+        let guard = self.gate(board).await;
         let mut doc = self.load(board)?;
         self.validate_repo(&doc.board, draft.repo_id.as_ref())
             .await?;
@@ -11,15 +11,30 @@ impl Boards {
         let now = self.now();
         ops::check_draft_writable(&doc.board, &draft)?;
         let card = ops::create_card(&mut doc.board, &doc.cards, new_card_id()?, draft, &now)?;
-        doc.cards.push(card.clone());
-        self.save(&doc, BoardChangeReason::CardChanged).await?;
-        Ok(card)
+        // Links are checked against the set the card is about to join: `validate_card`, which
+        // every save runs, sees one card and so cannot tell whether a blocker exists at all.
+        validate_links(&doc.board, &doc.cards, &card)?;
+        // A card created straight into a column that runs something starts it, exactly as a move
+        // into that column would: the column is what runs, not the gesture that put the card there.
+        let seeds = [card.id.clone()];
+        let index = doc.cards.len();
+        doc.cards.push(card);
+        self.commit(guard, &mut doc, &seeds, &now).await?;
+        Ok(doc.cards[index].clone())
     }
 
     /// Applies a partial card edit through the pure domain operations.
     pub async fn update_card(&self, card: &CardId, patch: CardPatch) -> DaemonResult<Card> {
-        let (_guard, mut doc, index) = self.card_document(card).await?;
+        let (guard, mut doc, index) = self.card_document(card).await?;
         let now = self.now();
+        // A working card cannot be archived out from under its run: the run would carry on with
+        // no column left to report into, and the board would show neither. Cancel it first.
+        if patch.archived == Some(true) && is_working(&doc.cards[index]) {
+            return Err(DaemonError::Conflict(format!(
+                "{} is working; cancel the run first",
+                doc.cards[index].display_key(&doc.board)
+            )));
+        }
         self.validate_repo(&doc.board, patch.repo_id.as_ref().and_then(Option::as_ref))
             .await?;
         // A card that owns a worktree keeps the repository that worktree lives in. Clearing it
@@ -53,6 +68,7 @@ impl Boards {
             // A patch that changes nothing writes nothing and announces nothing.
             return self.card_view(&doc.board, &doc.cards[index]).await;
         }
+        validate_links(&doc.board, &doc.cards, &doc.cards[index])?;
         // Only `move_card` renumbers a column, so a status changed by a patch would keep the
         // position it held in the column it left and interleave with cards it never met.
         if changed.iter().any(|field| field == "status_id") {
@@ -80,7 +96,24 @@ impl Boards {
                 .max()
                 .map_or(0, |position| position.saturating_add(10));
         }
-        self.save_card(doc, index, &now).await
+        // The two edits that can change what the board owes: the card may have entered a column
+        // that runs something, and either way its dependants may now be free to advance.
+        let seeded = changed
+            .iter()
+            .any(|field| field == "status_id" || field == "archived");
+        if seeded {
+            // A run owed to the column the card has left is not owed any more. Nothing is
+            // announced: the `Updated` entry the patch just wrote already says what happened.
+            doc.cards[index].pending_run = None;
+        }
+        let seeds = if seeded {
+            vec![card.clone()]
+        } else {
+            Vec::new()
+        };
+        doc.board.updated_at.clone_from(&now);
+        self.commit(guard, &mut doc, &seeds, &now).await?;
+        self.card_view(&doc.board, &doc.cards[index]).await
     }
 
     /// Moves a card and persists all affected column positions atomically.
@@ -89,20 +122,66 @@ impl Boards {
         card: &CardId,
         status: &StatusId,
         index: Option<usize>,
+        cancel_run: bool,
     ) -> DaemonResult<Card> {
-        let (_guard, mut doc, card_index) = self.card_document(card).await?;
+        let (mut guard, mut doc, mut card_index) = self.card_document(card).await?;
+        // A live run is settled before the move, and never under this gate: `cancel_run` takes
+        // the same board gate itself, and the gates are not reentrant.
+        if is_working(&doc.cards[card_index]) {
+            let key = doc.cards[card_index].display_key(&doc.board);
+            let cancelled = latest_run(&doc.cards[card_index]).map(|run| run.id);
+            drop(guard);
+            if !cancel_run {
+                return Err(DaemonError::Conflict(format!(
+                    "{key} is working; pass --cancel-run to move it"
+                )));
+            }
+            // With no automation nothing can be running: the row is what a previous daemon left
+            // behind, and the flag is the user saying to move the card regardless.
+            if self.automation().is_some() {
+                self.cancel_run(card).await?;
+            }
+            (guard, doc, card_index) = self.card_document(card).await?;
+            // The gate was down for the length of the cancel, and the card can have gained a
+            // *different* live run in that window — a concurrent `card run`, or a cascade that
+            // reached it once the cancel landed. The cancelled run is still live here as often
+            // as not (its `Cancelled` arrives with the delivery), so the id is what tells the
+            // two apart: moving on a run nobody asked to cancel would leave a live child
+            // reporting into a column the card has left.
+            if super::automation::live_run(&doc.cards[card_index])
+                .is_some_and(|live| Some(live) != cancelled)
+            {
+                return Err(DaemonError::Conflict(format!(
+                    "{key} is working; cancel the run first"
+                )));
+            }
+        }
         let now = self.now();
         // A move that lands where the card already was writes nothing and announces nothing,
         // exactly as an empty patch does.
         if !ops::move_card(&doc.board, &mut doc.cards, card, status, index, &now)? {
             return self.card_view(&doc.board, &doc.cards[card_index]).await;
         }
-        self.save_card(doc, card_index, &now).await
+        // A run owed to the column the card has left is not owed any more, and it is cleared
+        // silently: the `Moved` entry already says what the user did.
+        doc.cards[card_index].pending_run = None;
+        doc.board.updated_at.clone_from(&now);
+        self.commit(guard, &mut doc, std::slice::from_ref(card), &now)
+            .await?;
+        self.card_view(&doc.board, &doc.cards[card_index]).await
     }
 
     /// Deletes a card and clears references to it from its children.
     pub async fn delete_card(&self, card: &CardId) -> DaemonResult<()> {
-        let (_guard, mut doc, index) = self.locked_card_document(card).await?;
+        let (guard, mut doc, index) = self.locked_card_document(card).await?;
+        // The same refusal archiving makes, for the same reason: a run reporting into a card
+        // this document no longer holds has nowhere to land its outcome.
+        if is_working(&doc.cards[index]) {
+            return Err(DaemonError::Conflict(format!(
+                "{} is working; cancel the run first",
+                doc.cards[index].display_key(&doc.board)
+            )));
+        }
         // A mirrored card cannot be deleted from here: nothing carries the deletion to the
         // backend, so the next pull files the issue again as a brand-new card — with a new
         // number and none of the comments, activity, worktree link or column position this
@@ -118,8 +197,28 @@ impl Boards {
                 doc.board.backend.kind
             )));
         }
+        let key = doc.cards[index].display_key(&doc.board);
         doc.cards.remove(index);
         let now = self.now();
+        // A card that no longer exists blocks nobody. The link is dropped in the same write as
+        // the deletion — a dangling one would fail `validate_links` on every later edit — and
+        // every card it freed is seeded, so a column that advances the unblocked can act on it.
+        let mut seeds = Vec::new();
+        for dependant in &mut doc.cards {
+            if !dependant.blocked_by.iter().any(|blocker| blocker == card) {
+                continue;
+            }
+            dependant.blocked_by.retain(|blocker| blocker != card);
+            dependant.updated_at.clone_from(&now);
+            push_activity(
+                dependant,
+                ActivityKind::Updated,
+                None,
+                format!("Unblocked: {key} was deleted"),
+                &now,
+            );
+            seeds.push(dependant.id.clone());
+        }
         for child in &mut doc.cards {
             if child.parent_id.as_ref() != Some(card) {
                 continue;
@@ -149,8 +248,8 @@ impl Boards {
                 Err(error) => return Err(error.into()),
             }
         }
-        doc.board.updated_at = now;
-        self.save(&doc, BoardChangeReason::CardChanged).await
+        doc.board.updated_at.clone_from(&now);
+        self.commit(guard, &mut doc, &seeds, &now).await
     }
 
     /// Appends a locally authored comment with a UUID and clock timestamp.
@@ -167,6 +266,44 @@ impl Boards {
         doc.cards[index].dirty = !doc.board.backend.is_local();
         self.save_card(doc, index, &now).await
     }
+
+    /// The tail every card-writing trigger site shares.
+    ///
+    /// Evaluates, saves **once**, records whether the board still parks a card, drops the gate,
+    /// and only then starts what the evaluation decided — `start_for_card` re-acquires the same
+    /// gate to record its run, and the gates are not reentrant
+    /// (`docs/BOARD.md` §4, [`super::automation`]).
+    ///
+    /// # Errors
+    ///
+    /// The failure of the evaluation, of the save, or of the first run the plan asked for.
+    async fn commit(
+        &self,
+        guard: tokio::sync::OwnedMutexGuard<()>,
+        doc: &mut BoardDocument,
+        seeds: &[CardId],
+        now: &str,
+    ) -> DaemonResult<()> {
+        let plan = self.evaluate_with_reservation(doc, seeds, now).await?;
+        self.save(doc, BoardChangeReason::CardChanged).await?;
+        self.note_pending(
+            &doc.board.id,
+            doc.cards.iter().any(|card| card.pending_run.is_some()),
+        )
+        .await;
+        drop(guard);
+        self.apply_starts(&doc.board.id, plan).await
+    }
+}
+
+/// Whether the card's newest run is still going.
+///
+/// The card's own rows are the answer: a run is written when the delegation exists and closed
+/// when its delivery lands, so a live row is a run this daemon believes is still going. One left
+/// live by a crash is what [`Boards::resume_automation`] adopts or closes at boot, and until it
+/// does, the refusals here are right to treat it as working.
+pub(super) fn is_working(card: &Card) -> bool {
+    latest_run(card).is_some_and(CardRun::is_live)
 }
 
 /// Rejects a parent that is missing, on another board, the card itself, or its own descendant.
