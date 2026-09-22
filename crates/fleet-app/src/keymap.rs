@@ -45,8 +45,8 @@ use gpui::{Action, App, DummyKeyboardMapper, KeyBinding, KeyBindingContextPredic
 
 use crate::actions::fleet::Cancel;
 use crate::actions::{
-    agent, board, card_detail, confirm, context_dialog, create_worktree, daemon, dialog, filter,
-    first_run,
+    agent, board, board_settings, card_detail, confirm, context_dialog, create_worktree, daemon,
+    dialog, filter, first_run,
     fleet::{
         FocusStickyError, OpenAgentClaude, OpenAgentCodex, OpenHelp, OpenJobs, OpenPalette,
         OpenSettings, Quit, QuitAndStopDaemon, Refresh, UpdateFleet,
@@ -467,6 +467,13 @@ key_table! {
     ",", "Hub > Board" => board::Settings;
     "r", "Hub > Board" => board::Reload;
     "/", "Hub > Board" => board::Filter;
+    // `A`, `X` and `>` are deliberately absent here: the Hub draws a context board, which can
+    // never hold a run, and a key whose only answer is a refusal is an affordance that does
+    // nothing (contracts §5.5). `b` and `m` edit card fields every board has, so they stay —
+    // and while the board owns the keyboard they shadow the Hub's own `b` (§6 arbitration).
+    "b", "Hub > Board" => board::PickBlockedBy;
+    "m", "Hub > Board" => board::PickAgent;
+    "C", "Hub > Board" => board::Columns;
 
     // BOARD §8: the `fleet://board` tab draws the very same board with the very same keys, so
     // every `Hub > Board` row above is repeated here against the same action. The word sits
@@ -497,6 +504,12 @@ key_table! {
     ",", "Workspace > Native > Board" => board::Settings;
     "r", "Workspace > Native > Board" => board::Reload;
     "/", "Workspace > Native > Board" => board::Filter;
+    "A", "Workspace > Native > Board" => board::AttachRun;
+    "X", "Workspace > Native > Board" => board::CancelRun;
+    ">", "Workspace > Native > Board" => board::RunNow;
+    "b", "Workspace > Native > Board" => board::PickBlockedBy;
+    "m", "Workspace > Native > Board" => board::PickAgent;
+    "C", "Workspace > Native > Board" => board::Columns;
     "escape", "Dialog > CardDetail" => card_detail::Close;
     "i", "Dialog > CardDetail" => card_detail::EditTitle;
     "d", "Dialog > CardDetail" => card_detail::EditDescription;
@@ -509,6 +522,11 @@ key_table! {
     "K", "Dialog > CardDetail" => card_detail::KeepLocal;
     "R", "Dialog > CardDetail" => card_detail::TakeRemote;
     "ctrl-s", "Dialog > CardDetail" => card_detail::Save;
+    "A", "Dialog > CardDetail" => board::AttachRun;
+    "X", "Dialog > CardDetail" => board::CancelRun;
+    ">", "Dialog > CardDetail" => board::RunNow;
+    "b", "Dialog > CardDetail" => board::PickBlockedBy;
+    "m", "Dialog > CardDetail" => board::PickAgent;
     // The palette replaces the dialog it is opened over and remembers which one it was, so the
     // `Card detail:` rows can save or cancel an edit already typed instead of reseeding one over
     // it. Without a way in from the detail those rows can never be listed and that path is dead.
@@ -522,7 +540,24 @@ key_table! {
     "k", "Dialog > BoardSettings" => settings::MoveUp;
     "h", "Dialog > BoardSettings" => settings::CyclePrev;
     "l", "Dialog > BoardSettings" => settings::CycleNext;
+    // The arrows cycle only while browsing, exactly as they do in the global Settings dialog:
+    // a materialized row publishes `BoardSettingsEditing`, this row leaves the chain, and
+    // `FleetTextInput` moves the caret instead.
+    "left", "Dialog > BoardSettings" => settings::CyclePrev;
+    "right", "Dialog > BoardSettings" => settings::CycleNext;
     "space", "Dialog > BoardSettings" => settings::Toggle;
+    // The Columns list's five verbs. They are plain letters because the pane they act on has
+    // no editor open: a row being typed into publishes `BoardSettingsEditing`, where these
+    // rows are not bound and the letter is the letter.
+    "n", "Dialog > BoardSettings" => board_settings::NewColumn;
+    "d", "Dialog > BoardSettings" => board_settings::DeleteColumn;
+    "J", "Dialog > BoardSettings" => board_settings::MoveColumnDown;
+    "K", "Dialog > BoardSettings" => board_settings::MoveColumnUp;
+    "P", "Dialog > BoardSettings" => board_settings::ApplyPreset;
+    // §5.4 moved the save off `enter`, which the Columns pane needs for drilling in, so it is
+    // bound in both contexts: a column row being edited saves without being left first.
+    "ctrl-s", "Dialog > BoardSettings" => board_settings::Save;
+    "ctrl-s", "Dialog > BoardSettingsEditing" => board_settings::Save;
     "enter", "Dialog > BoardSettingsEditing" => dialog::Confirm;
 
     "ctrl-q",       "Fleet" => Quit;
@@ -1273,6 +1308,39 @@ mod tests {
                 .map(|action| action.name()),
             Some("daemon::Retry")
         );
+    }
+
+    /// Contracts §5.5: a context board can never hold a run, so `A`, `X` and `>` are bound on
+    /// the worktree board pane and the detail only — a key whose one answer is a refusal is an
+    /// affordance that does nothing. `b`, `m` and `C` edit things every board has.
+    #[test]
+    fn the_run_keys_are_absent_from_the_hubs_board() {
+        let table = table();
+        let bound = |context: &str, action: &str| {
+            table
+                .iter()
+                .any(|spec| spec.context == context && spec.action == action)
+        };
+        for action in ["board::AttachRun", "board::CancelRun", "board::RunNow"] {
+            assert!(
+                !bound("Hub > Board", action),
+                "`{action}` is bound on the Hub's context board"
+            );
+            assert!(bound("Workspace > Native > Board", action), "{action}");
+            assert!(bound("Dialog > CardDetail", action), "{action}");
+        }
+        for action in ["board::PickBlockedBy", "board::PickAgent"] {
+            for context in [
+                "Hub > Board",
+                "Workspace > Native > Board",
+                "Dialog > CardDetail",
+            ] {
+                assert!(bound(context, action), "{action} in {context}");
+            }
+        }
+        assert!(bound("Hub > Board", "board::Columns"));
+        assert!(bound("Workspace > Native > Board", "board::Columns"));
+        assert!(!bound("Dialog > CardDetail", "board::Columns"));
     }
 
     #[test]

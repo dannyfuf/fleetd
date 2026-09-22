@@ -49,6 +49,9 @@ pub fn adopt_schema(board: &mut Board, schema: &BackendSchema, now: &str) -> Vec
                     name,
                     category: remote_category(remote).unwrap_or(StatusCategory::Unstarted),
                     color: None,
+                    // A remote's schema names columns, never what they run; automation is
+                    // refused on a linked board, so an adopted column carries none.
+                    automation: None,
                 }
             })
             .collect();

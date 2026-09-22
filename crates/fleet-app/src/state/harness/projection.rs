@@ -13,11 +13,12 @@ use std::collections::{BTreeMap, HashSet};
 use std::rc::Rc;
 
 use fleet_core::{
-    agents::{AgentKind, Attention, AttentionKind, GateKind},
-    board::Card,
+    agents::{AgentKind, Attention, AttentionKind, DelegationStatus, GateKind},
+    board::{BoardView, Card, CardRun, RunOutcome},
     ids::TerminalId,
     sessions::Terminal as SessionTerminal,
 };
+use fleet_ui_kit::RunMark;
 
 use super::{
     AgentThreadDecisionSnapshot, AgentThreadSnapshot, AgentsSnapshot, CursorSnapshot,
@@ -25,11 +26,14 @@ use super::{
     JobSnapshot, ListSnapshot, RowSnapshot, SNAPSHOT_VERSION, TerminalSnapshot, ToastSnapshot,
     UiSnapshot, ViewportSnapshot, WindowSnapshot,
 };
+use crate::dialogs::Dialogs;
 use crate::presentation::{DisplayedHub, selected_worktree_id};
 use crate::state::{
     AgentPopupMode, AppState, BoardFocus, Cursors, DaemonLink, FilterState, HubPane, HubTab,
-    JobsPanelMirror, LiveToast, Mode, Overlay, RepoScope, Screen, StickyError, running_jobs,
+    JobsPanelMirror, LiveToast, Mode, Overlay, RepoScope, Screen, StickyError, board::TileMarks,
+    running_jobs,
 };
+use crate::views::board_card_detail as detail;
 
 /// Every input the builder reads, as cheap comparable values.
 ///
@@ -44,6 +48,13 @@ struct ProjectionKey {
     delegations_revision: u64,
     attached_revision: u64,
     board_revision: u64,
+    /// The tile-mark fold's revision (contracts §5.2).
+    ///
+    /// The marks are derived from the board *and* from the clock: a pending run that has waited
+    /// long enough turns `stalled` on the tick that re-derives them, with no board revision and
+    /// no delegation behind it. Without this input that mark would never reach a waiting
+    /// `await`.
+    marks: u64,
     link_generation: u64,
     scope: RepoScope,
     pr_tab: fleet_core::github::PrTab,
@@ -177,6 +188,7 @@ impl AppState {
             delegations_revision: self.agents.delegations_revision(),
             attached_revision: self.agents.attached_revision(),
             board_revision: self.board.revision,
+            marks: self.board.marks.revision,
             link_generation: self.link_generation,
             scope: self.scope.clone(),
             pr_tab: self.pr_tab,
@@ -395,10 +407,110 @@ impl AppState {
         }
     }
 
+    /// The pane header's two composed counts, as one row, or `None` while it says neither.
+    ///
+    /// Word for word `views::board_screen::model::HeaderFacts`'s `working_label` and
+    /// `needs_you_label` — the harness reads the sentence the user reads — joined with the
+    /// separator the board's own chrome uses, because a snapshot row is one string where the
+    /// header is two labels in a gap. A board with nothing running and nobody waiting carries
+    /// no counts at all, so the list is absent rather than a row saying `0/1 working`.
+    fn board_summary_row(&self, view: &BoardView) -> Option<RowSnapshot> {
+        let marks = &self.board.marks;
+        let limit = view.board.settings.max_live_runs();
+        let mut parts = Vec::new();
+        if marks.working > 0 {
+            parts.push(format!("{}/{limit} working", marks.working));
+        }
+        if marks.needs_you > 0 {
+            parts.push(format!("{} needs you", marks.needs_you));
+        }
+        (!parts.is_empty()).then(|| RowSnapshot {
+            id: "summary".to_owned(),
+            label: parts.join(" \u{b7} "),
+            badges: Vec::new(),
+            marks: Vec::new(),
+        })
+    }
+
+    /// One row per run of the open card, oldest first, as the detail draws them.
+    ///
+    /// Every label is [`detail::run_line`]'s own text rather than a second formatting of the
+    /// same run: the dump and the screen would otherwise drift apart a word at a time. That
+    /// function states the card's *latest* run, so the card is cloned once and truncated back
+    /// one run at a time to ask it about each — a clone the harness pays for only while the
+    /// detail is open and only when something else already rebuilt the snapshot.
+    ///
+    /// The elapsed time inside a label is as of that rebuild: nothing keys on the wall clock,
+    /// so a scenario awaits a row or its mark, never a duration.
+    fn card_run_rows(&self, view: &BoardView, card: &Card) -> Vec<RowSnapshot> {
+        if card.runs.is_empty() {
+            return Vec::new();
+        }
+        let now = chrono::Utc::now().timestamp();
+        // The tile's own mark belongs to the run the tile is about: the newest one, unless a
+        // run is owed, in which case the mark is the *pending* run's and every row here reads
+        // its own run instead.
+        let tile_speaks_for_newest = card.pending_run.is_none();
+        let newest = card.runs.len() - 1;
+        let mut trimmed = card.clone();
+        trimmed.pending_run = None;
+        let mut rows = Vec::with_capacity(card.runs.len());
+        for (index, run) in card.runs.iter().enumerate().rev() {
+            trimmed.runs.truncate(index + 1);
+            let live = self.live_run_status(view, run);
+            let mark = if index == newest && tile_speaks_for_newest {
+                self.board
+                    .marks
+                    .by_card
+                    .get(&card.id)
+                    .and_then(|marks| marks.run)
+            } else {
+                finished_run_mark(run)
+            };
+            let label = detail::run_line(&trimmed, mark, live, now)
+                .map(|line| line.text.to_string())
+                .unwrap_or_default();
+            rows.push(RowSnapshot {
+                id: run.id.to_string(),
+                label,
+                badges: vec![provider_name(run.provider).to_owned()],
+                marks: mark
+                    .map(run_mark_word)
+                    .map(str::to_owned)
+                    .into_iter()
+                    .collect(),
+            });
+        }
+        rows.reverse();
+        rows
+    }
+
+    /// The status of a run the card still believes is live, or `None` once it has ended.
+    ///
+    /// The delegation mirror is asked first and the view's join second, which is the order
+    /// `state::board`'s own fold uses: `live_runs` is as old as the last board response, while
+    /// `DelegationChanged` keeps arriving between them.
+    fn live_run_status(&self, view: &BoardView, run: &CardRun) -> Option<DelegationStatus> {
+        if run.outcome.is_some() {
+            return None;
+        }
+        self.agents
+            .delegation(run.id)
+            .map(|delegation| delegation.status)
+            .or_else(|| {
+                view.live_runs
+                    .iter()
+                    .find(|live| live.run == run.id)
+                    .map(|live| live.status)
+            })
+    }
+
     /// The open dialog, by the name `docs/KEYMAP.md` gives its key context.
     ///
     /// Fields, buttons and the message body belong to the dialog host entity and are not
-    /// mirrored into `AppState`, so they are reported empty rather than guessed.
+    /// mirrored into `AppState`; the fields and the message are recorded by the harness command
+    /// that is about to project, and buttons stay empty because Fleet's dialogs paint none
+    /// (`docs/TESTING-HARNESS.md` §3).
     fn dialog_snapshot(&self) -> Option<DialogSnapshot> {
         let Some(Overlay::Dialog(dialog)) = self.overlay.as_ref() else {
             return None;
@@ -409,7 +521,8 @@ impl AppState {
             // editors belong to the dialog host entity rather than to `AppState`.
             fields: self.harness.dialog_fields().to_vec(),
             buttons: Vec::new(),
-            message: None,
+            // The Confirm dialog's consequence sentence; every other dialog answers `null`.
+            message: self.harness.dialog_message().map(str::to_owned),
         })
     }
 
@@ -562,28 +675,41 @@ impl AppState {
                 .statuses
                 .iter()
                 .map(|status| {
-                    let cards = view
-                        .cards
-                        .iter()
-                        .filter(|card| card.status_id == status.id)
-                        .count();
+                    // The badge is the count the column header draws, so it counts the same
+                    // population the pane shows: neither an archived card, which is in no
+                    // column, nor one the filter is hiding.
+                    let cards = crate::views::board_screen::visible_cards(
+                        view,
+                        &status.id,
+                        &self.board.filter,
+                    )
+                    .len();
                     RowSnapshot {
                         id: status.id.as_str().to_owned(),
                         label: status.name.clone(),
                         badges: vec![cards.to_string()],
-                        marks: Vec::new(),
+                        marks: column_marks(status),
                     }
                 })
                 .collect();
+            // The column's cards exactly as the pane draws them: `visible_cards` is the same
+            // call `AppState::select_card` counts positions with, so `rows[R]` and
+            // `focused == board.column[C].card[R]` can never name two different cards, and a
+            // filtered board reports the rows it is actually showing rather than all of them.
             let cards = view
                 .board
                 .statuses
                 .get(self.board.focus.column)
                 .map(|status| {
-                    view.cards
-                        .iter()
-                        .filter(|card| card.status_id == status.id)
-                        .map(|card| card_row(&view.board.prefix, card))
+                    crate::views::board_screen::visible_cards(view, &status.id, &self.board.filter)
+                        .into_iter()
+                        .map(|card| {
+                            card_row(
+                                &view.board.prefix,
+                                card,
+                                self.board.marks.by_card.get(&card.id),
+                            )
+                        })
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
@@ -595,6 +721,34 @@ impl AppState {
                 "board.cards".to_owned(),
                 list(cards, self.board.focus.row, self.board.filter.clone()),
             );
+            if let Some(summary) = self.board_summary_row(view) {
+                lists.insert(
+                    "board.summary".to_owned(),
+                    list(vec![summary], 0, String::new()),
+                );
+            }
+            // Two dialogs project a list of their own, and both are drawn from the same loaded
+            // board: the detail opens on the board's selected card (`card_detail::seed`) and
+            // the settings dialog is seeded from the board's own columns
+            // (`board_settings::persistence::seed`), so the builder reads what the dialog is
+            // showing without reaching into the `DialogHost` entity it cannot see.
+            match self.overlay.as_ref() {
+                Some(Overlay::Dialog(Dialogs::CardDetail)) => {
+                    if let Some(card) = crate::screens::board::selected_card(self) {
+                        let runs = self.card_run_rows(view, card);
+                        if !runs.is_empty() {
+                            lists.insert("card.runs".to_owned(), unselected(runs));
+                        }
+                    }
+                }
+                Some(Overlay::Dialog(Dialogs::BoardSettings)) => {
+                    lists.insert(
+                        "settings.columns".to_owned(),
+                        unselected(settings_column_rows(view)),
+                    );
+                }
+                _ => {}
+            }
         }
         let tabs = self.tab_rows();
         if !tabs.rows.is_empty() {
@@ -920,16 +1074,107 @@ fn list(rows: Vec<RowSnapshot>, cursor: usize, filter: String) -> ListSnapshot {
     }
 }
 
-fn card_row(prefix: &str, card: &Card) -> RowSnapshot {
-    let mut marks = Vec::new();
+/// A list nothing is selected in, for the two dialog surfaces that have no cursor of their own.
+fn unselected(rows: Vec<RowSnapshot>) -> ListSnapshot {
+    ListSnapshot {
+        selected: None,
+        rows,
+        filter: String::new(),
+    }
+}
+
+/// One card row, with the marks its tile draws in the order the tile draws them.
+///
+/// The run mark leads, the blocked count follows and the assignee — which says who owns the
+/// card rather than what is happening to it — comes last, so `marks[0]` is the state a
+/// workflow scenario is waiting for whether or not anybody is assigned. `CardTile` shows only
+/// one of the first two on the key line, the run mark winning; the snapshot states both,
+/// because a dump is read for facts rather than for space.
+fn card_row(prefix: &str, card: &Card, marks: Option<&TileMarks>) -> RowSnapshot {
+    let mut row_marks = Vec::new();
+    if let Some(marks) = marks {
+        row_marks.extend(marks.run.map(run_mark_word).map(str::to_owned));
+        row_marks.extend(marks.blocked.map(|(count, _)| format!("blocked:{count}")));
+    }
     if let Some(assignee) = card.assignee.as_ref() {
-        marks.push(assignee.clone());
+        row_marks.push(assignee.clone());
     }
     RowSnapshot {
         id: card.id.as_str().to_owned(),
         label: card.title.clone(),
         badges: vec![format!("{prefix}-{}", card.number)],
-        marks,
+        marks: row_marks,
+    }
+}
+
+/// `action` for a column that starts a run on arrival, and nothing otherwise.
+///
+/// Only `on_enter` earns the mark, exactly as `KanbanColumn`'s `\u{26a1}` does: `on_success` and
+/// `advance_when_unblocked` move a card the column has already finished with, and a mark
+/// promising a run for either would lie.
+fn column_marks(status: &fleet_core::board::Status) -> Vec<String> {
+    if status
+        .automation
+        .as_ref()
+        .is_some_and(|automation| automation.on_enter.is_some())
+    {
+        vec!["action".to_owned()]
+    } else {
+        Vec::new()
+    }
+}
+
+/// The Board settings Columns pane, as the board it is seeded from states it.
+///
+/// `disabled` is the draft's `automation_locked` (`board_settings::persistence::seed`): a
+/// context board has no checkout to run in and a linked board's columns answer to its backend,
+/// so every column of such a board draws its automation rows disabled. It rides on the column
+/// rather than on the drilled-in row because the drill-in belongs to the `DialogHost` entity,
+/// which the builder cannot read.
+fn settings_column_rows(view: &BoardView) -> Vec<RowSnapshot> {
+    let locked = view.board.worktree_id.is_none() || !view.board.backend.is_local();
+    view.board
+        .statuses
+        .iter()
+        .map(|status| {
+            let mut marks = column_marks(status);
+            if locked {
+                marks.push("disabled".to_owned());
+            }
+            RowSnapshot {
+                id: status.id.as_str().to_owned(),
+                label: status.name.clone(),
+                badges: Vec::new(),
+                marks,
+            }
+        })
+        .collect()
+}
+
+/// The mark a finished run of an older generation carries.
+///
+/// The card's own fold states the newest run alone, because that is the one the tile is about.
+/// An older row is read from its outcome by the same table (`state::board`'s fold): a run that
+/// was cancelled leaves no mark, since somebody stopped it deliberately and a mark would
+/// report a decision as an event.
+fn finished_run_mark(run: &CardRun) -> Option<RunMark> {
+    match run.outcome? {
+        RunOutcome::Cancelled => None,
+        RunOutcome::Succeeded => Some(RunMark::Succeeded),
+        RunOutcome::NeedsYou | RunOutcome::Failed | RunOutcome::Incomplete => {
+            Some(RunMark::NeedsYou)
+        }
+    }
+}
+
+/// The mark vocabulary `docs/TESTING-HARNESS.md` §3 freezes, one word per mark.
+fn run_mark_word(mark: RunMark) -> &'static str {
+    match mark {
+        RunMark::Pending => "pending",
+        RunMark::Stalled => "stalled",
+        RunMark::Working => "working",
+        RunMark::NeedsYou => "needs you",
+        RunMark::Succeeded => "done",
     }
 }
 

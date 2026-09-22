@@ -1,7 +1,14 @@
 use super::*;
 use crate::state::test_support::*;
 use fleet_core::{
-    board::{CardDraft, create_card, new_board, new_worktree_board},
+    agents::{
+        AgentKind, Delegation, DelegationCaller, DelegationId, DelegationStatus, DeliveryState,
+        ThreadId,
+    },
+    board::{
+        ActionKind, CardDraft, ColumnAutomation, LiveRun, StatusCategory, create_card, new_board,
+        new_worktree_board,
+    },
     model::{Context, Worktree},
 };
 use fleet_proto::event::BoardChangeReason;
@@ -35,7 +42,11 @@ fn view_of(context: &Context) -> BoardView {
         .unwrap_or_else(|error| panic!("{error}"));
         cards.push(card);
     }
-    BoardView { board, cards }
+    BoardView {
+        board,
+        cards,
+        live_runs: Vec::new(),
+    }
 }
 
 fn view() -> BoardView {
@@ -71,6 +82,7 @@ fn worktree_view(worktree: &Worktree) -> BoardView {
     BoardView {
         board: new_worktree_board(&context("work"), worktree, "2026-09-06T12:00:00Z"),
         cards: Vec::new(),
+        live_runs: Vec::new(),
     }
 }
 
@@ -464,6 +476,53 @@ fn a_board_changed_event_only_makes_the_board_on_screen_stale() {
     assert!(state.board_stale, "its own board's change is owed a reload");
 }
 
+/// Regression: a board the *daemon* changed leaves the Workspace's pane a load to claim.
+///
+/// Column automation writes to a worktree board without this app asking — it records a run,
+/// carries a card on through `on_success`, releases one whose blockers finished — and
+/// [`AppState::apply_daemon_event`] answers the `BoardChanged` that follows by marking the
+/// mirror stale and nothing else. The Hub tab consumes that flag through the board screen's
+/// own observation; the pane did not, so every run mark, the header counts and an
+/// auto-advanced card waited for a hand-typed `r`
+/// (`screens::board::lifecycle::synchronize`).
+#[test]
+fn a_daemon_side_change_leaves_the_worktree_pane_a_load_to_claim() {
+    let mut state = state_in_workspace(2);
+    state
+        .daemon_capabilities
+        .insert(BOARD_WORKTREE_CAPABILITY.to_owned());
+    let worktree = worktree("feat-board");
+    assert!(state.enter_worktree_board_scope(worktree.id.clone(), Instant::now()));
+    let shown = worktree_view(&worktree);
+    let shown_id = shown.board.id.clone();
+    state.apply_board_view(shown);
+    assert!(
+        state.board_pane_is_active(),
+        "the pane is the surface drawing this scope"
+    );
+    assert!(
+        state.begin_board_load().is_none(),
+        "a view just applied owes nothing"
+    );
+
+    state.apply_daemon_event(
+        Event::BoardChanged {
+            board_id: shown_id,
+            reason: BoardChangeReason::CardChanged,
+        },
+        Instant::now(),
+    );
+
+    assert!(
+        state.begin_board_load().is_some(),
+        "the pane's observation has a load to claim"
+    );
+    assert!(
+        state.begin_board_load().is_none(),
+        "and only one: a burst of daemon events costs a single request"
+    );
+}
+
 #[test]
 fn a_daemon_without_worktree_boards_refuses_the_scope_and_keeps_the_board_it_shows() {
     let mut state = state_on_board();
@@ -548,5 +607,382 @@ fn a_refusal_no_board_pane_can_draw_stays_a_toast() {
             .text
             .as_ref(),
         WORKTREE_BOARDS_UNSUPPORTED
+    );
+}
+
+/// A fixed wall clock: `Stalled` and `attention` are decided by the fixture, never by the host.
+fn at(stamp: &str) -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339(stamp)
+        .unwrap_or_else(|error| panic!("{error}"))
+        .with_timezone(&Utc)
+}
+
+/// The moment every marks test reads as "now".
+const NOW: &str = "2026-09-20T12:00:00Z";
+
+/// A run started by the card's own column, live until `outcome` says otherwise.
+fn run_on(card: &Card, outcome: Option<RunOutcome>) -> CardRun {
+    CardRun {
+        id: DelegationId::new(),
+        thread_id: Some(ThreadId::new()),
+        status_id: card.status_id.clone(),
+        action: ActionKind::Prompt,
+        provider: AgentKind::Codex,
+        model: None,
+        effort: None,
+        started_at: "2026-09-20T11:00:00Z".to_owned(),
+        ended_at: outcome.is_some().then(|| "2026-09-20T11:30:00Z".to_owned()),
+        outcome,
+        detail: None,
+        report_comment_id: None,
+        files_changed: 0,
+        cost_usd: None,
+        tokens: None,
+    }
+}
+
+/// The delegation record behind a card's run, as `DelegationChanged` carries it.
+fn card_delegation(view: &BoardView, run: &CardRun, status: DelegationStatus) -> Delegation {
+    Delegation {
+        id: run.id,
+        caller: DelegationCaller::Card {
+            board: view.board.id.clone(),
+            card: view.cards[0].id.clone(),
+        },
+        caller_turn: None,
+        caller_item: None,
+        child: run
+            .thread_id
+            .unwrap_or_else(|| panic!("a run that reached a thread")),
+        provider: AgentKind::Codex,
+        depth: 1,
+        brief: "implement the card".to_owned(),
+        expectation: "the tests pass".to_owned(),
+        eager: false,
+        status,
+        status_payload: None,
+        result: None,
+        nudges: 0,
+        recoveries: 0,
+        delivery: DeliveryState::Pending,
+        created: chrono::DateTime::UNIX_EPOCH,
+        finished: None,
+        headline: None,
+        usage: None,
+    }
+}
+
+/// The marks of the board's first card, which is the one every fixture below runs.
+///
+/// A card with neither mark is absent from the map, so "nothing to say" and "not there" are
+/// the same answer and the default is the honest one.
+fn first_marks(state: &AppState) -> TileMarks {
+    let view = state.board().unwrap_or_else(|| panic!("no board"));
+    state
+        .board
+        .marks
+        .by_card
+        .get(&view.cards[0].id)
+        .copied()
+        .unwrap_or_default()
+}
+
+#[test]
+fn a_live_run_marks_its_card_as_working() {
+    let mut state = state_on_board();
+    let mut view = view();
+    let run = run_on(&view.cards[0], None);
+    view.live_runs.push(LiveRun {
+        card_id: view.cards[0].id.clone(),
+        run: run.id,
+        status: DelegationStatus::Running,
+        headline: None,
+        started: run.started_at.clone(),
+    });
+    view.cards[0].runs.push(run);
+
+    state.apply_board_view(view);
+
+    assert_eq!(
+        first_marks(&state).run,
+        Some(RunMark::Working),
+        "applying the view is what derives the mark; nothing re-derives it in render"
+    );
+    assert_eq!(
+        (state.board.marks.working, state.board.marks.needs_you),
+        (1, 0),
+        "a live run holds a slot and asks nobody for anything"
+    );
+}
+
+#[test]
+fn a_child_that_goes_blocked_turns_its_card_amber_without_a_board_reload() {
+    let mut state = state_on_board();
+    let mut view = view();
+    let run = run_on(&view.cards[0], None);
+    let delegation = card_delegation(&view, &run, DelegationStatus::Blocked);
+    view.cards[0].runs.push(run);
+    state.apply_board_view(view);
+    assert_eq!(first_marks(&state).run, Some(RunMark::Working));
+
+    state.apply_daemon_event(Event::DelegationChanged(delegation), Instant::now());
+
+    assert_eq!(
+        first_marks(&state).run,
+        Some(RunMark::NeedsYou),
+        "the mirror is the only notice the board gets that the child stopped for a person"
+    );
+    assert_eq!(
+        state.board.marks.working, 1,
+        "a blocked child is still holding the checkout"
+    );
+}
+
+#[test]
+fn a_card_called_child_paints_working_before_the_board_records_its_run() {
+    let mut state = state_on_board();
+    let view = view();
+    let run = run_on(&view.cards[0], None);
+    let delegation = card_delegation(&view, &run, DelegationStatus::Running);
+    // The view the app holds is the one from *before* the run started: the daemon writes the
+    // run onto the card and announces it as a `BoardChanged`, which costs a whole
+    // `EnsureWorktreeBoard` round trip, and a five-second child can end before that lands.
+    state.apply_board_view(view);
+    assert_eq!(first_marks(&state).run, None, "no run on the card yet");
+
+    state.apply_daemon_event(Event::DelegationChanged(delegation), Instant::now());
+
+    assert_eq!(
+        first_marks(&state).run,
+        Some(RunMark::Working),
+        "a card-called delegation names its own card, so the mark needs no board response"
+    );
+    assert_eq!(
+        state.board.marks.working, 1,
+        "a child the mirror has and the view has not is still holding a run slot"
+    );
+}
+
+#[test]
+fn a_card_called_child_that_starts_blocked_paints_needs_you_before_the_board_records_it() {
+    let mut state = state_on_board();
+    let view = view();
+    let run = run_on(&view.cards[0], None);
+    let delegation = card_delegation(&view, &run, DelegationStatus::Blocked);
+    state.apply_board_view(view);
+
+    state.apply_daemon_event(Event::DelegationChanged(delegation), Instant::now());
+
+    assert_eq!(
+        first_marks(&state).run,
+        Some(RunMark::NeedsYou),
+        "a child parked on its gate is the one thing the tile must say without a reload"
+    );
+}
+
+#[test]
+fn a_run_the_card_has_already_finished_outranks_a_mirror_row_that_has_not_caught_up() {
+    let mut state = state_on_board();
+    let mut view = view();
+    let run = run_on(&view.cards[0], Some(RunOutcome::Cancelled));
+    let delegation = card_delegation(&view, &run, DelegationStatus::Running);
+    view.cards[0].runs.push(run);
+    state.apply_board_view(view);
+
+    state.apply_daemon_event(Event::DelegationChanged(delegation), Instant::now());
+
+    assert_eq!(
+        first_marks(&state).run,
+        None,
+        "the card is the authority on a run it has already ended; a stale mirror row is not"
+    );
+    assert_eq!(state.board.marks.working, 0);
+}
+
+#[test]
+fn a_headline_only_delegation_change_leaves_the_marks_where_they_were() {
+    let mut state = state_on_board();
+    let mut view = view();
+    let run = run_on(&view.cards[0], None);
+    let delegation = card_delegation(&view, &run, DelegationStatus::Running);
+    view.cards[0].runs.push(run);
+    state.apply_board_view(view);
+    state.apply_daemon_event(Event::DelegationChanged(delegation.clone()), Instant::now());
+    let revision = state.board.marks.revision;
+
+    let mut talking = delegation;
+    talking.headline = Some("reading the reducer".to_owned());
+    state.apply_daemon_event(Event::DelegationChanged(talking), Instant::now());
+
+    assert_eq!(
+        state.board.marks.revision, revision,
+        "a child narrating itself changes no mark, and the projection is keyed on this counter"
+    );
+}
+
+#[test]
+fn an_owed_run_turns_amber_once_the_wait_is_the_story() {
+    let mut state = state_on_board();
+    let mut view = view();
+    view.cards[0].pending_run = Some(PendingRun {
+        status_id: view.cards[0].status_id.clone(),
+        since: "2026-09-20T11:59:00Z".to_owned(),
+    });
+    state.apply_board_view(view);
+
+    state.refresh_card_marks(at("2026-09-20T11:59:59Z"));
+    assert_eq!(first_marks(&state).run, Some(RunMark::Pending));
+    assert_eq!(
+        state.board.marks.working, 1,
+        "an owed run counts against the live limit that is holding it up"
+    );
+
+    state.refresh_card_marks(at(NOW));
+    assert_eq!(
+        first_marks(&state).run,
+        Some(RunMark::Stalled),
+        "sixty seconds owed is a wait worth noticing"
+    );
+    assert_eq!(
+        state.board.marks.needs_you, 1,
+        "and `attention` agrees, so the header says so too"
+    );
+}
+
+#[test]
+fn a_run_that_never_reached_a_thread_raises_the_sticky_slot_once() {
+    let mut state = state_on_board();
+    state.apply_board_view(view());
+    assert!(
+        state.sticky_error.is_none(),
+        "the first load has no previous board to call a run new against"
+    );
+
+    let mut failed = view();
+    let mut run = run_on(&failed.cards[0], Some(RunOutcome::Failed));
+    run.thread_id = None;
+    run.detail = Some("codex is not installed".to_owned());
+    failed.cards[0].runs.push(run);
+    state.apply_board_view(failed.clone());
+    assert_eq!(
+        state.sticky_error.as_ref().map(|error| error.text.as_str()),
+        Some("codex is not installed"),
+        "nothing else on the board can say why the card stopped"
+    );
+
+    state.sticky_error = None;
+    state.apply_board_view(failed);
+    assert!(
+        state.sticky_error.is_none(),
+        "the same run is not news twice, however often the board reloads"
+    );
+}
+
+#[test]
+fn two_live_blockers_read_as_waiting_and_a_canceled_one_as_stuck() {
+    let mut state = state_on_board();
+    let mut view = view();
+    let third = create_card(
+        &mut view.board,
+        &view.cards,
+        "card-2".parse().unwrap_or_else(|error| panic!("{error}")),
+        CardDraft {
+            title: "Land it".to_owned(),
+            ..CardDraft::default()
+        },
+        "2026-09-06T12:00:00Z",
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    view.cards.push(third);
+    let blockers = vec![view.cards[0].id.clone(), view.cards[1].id.clone()];
+    view.cards[2].blocked_by = blockers;
+    let blocked_id = view.cards[2].id.clone();
+    state.apply_board_view(view.clone());
+
+    assert_eq!(
+        state
+            .board
+            .marks
+            .by_card
+            .get(&blocked_id)
+            .and_then(|marks| marks.blocked),
+        Some((2, BlockedTone::Muted)),
+        "two cards still doing their work are ordinary waiting"
+    );
+
+    // A blocker nobody can finish never releases this card on its own: canceling is a decision
+    // not to do the work, not a report that it is done.
+    let canceled = view
+        .board
+        .statuses
+        .iter()
+        .find(|status| status.category == StatusCategory::Canceled)
+        .unwrap_or_else(|| panic!("no canceled column"))
+        .id
+        .clone();
+    view.cards[0].status_id = canceled;
+    state.apply_board_view(view);
+    assert_eq!(
+        state
+            .board
+            .marks
+            .by_card
+            .get(&blocked_id)
+            .and_then(|marks| marks.blocked),
+        Some((2, BlockedTone::Warning)),
+        "and that is a person's problem, not a queue's"
+    );
+}
+
+#[test]
+fn a_success_is_marked_only_where_the_column_does_not_carry_the_card_on() {
+    let mut state = state_on_board();
+    let mut view = view();
+    let run = run_on(&view.cards[0], Some(RunOutcome::Succeeded));
+    let column = run.status_id.clone();
+    view.cards[0].runs.push(run);
+    state.apply_board_view(view.clone());
+    assert_eq!(
+        first_marks(&state).run,
+        Some(RunMark::Succeeded),
+        "the card is still here, and the check is the only thing saying the work is done"
+    );
+
+    let next = view.board.statuses[1].id.clone();
+    for status in &mut view.board.statuses {
+        if status.id == column {
+            status.automation = Some(ColumnAutomation {
+                on_success: Some(next.clone()),
+                ..ColumnAutomation::default()
+            });
+        }
+    }
+    state.apply_board_view(view);
+    assert_eq!(
+        first_marks(&state).run,
+        None,
+        "a column that advances on success says so by moving the card, not with a second mark"
+    );
+}
+
+#[test]
+fn a_board_with_no_runs_and_no_links_carries_no_marks_at_all() {
+    let mut state = state_on_board();
+    state.apply_board_view(view());
+    let revision = state.board.marks.revision;
+
+    assert!(
+        state.board.marks.by_card.is_empty(),
+        "a daemon that runs nothing leaves every tile exactly as it was"
+    );
+    assert_eq!(
+        (state.board.marks.working, state.board.marks.needs_you),
+        (0, 0)
+    );
+
+    state.refresh_card_marks(at(NOW));
+    assert_eq!(
+        state.board.marks.revision, revision,
+        "a tick that changes no mark must not rebuild a whole board's model"
     );
 }

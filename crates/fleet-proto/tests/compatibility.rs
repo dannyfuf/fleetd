@@ -160,6 +160,7 @@ fn request_wire_goldens() {
                 card_id: "card-12".parse().unwrap(),
                 status_id: "doing".parse().unwrap(),
                 index: Some(2),
+                cancel_run: false,
             },
         },
         r#"{"id":9,"body":{"type":"move_card","card_id":"card-12","status_id":"doing","index":2}}"#,
@@ -243,6 +244,8 @@ fn response_wire_goldens() {
                 open_count: 1,
                 dirty_count: 0,
                 conflict_count: 0,
+                working_count: 0,
+                attention_count: 0,
                 last_synced_at: None,
                 last_error: None,
             }])),
@@ -523,4 +526,188 @@ fn terminal_attention_fields_default_for_legacy_peers() {
             ..
         }
     ));
+}
+
+/// The board view the automation goldens pin: a two-column board whose first column runs a
+/// skill, and one card carrying agent preferences, a blocker, a pending run and a finished run.
+fn automated_board_view() -> BoardView {
+    let mut view = board_view();
+    view.board.statuses = serde_json::from_value(serde_json::json!([
+        {
+            "id": "todo",
+            "name": "To do",
+            "category": "unstarted",
+            "automation": {
+                "onEnter": {
+                    "kind": {"kind": "skill", "name": "deep-review", "args": "--fast"},
+                    "instructions": "Review {key}.",
+                    "expect": "the review finds no blocking issue",
+                    "agent": {
+                        "provider": "claude",
+                        "model": "opus",
+                        "effort": "high",
+                        "mode": "full_access"
+                    },
+                    "env": ["CARD={key}"]
+                },
+                "onSuccess": "done",
+                "advanceWhenUnblocked": "done"
+            }
+        },
+        {"id": "done", "name": "Done", "category": "completed"}
+    ]))
+    .expect("automated statuses fixture");
+    view.board.settings.max_live_runs = Some(2);
+    view.cards = serde_json::from_value(serde_json::json!([{
+        "id": "card-12",
+        "boardId": "work",
+        "number": 12,
+        "title": "Fix login",
+        "statusId": "todo",
+        "comments": [{
+            "id": "comment-1",
+            "body": "report",
+            "createdAt": "2026-09-06T12:00:00Z",
+            "runId": "11111111-2222-4333-8444-555555555555"
+        }],
+        "agent": {"provider": "codex", "model": "gpt-5", "effort": "high"},
+        "blockedBy": ["card-11"],
+        "pendingRun": {"statusId": "todo", "since": "2026-09-06T12:00:00Z"},
+        "runs": [{
+            "id": "11111111-2222-4333-8444-555555555555",
+            "threadId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            "statusId": "todo",
+            "action": {"kind": "prompt"},
+            "provider": "claude",
+            "model": "opus",
+            "effort": "high",
+            "startedAt": "2026-09-06T12:00:00Z",
+            "endedAt": "2026-09-06T12:30:00Z",
+            "outcome": "needs_you",
+            "detail": "reported blocked",
+            "reportCommentId": "comment-1",
+            "filesChanged": 3,
+            "costUsd": 0.42,
+            "tokens": 1200
+        }],
+        "createdAt": "2026-09-06T12:00:00Z",
+        "updatedAt": "2026-09-06T12:00:00Z"
+    }]))
+    .expect("automated cards fixture");
+    view
+}
+
+#[test]
+fn board_automation_wire_goldens() {
+    assert_frame(
+        Response {
+            id: 7,
+            result: Ok(ResponseBody::Card(
+                automated_board_view().cards.pop().expect("fixture card"),
+            )),
+        },
+        r#"{"id":7,"result":{"Ok":{"type":"card","data":{"id":"card-12","boardId":"work","number":12,"title":"Fix login","description":"","statusId":"todo","priority":"none","labels":[],"assignee":null,"estimate":null,"dueDate":null,"parentId":null,"repoId":null,"worktreeId":null,"properties":{},"comments":[{"id":"comment-1","author":null,"body":"report","createdAt":"2026-09-06T12:00:00Z","remoteId":null,"runId":"11111111-2222-4333-8444-555555555555"}],"activity":[],"remote":null,"conflict":null,"dirty":false,"archived":false,"position":0,"agent":{"provider":"codex","model":"gpt-5","effort":"high"},"blockedBy":["card-11"],"pendingRun":{"statusId":"todo","since":"2026-09-06T12:00:00Z"},"runs":[{"id":"11111111-2222-4333-8444-555555555555","threadId":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee","statusId":"todo","action":{"kind":"prompt"},"provider":"claude","model":"opus","effort":"high","startedAt":"2026-09-06T12:00:00Z","endedAt":"2026-09-06T12:30:00Z","outcome":"needs_you","detail":"reported blocked","reportCommentId":"comment-1","filesChanged":3,"costUsd":0.42,"tokens":1200}],"createdAt":"2026-09-06T12:00:00Z","updatedAt":"2026-09-06T12:00:00Z"}}}}"#,
+    );
+    assert_frame(
+        Response {
+            id: 6,
+            result: Ok(ResponseBody::Board(automated_board_view())),
+        },
+        r#"{"id":6,"result":{"Ok":{"type":"board","data":{"board":{"id":"work","contextId":"work","name":"Fleet","prefix":"FLT","nextNumber":13,"backend":{"kind":"jira","settings":{"jql":"project = SP","project":"SP"}},"statuses":[{"id":"todo","name":"To do","category":"unstarted","color":null,"automation":{"onEnter":{"kind":{"kind":"skill","name":"deep-review","args":"--fast"},"instructions":"Review {key}.","expect":"the review finds no blocking issue","agent":{"provider":"claude","model":"opus","effort":"high","mode":"full_access"},"env":["CARD={key}"]},"onSuccess":"done","advanceWhenUnblocked":"done"}},{"id":"done","name":"Done","category":"completed","color":null}],"labels":[],"properties":[],"defaultRepoId":null,"settings":{"startOnWorktree":true,"branchTemplate":"{key}-{slug}","conflictPolicy":"manual","pushNewCards":false,"maxLiveRuns":2},"sync":{"lastSyncedAt":null,"cursor":null,"lastError":null,"statusMap":{"remoteToLocal":{},"localToRemote":{}},"readonlyFields":[]},"createdAt":"2026-09-06T12:00:00Z","updatedAt":"2026-09-06T12:00:00Z"},"cards":[{"id":"card-12","boardId":"work","number":12,"title":"Fix login","description":"","statusId":"todo","priority":"none","labels":[],"assignee":null,"estimate":null,"dueDate":null,"parentId":null,"repoId":null,"worktreeId":null,"properties":{},"comments":[{"id":"comment-1","author":null,"body":"report","createdAt":"2026-09-06T12:00:00Z","remoteId":null,"runId":"11111111-2222-4333-8444-555555555555"}],"activity":[],"remote":null,"conflict":null,"dirty":false,"archived":false,"position":0,"agent":{"provider":"codex","model":"gpt-5","effort":"high"},"blockedBy":["card-11"],"pendingRun":{"statusId":"todo","since":"2026-09-06T12:00:00Z"},"runs":[{"id":"11111111-2222-4333-8444-555555555555","threadId":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee","statusId":"todo","action":{"kind":"prompt"},"provider":"claude","model":"opus","effort":"high","startedAt":"2026-09-06T12:00:00Z","endedAt":"2026-09-06T12:30:00Z","outcome":"needs_you","detail":"reported blocked","reportCommentId":"comment-1","filesChanged":3,"costUsd":0.42,"tokens":1200}],"createdAt":"2026-09-06T12:00:00Z","updatedAt":"2026-09-06T12:00:00Z"}]}}}}"#,
+    );
+}
+
+/// A board view carrying one live run, joined onto the automated fixture above.
+///
+/// `liveRuns` is joined from the delegation store on read and skipped when it is empty, so
+/// every board golden written before automation existed is unchanged by its arrival.
+const BOARD_VIEW_WITH_A_LIVE_RUN: &str = r#"{"id":15,"result":{"Ok":{"type":"board","data":{"board":{"id":"work","contextId":"work","name":"Fleet","prefix":"FLT","nextNumber":13,"backend":{"kind":"jira","settings":{"jql":"project = SP","project":"SP"}},"statuses":[{"id":"todo","name":"To do","category":"unstarted","color":null,"automation":{"onEnter":{"kind":{"kind":"skill","name":"deep-review","args":"--fast"},"instructions":"Review {key}.","expect":"the review finds no blocking issue","agent":{"provider":"claude","model":"opus","effort":"high","mode":"full_access"},"env":["CARD={key}"]},"onSuccess":"done","advanceWhenUnblocked":"done"}},{"id":"done","name":"Done","category":"completed","color":null}],"labels":[],"properties":[],"defaultRepoId":null,"settings":{"startOnWorktree":true,"branchTemplate":"{key}-{slug}","conflictPolicy":"manual","pushNewCards":false,"maxLiveRuns":2},"sync":{"lastSyncedAt":null,"cursor":null,"lastError":null,"statusMap":{"remoteToLocal":{},"localToRemote":{}},"readonlyFields":[]},"createdAt":"2026-09-06T12:00:00Z","updatedAt":"2026-09-06T12:00:00Z"},"cards":[{"id":"card-12","boardId":"work","number":12,"title":"Fix login","description":"","statusId":"todo","priority":"none","labels":[],"assignee":null,"estimate":null,"dueDate":null,"parentId":null,"repoId":null,"worktreeId":null,"properties":{},"comments":[{"id":"comment-1","author":null,"body":"report","createdAt":"2026-09-06T12:00:00Z","remoteId":null,"runId":"11111111-2222-4333-8444-555555555555"}],"activity":[],"remote":null,"conflict":null,"dirty":false,"archived":false,"position":0,"agent":{"provider":"codex","model":"gpt-5","effort":"high"},"blockedBy":["card-11"],"pendingRun":{"statusId":"todo","since":"2026-09-06T12:00:00Z"},"runs":[{"id":"11111111-2222-4333-8444-555555555555","threadId":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee","statusId":"todo","action":{"kind":"prompt"},"provider":"claude","model":"opus","effort":"high","startedAt":"2026-09-06T12:00:00Z","endedAt":"2026-09-06T12:30:00Z","outcome":"needs_you","detail":"reported blocked","reportCommentId":"comment-1","filesChanged":3,"costUsd":0.42,"tokens":1200}],"createdAt":"2026-09-06T12:00:00Z","updatedAt":"2026-09-06T12:00:00Z"}],"liveRuns":[{"cardId":"card-12","run":"dddddddd-2222-4333-8444-555555555555","status":"running","headline":"Reading the login handler","started":"2026-09-06T12:05:00Z"}]}}}}"#;
+
+/// The three run verbs, the flag that rides on `MoveCard`, and a board view carrying a live run.
+///
+/// `cancel_run` is skipped when it is false, so the `MoveCard` golden above — written before the
+/// flag existed — is byte for byte what it always was, and only a move that really cancels a run
+/// puts the key on the wire.
+#[test]
+fn board_automation_request_and_live_run_wire_goldens() {
+    assert_frame(
+        Request {
+            id: 11,
+            body: RequestBody::CardRunStart {
+                card_id: "card-12".parse().unwrap(),
+            },
+        },
+        r#"{"id":11,"body":{"type":"card_run_start","card_id":"card-12"}}"#,
+    );
+    assert_frame(
+        Request {
+            id: 12,
+            body: RequestBody::CardRunCancel {
+                card_id: "card-12".parse().unwrap(),
+            },
+        },
+        r#"{"id":12,"body":{"type":"card_run_cancel","card_id":"card-12"}}"#,
+    );
+    assert_frame(
+        Request {
+            id: 13,
+            body: RequestBody::CardRunWait {
+                card_id: "card-12".parse().unwrap(),
+                timeout_ms: 30_000,
+            },
+        },
+        r#"{"id":13,"body":{"type":"card_run_wait","card_id":"card-12","timeout_ms":30000}}"#,
+    );
+    assert_frame(
+        Request {
+            id: 14,
+            body: RequestBody::MoveCard {
+                card_id: "card-12".parse().unwrap(),
+                status_id: "doing".parse().unwrap(),
+                index: None,
+                cancel_run: true,
+            },
+        },
+        r#"{"id":14,"body":{"type":"move_card","card_id":"card-12","status_id":"doing","index":null,"cancel_run":true}}"#,
+    );
+
+    let mut view = automated_board_view();
+    view.live_runs = serde_json::from_value(serde_json::json!([{
+        "cardId": "card-12",
+        "run": "dddddddd-2222-4333-8444-555555555555",
+        "status": "running",
+        "headline": "Reading the login handler",
+        "started": "2026-09-06T12:05:00Z"
+    }]))
+    .expect("live runs fixture");
+    assert_frame(
+        Response {
+            id: 15,
+            result: Ok(ResponseBody::Board(view)),
+        },
+        BOARD_VIEW_WITH_A_LIVE_RUN,
+    );
+}
+
+#[test]
+fn a_card_without_automation_fields_encodes_as_it_did_before() {
+    // Every automation field a card gained is skipped when it is unset, so a board nobody
+    // automated puts the same bytes on the wire as the build before this feature. A diff here
+    // is a missing `skip_serializing_if` on the new field, never a fixture to refresh.
+    assert_frame(
+        board_view().cards.pop().expect("fixture card"),
+        r#"{"id":"card-12","boardId":"work","number":12,"title":"Fix login","description":"","statusId":"todo","priority":"none","labels":[],"assignee":null,"estimate":null,"dueDate":null,"parentId":null,"repoId":null,"worktreeId":null,"properties":{},"comments":[],"activity":[],"remote":null,"conflict":null,"dirty":false,"archived":false,"position":0,"createdAt":"2026-09-06T12:00:00Z","updatedAt":"2026-09-06T12:00:00Z"}"#,
+    );
+}
+
+#[test]
+fn the_board_automation_capability_name_is_fixed_before_any_daemon_serves_it() {
+    // The string is what a peer negotiates on, so it is pinned here the moment it exists. The
+    // daemon's advertised list is written out literally in its own test and does not name it:
+    // this build knows the word and not the verbs, and Rule 7 says never to claim one it
+    // cannot serve. Phase 3 adds it to that list in the same commit as the requests.
+    assert_eq!(
+        fleet_proto::response::BOARD_AUTOMATION_CAPABILITY,
+        "board.automation"
+    );
 }

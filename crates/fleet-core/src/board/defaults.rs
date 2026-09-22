@@ -1,6 +1,12 @@
 //! Defaults for local boards scoped to a context or worktree.
 
-use super::model::{BackendRef, Board, BoardSettings, Status, StatusCategory, SyncState};
+use super::{
+    model::{
+        Action, ActionKind, BackendRef, Board, BoardSettings, ColumnAgentPrefs, ColumnAutomation,
+        Status, StatusCategory, SyncState,
+    },
+    ops::normalise_automation,
+};
 use crate::{
     ids::{BoardId, StatusId, WorktreeId},
     model::{Context, Worktree},
@@ -9,6 +15,16 @@ use crate::{
 
 /// Maximum byte length of a derived worktree board id.
 pub const BOARD_ID_MAX_LEN: usize = 64;
+
+/// What the preset's implementation column tells a run to do.
+pub const PRESET_INSTRUCTIONS_IMPLEMENT: &str =
+    "Implement this card in the current worktree. Do not commit.";
+/// What the preset's implementation column expects back.
+pub const PRESET_EXPECT_IMPLEMENT: &str = "make lint and make test pass";
+/// What the preset's review column expects back.
+pub const PRESET_EXPECT_REVIEW: &str = "the review finds no blocking issue";
+/// The skill the preset's review column invokes.
+pub const PRESET_REVIEW_SKILL: &str = "deep-review";
 
 /// Creates the five initial ordered status columns.
 #[must_use]
@@ -26,8 +42,116 @@ pub fn default_statuses() -> Vec<Status> {
         name: name.into(),
         category,
         color: None,
+        automation: None,
     })
     .collect()
+}
+
+/// The seven-column pipeline a board opts into: Backlog, Todo, Ready, In Progress, In review,
+/// Done, Canceled.
+///
+/// Todo stays human on purpose. Ready is the routing column — a card is put there once it is
+/// meant to run, and `advance_when_unblocked` releases it into In Progress as soon as every
+/// card blocking it is done — so nothing a person leaves in Todo can start itself.
+///
+/// The preset sets no `max_live_runs`, which leaves the board at one live run: every card on a
+/// worktree board edits the same checkout, and a second concurrent run is a decision its owner
+/// makes deliberately.
+#[must_use]
+pub fn workflow_preset() -> Vec<Status> {
+    let status = |id: &str, name: &str, category, automation| Status {
+        id: StatusId::try_from(id).expect("static status slug is valid"),
+        name: name.into(),
+        category,
+        color: None,
+        automation,
+    };
+    let route = |id: &str| StatusId::try_from(id).expect("static status slug is valid");
+    vec![
+        status("backlog", "Backlog", StatusCategory::Backlog, None),
+        status("todo", "Todo", StatusCategory::Unstarted, None),
+        status(
+            "ready",
+            "Ready",
+            StatusCategory::Unstarted,
+            Some(ColumnAutomation {
+                on_enter: None,
+                on_success: None,
+                advance_when_unblocked: Some(route("in-progress")),
+            }),
+        ),
+        status(
+            "in-progress",
+            "In Progress",
+            StatusCategory::Started,
+            Some(ColumnAutomation {
+                on_enter: Some(Action {
+                    kind: ActionKind::Prompt,
+                    instructions: PRESET_INSTRUCTIONS_IMPLEMENT.into(),
+                    expect: PRESET_EXPECT_IMPLEMENT.into(),
+                    agent: ColumnAgentPrefs::default(),
+                    env: Vec::new(),
+                }),
+                on_success: Some(route("in-review")),
+                advance_when_unblocked: None,
+            }),
+        ),
+        status(
+            "in-review",
+            "In review",
+            StatusCategory::Started,
+            Some(ColumnAutomation {
+                on_enter: Some(Action {
+                    kind: ActionKind::Skill {
+                        name: PRESET_REVIEW_SKILL.into(),
+                        args: String::new(),
+                    },
+                    instructions: String::new(),
+                    expect: PRESET_EXPECT_REVIEW.into(),
+                    agent: ColumnAgentPrefs::default(),
+                    env: Vec::new(),
+                }),
+                on_success: Some(route("done")),
+                advance_when_unblocked: None,
+            }),
+        ),
+        status("done", "Done", StatusCategory::Completed, None),
+        status("canceled", "Canceled", StatusCategory::Canceled, None),
+    ]
+}
+
+/// Adds the preset columns this board is missing and reports whether it changed anything.
+///
+/// Matching is by [`StatusId`], and an existing column is never touched: its name, category,
+/// colour and automation are its owner's, and a board that already renamed `in-progress` or
+/// wired its own action keeps both. A missing column lands in preset order relative to the
+/// neighbours already present, so applying this to the default five inserts Ready before
+/// In Progress and In review after it.
+pub fn apply_workflow_preset(board: &mut Board) -> bool {
+    let mut cursor = 0;
+    let mut added = false;
+    for status in workflow_preset() {
+        match board.statuses.iter().position(|s| s.id == status.id) {
+            Some(position) => cursor = position + 1,
+            None => {
+                let at = cursor.min(board.statuses.len());
+                board.statuses.insert(at, status);
+                cursor = at + 1;
+                added = true;
+            }
+        }
+    }
+    normalise_automation(&mut board.statuses);
+    added
+}
+
+/// Substitutes `{key}` and `{title}` in a column's instructions or an env value.
+///
+/// Anything else in braces is left alone: a column's instructions are markdown a person wrote,
+/// and a JSON snippet or a shell brace expansion in them is text, not a placeholder.
+#[must_use]
+pub fn render_template(text: &str, key: &str, title: &str) -> String {
+    text.replace("{key}", key).replace("{title}", title)
 }
 
 /// First three ASCII alphanumeric name characters, uppercased; FLT when absent.

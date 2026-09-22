@@ -292,17 +292,17 @@ fn restart_clears_daemon_local_identity() {
 #[test]
 fn the_delegation_census_is_seeded_behind_its_capability_and_patched_by_the_event() {
     use fleet_core::agents::{
-        AgentKind, Delegation, DelegationId, DelegationStatus, DeliveryState, ItemId, ThreadId,
-        TurnId,
+        AgentKind, Delegation, DelegationCaller, DelegationId, DelegationStatus, DeliveryState,
+        ItemId, ThreadId, TurnId,
     };
 
     let now = Instant::now();
     let mut state = AppState::new("/tmp/fleet", now);
     let record = Delegation {
         id: DelegationId::new(),
-        caller: ThreadId::new(),
-        caller_turn: TurnId::new(),
-        caller_item: ItemId::new(),
+        caller: DelegationCaller::Thread(ThreadId::new()),
+        caller_turn: Some(TurnId::new()),
+        caller_item: Some(ItemId::new()),
         child: ThreadId::new(),
         provider: AgentKind::Codex,
         depth: 1,

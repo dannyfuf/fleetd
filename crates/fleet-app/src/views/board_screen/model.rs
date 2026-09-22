@@ -171,6 +171,34 @@ pub(super) fn card_extras(board: &Board, card: &Card) -> Vec<SharedString> {
         .collect()
 }
 
+/// What one tile says about its card's run and its blockers.
+///
+/// The kit's vocabulary and nothing else. The fold from a card's runs, its owed run, the
+/// delegation mirror and its links happens once per change in `AppState::refresh_card_marks`
+/// (contracts §5.2); this is the copy of its answer the view layer draws, so the board model
+/// depends on the kit alone and [`build`] stays callable from a fixture with no `AppState`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TileMark {
+    /// The run mark the tile draws, when the card has one.
+    pub run: Option<RunMark>,
+    /// How many cards still block it, and how loudly to say so.
+    pub blocked: Option<(u32, BlockedTone)>,
+}
+
+/// Every mark one board model draws, handed to [`build`] once per rebuild.
+///
+/// The projection hands this over rather than the model reaching for state: *render prepares
+/// nothing*, and neither does the model — both halves are already derived when they arrive.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BoardMarks {
+    /// What each marked card says; a card with nothing to say is absent.
+    pub by_card: HashMap<CardId, TileMark>,
+    /// Cards holding or owed a run slot — the header's numerator.
+    pub working: u32,
+    /// Cards waiting on a person — the header's amber count.
+    pub needs_you: u32,
+}
+
 /// The facts the board header states, derived once and drawn once.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HeaderFacts {
@@ -194,15 +222,31 @@ pub struct HeaderFacts {
     pub conflicts: usize,
     /// The board's last sync error, verbatim.
     pub error: Option<String>,
+    /// Cards holding or owed a run slot.
+    pub working: u32,
+    /// How many runs this board lets itself hold at once (`BoardSettings::max_live_runs`).
+    pub live_limit: u32,
+    /// Cards waiting on a person.
+    pub needs_you: u32,
+    /// `1/1 working`, already composed, or `None` while nothing is running.
+    ///
+    /// The string is built here rather than in the header body for the reason every other
+    /// string on this screen is: `docs/APP-CONTRACTS.md:101` — *render prepares nothing*.
+    pub working_label: Option<String>,
+    /// `1 needs you`, already composed, or `None` while no card is waiting on anybody.
+    pub needs_you_label: Option<String>,
 }
 
 impl HeaderFacts {
     /// Reads the facts out of a loaded board.
     ///
     /// `backend_label` is the registry's name for this board's backend kind; `None` falls back
-    /// to the kind itself, which is what the first frames of a connection have.
+    /// to the kind itself, which is what the first frames of a connection have. `marks` is the
+    /// fold the app state already did; the two counts are only stated while they are non-zero,
+    /// so a board with no automation keeps exactly the header it has today.
     #[must_use]
-    pub fn of(view: &BoardView, backend_label: Option<&str>, now: i64) -> Self {
+    pub fn of(view: &BoardView, backend_label: Option<&str>, now: i64, marks: &BoardMarks) -> Self {
+        let live_limit = view.board.settings.max_live_runs();
         Self {
             name: view.board.name.clone(),
             prefix: view.board.prefix.clone(),
@@ -228,6 +272,13 @@ impl HeaderFacts {
                 .filter(|card| !card.archived && card.conflict.is_some())
                 .count(),
             error: view.board.sync.last_error.clone(),
+            working: marks.working,
+            live_limit,
+            needs_you: marks.needs_you,
+            working_label: (marks.working > 0)
+                .then(|| format!("{}/{live_limit} working", marks.working)),
+            needs_you_label: (marks.needs_you > 0)
+                .then(|| format!("{} needs you", marks.needs_you)),
         }
     }
 }
@@ -264,12 +315,21 @@ pub struct CardRow {
     pub conflict: bool,
     /// The `show_on_card` custom properties, in schema order.
     pub extras: Vec<SharedString>,
+    /// What the card's run says, when it has one.
+    pub run: Option<RunMark>,
+    /// How many cards still block it, and how loudly to say so.
+    pub blocked: Option<(u32, BlockedTone)>,
 }
 
 impl CardRow {
     /// Prepares one card of `board` for its tile.
+    ///
+    /// The marks are read out of the map the projection was handed, not derived here: a tile
+    /// mark is a fold over the delegation mirror, and doing it per card per rebuild would
+    /// answer the same question once per card instead of once per change.
     #[must_use]
-    fn of(board: &Board, card: &Card) -> Self {
+    fn of(board: &Board, card: &Card, marks: &BoardMarks) -> Self {
+        let mark = marks.by_card.get(&card.id).copied().unwrap_or_default();
         Self {
             element_id: SharedString::from(format!("board-card-{}", card.id.as_str())),
             key: SharedString::from(card.display_key(board)),
@@ -283,6 +343,8 @@ impl CardRow {
             dirty: card.dirty,
             conflict: card.conflict.is_some(),
             extras: card_extras(board, card),
+            run: mark.run,
+            blocked: mark.blocked,
         }
     }
 }
@@ -298,6 +360,11 @@ pub struct ColumnRows {
     pub status: Status,
     /// The cards of the column, filtered and in contract order.
     pub rows: Rc<[CardRow]>,
+    /// Whether entering this column starts something — the header's muted `⚡`.
+    ///
+    /// Only `on_enter` counts: `on_success` and `advance_when_unblocked` move a card the column
+    /// is already done with, and a glyph promising a run for one of those would lie.
+    pub has_action: bool,
 }
 
 /// Everything the board screen draws, derived once per board revision.
@@ -324,9 +391,17 @@ pub struct BoardModel {
 /// Builds the whole board model from a loaded view.
 ///
 /// `backend_label` is the registry's name for the board's backend kind and `now` the epoch
-/// second the synced stamp is relative to, exactly as [`HeaderFacts::of`] takes them.
+/// second the synced stamp is relative to, exactly as [`HeaderFacts::of`] takes them. `marks`
+/// is the app state's already-folded [`BoardMarks`], keyed into the projection by its own
+/// revision so a mark that moves rebuilds the model and a headline that does not never will.
 #[must_use]
-pub fn build(view: &BoardView, query: &str, backend_label: Option<&str>, now: i64) -> BoardModel {
+pub fn build(
+    view: &BoardView,
+    query: &str,
+    backend_label: Option<&str>,
+    now: i64,
+    marks: &BoardMarks,
+) -> BoardModel {
     let grouped = grouped_cards(view, query);
     let shown = grouped.iter().map(Vec::len).sum();
     let columns: Rc<[ColumnRows]> = view
@@ -340,8 +415,12 @@ pub fn build(view: &BoardView, query: &str, backend_label: Option<&str>, now: i6
             status: status.clone(),
             rows: grouped[index]
                 .iter()
-                .map(|card| CardRow::of(&view.board, card))
+                .map(|card| CardRow::of(&view.board, card, marks))
                 .collect(),
+            has_action: status
+                .automation
+                .as_ref()
+                .is_some_and(|automation| automation.on_enter.is_some()),
         })
         .collect();
     BoardModel {
@@ -350,7 +429,7 @@ pub fn build(view: &BoardView, query: &str, backend_label: Option<&str>, now: i6
         total: placed(view),
         no_columns: view.board.statuses.is_empty(),
         orphans: orphan_sentence(view),
-        facts: HeaderFacts::of(view, backend_label, now),
+        facts: HeaderFacts::of(view, backend_label, now, marks),
     }
 }
 

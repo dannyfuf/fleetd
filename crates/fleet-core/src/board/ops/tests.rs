@@ -2,13 +2,14 @@ use super::*;
 use crate::{
     board::{
         defaults::new_board,
-        model::{Conflict, RemoteLink},
+        model::{Action, CardAgentPrefs, ColumnAgentPrefs, Conflict, RemoteLink},
         property::{PropertyKind, PropertySource},
     },
     ids::ContextId,
     model::Context,
 };
 
+mod automation;
 mod cards;
 mod patches;
 mod query;
@@ -41,6 +42,16 @@ fn create(board: &mut Board, cards: &[Card], id: &str) -> Card {
         NOW,
     )
     .unwrap()
+}
+
+fn action(kind: ActionKind) -> Action {
+    Action {
+        kind,
+        instructions: String::new(),
+        expect: String::new(),
+        agent: ColumnAgentPrefs::default(),
+        env: Vec::new(),
+    }
 }
 
 fn property(key: &str) -> PropertySchema {

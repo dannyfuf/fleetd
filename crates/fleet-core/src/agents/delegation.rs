@@ -4,6 +4,67 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::{AgentKind, DelegationId, ItemId, Seq, ThreadId, TurnId, Usage};
+use crate::ids::{BoardId, CardId};
+
+/// Who asked for a delegated child.
+///
+/// Untagged on purpose: a thread caller is a bare id string, exactly the shape the field had
+/// before a card could call, so every record written by an older build still decodes and every
+/// record this build writes for a thread caller is byte for byte what it always was. A card
+/// caller is the only new shape, and it is a map, so the two never collide.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum DelegationCaller {
+    /// An agent thread delegated to the child.
+    Thread(ThreadId),
+    /// A board card's column automation started the child.
+    Card {
+        /// Board owning the card.
+        board: BoardId,
+        /// Card whose run this is.
+        card: CardId,
+    },
+}
+
+impl DelegationCaller {
+    /// The calling thread, when a thread called.
+    #[must_use]
+    pub const fn thread(&self) -> Option<&ThreadId> {
+        match self {
+            Self::Thread(thread) => Some(thread),
+            Self::Card { .. } => None,
+        }
+    }
+
+    /// The calling board and card, when a card called.
+    #[must_use]
+    pub const fn card(&self) -> Option<(&BoardId, &CardId)> {
+        match self {
+            Self::Thread(_) => None,
+            Self::Card { board, card } => Some((board, card)),
+        }
+    }
+
+    /// Whether a card called.
+    #[must_use]
+    pub const fn is_card(&self) -> bool {
+        matches!(self, Self::Card { .. })
+    }
+}
+
+/// A thread caller renders as its thread id, exactly the text every log line carried before a
+/// card could call; a card caller renders as `board/card`. Never use this for a column value: the
+/// store writes the caller's parts to their own columns.
+impl std::fmt::Display for DelegationCaller {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Thread(thread) => thread.fmt(formatter),
+            Self::Card { board, card } => {
+                write!(formatter, "{}/{}", board.as_str(), card.as_str())
+            }
+        }
+    }
+}
 
 /// The durable link between a caller thread and the child it spawned. The token is never on this
 /// type: the daemon stores its SHA-256 and only `RequestBody::DelegationComplete` carries plaintext.
@@ -15,12 +76,14 @@ use super::{AgentKind, DelegationId, ItemId, Seq, ThreadId, TurnId, Usage};
 pub struct Delegation {
     /// Delegation identity.
     pub id: DelegationId,
-    /// Thread that requested the child.
-    pub caller: ThreadId,
-    /// Caller turn that requested the child.
-    pub caller_turn: TurnId,
-    /// Caller transcript item representing the child.
-    pub caller_item: ItemId,
+    /// Who requested the child: an agent thread, or a board card's column automation.
+    pub caller: DelegationCaller,
+    /// Caller turn that requested the child. `Some` iff the caller is a thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller_turn: Option<TurnId>,
+    /// Caller transcript item representing the child. `Some` iff the caller is a thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller_item: Option<ItemId>,
     /// Spawned child thread.
     pub child: ThreadId,
     /// Provider running the child.
@@ -202,6 +265,12 @@ pub enum DeliveryState {
         /// Human-readable reason.
         reason: String,
     },
+    /// A card caller: the board write that recorded the outcome has committed.
+    ///
+    /// Terminal for delivery, like `Delivered` and `Consumed`, and never overwritten by the
+    /// repair sweep: that sweep only looks at rows whose delivery is `pending` and whose caller
+    /// is a thread, because there is no transcript to append a card's result to.
+    Recorded,
 }
 
 impl DeliveryState {
@@ -219,6 +288,7 @@ impl DeliveryState {
             Self::Delivered { .. } => "delivered",
             Self::Consumed => "consumed",
             Self::Undeliverable { .. } => "undeliverable",
+            Self::Recorded => "recorded",
         }
     }
 }
@@ -283,6 +353,15 @@ mod tests {
         assert_round_trip(DeliveryState::Undeliverable {
             reason: "caller stopped".to_owned(),
         });
+        assert_round_trip(DeliveryState::Recorded);
+    }
+
+    #[test]
+    fn a_recorded_delivery_encodes_as_a_tagged_object_and_is_not_pending() {
+        let json = serde_json::to_string(&DeliveryState::Recorded)
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(json, r#"{"type":"recorded"}"#);
+        assert!(!DeliveryState::Recorded.is_pending());
     }
 
     #[test]
@@ -299,6 +378,7 @@ mod tests {
                 reason: String::new(),
             }
             .word(),
+            DeliveryState::Recorded.word(),
         ];
         let unique: std::collections::BTreeSet<_> = words.iter().collect();
         assert_eq!(unique.len(), words.len(), "{words:?}");
@@ -324,13 +404,13 @@ mod tests {
         });
     }
 
-    #[test]
-    fn a_delegation_without_usage_serializes_without_the_key() {
-        let delegation = Delegation {
+    fn delegation(caller: DelegationCaller) -> Delegation {
+        let thread_called = caller.thread().is_some();
+        Delegation {
             id: DelegationId::new(),
-            caller: ThreadId::new(),
-            caller_turn: TurnId::new(),
-            caller_item: ItemId::new(),
+            caller,
+            caller_turn: thread_called.then(TurnId::new),
+            caller_item: thread_called.then(ItemId::new),
             child: ThreadId::new(),
             provider: AgentKind::Codex,
             depth: 1,
@@ -347,8 +427,60 @@ mod tests {
             finished: None,
             headline: None,
             usage: None,
-        };
-        let json = serde_json::to_string(&delegation).unwrap_or_else(|error| panic!("{error}"));
+        }
+    }
+
+    fn card_caller() -> DelegationCaller {
+        DelegationCaller::Card {
+            board: BoardId::try_from("work".to_owned()).unwrap_or_else(|error| panic!("{error}")),
+            card: CardId::try_from("card-12".to_owned()).unwrap_or_else(|error| panic!("{error}")),
+        }
+    }
+
+    #[test]
+    fn a_delegation_without_usage_serializes_without_the_key() {
+        let json = serde_json::to_string(&delegation(DelegationCaller::Thread(ThreadId::new())))
+            .unwrap_or_else(|error| panic!("{error}"));
         assert!(!json.contains("usage"), "{json}");
+    }
+
+    #[test]
+    fn a_thread_called_delegation_encodes_its_caller_as_a_bare_id() {
+        // The shape the field had before a card could call: a record an older build wrote still
+        // decodes, and this build writes the same bytes back.
+        let thread = ThreadId::new();
+        let delegation = delegation(DelegationCaller::Thread(thread));
+        let json = serde_json::to_string(&delegation).unwrap_or_else(|error| panic!("{error}"));
+        assert!(json.contains(&format!(r#""caller":"{thread}""#)), "{json}");
+        assert!(json.contains(r#""callerTurn":"#), "{json}");
+        assert!(json.contains(r#""callerItem":"#), "{json}");
+        assert_round_trip(delegation);
+    }
+
+    #[test]
+    fn a_card_called_delegation_encodes_its_caller_as_a_board_and_card_and_omits_the_turn_keys() {
+        let delegation = delegation(card_caller());
+        let json = serde_json::to_string(&delegation).unwrap_or_else(|error| panic!("{error}"));
+        assert!(
+            json.contains(r#""caller":{"board":"work","card":"card-12"}"#),
+            "{json}"
+        );
+        assert!(!json.contains("callerTurn"), "{json}");
+        assert!(!json.contains("callerItem"), "{json}");
+        assert_round_trip(delegation);
+    }
+
+    #[test]
+    fn a_caller_answers_which_kind_it_is() {
+        let thread = ThreadId::new();
+        let thread_caller = DelegationCaller::Thread(thread);
+        assert_eq!(thread_caller.thread(), Some(&thread));
+        assert!(thread_caller.card().is_none());
+        assert!(!thread_caller.is_card());
+
+        let card_caller = card_caller();
+        assert!(card_caller.thread().is_none());
+        assert!(card_caller.card().is_some());
+        assert!(card_caller.is_card());
     }
 }

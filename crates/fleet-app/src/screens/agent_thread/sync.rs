@@ -44,6 +44,24 @@ impl AgentThreadView {
         cx.notify();
     }
 
+    /// Keeps the card a column-started run works for in step with the app mirror.
+    ///
+    /// Shaped like [`AgentThreadView::sync_caller`] and for the same reason: the join is the
+    /// workspace's to make, and the view only has to notice when its answer changes.
+    pub(crate) fn sync_card_caller(
+        &mut self,
+        caller: Option<presentation::CardCaller>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.card_caller == caller {
+            return;
+        }
+        self.card_caller = caller;
+        self.refresh_metadata();
+        self.sync_composer(cx);
+        cx.notify();
+    }
+
     /// Refreshes the durable delegation join independently of the caller's event projection.
     pub(crate) fn sync_delegations(
         &mut self,
@@ -559,6 +577,10 @@ impl AgentThreadView {
     /// Rebuilds the metadata strip and bumps the fit memo's revision.
     fn refresh_metadata(&mut self) {
         let mut metadata = Vec::new();
+        // The card segment leads: it is the one thing this tab says that no other tab does.
+        if let Some(card) = &self.card_caller {
+            metadata.push(presentation::card_metadata_segment(card));
+        }
         if let Some(caller) = &self.caller {
             metadata.push(presentation::caller_metadata_segment(
                 caller,
@@ -592,6 +614,9 @@ impl AgentThreadView {
         let payload = self.approval_payload();
         let placeholder = match self.host.as_ref().filter(|_| unreachable) {
             Some(host) => unreachable_placeholder(&host.name),
+            None if matches!(mode, ComposerMode::Normal) && self.card_caller.is_some() => {
+                presentation::CARD_COMPOSER_PLACEHOLDER.to_owned()
+            }
             None if matches!(mode, ComposerMode::Normal) && self.caller.is_some() => {
                 presentation::child_composer_placeholder(self.caller_index)
             }

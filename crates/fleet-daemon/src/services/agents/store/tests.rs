@@ -13,13 +13,13 @@ use anyhow::Context;
 use chrono::{DateTime, Utc};
 use fleet_core::{
     agents::{
-        AbortReason, AgentEvent, AgentKind, Delegation, DelegationId, DelegationResult,
-        DelegationStatus, DeliveryState, GateAnswer, GateId, GateKind, GateResolver, ItemId,
-        ItemKind, ItemPatch, ItemPayloadPatch, ItemStatus, MessageOrigin, ModelDescriptor,
-        ModelSelection, PermissionChoice, PermissionMode, PermissionOption, ProviderOptionId,
-        ReasoningEffortDescriptor, ResultSource, Seq, SeqEvent, SessionState, StopCause,
-        StreamKind, ThreadId, ThreadProjection, ToolCall, ToolKind, TurnId, TurnOutcome, TurnState,
-        Usage,
+        AbortReason, AgentEvent, AgentKind, Delegation, DelegationCaller, DelegationId,
+        DelegationResult, DelegationStatus, DeliveryState, GateAnswer, GateId, GateKind,
+        GateResolver, ItemId, ItemKind, ItemPatch, ItemPayloadPatch, ItemStatus, MessageOrigin,
+        ModelDescriptor, ModelSelection, PermissionChoice, PermissionMode, PermissionOption,
+        ProviderOptionId, ReasoningEffortDescriptor, ResultSource, Seq, SeqEvent, SessionState,
+        StopCause, StreamKind, ThreadId, ThreadProjection, ToolCall, ToolKind, TurnId, TurnOutcome,
+        TurnState, Usage,
     },
     ids::WorktreeId,
 };
@@ -675,9 +675,9 @@ fn record(thread: ThreadId, title: &str, created_ms: u64) -> AgentThreadRecord {
 fn delegation(child: ThreadId) -> Delegation {
     Delegation {
         id: DelegationId::new(),
-        caller: ThreadId::new(),
-        caller_turn: TurnId::new(),
-        caller_item: ItemId::new(),
+        caller: DelegationCaller::Thread(ThreadId::new()),
+        caller_turn: Some(TurnId::new()),
+        caller_item: Some(ItemId::new()),
         child,
         provider: AgentKind::Codex,
         depth: 3,
@@ -708,9 +708,9 @@ fn delegation(child: ThreadId) -> Delegation {
 fn live_delegation(child: ThreadId, caller: ThreadId, status: DelegationStatus) -> Delegation {
     Delegation {
         id: DelegationId::new(),
-        caller,
-        caller_turn: TurnId::new(),
-        caller_item: ItemId::new(),
+        caller: DelegationCaller::Thread(caller),
+        caller_turn: Some(TurnId::new()),
+        caller_item: Some(ItemId::new()),
         child,
         provider: AgentKind::Codex,
         depth: 1,
@@ -780,7 +780,15 @@ async fn apply_child_transition(
     let id = current.id;
     // Keep the caller visible too: caller-side matching must still be scoped to the event thread.
     store
-        .write_record(&record(current.caller, "transition caller", 1))
+        .write_record(&record(
+            current
+                .caller
+                .thread()
+                .copied()
+                .expect("a thread-called fixture"),
+            "transition caller",
+            1,
+        ))
         .await?;
     let sequence = match &agent_event {
         AgentEvent::GateResolved { gate, .. } | AgentEvent::GateWithdrawn { gate } => {
@@ -1611,6 +1619,46 @@ async fn a_child_environment_round_trips_without_fleet_identity() -> anyhow::Res
     Ok(())
 }
 
+/// A card caller's own `FLEET_CARD`/`FLEET_BOARD` *do* survive the round trip.
+///
+/// Only the rotating identity pair is dropped. The caller keys are fixed for the life of the
+/// delegation and the column-env rule means the stored values are the ones this daemon minted,
+/// so keeping them is what lets a resumed card child still refuse to move its own card.
+#[tokio::test]
+async fn a_card_childs_caller_variables_survive_but_its_token_does_not() -> anyhow::Result<()> {
+    let (_directory, store) = store()?;
+    let mut stored = delegation(ThreadId::new());
+    stored.caller = DelegationCaller::Card {
+        board: "work".parse().expect("a static board id is valid"),
+        card: "card-1".parse().expect("a static card id is valid"),
+    };
+    stored.caller_turn = None;
+    stored.caller_item = None;
+    let id = stored.id;
+    let env = BTreeMap::from([
+        ("FLEET_DELEGATION".to_owned(), id.to_string()),
+        ("FLEET_DELEGATION_TOKEN".to_owned(), "0f".repeat(32)),
+        ("FLEET_CARD".to_owned(), "FLT-12".to_owned()),
+        ("FLEET_BOARD".to_owned(), "work".to_owned()),
+    ]);
+
+    store
+        .delegation_write("insert a card-called delegation", move |tx| {
+            delegations::insert(tx, &stored, "token-hash", &env)?;
+            Ok(((), false))
+        })
+        .await?;
+
+    assert_eq!(
+        read_child_env(&store, id).await?,
+        BTreeMap::from([
+            ("FLEET_CARD".to_owned(), "FLT-12".to_owned()),
+            ("FLEET_BOARD".to_owned(), "work".to_owned()),
+        ])
+    );
+    Ok(())
+}
+
 /// A child given no variables reads back the same empty map a pre-slot-006 row does.
 #[tokio::test]
 async fn a_delegation_without_an_environment_reads_an_empty_map() -> anyhow::Result<()> {
@@ -1680,7 +1728,11 @@ async fn delegation_rows_round_trip_every_column_and_update_mutable_state() -> a
     let expected = stored.clone();
     let id = stored.id;
     let child = stored.child;
-    let caller = stored.caller;
+    let caller = stored
+        .caller
+        .thread()
+        .copied()
+        .expect("a thread-called fixture");
 
     store
         .delegation_write("insert test delegation", move |tx| {

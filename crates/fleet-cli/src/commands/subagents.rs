@@ -48,6 +48,16 @@ impl Environment {
             token: std::env::var("FLEET_DELEGATION_TOKEN").ok(),
         }
     }
+
+    /// The card a column-started run is working on, as the daemon injects it (`FLEET_CARD`).
+    ///
+    /// It sits beside the other injected names rather than in the board command that reads it,
+    /// so the variables the daemon owns are all declared in one place. It is not a field of
+    /// `Environment`, because nothing validates it: `fleet board card move` compares it to the
+    /// key the caller typed and every other verb ignores it.
+    pub(super) fn card_from_process() -> Option<String> {
+        std::env::var("FLEET_CARD").ok()
+    }
 }
 
 pub(super) fn validate_context(
@@ -267,9 +277,36 @@ async fn status(client: &Client, arguments: SubagentIdArgs) -> Result<CommandOut
     let text = if arguments.json {
         whole_envelope(&delegation)?
     } else {
-        human::subagent_status(&delegation, SystemTime::now())
+        let keys = caller_keys(client, std::slice::from_ref(&delegation)).await;
+        human::subagent_status_with_keys(&delegation, SystemTime::now(), &keys)
     };
     Ok(CommandOutput::success(text))
+}
+
+/// The display key of every card that called one of these delegations.
+///
+/// A delegation names its caller by id; the key a person reads is the board's. One `GetBoard`
+/// per distinct board answers every card on it, and a board that cannot be read leaves its cards
+/// printing the id they already would have — a listing must not fail because of its own chrome.
+async fn caller_keys(client: &Client, delegations: &[Delegation]) -> human::CallerKeys {
+    let mut keys = human::CallerKeys::new();
+    let mut seen: Vec<fleet_core::ids::BoardId> = Vec::new();
+    for delegation in delegations {
+        let Some((board, _)) = delegation.caller.card() else {
+            continue;
+        };
+        if seen.iter().any(|known| known == board) {
+            continue;
+        }
+        seen.push(board.clone());
+        let Ok(view) = client.get_board(board.clone()).await else {
+            continue;
+        };
+        for card in &view.cards {
+            keys.insert(card.id.clone(), card.display_key(&view.board));
+        }
+    }
+    keys
 }
 
 async fn list(client: &Client, arguments: SubagentListArgs) -> Result<CommandOutput, ProtoError> {
@@ -288,7 +325,8 @@ async fn list(client: &Client, arguments: SubagentListArgs) -> Result<CommandOut
             brief_elided: elided,
         })?
     } else {
-        human::subagents(&delegations, SystemTime::now())
+        let keys = caller_keys(client, &delegations).await;
+        human::subagents_with_keys(&delegations, SystemTime::now(), &keys)
     };
     Ok(CommandOutput::success(text))
 }
@@ -487,7 +525,11 @@ fn required_value(value: Option<&str>, missing: &str) -> Result<String, ProtoErr
         .ok_or_else(|| validation(missing))
 }
 
-fn read_text(path: Option<&Path>, name: &str) -> Result<String, ProtoError> {
+/// Reads `name`'s text from `path`, or from stdin when no path was given.
+///
+/// `pub(super)` because `board card new --desc-file` reads a description exactly as
+/// `subagent run --brief-file` reads a brief, down to the refusal text.
+pub(super) fn read_text(path: Option<&Path>, name: &str) -> Result<String, ProtoError> {
     match path {
         Some(path) => std::fs::read_to_string(path).map_err(|error| read_error(name, path, error)),
         None => {

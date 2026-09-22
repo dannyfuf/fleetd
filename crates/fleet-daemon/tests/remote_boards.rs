@@ -141,6 +141,7 @@ async fn real_two_daemon_hosted_worktree_board_contract() {
             card_id: first.id.clone(),
             status_id: status_id.clone(),
             index: None,
+            cancel_run: false,
         })
         .await;
     let ResponseBody::Card(moved_card) = expect_body(moved, "move a hosted card") else {

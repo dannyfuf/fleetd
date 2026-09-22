@@ -500,6 +500,29 @@ pub enum RequestBody {
         status_id: StatusId,
         /// Index.
         index: Option<usize>,
+        /// Cancel the card's live run instead of refusing the move.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        cancel_run: bool,
+    },
+    /// Start the run the card's column asks for, whatever its last run ended as.
+    ///
+    /// The board's live-run ceiling still applies: a card asked for while the board is full
+    /// is parked for the next free slot, because the runs of one board share one checkout.
+    CardRunStart {
+        /// Card id.
+        card_id: CardId,
+    },
+    /// Cancel the card's live run, or drop the slot it is waiting for.
+    CardRunCancel {
+        /// Card id.
+        card_id: CardId,
+    },
+    /// Wait for the card's live run to end, answering the card either way.
+    CardRunWait {
+        /// Card id.
+        card_id: CardId,
+        /// How long to wait before answering the card as it stands.
+        timeout_ms: u64,
     },
     /// Delete card.
     DeleteCard {

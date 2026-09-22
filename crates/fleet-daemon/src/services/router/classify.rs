@@ -119,6 +119,11 @@ pub fn classify(body: &RequestBody, resolver: &dyn Resolver) -> Target {
         | DescribeBoardBackend { board_id } => host_or_local(resolver.host_of_board(board_id)),
         UpdateCard { card_id, .. }
         | MoveCard { card_id, .. }
+        // A card's run is served where the card lives, exactly as a move is: the board document
+        // and the delegation that backs the run are both the owner's (ADR 0021).
+        | CardRunStart { card_id }
+        | CardRunCancel { card_id }
+        | CardRunWait { card_id, .. }
         | DeleteCard { card_id }
         | AddCardComment { card_id, .. }
         | ResolveCardConflict { card_id, .. }
@@ -335,6 +340,9 @@ pub(crate) fn local_fanout_part(
         | RequestBody::CreateCard { .. }
         | RequestBody::UpdateCard { .. }
         | RequestBody::MoveCard { .. }
+        | RequestBody::CardRunStart { .. }
+        | RequestBody::CardRunCancel { .. }
+        | RequestBody::CardRunWait { .. }
         | RequestBody::DeleteCard { .. }
         | RequestBody::AddCardComment { .. }
         | RequestBody::CreateWorktreeFromCard { .. }
@@ -546,6 +554,69 @@ mod tests {
         }
     }
 
+    /// The three run verbs are card-addressed like `MoveCard`, and for the same reason: the board
+    /// document they write and the delegation they drive both live on the card's owner (ADR 0021).
+    #[test]
+    fn a_card_run_request_classifies_exactly_like_a_move_of_the_same_card() {
+        let remote = WorktreeId::try_from("acme/api#remote").expect("worktree");
+        let host = HostId::try_from("dev-box").expect("host");
+        let resolver = TestResolver::new(remote, host.clone());
+        let hosted = resolver.remote_card.clone();
+        let local = card("card-local");
+
+        for (hosted, local) in [
+            (
+                RequestBody::CardRunStart {
+                    card_id: hosted.clone(),
+                },
+                RequestBody::CardRunStart {
+                    card_id: local.clone(),
+                },
+            ),
+            (
+                RequestBody::CardRunCancel {
+                    card_id: hosted.clone(),
+                },
+                RequestBody::CardRunCancel {
+                    card_id: local.clone(),
+                },
+            ),
+            (
+                RequestBody::CardRunWait {
+                    card_id: hosted.clone(),
+                    timeout_ms: 30_000,
+                },
+                RequestBody::CardRunWait {
+                    card_id: local.clone(),
+                    timeout_ms: 30_000,
+                },
+            ),
+        ] {
+            let moved = RequestBody::MoveCard {
+                card_id: match &hosted {
+                    RequestBody::CardRunStart { card_id }
+                    | RequestBody::CardRunCancel { card_id }
+                    | RequestBody::CardRunWait { card_id, .. } => card_id.clone(),
+                    other => panic!("{other:?}"),
+                },
+                status_id: status(),
+                index: None,
+                cancel_run: false,
+            };
+            assert_eq!(
+                classify(&hosted, &resolver),
+                classify(&moved, &resolver),
+                "{hosted:?}"
+            );
+            assert_eq!(
+                classify(&hosted, &resolver),
+                Target::Host(host.clone()),
+                "{hosted:?}"
+            );
+            assert_eq!(classify(&local, &resolver), Target::Local, "{local:?}");
+        }
+    }
+
     #[test]
     fn every_board_and_card_request_follows_the_daemon_that_owns_it() {
         let remote = WorktreeId::try_from("acme/api#remote").expect("worktree");
@@ -627,11 +698,13 @@ mod tests {
                     card_id: hosted_card.clone(),
                     status_id: status(),
                     index: None,
+                    cancel_run: false,
                 },
                 RequestBody::MoveCard {
                     card_id: local_card.clone(),
                     status_id: status(),
                     index: None,
+                    cancel_run: false,
                 },
             ),
             (
@@ -650,6 +723,32 @@ mod tests {
                 RequestBody::AddCardComment {
                     card_id: local_card.clone(),
                     body: "note".to_owned(),
+                },
+            ),
+            (
+                RequestBody::CardRunStart {
+                    card_id: hosted_card.clone(),
+                },
+                RequestBody::CardRunStart {
+                    card_id: local_card.clone(),
+                },
+            ),
+            (
+                RequestBody::CardRunCancel {
+                    card_id: hosted_card.clone(),
+                },
+                RequestBody::CardRunCancel {
+                    card_id: local_card.clone(),
+                },
+            ),
+            (
+                RequestBody::CardRunWait {
+                    card_id: hosted_card.clone(),
+                    timeout_ms: 30_000,
+                },
+                RequestBody::CardRunWait {
+                    card_id: local_card.clone(),
+                    timeout_ms: 30_000,
                 },
             ),
             (

@@ -79,7 +79,9 @@ pub use agent::*;
 pub use app_frame::AppFrame;
 pub use badge::{Badge, BadgeStyle};
 pub use banner::Banner;
-pub use card_tile::{ASSIGNEE_INITIALS, CARD_TITLE_LINES, CardTile, initials, label_tone};
+pub use card_tile::{
+    ASSIGNEE_INITIALS, BlockedTone, CARD_TITLE_LINES, CardTile, RunMark, initials, label_tone,
+};
 pub use chip::Chip;
 pub use column_ladder::{ColumnLadder, ColumnSpec, ColumnWidth, ResolvedColumn};
 pub use confirm_dialog::ConfirmDialog;

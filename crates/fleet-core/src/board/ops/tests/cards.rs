@@ -82,6 +82,11 @@ fn create_honors_explicit_status_and_all_draft_fields() {
         parent_id: Some("parent".parse().unwrap()),
         repo_id: Some("org/repo".parse().unwrap()),
         properties: BTreeMap::from([("score".into(), PropertyValue::Number(2.0))]),
+        agent: Some(CardAgentPrefs {
+            model: Some("opus".into()),
+            ..CardAgentPrefs::default()
+        }),
+        blocked_by: vec!["parent".parse().unwrap()],
     };
     let card = create_card(&mut board, &[], "a".parse().unwrap(), draft.clone(), NOW).unwrap();
     assert_eq!(card.title, draft.title);
@@ -93,6 +98,10 @@ fn create_honors_explicit_status_and_all_draft_fields() {
     assert_eq!(card.estimate, draft.estimate);
     assert_eq!(card.due_date, draft.due_date);
     assert_eq!(card.parent_id, draft.parent_id);
+    assert_eq!(card.agent, draft.agent);
+    assert_eq!(card.blocked_by, draft.blocked_by);
+    assert!(card.runs.is_empty());
+    assert_eq!(card.pending_run, None);
     assert_eq!(card.repo_id, draft.repo_id);
     assert_eq!(card.properties, draft.properties);
     assert!(card.dirty);

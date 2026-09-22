@@ -434,6 +434,33 @@ fn the_child_metadata_segment_names_attached_and_hidden_callers() {
     assert!(!hidden.collapsible);
 }
 
+/// Contracts §5.5: a card calls a run exactly as a thread does, and its tab differs from every
+/// other agent tab in those two strings alone.
+#[test]
+fn a_card_caller_names_its_card_its_column_and_its_board() {
+    let card: fleet_core::ids::CardId = "card-1".parse().expect("a static card id is valid");
+    let segment = presentation::card_metadata_segment(&presentation::CardCaller {
+        card: card.clone(),
+        key: "FLT-12".to_owned(),
+        column: "Ready".to_owned(),
+        board: "Fleet".to_owned(),
+    });
+    assert_eq!(
+        segment.text.as_ref(),
+        "for FLT-12 \u{b7} Ready \u{b7} Fleet"
+    );
+    assert!(!segment.collapsible, "the card jump is always pinned");
+    assert_eq!(
+        segment.target.as_deref(),
+        Some(format!("{}{card}", presentation::CARD_TARGET_PREFIX).as_str()),
+        "the segment makes the jump `^s u` makes"
+    );
+    assert_eq!(
+        presentation::CARD_COMPOSER_PLACEHOLDER,
+        "Steering a card run. Its report moves the card when it finishes."
+    );
+}
+
 #[test]
 fn a_metadata_segment_estimates_its_own_width() {
     // The fit is a pure function of data the caller already has, which is what lets the memo be

@@ -40,6 +40,12 @@ pub(crate) struct CardDetailState {
     pub(super) saving: Option<u64>,
     /// The last refusal, kept until the next successful edit.
     pub(crate) error: Option<String>,
+    /// Report comments the reader has opened, by comment id.
+    ///
+    /// Per report, the way the transcript keeps a delivered result's expansion per row, and
+    /// only for as long as the dialog is open: `seed` rebuilds the draft on every open, so a
+    /// card the reader comes back to folds its reports again.
+    pub(super) expanded_reports: std::collections::HashSet<String>,
 }
 
 impl CardDetailState {
@@ -82,6 +88,33 @@ impl CardDetailState {
             self.cancel();
         }
         self.error = error;
+    }
+}
+
+/// What `⏎` does on the detail when no text surface owns the keyboard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Enter {
+    /// Open these report comments, by comment id.
+    Unfold(Vec<String>),
+    /// Act on the selected property row, as `⏎` has always done.
+    Property,
+}
+
+/// Which of the two `⏎` means right now.
+///
+/// A folded report hides the very thing the reader opened the card for, so the key opens the
+/// reports first and goes back to the property pane once none of them is folded. The fold hint
+/// is drawn only while one is closed, so `⏎` never names an affordance that does nothing,
+/// and a card with no report — which is every card on a board nobody automated — never sees
+/// this branch at all.
+pub(super) fn enter_target(card: Option<&Card>, draft: &CardDetailState) -> Enter {
+    let folded = card.map_or_else(Vec::new, |card| {
+        detail::folded_reports(card, &draft.expanded_reports)
+    });
+    if folded.is_empty() {
+        Enter::Property
+    } else {
+        Enter::Unfold(folded)
     }
 }
 

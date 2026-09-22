@@ -27,12 +27,15 @@ use crate::{bridge::Bridge, state::AppState};
 /// Clamped cursor stepping, named so it does not collide with the per-dialog `move_cursor`
 /// helpers that step a whole draft.
 pub(crate) use crate::state::move_cursor as step;
+/// `C` opens the board settings on one named section (contracts §5.4); `,` opens the dialog on
+/// the section this app session last used.
+pub(crate) use board_settings::{BoardSection, open_on_section as open_board_section};
 pub use confirm::ConfirmRequest;
 pub use host::{ActiveDialog, request_confirm, request_edit_hooks};
 pub(crate) use host::{
-    DialogHost, SessionTransport, dialog_fields, focused_input, notify, open_agent_session,
-    open_agent_thread_worktree, open_agents_picker, open_session, open_worktree, read_host,
-    retain_task, with_host,
+    DialogHost, SessionTransport, dialog_fields, dialog_message, focused_input, notify,
+    open_agent_session, open_agent_thread_worktree, open_agents_picker, open_session,
+    open_worktree, read_host, retain_task, with_host,
 };
 #[cfg(test)]
 pub(crate) use host::{focused_input_text, hook_row_count};
@@ -127,9 +130,11 @@ impl Dialogs {
             | Self::CloneRepo
             | Self::QuitDaemon
             | Self::EditHooks
-            | Self::BoardSettings
             | Self::CardPicker
             | Self::CardCreate => cx.theme().metrics.dialog_w,
+            // A rail plus a pane, like the global settings: the board settings grew a third
+            // section whose pane is a list of columns (§3.8.6, contracts §5.4).
+            Self::BoardSettings => WIDE_W,
             Self::Confirm => cx.theme().metrics.confirm_compact_w,
             Self::NewContext | Self::EditContext | Self::RenameTerminal | Self::AssignRepo => {
                 NARROW_W
@@ -146,7 +151,7 @@ impl Dialogs {
     pub(crate) const fn height(&self) -> Option<Pixels> {
         match self {
             Self::CloneRepo => Some(CLONE_H),
-            Self::Settings => Some(SETTINGS_H),
+            Self::BoardSettings | Self::Settings => Some(SETTINGS_H),
             Self::Help => Some(HELP_H),
             _ => None,
         }

@@ -4,9 +4,9 @@ use fleet_client::{AgentMirror, MirrorOutcome, PageOutcome};
 use fleet_core::{
     agents::{
         AgentThreadSummary, Applied, Attention, AttentionKind, Delegation, DelegationId,
-        PermissionMode, Seq, SeqEvent, ThreadId, ThreadProjection,
+        DelegationStatus, PermissionMode, Seq, SeqEvent, ThreadId, ThreadProjection,
     },
-    ids::WorktreeId,
+    ids::{BoardId, CardId, WorktreeId},
 };
 
 use fleet_proto::agents::AgentThreadWindow;
@@ -53,6 +53,12 @@ pub struct AgentThreads {
     /// Daemon summaries in snapshot order; the tab strip inherits that order.
     summaries: Vec<AgentThreadSummary>,
     summaries_revision: u64,
+    /// Moves when a harness declares the models and efforts it offers.
+    ///
+    /// The vocabulary lives on an installed *projection*, not on a summary, so nothing else
+    /// here moves when it lands: a Model or Effort list keyed on `summaries_revision` alone
+    /// would serve an empty catalogue until something unrelated changed.
+    vocabulary_revision: u64,
     seen_revision: u64,
     /// Durable caller-to-child records, replaced by the capability-gated seed after Hello.
     delegations: HashMap<DelegationId, Delegation>,
@@ -125,6 +131,12 @@ impl AgentThreads {
     #[must_use]
     pub const fn summaries_revision(&self) -> u64 {
         self.summaries_revision
+    }
+
+    /// The revision of the declared model and effort vocabulary (see the field).
+    #[must_use]
+    pub const fn vocabulary_revision(&self) -> u64 {
+        self.vocabulary_revision
     }
 
     /// Scalar generation for consumers whose projection depends on installation-local cursors.
@@ -237,7 +249,7 @@ impl AgentThreads {
         self.delegation_order
             .iter()
             .filter_map(|id| self.delegations.get(id))
-            .filter(|delegation| delegation.caller == caller)
+            .filter(|delegation| delegation.caller.thread() == Some(&caller))
             .collect()
     }
 
@@ -248,6 +260,48 @@ impl AgentThreads {
             .iter()
             .filter_map(|id| self.delegations.get(id))
             .find(|delegation| delegation.child == child)
+    }
+
+    /// The live child each card of `board` has out, keyed by card.
+    ///
+    /// A card-called delegation names its board and its card, so this mirror can say a card has
+    /// a child out *before* any board response carries the run: `DelegationChanged` arrives the
+    /// moment the daemon starts the child, while the card's own `runs` row only reaches the app
+    /// with the next board view. The board's marks are derived from both, and this is the half
+    /// that does not wait for a round trip (contracts §5.2, BOARD.md §11.8).
+    ///
+    /// Later entries win, so a card that has started a second run reads as its newest child.
+    #[must_use]
+    pub(crate) fn live_card_runs(
+        &self,
+        board: &BoardId,
+    ) -> HashMap<&CardId, (DelegationId, DelegationStatus)> {
+        self.delegation_order
+            .iter()
+            .filter_map(|id| self.delegations.get(id))
+            .filter(|delegation| delegation.status.is_live())
+            .filter_map(|delegation| {
+                let (owner, card) = delegation.caller.card()?;
+                (owner == board).then_some((card, (delegation.id, delegation.status)))
+            })
+            .collect()
+    }
+
+    /// The live child one card has out, newest first, or `None`.
+    ///
+    /// The per-card half of [`Self::live_card_runs`], for the surfaces that ask about one card
+    /// rather than fold a whole board: the run keys and the move confirm. It joins on the
+    /// delegation's own caller — `Card { board, card }` — and never on a run id the card may
+    /// not carry yet, which is the whole point of reading the mirror first (contracts §5.5,
+    /// `BOARD.md` §11.8).
+    #[must_use]
+    pub(crate) fn live_card_run(&self, board: &BoardId, card: &CardId) -> Option<&Delegation> {
+        self.delegation_order
+            .iter()
+            .rev()
+            .filter_map(|id| self.delegations.get(id))
+            .filter(|delegation| delegation.status.is_live())
+            .find(|delegation| delegation.caller.card() == Some((board, card)))
     }
 
     /// Every delegation in creation order, for stable harness projection.
@@ -297,7 +351,7 @@ impl AgentThreads {
             return;
         }
         let id = delegation.id;
-        let caller = delegation.caller;
+        let caller = delegation.caller.thread().copied();
         let caller_item = delegation.caller_item;
         let is_new = !self.delegations.contains_key(&id);
         self.delegations.insert(id, delegation);
@@ -309,11 +363,17 @@ impl AgentThreads {
                     .map(|delegation| (delegation.created, delegation.id))
             });
         }
-        if self
-            .mirror
-            .projections
-            .get(&caller)
-            .is_some_and(|projection| !projection.items.iter().any(|item| item.id == caller_item))
+        if let Some(caller) = caller
+            && self
+                .mirror
+                .projections
+                .get(&caller)
+                .is_some_and(|projection| {
+                    !projection
+                        .items
+                        .iter()
+                        .any(|item| Some(item.id) == caller_item)
+                })
         {
             // `DelegationChanged` and the caller's item event travel independently. If this
             // window observed the durable record first, re-open its caller window so the row
@@ -329,7 +389,7 @@ impl AgentThreads {
             .delegations
             .values()
             .filter(|delegation| delegation.status.is_live())
-            .map(|delegation| delegation.caller)
+            .filter_map(|delegation| delegation.caller.thread().copied())
             .collect();
     }
 
@@ -888,6 +948,9 @@ impl AgentThreads {
     /// Replaces a projection with a daemon snapshot and applies its ordered tail.
     pub fn install_snapshot(&mut self, projection: ThreadProjection, events: &[SeqEvent]) {
         let thread = projection.thread;
+        // A replayed projection arrives with the vocabulary its `SessionConfigured` declared,
+        // and the events replayed under it never reach `apply_event`.
+        self.vocabulary_revision = self.vocabulary_revision.wrapping_add(1);
         let repair_pending = self.resync.contains(&thread);
         self.last_applied.insert(thread, Applied::Structural);
         self.projection_replaced.insert(thread);
@@ -921,6 +984,9 @@ impl AgentThreads {
             } => {
                 self.commands.insert(thread, commands.clone());
                 self.skills.insert(thread, skills.clone());
+                // The one event that carries a harness's model vocabulary, and so the one that
+                // can change what the Model and Effort pickers have to offer.
+                self.vocabulary_revision = self.vocabulary_revision.wrapping_add(1);
             }
             fleet_core::agents::AgentEvent::MetadataChanged {
                 skills: Some(skills),

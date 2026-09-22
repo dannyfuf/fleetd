@@ -3,7 +3,10 @@
 //! Every string here is part of the delegation contract a child and a caller read, so each one is
 //! a constant with a test asserting it verbatim rather than a format string at its call site.
 use chrono::{DateTime, Utc};
-use fleet_core::agents::{AgentKind, Delegation, DelegationId, DelegationStatus};
+use fleet_core::{
+    agents::{AgentKind, Delegation, DelegationId, DelegationStatus},
+    ids::BoardId,
+};
 
 /// The completion footer appended to the child's first message (design doc, verbatim).
 ///
@@ -19,6 +22,22 @@ Write the report first, then run the command. Do not run it before you are done.
 If you are blocked and cannot finish, run:\n  \
 {fleet} subagent complete --blocked --result-file <path-with-what-you-need>\n\
 Do not ask the user questions; state assumptions in the report instead.";
+
+/// The completion footer appended to a *card* run's first message (contracts §3.3, verbatim).
+///
+/// A card run's child is told two things a thread run's child is not: which card and board it is
+/// working for, and that it must not move that card — the report moves it, so a child that moved
+/// it itself would race the outcome the board is about to write.
+pub(crate) const CARD_FOOTER_TEMPLATE: &str = "--- Fleet run {id} for card {key} on board {board} ---\n\
+You are running as a subagent. No human is watching this session.\n\
+The card expects: {expectation}\n\
+When the work is fully finished and verified, report it with exactly one command:\n  \
+{fleet} subagent complete --result-file <path-to-your-report.md>\n\
+Write the report first, then run the command. Do not run it before you are done.\n\
+If you are blocked and cannot finish, run:\n  \
+{fleet} subagent complete --blocked --result-file <path-with-what-you-need>\n\
+Do not ask the user questions; state assumptions in the report instead.\n\
+Do not move card {key}; its report moves it when you finish. You may comment on it and move other cards.";
 
 /// The program named in the footer when the daemon could not resolve an absolute `fleet`.
 pub(crate) const BARE_FLEET: &str = "fleet";
@@ -53,6 +72,63 @@ pub(crate) fn first_message(
 ) -> String {
     let brief = brief.trim_end_matches(['\r', '\n']);
     format!("{brief}\n\n{}", footer(id, expectation, fleet))
+}
+
+/// Printed in place of an empty expectation, so the card footer never names nothing.
+///
+/// A column may leave `expect` empty (contracts §1.1); the child still reads the line, and a bare
+/// `The card expects:` would read as a truncated instruction rather than an absent one.
+pub(crate) const NO_EXPECTATION: &str = "(the column names no expectation)";
+
+/// Renders a card run's completion footer with its identity, card, board and `fleet` program.
+///
+/// Substitution order is `{fleet}` → `{id}` → `{key}` → `{board}` → `{expectation}`: the
+/// expectation is the only column-authored text, so it is substituted last and can never
+/// introduce a placeholder a later pass would fill in.
+pub(crate) fn card_footer(
+    id: DelegationId,
+    key: &str,
+    board: &BoardId,
+    expectation: &str,
+    fleet: &str,
+) -> String {
+    // Whitespace-only counts as empty: a column author who typed a space meant no expectation,
+    // and the parenthetical says that where a blank line would only look truncated.
+    let expectation = if expectation.trim().is_empty() {
+        NO_EXPECTATION
+    } else {
+        expectation
+    };
+    CARD_FOOTER_TEMPLATE
+        .replace("{fleet}", fleet)
+        .replace("{id}", &id.to_string())
+        .replace("{key}", key)
+        .replace("{board}", board.as_str())
+        .replace("{expectation}", expectation)
+}
+
+/// Builds a card run's first child message from its brief and its rendered footer.
+///
+/// The footer arrives rendered rather than as its parts because a card footer needs the card, the
+/// board and the resolved `fleet` program, which is four arguments the brief has no opinion about.
+pub(crate) fn card_first_message(brief: &str, footer: &str) -> String {
+    let brief = brief.trim_end_matches(['\r', '\n']);
+    format!("{brief}\n\n{footer}")
+}
+
+/// Builds a card run's child thread title from the card's key and title.
+///
+/// The same first-line, 48-character cut [`child_title`] makes, so a card thread and a delegated
+/// thread sit the same width in every list that shows both.
+pub(crate) fn card_child_title(key: &str, title: &str) -> String {
+    let first_line: String = title
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .take(48)
+        .collect();
+    format!("↳ {key} — {first_line}")
 }
 
 /// Formats a terminal delegation result for delivery into the caller's thread.
@@ -119,18 +195,22 @@ const fn terminal_status_word(status: DelegationStatus) -> &'static str {
 mod tests {
     use chrono::Duration;
     use fleet_core::agents::{
-        DelegationResult, DeliveryState, ItemId, ResultSource, ThreadId, TurnId,
+        DelegationCaller, DelegationResult, DeliveryState, ItemId, ResultSource, ThreadId, TurnId,
     };
 
     use super::*;
+
+    fn board() -> BoardId {
+        BoardId::try_from("board-1").expect("valid test board id")
+    }
 
     fn delegation() -> Delegation {
         let created = DateTime::from_timestamp(1_700_000_000, 0).expect("valid test timestamp");
         Delegation {
             id: DelegationId::new(),
-            caller: ThreadId::new(),
-            caller_turn: TurnId::new(),
-            caller_item: ItemId::new(),
+            caller: DelegationCaller::Thread(ThreadId::new()),
+            caller_turn: Some(TurnId::new()),
+            caller_item: Some(ItemId::new()),
             child: ThreadId::new(),
             provider: AgentKind::Codex,
             depth: 1,
@@ -198,6 +278,93 @@ Do not ask the user questions; state assumptions in the report instead."
         let id = DelegationId::new();
         let rendered = footer(id, "keep {fleet} and {id} literal", "/opt/fleet/bin/fleet");
         assert!(rendered.contains("The caller expects: keep {fleet} and {id} literal"));
+    }
+
+    /// Contract text a child reads, so it is pinned line by line rather than as one blob: a
+    /// wrapped or reordered line is the kind of edit a diff hides and a child obeys.
+    #[test]
+    fn the_card_footer_template_is_the_contract_text() {
+        assert_eq!(
+            CARD_FOOTER_TEMPLATE.lines().collect::<Vec<_>>(),
+            vec![
+                "--- Fleet run {id} for card {key} on board {board} ---",
+                "You are running as a subagent. No human is watching this session.",
+                "The card expects: {expectation}",
+                "When the work is fully finished and verified, report it with exactly one command:",
+                "  {fleet} subagent complete --result-file <path-to-your-report.md>",
+                "Write the report first, then run the command. Do not run it before you are done.",
+                "If you are blocked and cannot finish, run:",
+                "  {fleet} subagent complete --blocked --result-file <path-with-what-you-need>",
+                "Do not ask the user questions; state assumptions in the report instead.",
+                "Do not move card {key}; its report moves it when you finish. You may comment on it and move other cards.",
+            ]
+        );
+    }
+
+    /// The rendered text, not the template: a substitution that dropped a placeholder or filled
+    /// one in the wrong order would leave this test's expectation untouched.
+    #[test]
+    fn the_card_footer_renders_every_placeholder() {
+        let id = DelegationId::new();
+        let board = board();
+        assert_eq!(
+            card_footer(id, "FLT-7", &board, "tests pass", "/opt/fleet/bin/fleet"),
+            format!(
+                "--- Fleet run {id} for card FLT-7 on board board-1 ---\n\
+You are running as a subagent. No human is watching this session.\n\
+The card expects: tests pass\n\
+When the work is fully finished and verified, report it with exactly one command:\n  \
+/opt/fleet/bin/fleet subagent complete --result-file <path-to-your-report.md>\n\
+Write the report first, then run the command. Do not run it before you are done.\n\
+If you are blocked and cannot finish, run:\n  \
+/opt/fleet/bin/fleet subagent complete --blocked --result-file <path-with-what-you-need>\n\
+Do not ask the user questions; state assumptions in the report instead.\n\
+Do not move card FLT-7; its report moves it when you finish. You may comment on it and move other cards."
+            )
+        );
+    }
+
+    #[test]
+    fn a_card_footer_with_no_expectation_names_the_column_instead() {
+        let rendered = card_footer(DelegationId::new(), "FLT-7", &board(), "   ", BARE_FLEET);
+        assert!(
+            rendered.contains("The card expects: (the column names no expectation)"),
+            "{rendered}"
+        );
+    }
+
+    /// The card expectation is column-authored text, so it gets the guarantee the thread
+    /// expectation has: it is substituted last and is never re-scanned for placeholders.
+    #[test]
+    fn a_card_expectation_naming_a_placeholder_is_never_substituted_again() {
+        let rendered = card_footer(
+            DelegationId::new(),
+            "FLT-7",
+            &board(),
+            "keep {key} and {board} literal",
+            BARE_FLEET,
+        );
+        assert!(
+            rendered.contains("The card expects: keep {key} and {board} literal"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn card_first_message_separates_the_brief_and_footer() {
+        assert_eq!(
+            card_first_message("Do the work\r\n", "--- footer ---"),
+            "Do the work\n\n--- footer ---"
+        );
+    }
+
+    #[test]
+    fn card_child_title_uses_the_first_48_characters_of_the_first_line() {
+        let title = "123456789012345678901234567890123456789012345678EXTRA\nignored";
+        assert_eq!(
+            card_child_title("FLT-7", title),
+            "↳ FLT-7 — 123456789012345678901234567890123456789012345678"
+        );
     }
 
     #[test]

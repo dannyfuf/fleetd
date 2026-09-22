@@ -536,6 +536,9 @@ fn live_board(gallery: &BoardGallery, t: &Theme, cx: &mut Context<BoardGallery>)
                 column.title.clone(),
             )
             .count(column.cards.len())
+            // One automated column, so the ⚡ can be read against its plain neighbours: a card
+            // moved into "In progress" starts a run.
+            .action(index == 1)
             .accent(Some(column.category.accent(t)))
             .focused(focused)
             .empty_hint("No cards here.")
@@ -686,6 +689,17 @@ fn live_board_section(
     LAYOUT.section("live board", t, children)
 }
 
+/// The word a [`RunMark`] is called, here and in a harness dump.
+fn mark_word(mark: RunMark) -> &'static str {
+    match mark {
+        RunMark::Pending => "pending",
+        RunMark::Stalled => "stalled",
+        RunMark::Working => "working",
+        RunMark::NeedsYou => "needs you",
+        RunMark::Succeeded => "done",
+    }
+}
+
 fn card_tile_section(cx: &mut App) -> AnyElement {
     let t = cx.theme().clone();
 
@@ -744,8 +758,66 @@ fn card_tile_section(cx: &mut App) -> AnyElement {
         .assignee(Some("ñandú ávila".into())),
     );
 
+    let runs: Vec<AnyElement> = RunMark::ALL
+        .into_iter()
+        .enumerate()
+        .map(|(index, mark)| {
+            let word = mark_word(mark);
+            panel(
+                TILE_W,
+                CardTile::new(
+                    SharedString::from(format!("tile-run-{index}")),
+                    SharedString::from(format!("FLT-5{index}")),
+                    SharedString::from(format!(
+                        "A run mark at the right end of the key line: {word}"
+                    )),
+                )
+                .run(mark),
+            )
+        })
+        .collect();
+
+    let blocked: Vec<AnyElement> = BlockedTone::ALL
+        .into_iter()
+        .enumerate()
+        .map(|(index, tone)| {
+            let word = match tone {
+                BlockedTone::Muted => "still moving",
+                BlockedTone::Warning => "needs a person",
+            };
+            panel(
+                TILE_W,
+                CardTile::new(
+                    SharedString::from(format!("tile-blocked-{index}")),
+                    SharedString::from(format!("FLT-6{index}")),
+                    SharedString::from(format!("Waiting on two cards: {word}")),
+                )
+                .blocked(2, tone)
+                .priority(PriorityLevel::High)
+                .assignee(Some("Danny Fuentes".into())),
+            )
+        })
+        .collect();
+
+    let run_wins = panel(
+        TILE_W,
+        CardTile::new(
+            "tile-run-wins",
+            "FLT-62",
+            "Blocked and running at once: the run mark wins",
+        )
+        .blocked(2, BlockedTone::Warning)
+        .run(RunMark::Working),
+    );
+
     let children = vec![
         LAYOUT.labeled("bare · every slot", &t, row_of(&t, vec![bare, full])),
+        LAYOUT.labeled("run marks", &t, row_of(&t, runs)),
+        LAYOUT.labeled("blocked · run wins", &t, {
+            let mut tiles = blocked;
+            tiles.push(run_wins);
+            row_of(&t, tiles)
+        }),
         LAYOUT.labeled(
             "selected · focused",
             &t,

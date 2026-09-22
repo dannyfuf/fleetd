@@ -17,11 +17,11 @@ use std::{
 use async_trait::async_trait;
 use fleet_core::{
     agents::{
-        AbortReason, Attention, AttentionKind, ControlCost, Delegation, DelegationId,
-        DelegationStatus, DeliveryState, GateAnswer, GateId, GateKind, HarnessCapabilities,
-        InterruptSupport, ItemKind, ItemPatch, ItemPayloadPatch, MessageOrigin, ModelSelection,
-        PermissionChoice, PermissionMode, ResumeSupport, Seq, SeqEvent, SteerSupport, StreamKind,
-        ThreadProjection, ToolKind, TurnOutcome, Usage,
+        AbortReason, Attention, AttentionKind, ControlCost, Delegation, DelegationCaller,
+        DelegationId, DelegationStatus, DeliveryState, GateAnswer, GateId, GateKind,
+        HarnessCapabilities, InterruptSupport, ItemKind, ItemPatch, ItemPayloadPatch,
+        MessageOrigin, ModelSelection, PermissionChoice, PermissionMode, ResumeSupport, Seq,
+        SeqEvent, SteerSupport, StreamKind, ThreadProjection, ToolKind, TurnOutcome, Usage,
     },
     ids::{ContextId, RepoId},
     model::{Context as ContextRecord, Repo, RepoHooks, Worktree},
@@ -621,9 +621,9 @@ impl Harness {
     ) {
         let row = Delegation {
             id,
-            caller,
-            caller_turn: TurnId::new(),
-            caller_item: ItemId::new(),
+            caller: DelegationCaller::Thread(caller),
+            caller_turn: Some(TurnId::new()),
+            caller_item: Some(ItemId::new()),
             child,
             provider: AgentKind::Claude,
             depth: 1,

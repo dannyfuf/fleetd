@@ -354,6 +354,27 @@ the same shape in the palette, in a confirm and in the Workspace header.
 `NoSession` is a dim dot, **not** a blank cell; a blank cell means "this column does not apply to
 this row". An unreachable host forces the session to `Unknown`, never to `NoSession`.
 
+**Board run marks (`RunMark`, §6.7).** A card whose column runs an action borrows this same
+vocabulary rather than inventing one: these are the glyphs above, with the tones above, in the
+board's own five states (`BOARD.md` §11.8, `UX-SPEC.md` §Board). They add **no token and no
+glyph** — `⊘` is the only new character, and it is text in the data face, not an icon.
+
+| `RunMark` | Glyph | Tone | Harness word |
+| --- | --- | --- | --- |
+| `Pending` | `Spinner` (`loader-circle`, spins) | secondary | `pending` |
+| `Stalled` | `StatusDot::small` | **warning** | `stalled` |
+| `Working` | `Spinner` (`loader-circle`, spins) | secondary | `working` |
+| `NeedsYou` | `StatusDot::small` | **warning** | `needs you` |
+| `Succeeded` | `check` | muted | `done` |
+| — (blocked count) | `⊘ n`, `Text::data_small` | muted, or **warning** when a blocker is canceled, archived or gone | `blocked:n` |
+
+`Stalled` and `NeedsYou` are deliberately the same amber dot: both mean "this card wants you", and
+a tile is not the surface that explains which — the card detail's run row is. The spinner is
+secondary rather than the `AgentWorking` amber above because a run in progress is *progress*, and
+§1 reserves amber for what needs a person (`NATIVE-AGENTS.md` §2: gray is everything else,
+including progress). The card detail draws the same three glyphs from its own table; the two must
+stay identical.
+
 ---
 
 ## 6. Component catalog
@@ -1375,30 +1396,35 @@ information), so the ladder still reads in grayscale. `None` is dashed and hollo
 
 #### `CardTile`
 **Purpose.** One card on the board — the list row of the kanban world.
-**Anatomy.** key (muted data face) · title (`UiStrong`, wrapped to `CARD_TITLE_LINES` = 2 with an
-ellipsis on the last line) ·
+**Anatomy.** a key **line** — key (muted data face), a flex spacer, and at its right end the run
+mark or the blocked count `⊘ n`, never both · title (`UiStrong`, wrapped to `CARD_TITLE_LINES` = 2
+with an ellipsis on the last line) ·
 a zero-suppressed meta row: priority glyph · label chips · assignee initials chip · estimate
 (`n pt`) · due date behind a `clock` glyph · `git-branch` glyph when a worktree is linked ·
 amber dirty dot · red conflict dot · `show_on_card` extras.
 **API.** `CardTile::new(id, key, title).priority(PriorityLevel)
 .labels(Vec<(SharedString, Option<SharedString>)>).assignee(..).estimate(..).due(..)
 .worktree(bool).dirty(bool).conflict(bool).selected(bool).focused(bool).extras(..)
-.on_click(..)`; helpers `label_tone(Option<&str>) -> Tone` and
-`initials(&str) -> String` (`ASSIGNEE_INITIALS` = 2).
+.on_click(..).run(RunMark).blocked(u32, BlockedTone)`; helpers `label_tone(Option<&str>) -> Tone`
+and `initials(&str) -> String` (`ASSIGNEE_INITIALS` = 2); `RunMark::{Pending, Stalled, Working,
+NeedsYou, Succeeded}` and `BlockedTone::{Muted, Warning}`, both with `ALL` for the gallery.
 **States.** default · hover (`row_hover`) · selected (`row_selected`) · focused (2 px cursor
 bar) · selected + focused.
 **Usage rule.** Selection and focus are the **same two tokens `ListView`'s cursor row uses**, so
 a board and a list say "where am I" identically. A label's color arrives as a **token name**
 (`"accent"`, `"danger"`), never as a hex string: a remote backend cannot smuggle a color into a
 Fleet surface, and an unknown name falls back to the neutral chip. Everything below the title
-is zero-suppressed, so a bare card costs exactly a key and a title.
+is zero-suppressed, so a bare card costs exactly a key and a title. `run` wins over `blocked` — a
+card that is already running has nothing left to wait for — and `blocked(0, _)` draws nothing, as
+every other zero does. Both are **kit vocabularies, not domain types** (§5.2): the app folds a
+run's state, its child's state and how long it has waited into one `RunMark` and passes that.
 
 #### `KanbanColumn` / `KanbanBoard`
 **Purpose.** The column and the horizontal scroller that holds the columns.
 **Anatomy.** optional 2 px category accent bar · 30 px header (status name in the `Label` role,
 count `Badge`) · gapped body of tiles, virtualized through `gpui::list` when the caller supplies
 a `ListState` · `EmptyState` hint when the column is empty · `Pane`'s 2 px focus ring.
-**API.** `KanbanColumn::new(id, title).count(usize).accent(Option<Hsla>).focused(bool)
+**API.** `KanbanColumn::new(id, title).count(usize).accent(Option<Hsla>).action(bool).focused(bool)
 .width(Pixels).empty_hint(..)` then either `.tiles(impl IntoIterator<Item = AnyElement>)
 .scroll_handle(ScrollHandle)` or `.rows(ListState, usize, impl FnMut(usize, &mut Window,
 &mut App) -> AnyElement)`; `KanbanColumn::list_state() -> ListState` builds the state with the
@@ -1407,7 +1433,9 @@ column's own overdraw. `COLUMN_WIDTH_CH` = 34.
 **States.** default · focused (the 2 px pane ring) · empty (the `empty_hint` `EmptyState`).
 **Variants.** column (vertical, `COLUMN_WIDTH_CH` wide) · board (the horizontal scroller).
 **Usage rule.** The count renders even at `0` — a column header is a ledger, and a missing
-count reads as "unknown", not as "empty". `accent` takes a resolved `Hsla` because the status
+count reads as "unknown", not as "empty". `action(true)` puts a muted `zap` after that count and
+is the whole of what the kit knows about automation — which columns deserve one is domain
+knowledge the app keeps (`BOARD.md` §11.8). `accent` takes a resolved `Hsla` because the status
 category → token mapping is domain knowledge that lives in the app; the call site passes a
 theme token and never a literal. `tiles(..)` is for a fixed handful of rows; anything bounded by
 data uses `rows(..)`, because a column handed finished elements builds and measures every one of

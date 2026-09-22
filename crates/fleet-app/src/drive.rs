@@ -619,6 +619,7 @@ impl Harness {
             // Read before the update below: the editors live on another entity, so they cannot
             // be read from inside `state.update`.
             let dialog_fields = crate::dialogs::dialog_fields(state, cx);
+            let dialog_message = crate::dialogs::dialog_message(state, cx);
             let frame = fleet_ui_kit::harness::frame(window);
             // Paint order is back to front, so a name painted twice keeps its topmost rectangle.
             let targets: BTreeMap<String, TargetSnapshot> = fleet_ui_kit::harness::painted(window)
@@ -648,6 +649,7 @@ impl Harness {
             state.update(cx, |state, _| {
                 state.harness.set_targets(targets);
                 state.harness.set_dialog_fields(dialog_fields);
+                state.harness.set_dialog_message(dialog_message);
                 state.harness.set_window(bounds, scale_factor, title, frame);
                 state.harness_projection()
             })

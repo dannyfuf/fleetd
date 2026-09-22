@@ -61,6 +61,42 @@ pub(super) use requests::run_sweep;
 use git::{Plumbing, ScratchIndex};
 use refs::Metadata;
 
+/// How one file differs between a run's first checkpoint and the worktree now.
+///
+/// Public and distinct from the private `git::Change` this is derived from: that one is a parse
+/// of `git diff --name-status` and carries Git's own vocabulary, while this is the vocabulary the
+/// report comment prints, and the two must be free to diverge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangeKind {
+    /// The file existed at the checkpoint and its contents differ now.
+    Modified,
+    /// The file did not exist at the checkpoint.
+    Added,
+    /// The file existed at the checkpoint and does not exist now.
+    Deleted,
+}
+
+impl From<git::Change> for ChangeKind {
+    fn from(change: git::Change) -> Self {
+        match change {
+            git::Change::Added => Self::Added,
+            git::Change::Deleted => Self::Deleted,
+            // `T`, a file that became a symlink, arrives here as `Modified` too: the report says
+            // the path is not what it was, which is the whole of what a reviewer needs.
+            git::Change::Modified => Self::Modified,
+        }
+    }
+}
+
+/// One file a run changed, as the run's report comment lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangedFile {
+    /// Worktree-relative path, exactly as Git spells it.
+    pub path: String,
+    /// What happened to it.
+    pub kind: ChangeKind,
+}
+
 /// Fleet-owned checkpoints for every worktree this daemon owns.
 ///
 /// Cloning shares the per-thread capture locks, which is what makes the clone safe to hand to the
@@ -186,6 +222,74 @@ impl Checkpoints {
             .collect();
         checkpoints.sort_unstable_by_key(|checkpoint| checkpoint.ordinal);
         Ok(checkpoints)
+    }
+
+    /// What a run changed in its worktree since it started.
+    ///
+    /// The diff of the thread's *first* checkpoint tree against a fresh snapshot of the worktree
+    /// as it is now, so it describes the tree the run leaves behind rather than the tree any one
+    /// turn produced. A worktree that is not a Git working tree, and a thread that never took a
+    /// checkpoint, both answer `Ok(vec![])`: a run whose changes cannot be described is not a
+    /// run that failed.
+    ///
+    /// Two properties of *when* and *how* it is taken are deliberate, and the heading it is
+    /// printed under says both out loud. It is taken when a run ends, never while a brief is
+    /// assembled, so it is the tree the run left rather than the tree the next one will read.
+    /// And it is tree-to-tree rather than per-edit attribution, so an edit the user — or, on a
+    /// shared worktree, another run — made while this one worked is in the list too.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CheckpointError::Git`] when the snapshot or the diff itself fails, and
+    /// [`CheckpointError::Metadata`] when a file-scoped first checkpoint carries a body this
+    /// build cannot read.
+    pub async fn changed_since(
+        &self,
+        worktree: &Path,
+        thread: &ThreadId,
+    ) -> Result<Vec<ChangedFile>> {
+        let thread = *thread;
+        // `list` is the one call that answers both empty cases: a worktree that is no longer a
+        // repository lists nothing, and so does a thread whose provider never ran a turn. Neither
+        // is an error — a delivery must not fail because there is nothing to describe.
+        let Some(first) = self.list(worktree, thread).await?.into_iter().next() else {
+            return Ok(Vec::new());
+        };
+        let name = refs::ref_name(thread, &first.id);
+        let Some(recorded) = self.inner.git.resolve_tree(worktree, &name).await? else {
+            // The sweep collected the ref between the listing and this resolve. The thread's
+            // history is gone, which is the same answer as never having had one.
+            return Ok(Vec::new());
+        };
+        // A turn checkpoint holds the whole worktree, so its diff is unnarrowed. A file
+        // checkpoint holds *only* the paths that edit covered, so diffing it against a whole
+        // worktree would report every other file as added; its recorded scope narrows the diff
+        // back to what it actually knows about.
+        let scope = match first.scope {
+            CheckpointScope::Turn => Vec::new(),
+            CheckpointScope::File => {
+                let commit = self.inner.git.read_commit(worktree, &name).await?;
+                Metadata::decode(&first.id, &commit)?.paths
+            }
+        };
+
+        let index = ScratchIndex::new();
+        let current = self.inner.git.snapshot_tree(worktree, &index, None).await?;
+        let mut changed: Vec<ChangedFile> = self
+            .inner
+            .git
+            .diff_trees(worktree, &recorded, &current, &scope)
+            .await?
+            .into_iter()
+            .map(|difference| ChangedFile {
+                path: difference.path,
+                kind: difference.change.into(),
+            })
+            .collect();
+        // Sorted by path, because Git's own order is the tree walk's and a report that lists the
+        // same three files in a different order on two runs reads as three different reports.
+        changed.sort_unstable_by(|left, right| left.path.cmp(&right.path));
+        Ok(changed)
     }
 
     async fn capture(

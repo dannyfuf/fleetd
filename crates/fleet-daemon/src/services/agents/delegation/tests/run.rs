@@ -3,9 +3,9 @@ use std::{collections::BTreeMap, os::unix::fs::PermissionsExt as _, sync::Arc};
 use chrono::Utc;
 use fleet_core::{
     agents::{
-        AgentKind, AgentThreadSummary, Delegation, DelegationId, DelegationStatus, DeliveryState,
-        ItemId, ItemKind, MessageOrigin, PermissionMode, SessionState, ThreadId, ThreadProjection,
-        TurnId, TurnState,
+        AgentKind, AgentThreadSummary, Delegation, DelegationCaller, DelegationId,
+        DelegationStatus, DeliveryState, ItemId, ItemKind, MessageOrigin, PermissionMode,
+        SessionState, ThreadId, ThreadProjection, TurnId, TurnState,
     },
     ids::{ContextId, HostId, RepoId, WorktreeId},
     model::{Context, Repo, RepoHooks, Worktree},
@@ -417,9 +417,9 @@ impl Harness {
     pub(super) async fn insert_live(&self, caller: ThreadId, child: ThreadId, depth: u8) {
         let delegation = Delegation {
             id: DelegationId::new(),
-            caller,
-            caller_turn: TurnId::new(),
-            caller_item: ItemId::new(),
+            caller: DelegationCaller::Thread(caller),
+            caller_turn: Some(TurnId::new()),
+            caller_item: Some(ItemId::new()),
             child,
             provider: AgentKind::Claude,
             depth,
@@ -471,7 +471,7 @@ fn provider_script(environment_log: &std::path::Path, input_log: &std::path::Pat
 case " $* " in
   *" --version "*) printf '%s\n' '2.1.266 (Claude Code)'; exit 0 ;;
 esac
-printf '%s|%s|%s|%s|%s\n' "$FLEET_SESSION" "$FLEET_DELEGATION" "$FLEET_DELEGATION_TOKEN" "$PATH" "$FLEET_ENV_PROBE" >> '{}'
+printf '%s|%s|%s|%s|%s|%s\n' "$FLEET_SESSION" "$FLEET_DELEGATION" "$FLEET_DELEGATION_TOKEN" "$PATH" "$FLEET_ENV_PROBE" "$FLEET_CARD" >> '{}'
 printf '%s\n' '{{"type":"system","subtype":"init","session_id":"run-cursor","model":"test","tools":[],"slash_commands":[],"capabilities":["interrupt_receipt_v1","interrupt_cancel_queued_v1","msg_lifecycle_v1"]}}'
 count=0
 while IFS= read -r line; do
@@ -599,7 +599,7 @@ async fn run_carries_the_token_and_seeds_both_transcripts() {
             .expect("start delegation"),
     );
 
-    assert_eq!(delegation.caller_turn, caller_turn);
+    assert_eq!(delegation.caller_turn, Some(caller_turn));
     assert_eq!(delegation.depth, 1);
     assert_eq!(warning.as_deref(), Some(SAME_WORKTREE_WARNING));
 
@@ -628,7 +628,7 @@ async fn run_carries_the_token_and_seeds_both_transcripts() {
     let caller_projection = harness
         .wait_for(caller, |projection| {
             projection.items.iter().any(|item| {
-                item.id == delegation.caller_item
+                Some(item.id) == delegation.caller_item
                     && item.turn == caller_turn
                     && matches!(
                         item.kind,
@@ -642,11 +642,9 @@ async fn run_carries_the_token_and_seeds_both_transcripts() {
             })
         })
         .await;
-    assert!(
-        caller_projection.items.iter().any(|item| {
-            item.id == delegation.caller_item && item.turn == delegation.caller_turn
-        })
-    );
+    assert!(caller_projection.items.iter().any(|item| {
+        Some(item.id) == delegation.caller_item && Some(item.turn) == delegation.caller_turn
+    }));
 
     let expected_message = first_message(
         &delegation.brief,
@@ -849,9 +847,10 @@ async fn the_child_path_begins_with_the_resolved_fleet_directory() {
 }
 
 /// The reason `env` exists: four children in one worktree need four `CARGO_TARGET_DIR`s. The
-/// probe variable stands in for one, and the forged `FLEET_DELEGATION` proves the merge order —
-/// caller variables go in first, Fleet's identity second, so a peer cannot make a child report
-/// against a delegation it was not started for.
+/// probe variable stands in for one, and the forged Fleet names prove the rule the constant
+/// states — every `FLEET_OWNED_CHILD_ENV` key a request carries is **dropped**, so a peer can
+/// neither make a child report against a delegation it was not started for nor hand it a
+/// `FLEET_CARD` naming a card it has nothing to do with.
 #[tokio::test(start_paused = true)]
 async fn the_child_environment_carries_caller_variables_and_fleet_identity_still_wins() {
     let harness = Harness::start().await;
@@ -868,6 +867,7 @@ async fn the_child_environment_carries_caller_variables_and_fleet_identity_still
             "FLEET_DELEGATION_TOKEN".to_owned(),
             "forged-token".to_owned(),
         ),
+        ("FLEET_CARD".to_owned(), "FLT-9".to_owned()),
     ]);
     let (delegation, _) = started(harness.run(with_env).await.expect("start delegation"));
 
@@ -892,6 +892,14 @@ async fn the_child_environment_carries_caller_variables_and_fleet_identity_still
         fields.get(4).copied(),
         Some("child-a"),
         "an ordinary caller variable reaches the child verbatim: {child_environment}"
+    );
+    // A thread's child is told no card, whatever the request asked for: this daemon mints
+    // `FLEET_CARD` only for a card caller, and a stray one would make the child's own CLI
+    // refuse to move a card it has nothing to do with.
+    assert_eq!(
+        fields.get(5).map(|card| card.trim()),
+        Some(""),
+        "a caller-supplied FLEET_CARD must be dropped, not passed through: {child_environment}"
     );
 }
 

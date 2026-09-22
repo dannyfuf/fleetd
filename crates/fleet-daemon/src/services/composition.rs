@@ -99,8 +99,24 @@ impl Services {
             Arc::clone(&jobs),
             Arc::new(worktrees.clone()),
             events.clone(),
+            // Automation exists exactly when the delegation service does: a card run *is* a
+            // delegation, so a daemon whose agent database never opened has nothing to run one
+            // with, and its boards refuse the run verbs while serving every other one.
+            delegations.as_ref().map(|delegations| {
+                boards::Automation::new(delegations.clone(), Arc::new(checkpoints.clone()))
+            }),
         ));
         worktrees.set_cascade(boards.clone());
+        // Where a terminal card-called delegation is recorded. A `Weak`, because the boards
+        // service holds the delegation service through `Automation`: a strong handle back would
+        // close a cycle neither half could ever break.
+        if let Some(delegations) = &delegations {
+            // The clone shares `boards`' allocation, so the `Weak` taken from it is a weak
+            // handle on the one boards service and not on a second object.
+            let hook: Arc<dyn agents::delegation::RunDeliveryHook> =
+                Arc::<boards::Boards>::clone(&boards);
+            delegations.set_run_delivery_hook(Arc::downgrade(&hook));
+        }
         repos.set_context_mover(boards.clone());
         let pool = Pool::new(
             Arc::clone(&config),

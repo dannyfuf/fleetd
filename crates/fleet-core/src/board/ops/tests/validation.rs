@@ -238,3 +238,284 @@ fn a_read_only_status_refuses_a_move_but_still_reorders() {
     assert_eq!(cards[0].position, 10);
     assert!(!cards[0].dirty);
 }
+
+#[test]
+fn a_column_may_only_route_a_card_to_a_column_this_board_has() {
+    let mut board = board();
+    board.statuses[1].automation = Some(ColumnAutomation {
+        on_success: Some("shipped".parse().unwrap()),
+        ..ColumnAutomation::default()
+    });
+
+    assert_eq!(
+        validate_board(&board),
+        Err(BoardError::Invalid {
+            field: "on_success".into(),
+            reason: format!(
+                "{} routes to shipped, which is not a column on this board",
+                board.statuses[1].name
+            ),
+        })
+    );
+}
+
+#[test]
+fn a_column_may_not_route_a_card_back_into_itself() {
+    let mut board = board();
+    board.statuses[1].automation = Some(ColumnAutomation {
+        advance_when_unblocked: Some("todo".parse().unwrap()),
+        ..ColumnAutomation::default()
+    });
+
+    assert_eq!(
+        validate_board(&board),
+        Err(BoardError::Invalid {
+            field: "advance_when_unblocked".into(),
+            reason: format!("{} may not route to itself", board.statuses[1].name),
+        })
+    );
+}
+
+#[test]
+fn a_column_may_not_route_a_card_backwards() {
+    let mut board = board();
+    board.statuses[3].automation = Some(ColumnAutomation {
+        on_success: Some("todo".parse().unwrap()),
+        ..ColumnAutomation::default()
+    });
+
+    assert_eq!(
+        validate_board(&board),
+        Err(BoardError::Invalid {
+            field: "on_success".into(),
+            reason: format!(
+                "{} routes to todo, which is not a later column",
+                board.statuses[3].name
+            ),
+        })
+    );
+}
+
+#[test]
+fn a_skill_action_without_a_name_is_refused() {
+    let mut board = board();
+    board.statuses[2].automation = Some(ColumnAutomation {
+        on_enter: Some(action(ActionKind::Skill {
+            name: "  ".into(),
+            args: String::new(),
+        })),
+        ..ColumnAutomation::default()
+    });
+
+    assert_eq!(
+        validate_board(&board),
+        Err(BoardError::Invalid {
+            field: "on_enter".into(),
+            reason: "a skill action needs a name".into(),
+        })
+    );
+}
+
+#[test]
+fn a_skill_action_is_refused_on_codex() {
+    let mut board = board();
+    let mut on_enter = action(ActionKind::Skill {
+        name: "deep-review".into(),
+        args: String::new(),
+    });
+    on_enter.agent.provider = Some(AgentKind::Codex);
+    board.statuses[2].automation = Some(ColumnAutomation {
+        on_enter: Some(on_enter),
+        ..ColumnAutomation::default()
+    });
+
+    assert_eq!(
+        validate_board(&board),
+        Err(BoardError::Invalid {
+            field: "on_enter".into(),
+            reason: "skill actions run on claude only; put the invocation in the column's \
+                     instructions for codex"
+                .into(),
+        })
+    );
+}
+
+#[test]
+fn a_prompt_action_may_name_a_provider_a_skill_action_may_not() {
+    let mut board = board();
+    let mut on_enter = action(ActionKind::Prompt);
+    on_enter.agent.provider = Some(AgentKind::Codex);
+    board.statuses[2].automation = Some(ColumnAutomation {
+        on_enter: Some(on_enter),
+        on_success: Some("done".parse().unwrap()),
+        ..ColumnAutomation::default()
+    });
+
+    assert_eq!(validate_board(&board), Ok(()));
+}
+
+#[test]
+fn a_column_env_entry_is_refused_with_the_same_five_sentences_the_cli_uses() {
+    for (entry, reason) in [
+        (
+            "NOPE",
+            "NOPE is not KEY=VALUE: every entry needs an `=`".to_owned(),
+        ),
+        ("=value", "=value has an empty key".to_owned()),
+        (
+            "FLEET_CARD=x",
+            "FLEET_CARD is refused: FLEET_* names are the delegation's own identity and the \
+             daemon sets them itself"
+                .to_owned(),
+        ),
+        (
+            "PATH=/usr/bin",
+            "PATH is refused: an entry replaces the value outright rather than extending the \
+             login shell's, and Fleet already prepends the directory holding this fleet so the \
+             child can run `fleet subagent complete`"
+                .to_owned(),
+        ),
+    ] {
+        assert_eq!(
+            validate_env(&[entry.to_owned()]),
+            Err(BoardError::Invalid {
+                field: "env".into(),
+                reason,
+            }),
+            "{entry}"
+        );
+    }
+    assert_eq!(
+        validate_env(&["A=1".to_owned(), "A=2".to_owned()]),
+        Err(BoardError::Invalid {
+            field: "env".into(),
+            reason: "A is given twice".into(),
+        })
+    );
+    assert_eq!(validate_env(&["A=1".to_owned(), "B=".to_owned()]), Ok(()));
+}
+
+#[test]
+fn a_column_env_entry_is_checked_when_the_board_is_validated() {
+    let mut board = board();
+    let mut on_enter = action(ActionKind::Prompt);
+    on_enter.env = vec!["PATH=/usr/bin".into()];
+    board.statuses[2].automation = Some(ColumnAutomation {
+        on_enter: Some(on_enter),
+        ..ColumnAutomation::default()
+    });
+
+    assert!(matches!(
+        validate_board(&board),
+        Err(BoardError::Invalid { field, .. }) if field == "env"
+    ));
+}
+
+#[test]
+fn the_board_throttle_is_refused_below_one_and_above_the_daemon_limit() {
+    let mut board = board();
+    for runs in [0, MAX_LIVE_RUNS_PER_BOARD + 1] {
+        board.settings.max_live_runs = Some(runs);
+
+        assert_eq!(
+            validate_board(&board),
+            Err(BoardError::Invalid {
+                field: "max_live_runs".into(),
+                reason: "must be between 1 and 8".into(),
+            }),
+            "{runs}"
+        );
+    }
+    board.settings.max_live_runs = Some(MAX_LIVE_RUNS_PER_BOARD);
+
+    assert_eq!(validate_board(&board), Ok(()));
+}
+
+#[test]
+fn a_blocker_that_is_not_on_this_board_is_refused_by_name() {
+    let mut board = board();
+    let mut card = create(&mut board, &[], "a");
+    card.blocked_by = vec!["elsewhere".parse().unwrap()];
+
+    assert_eq!(
+        validate_links(&board, std::slice::from_ref(&card), &card),
+        Err(BoardError::Invalid {
+            field: "blocked_by".into(),
+            reason: "elsewhere is not on this board".into(),
+        })
+    );
+}
+
+#[test]
+fn a_card_cannot_block_itself() {
+    let mut board = board();
+    let mut card = create(&mut board, &[], "a");
+    card.blocked_by = vec![card.id.clone()];
+
+    assert_eq!(
+        validate_links(&board, std::slice::from_ref(&card), &card),
+        Err(BoardError::Invalid {
+            field: "blocked_by".into(),
+            reason: "a card cannot block itself".into(),
+        })
+    );
+}
+
+#[test]
+fn a_two_card_cycle_names_the_path_back_to_the_card_being_written() {
+    let mut board = board();
+    let first = create(&mut board, &[], "a");
+    let mut second = create(&mut board, std::slice::from_ref(&first), "b");
+    second.blocked_by = vec![first.id.clone()];
+    let mut first = first;
+    first.blocked_by = vec![second.id.clone()];
+    let cards = vec![first.clone(), second];
+
+    assert_eq!(
+        validate_links(&board, &cards, &first),
+        Err(BoardError::Invalid {
+            field: "blocked_by".into(),
+            reason: "would close a cycle: FLE-1 → FLE-2 → FLE-1".into(),
+        })
+    );
+}
+
+#[test]
+fn a_three_card_cycle_lists_every_key_on_the_path() {
+    let mut board = board();
+    let first = create(&mut board, &[], "a");
+    let mut second = create(&mut board, std::slice::from_ref(&first), "b");
+    let mut third = create(&mut board, &[first.clone(), second.clone()], "c");
+    second.blocked_by = vec![first.id.clone()];
+    third.blocked_by = vec![second.id.clone()];
+    let mut first = first;
+    first.blocked_by = vec![third.id.clone()];
+    let cards = vec![first.clone(), second, third];
+
+    assert_eq!(
+        validate_links(&board, &cards, &first),
+        Err(BoardError::Invalid {
+            field: "blocked_by".into(),
+            reason: "would close a cycle: FLE-1 → FLE-3 → FLE-2 → FLE-1".into(),
+        })
+    );
+}
+
+#[test]
+fn a_diamond_of_links_is_not_a_cycle() {
+    let mut board = board();
+    let base = create(&mut board, &[], "a");
+    let mut left = create(&mut board, std::slice::from_ref(&base), "b");
+    let mut right = create(&mut board, &[base.clone(), left.clone()], "c");
+    let mut top = create(
+        &mut board,
+        &[base.clone(), left.clone(), right.clone()],
+        "d",
+    );
+    left.blocked_by = vec![base.id.clone()];
+    right.blocked_by = vec![base.id.clone()];
+    top.blocked_by = vec![left.id.clone(), right.id.clone()];
+    let cards = vec![base, left, right, top.clone()];
+
+    assert_eq!(validate_links(&board, &cards, &top), Ok(()));
+}

@@ -19,8 +19,10 @@ use gpui::{
 use crate::{
     components::{Badge, EmptyState},
     focus::FocusRing,
+    icons::{Icon, IconSize},
     text::Text,
     theme::{ActiveTheme, ch},
+    tone::Tone,
 };
 
 /// The default column width, in `ch` of the data face — wide enough for a `FLT-123` key, a
@@ -42,6 +44,7 @@ pub struct KanbanColumn {
     id: ElementId,
     title: SharedString,
     count: Option<usize>,
+    action: bool,
     accent: Option<Hsla>,
     focused: bool,
     width: Option<Pixels>,
@@ -68,6 +71,7 @@ impl KanbanColumn {
             id: id.into(),
             title: title.into(),
             count: None,
+            action: false,
             accent: None,
             focused: false,
             width: None,
@@ -82,6 +86,15 @@ impl KanbanColumn {
     /// header is a ledger, not a chip: a missing count reads as "unknown", not as "empty".
     pub fn count(mut self, count: usize) -> Self {
         self.count = Some(count);
+        self
+    }
+
+    /// Whether entering this column starts something: a muted `⚡` after the count.
+    ///
+    /// The glyph is the whole statement — *cards that land here do not sit still*. What it
+    /// starts, and with which agent, belongs to the surface that can say it in words.
+    pub fn action(mut self, has_action: bool) -> Self {
+        self.action = has_action;
         self
     }
 
@@ -177,7 +190,11 @@ impl RenderOnce for KanbanColumn {
                     .min_w_0()
                     .child(Text::label(self.title).ellipsize()),
             )
-            .children(self.count.map(|count| Badge::new(count.to_string())));
+            .children(self.count.map(|count| Badge::new(count.to_string())))
+            .children(
+                self.action
+                    .then(|| Icon::Zap.el().size(IconSize::Small).tone(Tone::Muted)),
+            );
 
         let hint = self
             .empty_hint

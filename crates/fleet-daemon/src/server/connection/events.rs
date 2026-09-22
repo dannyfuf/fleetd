@@ -39,6 +39,17 @@ pub(super) fn event_visible(
             client.supports(fleet_proto::AGENT_SYNC_MARKER_CAPABILITY)
         }
         Event::AgentWindow { .. } => client.supports(fleet_proto::AGENT_WINDOW_CAPABILITY),
+        // A card-called delegation is a board fact wearing a delegation's clothes: its caller is
+        // a board and a card, not a thread, and a peer that never named `board.automation` has no
+        // vocabulary for either. It is withheld from the stream for the same reason
+        // `connection.rs` withholds one from a `Delegations` listing — a peer that cannot name
+        // the feature never learns the records exist. `agent.delegation` still has to be named
+        // too: it is what gates the *decode* of this variant, and the board capability does not
+        // stand in for it.
+        Event::DelegationChanged(delegation) if delegation.caller.is_card() => {
+            client.supports(fleet_proto::AGENT_DELEGATION_CAPABILITY)
+                && client.supports(fleet_proto::response::BOARD_AUTOMATION_CAPABILITY)
+        }
         Event::DelegationChanged(_) => client.supports(fleet_proto::AGENT_DELEGATION_CAPABILITY),
         // Never re-broadcast: it is a tag *this* build could not name, and forwarding it tells
         // no peer anything it can act on.
@@ -82,10 +93,10 @@ pub(super) fn event_kind(event: &Event) -> EventKind {
 mod tests {
     use fleet_core::{
         agents::{
-            AgentKind, Delegation, DelegationId, DelegationStatus, DeliveryState, ItemId, ThreadId,
-            TurnId,
+            AgentKind, Delegation, DelegationCaller, DelegationId, DelegationStatus, DeliveryState,
+            ItemId, ThreadId, TurnId,
         },
-        ids::TerminalId,
+        ids::{BoardId, CardId, TerminalId},
     };
 
     use super::*;
@@ -152,13 +163,12 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn delegation_events_need_the_peer_to_have_named_the_capability() {
-        let event = Event::DelegationChanged(Delegation {
+    fn delegation(caller: DelegationCaller) -> Delegation {
+        Delegation {
             id: DelegationId::new(),
-            caller: ThreadId::new(),
-            caller_turn: TurnId::new(),
-            caller_item: ItemId::new(),
+            caller,
+            caller_turn: Some(TurnId::new()),
+            caller_item: Some(ItemId::new()),
             child: ThreadId::new(),
             provider: AgentKind::Codex,
             depth: 1,
@@ -175,12 +185,24 @@ mod tests {
             finished: None,
             headline: None,
             usage: None,
-        });
-        let subscriptions = HashSet::from([EventKind::AgentSummary]);
-        let capable = HelloClient {
-            capabilities: vec![fleet_proto::AGENT_DELEGATION_CAPABILITY.to_owned()],
+        }
+    }
+
+    fn client_with(capabilities: &[&str]) -> HelloClient {
+        HelloClient {
+            capabilities: capabilities
+                .iter()
+                .map(|capability| (*capability).to_owned())
+                .collect(),
             ..HelloClient::default()
-        };
+        }
+    }
+
+    #[test]
+    fn delegation_events_need_the_peer_to_have_named_the_capability() {
+        let event = Event::DelegationChanged(delegation(DelegationCaller::Thread(ThreadId::new())));
+        let subscriptions = HashSet::from([EventKind::AgentSummary]);
+        let capable = client_with(&[fleet_proto::AGENT_DELEGATION_CAPABILITY]);
 
         assert!(!event_visible(
             &event,
@@ -193,6 +215,50 @@ mod tests {
             &subscriptions,
             &HashSet::new(),
             &capable,
+        ));
+    }
+
+    /// A card caller is a board fact: a peer that named `agent.delegation` and nothing about
+    /// boards keeps exactly the delegation stream it had, and never learns that card-called
+    /// records exist.
+    #[test]
+    fn a_peer_without_the_capability_never_sees_a_card_called_event() {
+        let subscriptions = HashSet::from([EventKind::AgentSummary]);
+        let thread_called =
+            Event::DelegationChanged(delegation(DelegationCaller::Thread(ThreadId::new())));
+        let card_called = Event::DelegationChanged(delegation(DelegationCaller::Card {
+            board: BoardId::try_from("engineering").expect("board id"),
+            card: CardId::try_from("card-7").expect("card id"),
+        }));
+        let delegations_only = client_with(&[fleet_proto::AGENT_DELEGATION_CAPABILITY]);
+        let both = client_with(&[
+            fleet_proto::AGENT_DELEGATION_CAPABILITY,
+            fleet_proto::response::BOARD_AUTOMATION_CAPABILITY,
+        ]);
+
+        assert!(event_visible(
+            &thread_called,
+            &subscriptions,
+            &HashSet::new(),
+            &delegations_only,
+        ));
+        assert!(!event_visible(
+            &card_called,
+            &subscriptions,
+            &HashSet::new(),
+            &delegations_only,
+        ));
+        assert!(event_visible(
+            &thread_called,
+            &subscriptions,
+            &HashSet::new(),
+            &both,
+        ));
+        assert!(event_visible(
+            &card_called,
+            &subscriptions,
+            &HashSet::new(),
+            &both,
         ));
     }
 

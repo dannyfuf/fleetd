@@ -54,10 +54,13 @@ Full flag and output reference: `references/commands.md`. Pre-flight lists:
    - In a Fleet **worktree terminal**, `FLEET_SESSION` is a worktree session, so a bare
      `--worktree` selects this worktree's board.
    - In a **native agent thread** (Claude Code or Codex started by Fleet, including every
-     subagent), `FLEET_SESSION` is the thread UUID, which is not a session. A bare `--worktree`
-     fails with `no worktree session`. Pass `--worktree=<owner/name#slug>` explicitly; find the
-     id in the sixth column of `fleet agent list` for your thread, or match your `pwd` against
-     the `path` fields of `fleet list --json`. The `=` is required.
+     subagent), `FLEET_SESSION` is the thread UUID, which is not a session; the CLI matches it
+     against the daemon's agent threads instead, so a bare `--worktree` selects the thread's
+     worktree board. It fails with `no worktree session` only when neither a session nor a thread
+     owns that id — from a plain shell, say. To name another worktree, pass
+     `--worktree=<owner/name#slug>`; find the id in the sixth column of `fleet agent list` for
+     your thread, or match your `pwd` against the `path` fields of `fleet list --json`. The `=`
+     is required when an id is passed.
    - `--board`, `--worktree`, and `--context` are mutually exclusive, and are global flags: they
      may sit before or after the subcommand.
 
@@ -163,6 +166,66 @@ fleet board --worktree=acme/api#feat-x card move FLT-1 done
 Set the selector once in a shell variable when a pass has many commands:
 `B="fleet board --worktree=acme/api#feat-x"` then `$B card move FLT-2 in-progress`.
 
+## Building a chain
+
+A **chain** is a plan the board runs by itself: columns carry actions, cards carry links, and the
+daemon starts an agent on each card as its blockers clear. It is worth building when the plan has
+real dependencies and every step can be described completely in a brief; it is not worth building
+for three cards you are about to do yourself.
+
+Give the board the pipeline once:
+
+```sh
+B="fleet board --worktree=acme/api#feat-x"
+$B columns preset workflow          # adds Ready and In review; never rewrites a column you have
+$B columns edit in-progress --on-enter prompt \
+  --instructions "Implement this card in the current worktree. Do not commit." \
+  --expect "make lint and make test pass" --on-success in-review
+$B columns                          # read it back: which columns run something, and where they route
+```
+
+Then build the cards, in this order and no other:
+
+```sh
+# 1. Create every card in Todo, the one column the preset leaves human.
+a=$($B card new "Throttle the board to one run" --provider codex | head -1 | awk '{print $1}')
+b=$($B card new "Give the column an action" --provider codex --blocked-by "$a" | head -1 | awk '{print $1}')
+c=$($B card new "Review the throttle"        --provider codex --blocked-by "$a" | head -1 | awk '{print $1}')
+d=$($B card new "Ship the workflow" --provider codex --blocked-by "$b" --blocked-by "$c" | head -1 | awk '{print $1}')
+
+# 2. Move the dependants into Ready, where `when-unblocked` will collect them.
+$B card move "$b" ready; $B card move "$c" ready; $B card move "$d" ready
+
+# 3. Start the head by hand. Nothing else can.
+$B card move "$a" in-progress
+```
+
+The rules behind that order, each of which costs a debugging hour when broken:
+
+1. **Write every link while the card is still in Todo.** A card that reaches an action column
+   before its blockers are recorded starts at once, and a run you did not want is a run you have
+   to cancel and a worktree you have to clean.
+2. **The head of a chain is moved by a person.** The engine advances the *dependants* of a card
+   it has just visited, so a card nothing blocks is released by nothing: put it in the action
+   column yourself, or start it with `card run`. Leaving it in Ready waits forever.
+3. **One card per verifiable outcome still applies.** A chain does not make a bad card good; it
+   makes a bad card run.
+4. **Watch, do not poll hard.** `board show` at phase boundaries; `card runs <key>` for one
+   card's history; `card attach <key>` plus `fleet agent tail` to read a run live. `card wait`
+   waits for the newest run of *one* card and exits 2 when none has started, so it is a barrier
+   for a run, never for a chain — for a chain, look at the board.
+5. **Never move a card that has a live run.** The move is refused, and `--cancel-run` is the
+   deliberate way to say "stop what it is doing and move it anyway".
+6. **A board runs one card at a time** unless `board set --max-live-runs N` says otherwise; every
+   run of one board edits the same checkout, so raising it is a decision about that checkout.
+7. **A run does not move its own card.** If you are a child (`FLEET_DELEGATION` is set), report
+   with `fleet subagent complete` and let the column's `on-success` route the card; `card move`
+   on your own card is refused.
+
+`make smoke-workflow` runs exactly this chain end to end against a private daemon with scripted
+agents; `scripts/board-workflow-smoke.sh` is the worked example, and it is the first thing to run
+when a chain of your own does not move.
+
 ## Reading the output
 
 `fleet board show` prints a header, then each column with its count, then one row per card:
@@ -196,7 +259,8 @@ refusal). Errors go to stderr as one line, or as a JSON error envelope when `--j
 - **A comment thread as a chat.** Comments are for the next reader, weeks later.
 - **Creating labels ad hoc.** `--label` errors; and a board with twenty one-off labels filters
   nothing.
-- **A bare `--worktree` from a native thread.** It cannot resolve; pass the id with `=`.
+- **A bare `--worktree` from a plain shell.** Nothing owns `FLEET_SESSION` there; pass the id
+  with `=`.
 - **`sync` on a local board, or after every edit on a Jira board.** Dirty cards accumulate and one
   sync pushes them all.
 

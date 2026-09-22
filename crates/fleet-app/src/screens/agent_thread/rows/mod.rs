@@ -257,7 +257,7 @@ pub(crate) fn build_rows(inputs: &RowInputs<'_>) -> BuiltRows {
         .delegations
         .values()
         .filter(|delegation| {
-            delegation.caller == projection.thread
+            delegation.caller.thread() == Some(&projection.thread)
                 && !projected_delegations.contains(&delegation.id)
         })
         .collect::<Vec<_>>();
@@ -265,7 +265,12 @@ pub(crate) fn build_rows(inputs: &RowInputs<'_>) -> BuiltRows {
     for delegation in missing_delegations {
         built.push(
             TranscriptRow::new(
-                TranscriptRowId::Item(SharedString::from(delegation.caller_item.to_string())),
+                TranscriptRowId::Item(SharedString::from(
+                    delegation
+                        .caller_item
+                        .map(|item| item.to_string())
+                        .unwrap_or_default(),
+                )),
                 TranscriptRowKind::Delegation(item::delegation_row(
                     inputs,
                     delegation.id,

@@ -6,9 +6,10 @@ list before declaring the pass done. Each item names the rule in `SKILL.md`.
 ## Before writing to a board
 
 - [ ] I know which board I am writing to and I named it explicitly (`--board`, `--worktree=…`,
-      or `--context`), or I am in a worktree terminal and a bare `--worktree` resolves. (Rule 1)
-- [ ] If I am a native agent thread or a subagent, I passed `--worktree=<owner/name#slug>` with
-      the `=`; I did not rely on a bare `--worktree`. (Rule 1)
+      or `--context`), or I am in a worktree terminal or a native agent thread and a bare
+      `--worktree` resolves. (Rule 1)
+- [ ] If I need a worktree other than the one my terminal or thread belongs to, I passed
+      `--worktree=<owner/name#slug>` with the `=`. (Rule 1)
 - [ ] I ran `fleet board show` once (human output) and read what is already planned and what is
       in progress before adding anything. (Rules 2, 3)
 - [ ] Every card I am about to create is one verifiable outcome with an imperative title and a
@@ -17,6 +18,23 @@ list before declaring the pass done. Each item names the rule in `SKILL.md`.
 - [ ] Any label I will use already exists on the board, or I added it once with
       `board set --add-label`. (Rule 10)
 - [ ] I am not creating a board just to see whether one exists. (Rule 15)
+
+## Before building a chain (a board that runs its own cards)
+
+- [ ] The plan has real dependencies and every card's brief is complete enough for an agent to
+      act on alone; otherwise I am doing this work myself. ("Building a chain")
+- [ ] The columns carry their actions and routes already — `columns preset workflow`, then
+      `columns edit`, then `columns` read back — before any card can reach one.
+- [ ] Every card was created in Todo and every `--blocked-by` / `--blocks` link was written
+      **before** the card reached an action column. (Chain rule 1)
+- [ ] The head of the chain is the one card I move by hand, or start with `card run`; nothing
+      releases a card that nothing blocks. (Chain rule 2)
+- [ ] I am watching with `board show` at phase boundaries, not polling; `card wait` is a barrier
+      for one run, never for a chain. (Chain rule 4)
+- [ ] I am not moving a card that has a live run; `--cancel-run` is the deliberate way to say
+      stop it. (Chain rule 5)
+- [ ] `board set --max-live-runs N` above 1 is a decision I made about one shared checkout, not a
+      default. (Chain rule 6)
 
 ## While working
 
@@ -49,4 +67,7 @@ list before declaring the pass done. Each item names the rule in `SKILL.md`.
 - More than one card in progress per agent → finding.
 - A comment thread used as chat → finding.
 - `card delete` on a card that had work recorded → finding.
-- A bare `--worktree` in a script that runs from a native thread → finding.
+- A bare `--worktree` in a script that may run outside a worktree terminal or agent thread →
+  finding.
+- A card that reached an action column before its links were written, or a chain left waiting in
+  Ready with no head moved by hand → finding.

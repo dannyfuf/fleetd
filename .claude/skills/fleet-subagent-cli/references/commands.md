@@ -12,6 +12,8 @@ right and this file needs the fix.
 | `FLEET_SESSION` | every native thread | The thread's UUID. `run` and `wait` use it as the default caller; `complete` requires it to be the child. |
 | `FLEET_DELEGATION` | delegated children only | The delegation id `complete` defaults to. Its presence means "I am a child". |
 | `FLEET_DELEGATION_TOKEN` | delegated children only | Bearer token `complete` presents. Never echo, forward, or set it. |
+| `FLEET_CARD` | children a board column started | The display key (`FLT-12`) of the card this run is working. `fleet board card move` on it is refused: the column's `on-success` route moves the card when the report lands. |
+| `FLEET_BOARD` | children a board column started | The board id that card belongs to. Pass it as `--board` to read the card or comment on it. |
 
 `--env` refuses any `FLEET_*` key and `PATH`. Fleet prepends the directory of a compatible
 `fleet` to the child's `PATH` itself.
@@ -85,11 +87,15 @@ brief whole. This is how a missed `wait` is recovered.
 
 ## `fleet subagent list [--caller <thread>]`
 
-One line per delegation, eight tab-separated fields:
+One line per delegation, nine tab-separated fields:
 
 ```text
-<id>  <status>  <provider>  <child thread>  <duration>  <total tokens|->  <cost|->  <delivery>
+<id>  <status>  <provider>  <child thread>  <duration>  <total tokens|->  <cost|->  <delivery>  <caller>
 ```
+
+`<caller>` is `thread <id>` for a child a thread delegated and `card <KEY>` for one a board
+column's automation started; a card whose display key could not be resolved prints its card id,
+which every `fleet board card` verb still accepts.
 
 `--json` elides every brief over 200 characters and sets `briefElided` if any was cut. Usage is
 the child's own thread only, never its descendants.
@@ -124,6 +130,7 @@ doing, not to read its report; `status` prints the report.
 | `pending` | Terminal result not yet handed to the caller. |
 | `delivered` | Injected into the caller as a user message. |
 | `consumed` | The caller took it through its own `wait`; no message will follow. |
+| `recorded` | A **card** caller's terminal delivery: the board write that recorded the run's outcome committed. No message is injected anywhere, because a card has no transcript. |
 | `undeliverable` | The caller is gone or cannot be resumed; `status` shows the reason. |
 
 ## Limits

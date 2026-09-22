@@ -30,6 +30,7 @@ pub fn apply_board_patch(
         default_repo_id,
         settings
     );
+    normalise_automation(&mut next.statuses);
     validate_board(&next)?;
     if next == *board {
         return Ok(false);
@@ -37,6 +38,24 @@ pub fn apply_board_patch(
     next.updated_at = now.into();
     *board = next;
     Ok(true)
+}
+
+/// Drops an automation block that asks for nothing, so an emptied column reads as automating
+/// nothing.
+///
+/// Every surface asks `status.automation.is_some()` — the column glyph, the entry rule, the
+/// document version — and a block whose every field a user has just cleared would keep all
+/// three answering yes, and keep the document at version 2 forever.
+pub fn normalise_automation(statuses: &mut [Status]) {
+    for status in statuses {
+        if status
+            .automation
+            .as_ref()
+            .is_some_and(ColumnAutomation::is_empty)
+        {
+            status.automation = None;
+        }
+    }
 }
 
 /// Parses repeated `k=v` settings and merges them into a backend settings object.
@@ -107,7 +126,9 @@ pub fn apply_card_patch(
         due_date,
         parent_id,
         repo_id,
-        archived
+        archived,
+        agent,
+        blocked_by
     );
     if let Some(properties) = patch.properties {
         for (key, value) in properties {

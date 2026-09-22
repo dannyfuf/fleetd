@@ -1,5 +1,8 @@
 use super::{Result, expect_ack, unexpected};
-use crate::{Client, connection::worktree_board_capability_error};
+use crate::{
+    Client,
+    connection::{board_automation_capability_error, worktree_board_capability_error},
+};
 use fleet_core::{
     board::{
         BackendDescriptor, BackendRef, BackendSchema, BoardPatch, BoardSummary, BoardView, Card,
@@ -10,7 +13,7 @@ use fleet_core::{
 };
 use fleet_proto::{
     request::RequestBody,
-    response::{BOARD_WORKTREE_CAPABILITY, ResponseBody},
+    response::{BOARD_AUTOMATION_CAPABILITY, BOARD_WORKTREE_CAPABILITY, ResponseBody},
 };
 
 impl Client {
@@ -148,22 +151,68 @@ impl Client {
     }
 
     /// Moves a card to a status, optionally at a position inside its column.
+    ///
+    /// `cancel_run` decides what happens when the card has a live run: `false` refuses the move,
+    /// `true` cancels the run and moves the card anyway.
     pub async fn move_card(
         &self,
         card_id: CardId,
         status_id: StatusId,
         index: Option<usize>,
+        cancel_run: bool,
     ) -> Result<Card> {
         match self
             .request(RequestBody::MoveCard {
                 card_id,
                 status_id,
                 index,
+                cancel_run,
             })
             .await?
         {
             ResponseBody::Card(value) => Ok(value),
             response => Err(unexpected("move_card", response)),
+        }
+    }
+
+    /// Starts the run the card's column asks for, now.
+    pub async fn card_run_start(&self, card_id: CardId) -> Result<Card> {
+        self.require_board_automation_capability()?;
+        match self.request(RequestBody::CardRunStart { card_id }).await? {
+            ResponseBody::Card(value) => Ok(value),
+            response => Err(unexpected("card_run_start", response)),
+        }
+    }
+
+    /// Cancels the card's live run, or the slot it is waiting for.
+    pub async fn card_run_cancel(&self, card_id: CardId) -> Result<Card> {
+        self.require_board_automation_capability()?;
+        match self.request(RequestBody::CardRunCancel { card_id }).await? {
+            ResponseBody::Card(value) => Ok(value),
+            response => Err(unexpected("card_run_cancel", response)),
+        }
+    }
+
+    /// Waits up to `timeout_ms` for the card's run to end, answering the card either way.
+    pub async fn card_run_wait(&self, card_id: CardId, timeout_ms: u64) -> Result<Card> {
+        self.require_board_automation_capability()?;
+        match self
+            .request(RequestBody::CardRunWait {
+                card_id,
+                timeout_ms,
+            })
+            .await?
+        {
+            ResponseBody::Card(value) => Ok(value),
+            response => Err(unexpected("card_run_wait", response)),
+        }
+    }
+
+    fn require_board_automation_capability(&self) -> Result<()> {
+        if self.supports_capability(BOARD_AUTOMATION_CAPABILITY) {
+            Ok(())
+        } else {
+            Err(board_automation_capability_error())
         }
     }
 

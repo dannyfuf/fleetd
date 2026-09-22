@@ -27,9 +27,13 @@ pub(crate) fn seed(state: &Entity<AppState>, cx: &mut App) {
         .and_then(|card| current_value(card, &kind_now))
         .filter(|value| !value.is_empty());
     let at = current.as_ref().and_then(|current| {
-        options(state.read(cx), &kind_now)
-            .iter()
-            .position(|option| option.value == *current)
+        options(
+            state.read(cx),
+            &kind_now,
+            card.as_ref().map(|card| &card.id),
+        )
+        .iter()
+        .position(|option| option.value == *current)
     });
     let schema = property_kind(state.read(cx), &kind_now);
     let query = match (&at, &current) {
@@ -55,6 +59,17 @@ pub(crate) fn seed(state: &Entity<AppState>, cx: &mut App) {
         );
         input
     });
+    // The `Blocks` picker opens on the cards that wait for this one, which no card stores:
+    // `ops::query::blocks` derives that direction from everyone else's blockers, and the
+    // selection has to be seeded before the dialog takes the board's borrow.
+    let dependants: Vec<String> = card.as_ref().map_or_else(Vec::new, |card| {
+        state.read(cx).board().map_or_else(Vec::new, |view| {
+            fleet_core::board::blocks(&view.cards, &card.id)
+                .into_iter()
+                .map(|other| other.id.as_str().to_owned())
+                .collect()
+        })
+    });
     let host = crate::dialogs::host::host_for(state, cx);
     host.update(cx, |host, _| {
         let kind = host.card_picker.kind.clone();
@@ -66,6 +81,12 @@ pub(crate) fn seed(state: &Entity<AppState>, cx: &mut App) {
                 .iter()
                 .map(|id| id.as_str().to_owned())
                 .collect(),
+            (PickerKind::BlockedBy, Some(card)) => card
+                .blocked_by
+                .iter()
+                .map(|id| id.as_str().to_owned())
+                .collect(),
+            (PickerKind::Blocks, Some(_)) => dependants.clone(),
             (PickerKind::Property(key), Some(card)) => match card.properties.get(key) {
                 Some(PropertyValue::MultiSelect(values)) => values.clone(),
                 _ => Vec::new(),
@@ -159,11 +180,11 @@ pub(super) fn apply(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
     let Some(card_id) = draft.card_id.clone() else {
         return;
     };
-    if !state
+    let card = state
         .read(cx)
         .board()
-        .is_some_and(|view| view.cards.iter().any(|card| card.id == card_id))
-    {
+        .and_then(|view| view.cards.iter().find(|card| card.id == card_id).cloned());
+    let Some(card) = card else {
         // A reload can drop the card out from under an open picker. Every other refusal in this
         // dialog says so; returning silently makes `Enter` a dead key with nothing to read.
         with_host(state, cx, |host| {
@@ -171,20 +192,32 @@ pub(super) fn apply(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
         });
         notify(state, cx);
         return;
-    }
+    };
     let schema = property_kind(state.read(cx), &draft.kind);
     if let Some(message) = free_text_error(&draft.kind, query.trim(), schema) {
         with_host(state, cx, |host| host.card_picker.error = Some(message));
         notify(state, cx);
         return;
     }
-    let chosen = prepared(state, cx)
-        .get(draft.cursor)
-        .map(|option| option.value.clone());
+    let row = prepared(state, cx).get(draft.cursor).cloned();
     // A multi-select applies `draft.selected`, not the row under the cursor: filtering the list
     // down to nothing after toggling still leaves a perfectly good set to send, and a board with
     // no labels at all would otherwise make `t` a picker that can never apply anything.
     let multi = draft.kind.is_multi_select(schema);
+    // A listed row that cannot be taken refuses `Enter` the way it refuses `space`: the dialog
+    // stays open with the row's own reason on the error line (contracts §5.3). A multi-select
+    // never applies the row under the cursor, and `toggle` already kept it out of the set.
+    if let Some(row) = row.as_ref().filter(|row| row.disabled && !multi) {
+        let reason = row
+            .detail
+            .clone()
+            .unwrap_or_else(|| "cannot be picked".to_owned());
+        let message = format!("{} \u{2014} {reason}", row.label);
+        with_host(state, cx, |host| host.card_picker.error = Some(message));
+        notify(state, cx);
+        return;
+    }
+    let chosen = row.map(|option| option.value);
     // A kind whose values are a fixed list takes no typed one: falling back to the query would
     // send a status or label the board does not have and wait for the daemon to say so.
     if chosen.is_none() && !multi && !accepts_free_text(&draft.kind, schema) {
@@ -203,7 +236,21 @@ pub(super) fn apply(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
         notify(state, cx);
         return;
     }
-    let Some(request) = request_for(&draft, &card_id, &value, schema) else {
+    // The picker returns to the card detail when it came from there, and that dialog's scrim
+    // covers the status bar: the refusal has to follow the surface the user is left looking at.
+    let refusal = board::Refusal::for_detail(draft.then_detail, &card_id);
+
+    // `Blocks` is the one kind that does not patch the card it was opened on: the link lives on
+    // each dependant, so the set turns into one `UpdateCard` per card whose membership changed
+    // (contracts §5.3).
+    if matches!(draft.kind, PickerKind::Blocks) {
+        let updates = blocks_updates(state.read(cx), &card, &draft.selected);
+        send_each(state, bridge, updates, refusal, cx);
+        close(state, cx);
+        return;
+    }
+
+    let Some(request) = request_for(&draft, &card_id, &value, schema, card.agent.as_ref()) else {
         with_host(state, cx, |host| {
             host.card_picker.error = Some(format!("`{value}` is not a valid value"));
         });
@@ -211,9 +258,6 @@ pub(super) fn apply(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
         return;
     };
 
-    // The picker returns to the card detail when it came from there, and that dialog's scrim
-    // covers the status bar: the refusal has to follow the surface the user is left looking at.
-    let refusal = board::Refusal::for_detail(draft.then_detail, &card_id);
     if draft.then_worktree {
         // §8's `w` asked for a repository first: one request links the repo and creates the
         // worktree, so the daemon can never see the create before the repo it needs.
@@ -255,12 +299,109 @@ pub(super) fn close(state: &Entity<AppState>, cx: &mut App) {
     });
 }
 
+/// The `UpdateCard`s that make the card's dependants match the `Blocks` picker's set.
+///
+/// Only the cards whose membership actually changed are in the list: re-sending the blockers
+/// of every other card on the board would touch documents the user never edited, and each one
+/// is an activity entry somebody has to read. The order is the cards' own key order, so a
+/// refusal partway through stops at a card the user can name.
+#[must_use]
+pub(super) fn blocks_updates(
+    state: &AppState,
+    card: &fleet_core::board::Card,
+    selected: &[String],
+) -> Vec<(CardId, Vec<CardId>)> {
+    let Some(view) = state.board() else {
+        return Vec::new();
+    };
+    let mut updates: Vec<(String, CardId, Vec<CardId>)> = Vec::new();
+    for other in view.cards.iter().filter(|other| other.id != card.id) {
+        let blocked = other.blocked_by.contains(&card.id);
+        let wanted = selected.iter().any(|value| value == other.id.as_str());
+        if blocked == wanted {
+            continue;
+        }
+        let mut links = other.blocked_by.clone();
+        if wanted {
+            links.push(card.id.clone());
+        } else {
+            links.retain(|blocker| *blocker != card.id);
+        }
+        updates.push((other.display_key(&view.board), other.id.clone(), links));
+    }
+    updates.sort_by(|left, right| left.0.cmp(&right.0));
+    updates
+        .into_iter()
+        .map(|(_, card_id, links)| (card_id, links))
+        .collect()
+}
+
+/// Sends one `UpdateCard` per entry, in order, stopping at the first refusal.
+///
+/// Sequential rather than fired all at once because the contract is "stop at the first
+/// refusal": a batch would leave the user with one sentence and no way to tell which of the
+/// other cards it did or did not reach. Everything patched before the refusal stays patched —
+/// the daemon accepted those — and the sentence is the daemon's own, on the surface the picker
+/// returned to.
+pub(super) fn send_each(
+    state: &Entity<AppState>,
+    bridge: &Bridge,
+    updates: Vec<(CardId, Vec<CardId>)>,
+    refusal: board::Refusal,
+    cx: &mut App,
+) {
+    if updates.is_empty() {
+        return;
+    }
+    let state = state.clone();
+    let bridge = bridge.clone();
+    cx.spawn(async move |cx| {
+        for (card_id, blocked_by) in updates {
+            let reply = bridge.request(RequestBody::UpdateCard {
+                card_id,
+                patch: CardPatch {
+                    blocked_by: Some(blocked_by),
+                    ..CardPatch::default()
+                },
+            });
+            let answer = match reply.recv().await {
+                Ok(answer) => answer,
+                Err(error) => {
+                    let message = format!("Board request channel closed: {error}");
+                    cx.update(|cx| refusal.clone().report(&state, message, cx));
+                    return;
+                }
+            };
+            match answer {
+                Ok(ResponseBody::Card(card)) => cx.update(|cx| {
+                    state.update(cx, |app, cx| {
+                        app.apply_card(card);
+                        cx.notify();
+                    });
+                }),
+                Ok(_) => cx.update(|cx| {
+                    state.update(cx, |app, cx| {
+                        app.board_stale = true;
+                        cx.notify();
+                    });
+                }),
+                Err(error) => {
+                    cx.update(|cx| refusal.clone().report(&state, error.message, cx));
+                    return;
+                }
+            }
+        }
+    })
+    .detach();
+}
+
 /// The request one applied pick turns into.
 pub(super) fn request_for(
     draft: &CardPickerState,
     card_id: &CardId,
     value: &str,
     schema: Option<PropertyKind>,
+    agent: Option<&CardAgentPrefs>,
 ) -> Option<RequestBody> {
     let empty = value.is_empty();
     let patch = |patch: CardPatch| {
@@ -274,6 +415,7 @@ pub(super) fn request_for(
             card_id: card_id.clone(),
             status_id: StatusId::try_from(value).ok()?,
             index: None,
+            cancel_run: false,
         }),
         PickerKind::Priority => patch(CardPatch {
             priority: Some(parse_priority(value)?),
@@ -324,6 +466,43 @@ pub(super) fn request_for(
                 ..CardPatch::default()
             })
         }
+        PickerKind::BlockedBy => patch(CardPatch {
+            // The whole set, the way labels send the whole set: a blocker the daemon no longer
+            // knows drops out here rather than travelling as an id nothing resolves.
+            blocked_by: Some(
+                draft
+                    .selected
+                    .iter()
+                    .filter_map(|id| CardId::try_from(id.as_str()).ok())
+                    .collect(),
+            ),
+            ..CardPatch::default()
+        }),
+        // `Blocks` writes the dependants, not this card: `apply` sends that sequence itself and
+        // never reaches here.
+        PickerKind::Blocks => None,
+        PickerKind::Provider | PickerKind::Model | PickerKind::Effort => {
+            // One field of the card's whole `agent` block is replaced and the block is sent
+            // whole, so the last writer wins exactly as it does for labels (contracts §5.3).
+            let mut prefs = agent.cloned().unwrap_or_default();
+            match &draft.kind {
+                PickerKind::Provider => {
+                    prefs.provider = if empty {
+                        None
+                    } else {
+                        Some(parse_provider(value)?)
+                    };
+                }
+                PickerKind::Model => prefs.model = (!empty).then(|| value.to_owned()),
+                _ => prefs.effort = (!empty).then(|| value.to_owned()),
+            }
+            patch(CardPatch {
+                // An empty block is no block at all: once the last of the three is back on the
+                // column's default, `Some(None)` takes the override off the card entirely.
+                agent: Some((!prefs.is_empty()).then_some(prefs)),
+                ..CardPatch::default()
+            })
+        }
     }
 }
 
@@ -346,6 +525,17 @@ pub(super) fn property_value(
         PropertyKind::User => PropertyValue::User(value.to_owned()),
         PropertyKind::Url => PropertyValue::Url(value.to_owned()),
     })
+}
+
+/// The provider a picker row's value names, spelled the way the row reads it.
+///
+/// `AgentKind` has no parser of its own: the two harnesses are named by their executable
+/// everywhere a person types one, and the picker offers no other word.
+#[must_use]
+pub(super) fn parse_provider(value: &str) -> Option<AgentKind> {
+    [AgentKind::Claude, AgentKind::Codex]
+        .into_iter()
+        .find(|provider| provider.executable() == value)
 }
 
 /// The priority a picker row's value names.

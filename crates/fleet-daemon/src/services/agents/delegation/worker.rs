@@ -9,9 +9,12 @@ use std::collections::HashSet;
 use crate::services::agents::store::{OutboxAction, OutboxRow, delegations};
 use anyhow::Context as _;
 use chrono::Utc;
-use fleet_core::agents::{
-    Delegation, DelegationStatus, DeliveryState, ItemPatch, ItemPayloadPatch, ItemStatus,
-    MessageOrigin, ResultSource, SessionState, StopCause, UserInput,
+use fleet_core::{
+    agents::{
+        Delegation, DelegationCaller, DelegationStatus, DeliveryState, ItemPatch, ItemPayloadPatch,
+        ItemStatus, MessageOrigin, ResultSource, SessionState, StopCause, ThreadId, UserInput,
+    },
+    ids::BoardId,
 };
 use fleet_proto::error::ErrorKind;
 
@@ -21,6 +24,27 @@ use super::{
     limits::SETTLE_GRACE,
 };
 use crate::services::agents::manager::SubmissionState;
+
+/// What the drain throttles on: at most one performed row per key per pass.
+///
+/// A thread caller is keyed on itself, so two child results cannot land in one transcript in a
+/// single pass. A card caller is keyed on its **board**, not its card: the board document is the
+/// one thing two cards' deliveries contend for, so two cards of one board record one after the
+/// other while two boards record together.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ThrottleKey {
+    Thread(ThreadId),
+    Board(BoardId),
+}
+
+impl From<&DelegationCaller> for ThrottleKey {
+    fn from(caller: &DelegationCaller) -> Self {
+        match caller {
+            DelegationCaller::Thread(thread) => Self::Thread(*thread),
+            DelegationCaller::Card { board, .. } => Self::Board(board.clone()),
+        }
+    }
+}
 
 /// Performs one oldest open row per caller.
 ///
@@ -64,7 +88,7 @@ pub(super) async fn drain(service: &DelegationService) -> anyhow::Result<()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .retain(|row| open.contains(row));
     rows.sort_by_key(|row| (row.action != OutboxAction::CancelChildren, row.id));
-    let mut callers = HashSet::new();
+    let mut callers: HashSet<ThrottleKey> = HashSet::new();
 
     for row in rows {
         let Some(delegation) = service.inner.store.delegation(row.delegation).await? else {
@@ -79,10 +103,14 @@ pub(super) async fn drain(service: &DelegationService) -> anyhow::Result<()> {
             );
             continue;
         };
-        if row.action != OutboxAction::CancelChildren && !callers.insert(delegation.caller) {
+        // Cancellation is not a delivery: it writes to the child, never to the caller, so it is
+        // never held back by another row of the same caller.
+        if row.action != OutboxAction::CancelChildren
+            && !callers.insert(ThrottleKey::from(&delegation.caller))
+        {
             continue;
         }
-        let caller = delegation.caller;
+        let caller = delegation.caller.clone();
         let child = delegation.child;
 
         tracing::info!(
@@ -150,12 +178,22 @@ async fn mirror(
     row: &OutboxRow,
     delegation: Delegation,
 ) -> anyhow::Result<()> {
+    // Mirroring writes the child's status onto the caller's transcript item. A card caller has
+    // neither a thread nor an item, and the board learns the same fact from `DelegationChanged`,
+    // so the row is closed and nothing is written.
+    let (Some(caller), Some(caller_item)) =
+        (delegation.caller.thread().copied(), delegation.caller_item)
+    else {
+        finish_row(service, row.id).await?;
+        service.publish_changed(delegation);
+        return Ok(());
+    };
     service
         .inner
         .manager
         .patch_item(
-            delegation.caller,
-            delegation.caller_item,
+            caller,
+            caller_item,
             status_patch(delegation.status),
             terminal_item_status(delegation.status),
         )
@@ -389,12 +427,22 @@ async fn deliver(
     if row_in_flight(service, row.id) {
         return Ok(());
     }
+    if delegation.caller.is_card() {
+        return deliver_to_card(service, row, delegation).await;
+    }
+    // A thread caller stores its transcript item when the delegation is created. A row without
+    // one has nothing to patch and nothing to inject into, so closing it is all that is left.
+    let (Some(caller), Some(caller_item)) =
+        (delegation.caller.thread().copied(), delegation.caller_item)
+    else {
+        return finish_row(service, row.id).await;
+    };
     if let Err(error) = service
         .inner
         .manager
         .patch_item(
-            delegation.caller,
-            delegation.caller_item,
+            caller,
+            caller_item,
             status_patch(delegation.status),
             terminal_item_status(delegation.status),
         )
@@ -421,13 +469,13 @@ async fn deliver(
         tracing::info!(
             target: "fleet::agents",
             delegation = %delegation.id,
-            caller = %delegation.caller,
+            caller = %caller,
             "skipped delivery injection for a result the caller already read",
         );
         return finish_row(service, row.id).await;
     }
 
-    let record = match service.inner.manager.record(delegation.caller).await {
+    let record = match service.inner.manager.record(caller).await {
         Ok(record) => record,
         Err(error) if error.kind == ErrorKind::NotFound => {
             return make_undeliverable(
@@ -440,7 +488,7 @@ async fn deliver(
         }
         Err(error) => return Err(error.into()),
     };
-    let projection = service.inner.manager.projection(delegation.caller).await?;
+    let projection = service.inner.manager.projection(caller).await?;
 
     // An open caller gate wins over every session state. Sending while it is open could answer a
     // question or permission prompt instead of starting the result turn.
@@ -490,7 +538,7 @@ async fn deliver(
         item: Some(item),
         ..UserInput::default()
     };
-    match durable_submission_state(service, row, delegation.caller, item).await? {
+    match durable_submission_state(service, row, caller, item).await? {
         SubmissionState::Committed => {
             finish_row(service, row.id).await?;
             return Ok(());
@@ -502,16 +550,70 @@ async fn deliver(
         return Ok(());
     };
     mark_submission(service, row.id).await?;
-    match service
-        .inner
-        .manager
-        .send_durable(delegation.caller, input)
-        .await
-    {
+    match service.inner.manager.send_durable(caller, input).await {
         Ok(_) => Ok(()),
         Err(error) if error.kind == ErrorKind::Conflict => Ok(()),
         Err(error) => Err(anyhow::Error::new(error)),
     }
+}
+
+/// Records a terminal card run on its board, and closes the row only once that write committed.
+///
+/// None of the thread path applies here: a card has no transcript item to patch, no gate that
+/// could answer the wrong prompt, no session to resume and no user message to inject. The board
+/// write *is* the delivery, so the hook's `Ok` is the only thing that closes the row — an `Err`
+/// leaves it open and the next drain asks again, which is why the hook must be idempotent by
+/// delegation id.
+async fn deliver_to_card(
+    service: &DelegationService,
+    row: &OutboxRow,
+    delegation: Delegation,
+) -> anyhow::Result<()> {
+    let Some((board, card)) = delegation
+        .caller
+        .card()
+        .map(|(board, card)| (board.clone(), card.clone()))
+    else {
+        // Unreachable: `deliver` routes only a card caller here. Closing the row is still safer
+        // than leaving one open that no later pass could ever perform.
+        return finish_row(service, row.id).await;
+    };
+    let Some(hook) = service.run_delivery_hook() else {
+        // Either composition installed no boards service, or it has been dropped. Neither can
+        // change while this daemon runs, so the delivery is durably failed rather than retried
+        // for the life of the process.
+        return make_undeliverable(service, row.id, delegation, "no board service".to_owned())
+            .await;
+    };
+    hook.on_run_delivered(&board, &card, &delegation)
+        .await
+        .with_context(|| format!("record card run {} on card {board}/{card}", delegation.id))?;
+
+    let delegation_id = delegation.id;
+    let recorded = service
+        .inner
+        .store
+        .delegation_write("record a card run's delivery", move |tx| {
+            let Some(mut current) = delegations::get(tx, delegation_id)? else {
+                anyhow::bail!("delegation {delegation_id} does not exist");
+            };
+            let now = Utc::now();
+            current.delivery = DeliveryState::Recorded;
+            delegations::update(tx, &current)?;
+            // No wake: this closes the delivery work rather than opening new work.
+            delegations::mark_done_for(tx, delegation_id, OutboxAction::Deliver, now)?;
+            Ok((current, false))
+        })
+        .await?;
+    tracing::info!(
+        target: "fleet::agents",
+        delegation = %recorded.id,
+        caller = %recorded.caller,
+        child = %recorded.child,
+        "recorded a card run's outcome on its board",
+    );
+    service.publish_changed(recorded);
+    Ok(())
 }
 
 fn row_in_flight(service: &DelegationService, row: i64) -> bool {

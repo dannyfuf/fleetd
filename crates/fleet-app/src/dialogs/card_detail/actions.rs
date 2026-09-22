@@ -15,6 +15,15 @@ pub(super) fn enter(
         Some(CardEdit::Description | CardEdit::Comment) => return,
         None => {}
     }
+    let draft = read_host(state, cx, |host, _| host.card_detail.clone());
+    if let Enter::Unfold(folded) = enter_target(card(state.read(cx), &draft), &draft) {
+        with_host(state, cx, |host| {
+            host.card_detail.expanded_reports.extend(folded);
+        });
+        notify(state, cx);
+        cx.stop_propagation();
+        return;
+    }
     let row = read_host(state, cx, |host, _| host.card_detail.property_row);
     let selected = targets.get(row);
     match selected.map(|row| &row.target) {

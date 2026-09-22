@@ -136,6 +136,14 @@ impl AppState {
             DaemonLink::Starting | DaemonLink::Lost { .. } => changed = true,
             DaemonLink::Connected | DaemonLink::Failed { .. } => {}
         }
+        // A wait turning amber and a card falling due for attention are the two board facts
+        // no event announces, so the board's marks are re-derived on the clock like the
+        // toasts — but only while a surface is drawing them, and only a real change repaints.
+        if self.board_is_shown() {
+            let revision = self.board.marks.revision;
+            self.refresh_card_marks(chrono::Utc::now());
+            changed |= self.board.marks.revision != revision;
+        }
         changed
     }
 
@@ -169,7 +177,14 @@ impl AppState {
             }
             BridgeEvent::AgentSeenCursors(cursors) => self.agents.seed_seen(&cursors),
             BridgeEvent::AgentClosedThreads(threads) => self.agents.seed_closed(threads),
-            BridgeEvent::Delegations(delegations) => self.agents.seed_delegations(delegations),
+            BridgeEvent::Delegations(delegations) => {
+                // The census is one of the two inputs the tile marks are folded from, so a
+                // board already on screen when it lands has to be re-derived against it.
+                self.agents.seed_delegations(delegations);
+                if self.board_is_shown() {
+                    self.refresh_card_marks(chrono::Utc::now());
+                }
+            }
             BridgeEvent::ConnectFailed {
                 message,
                 log_tail,
@@ -300,7 +315,16 @@ impl AppState {
                 self.notify_agent_attention(now);
             }
             Event::AgentSummary(summary) => self.apply_agent_summary(summary, now),
-            Event::DelegationChanged(delegation) => self.agents.apply_delegation(delegation),
+            Event::DelegationChanged(delegation) => {
+                // A card's own run: the tile's mark is joined from this mirror, so the record
+                // landing is the only notice the board gets that a child went blocked or came
+                // back. A thread's delegation changes no card and re-derives nothing.
+                let card_called = delegation.caller.is_card();
+                self.agents.apply_delegation(delegation);
+                if card_called && self.board_is_shown() {
+                    self.refresh_card_marks(chrono::Utc::now());
+                }
+            }
             // Backpressure dropped this connection's tail for one thread. Re-opening from the
             // cursor the daemon names is the whole repair, and it is never a silent drop.
             Event::AgentResync { thread, from_seq } => {

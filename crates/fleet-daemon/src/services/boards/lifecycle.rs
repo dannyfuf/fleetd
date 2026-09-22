@@ -33,7 +33,7 @@ impl Boards {
                 .write()
                 .await
                 .extend(doc.cards.iter().map(|c| (c.id.clone(), id.clone())));
-            summaries.push(summarize(&doc.board, &doc.cards));
+            summaries.push(summarize(&doc.board, &doc.cards, &[], &self.now()));
         }
         Ok(summaries)
     }
@@ -63,9 +63,13 @@ impl Boards {
             }
             scrub_repo(&state, &context, &mut card.repo_id);
         }
+        // The card index is not held across the delegation read: the join asks another service.
+        drop(index);
+        let live_runs = self.live_runs(id).await;
         Ok(BoardView {
             board: doc.board,
             cards: doc.cards,
+            live_runs,
         })
     }
 
@@ -102,6 +106,9 @@ impl Boards {
         Ok(BoardView {
             board: doc.board,
             cards: doc.cards,
+            // A board created by this call has no cards, so nothing can have called a run.
+            // Every *existing*-board path above returns through `get`, which joins them.
+            live_runs: Vec::new(),
         })
     }
 
@@ -142,6 +149,9 @@ impl Boards {
         Ok(BoardView {
             board: doc.board,
             cards: doc.cards,
+            // A board created by this call has no cards, so nothing can have called a run.
+            // Every *existing*-board path above returns through `get`, which joins them.
+            live_runs: Vec::new(),
         })
     }
 
@@ -187,7 +197,7 @@ impl Boards {
                         .write()
                         .await
                         .extend(doc.cards.iter().map(|c| (c.id.clone(), id.clone())));
-                    let summary = summarize(&doc.board, &doc.cards);
+                    let summary = summarize(&doc.board, &doc.cards, &[], &self.now());
                     if let Some(stamp) = stamp {
                         self.summaries
                             .write()
@@ -443,7 +453,7 @@ impl Boards {
     /// board no longer talks to. Both are dropped before the patch is applied, so a client
     /// that echoes back the settings it was showing cannot smuggle them into the new kind.
     pub async fn update(&self, id: &BoardId, patch: BoardPatch) -> DaemonResult<BoardView> {
-        let _guard = self.gate(id).await;
+        let guard = self.gate(id).await;
         let mut doc = self.load(id)?;
         let backend_before = doc.board.backend.clone();
         self.validate_repo(
@@ -500,11 +510,38 @@ impl Boards {
                 doc.board.sync.cursor = None;
             }
         }
-        if !apply_board_patch(&mut doc.board, patch, &self.now())? {
+        // The columns as they were, so what the patch did to them can be read off afterwards:
+        // which went away, which lost their action, and which changed category.
+        let before = doc.board.statuses.clone();
+        let throttle_before = doc.board.settings.max_live_runs;
+        let now = self.now();
+        if !apply_board_patch(&mut doc.board, patch, &now)? {
             // A patch that changes nothing writes nothing and announces nothing, exactly as an
             // empty card patch and a no-op move do.
             return self.get(id).await;
         }
+        // Automation is a worktree, local, host-free affair (contracts §1.7). The three rules
+        // are checked on what the patch produced, and only when the patch asked for automation
+        // at all: a board whose worktree a host adopted afterwards must stay renamable, and
+        // must stay able to give its automation up.
+        if asks_for_automation(&before, &doc.board, throttle_before) {
+            self.require_automatable(&doc.board).await?;
+        }
+        // A column a run started in cannot be taken away under it: the run's own row names that
+        // column, and nothing left on the card would say where the work is happening. The
+        // refusal comes before the in-use check below, which would otherwise answer the same
+        // situation with the column's cards instead of its runs.
+        if let Some(live) = removed_column_live_runs(&before, &doc.board, &doc.cards) {
+            return Err(DaemonError::Conflict(format!(
+                "column has {live} live runs; cancel them first"
+            )));
+        }
+        // A card parked for a column that no longer runs anything is waiting for a run that can
+        // never come, so the park goes and the activity says why.
+        clear_stranded_pending_runs(&before, &doc.board, &mut doc.cards, &now);
+        // The seeds this patch owes the engine: a column's category is what makes the cards in
+        // it satisfy their dependants, so changing it can release work anywhere on the board.
+        let seeds = recategorised_cards(&before, &doc.board, &doc.cards);
         for card in &doc.cards {
             if !doc
                 .board
@@ -566,8 +603,59 @@ impl Boards {
                 card.dirty = false;
             }
         }
+        // The same walk every card-writing trigger site makes, over the board's own reservation.
+        // The tail is spelled out here rather than shared with `cards::commit` because this path
+        // saves with `Updated` rather than `CardChanged`: the moves and the parks land in
+        // `doc.cards` in memory, and the starts are handed back for after the gate.
+        let plan = self
+            .evaluate_with_reservation(&mut doc, &seeds, &now)
+            .await?;
         self.save(&doc, BoardChangeReason::Updated).await?;
+        self.note_pending(
+            &doc.board.id,
+            doc.cards.iter().any(|card| card.pending_run.is_some()),
+        )
+        .await;
+        // `start_for_card` re-acquires this same gate to record what the delegation service
+        // answered, and the gates are not reentrant (`docs/BOARD.md` §4).
+        drop(guard);
+        self.apply_starts(&doc.board.id, plan).await?;
         self.get(id).await
+    }
+
+    /// Refuses column automation on a board that cannot run it (contracts §1.7).
+    ///
+    /// Three rules, in the order a person meets them: a run happens *in* a worktree, it is
+    /// started by this daemon's own agents, and it must never be started for a tree another
+    /// host owns. The same three run again when a card enters an action column, because a
+    /// worktree can be adopted by a host long after its board was configured.
+    ///
+    /// # Errors
+    ///
+    /// `Validation` carrying whichever of the three sentences applies.
+    pub(crate) async fn require_automatable(&self, board: &Board) -> DaemonResult<()> {
+        let Some(worktree) = board.worktree_id.as_ref() else {
+            return Err(refused_automation(
+                "automation is available on worktree boards only",
+            ));
+        };
+        if !board.backend.is_local() {
+            return Err(refused_automation(
+                "automation is available on local boards only",
+            ));
+        }
+        let state = self.state_store.load().await?;
+        // The mirror counts here, unlike board *scope*: a worktree this daemon published and one
+        // it merely mirrors are both answers to "who owns the tree this run would touch".
+        if let Some(host) = self
+            .known_worktree(&state, worktree)
+            .and_then(|worktree| worktree.host)
+        {
+            return Err(refused_automation(&format!(
+                "automation is unavailable on a worktree owned by host {host}"
+            )));
+        }
+        Ok(())
     }
 
     /// Moves a board document to trash and removes its card lookup entries.
@@ -744,6 +832,118 @@ impl RepoContextMover for Boards {
     ) -> DaemonResult<fleet_core::model::Repo> {
         Boards::move_repo_to_context(self, repo, context).await
     }
+}
+
+/// One of the three `automation` refusals of contracts §1.7, in the words every surface prints.
+fn refused_automation(reason: &str) -> DaemonError {
+    BoardError::Invalid {
+        field: "automation".into(),
+        reason: reason.into(),
+    }
+    .into()
+}
+
+/// Whether the patch turned automation on, or turned it up, rather than leaving it alone.
+///
+/// Only a patch that asks for automation is held to the three rules. Holding every patch to
+/// them would strand a board whose worktree a host adopted after the fact: it could no longer
+/// be renamed, and — worse — its automation could no longer be taken off.
+fn asks_for_automation(before: &[Status], board: &Board, throttle_before: Option<u32>) -> bool {
+    if board.settings.max_live_runs.is_some() && board.settings.max_live_runs != throttle_before {
+        return true;
+    }
+    board.statuses.iter().any(|status| {
+        status.automation.is_some()
+            && before
+                .iter()
+                .find(|old| old.id == status.id)
+                .is_none_or(|old| old.automation != status.automation)
+    })
+}
+
+/// How many live runs the first column this patch removes still owns, when it owns any.
+///
+/// A run records the column it started in, so a column with live runs cannot be taken away: the
+/// run would outlive the only thing that says what it is doing.
+fn removed_column_live_runs(before: &[Status], board: &Board, cards: &[Card]) -> Option<usize> {
+    before
+        .iter()
+        .filter(|old| !board.statuses.iter().any(|status| status.id == old.id))
+        .map(|removed| {
+            cards
+                .iter()
+                .filter(|card| {
+                    latest_run(card).is_some_and(|run| run.is_live() && run.status_id == removed.id)
+                })
+                .count()
+        })
+        .find(|live| *live > 0)
+}
+
+/// Clears every park left waiting on a column that no longer runs anything.
+///
+/// A `pending_run` is a promise that a slot will start this card where it stands. A column that
+/// lost its action — or that the patch removed outright — can never keep it, and a card left
+/// parked against one waits for a run nothing will ever decide to start.
+fn clear_stranded_pending_runs(before: &[Status], board: &Board, cards: &mut [Card], now: &str) {
+    for card in cards {
+        let Some(pending) = card.pending_run.as_ref() else {
+            continue;
+        };
+        let column = board
+            .statuses
+            .iter()
+            .find(|status| status.id == pending.status_id);
+        if column.is_some_and(|status| {
+            status
+                .automation
+                .as_ref()
+                .is_some_and(|automation| automation.on_enter.is_some())
+        }) {
+            continue;
+        }
+        // The removed column's own name, taken from the columns as they were: the activity is
+        // read by someone asking what happened to their card, and a status id would not say.
+        let name = column
+            .or_else(|| before.iter().find(|status| status.id == pending.status_id))
+            .map_or_else(
+                || pending.status_id.to_string(),
+                |status| status.name.clone(),
+            );
+        card.pending_run = None;
+        push_activity(
+            card,
+            ActivityKind::Updated,
+            None,
+            format!("Run canceled: {name} no longer runs an action"),
+            now,
+        );
+    }
+}
+
+/// The cards sitting in a column whose category the patch changed.
+///
+/// Category is what makes a card satisfy its dependants, so a column that becomes (or stops
+/// being) `Completed` can release work anywhere on the board: every card in it is a seed.
+fn recategorised_cards(before: &[Status], board: &Board, cards: &[Card]) -> Vec<CardId> {
+    let changed: Vec<&StatusId> = board
+        .statuses
+        .iter()
+        .filter(|status| {
+            before
+                .iter()
+                .any(|old| old.id == status.id && old.category != status.category)
+        })
+        .map(|status| &status.id)
+        .collect();
+    if changed.is_empty() {
+        return Vec::new();
+    }
+    cards
+        .iter()
+        .filter(|card| !card.archived && changed.iter().any(|id| **id == card.status_id))
+        .map(|card| card.id.clone())
+        .collect()
 }
 
 /// Resolves the worktree a board is scoped to, and the context that board belongs to.

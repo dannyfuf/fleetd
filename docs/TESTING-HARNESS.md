@@ -120,7 +120,7 @@ Arguments after `type` and `clipboard set` have leading and trailing whitespace 
 spaces are preserved. The frozen line grammar is:
 
 ```text
-fixture: empty|one-repo|busy|board|agents|agents-subagent|agents-subagent-other-worktree
+fixture: empty|one-repo|busy|board|agents|agents-subagent|agents-subagent-other-worktree|board-workflow
 meta
 quit
 wait <milliseconds>
@@ -207,7 +207,7 @@ The snapshot is built from update-path state and memoised per revision. Render n
 | `focused` | stable focus-owner target name or null |
 | `lists` | map name → `{rows:[row],selected:row|null,filter:string}` |
 | row | `{id:string,label:string,badges:[string],marks:[string]}` |
-| `dialog` | `{name,fields:[{name,value,focused}],buttons:[string],message:string|null}` or null |
+| `dialog` | `{name,fields:[{name,value,focused}],buttons:[string],message:string|null}` or null; `message` carries the Confirm dialog's consequence sentence — the one line §3.8.3 has the user accept, including the two cancel cards' own — and is `null` over every other dialog, whose body is elements rather than a sentence |
 | `toasts` | `[{level,text,count}]`; levels use the UX vocabulary `info`, `success`, `warning`, `error` |
 | `sticky_error` | stable human-readable failed-job text or null |
 | `jobs` | `[{id,status}]`; status is the daemon job vocabulary (`queued`, `running`, `succeeded`, `failed`, `cancelled`) |
@@ -226,8 +226,12 @@ trailing empty rows, so `terminal.rows.len()` need not equal `terminal.viewport.
 must not assume the viewport's last row exists in `terminal.rows`. `jobs[].status` may also be
 `cancelling`, which is a real daemon job state.
 
-The list names are `repos`, `worktrees`, `prs`, `jobs`, `tabs`, `palette`, `board` and
-`board.cards`. While the agent picker is open, `lists.palette` projects its native-thread rows:
+The list names are `repos`, `worktrees`, `prs`, `jobs`, `tabs`, `palette`, `board`,
+`board.cards`, `board.summary`, `card.runs` and `settings.columns`. The last three are
+additive version-1 lists and each is absent unless its surface has something to say:
+`board.summary` while the board states a run count, `card.runs` while the card detail is open on
+a card that has run, `settings.columns` while Board settings is open. While the agent picker is
+open, `lists.palette` projects its native-thread rows:
 `id` is the thread id; `label` is the rendered picker label; `badges` are provider,
 `caller`/`child`, and worktree id; and `marks` are attention, `go`/`attach`, and
 `attached`/`hidden`. An agent tab whose thread has a parent includes the additive `child` badge. The
@@ -237,6 +241,29 @@ predicate reaches them with the quoted step §2 defines: `lists["board.cards"].r
 `focused` vocabulary is `filter.input`, `palette.input`, `dialog`, `agents.popup`, `board.filter`,
 `repos.row[N]`, `worktrees.row[N]`, `prs.row[N]`, `jobs.row[N]`, `board.column[C].card[R]`,
 `tabs.tab[N]`, `agents.tabs.tab[N]` and `agents.composer`.
+
+Board workflows add row vocabulary rather than fields. Two of the changes are **not** additive,
+and a scenario written before them can read differently: `board.cards` and a `board` row's badge
+now project the column as the pane draws it — ordered by position, the board filter applied and
+archived cards left out — where they used to carry every card of the status in document order;
+and `dialog.message`, documented as always `null`, now carries an open Confirm's consequence
+line. Everything else below is additive within version 1.
+A `board.cards` row carries, in this order, its card's run mark — one of `working`, `pending`,
+`stalled`, `needs you`, `done` — then `blocked:<n>` for the cards still blocking it, then the
+assignee it already carried; a card whose tile draws neither mark carries only the assignee, so
+`marks[0]` is the run state whenever there is one. `board.cards` is the focused column exactly as
+the pane draws it — ordered by the card's position, archived cards left out, and narrowed by the
+board filter — so `rows[R]` and `focused == board.column[C].card[R]` always name the same card;
+a `board` row's badge counts that same population. A `board` row carries `action` when its
+column starts a run on arrival, which is the `on_enter` automation alone. `board.summary` holds
+the one row the pane header states — `1/1 working · 1 needs you`, each half omitted while its
+count is zero — and the list is absent when both are. `card.runs` is one row per run of the open
+card, oldest first: `label` is the run row the detail draws, `badges` is the provider, and
+`marks` is that run's mark word. `settings.columns` is one row per column of the board the
+dialog is editing, `label` its name, marked `action` on the same rule as `board` and `disabled`
+on a board that may not carry automation at all — a context board, or a board whose columns
+answer to its backend. The elapsed time inside a `card.runs` label is as of the last projection:
+nothing keys on the wall clock, so a scenario awaits a row or a mark, never a duration.
 
 `lists.jobs.rows` is the row set accepted by the Jobs panel's current filter, and
 `lists.jobs.selected` is the row at the panel cursor within that filtered set. Thus
@@ -275,8 +302,8 @@ The names Fleet paints today, by surface:
 `dialog.field[N]` counts the dialog's **tab cycle**: create-worktree `0` branch / `1` base /
 `2` host (absent on a single-host daemon); new and edit context `0` name / `1` owners;
 rename-terminal `0`; clone-repo `0` search; edit-hooks `0..` prepare commands then post-create;
-new-card `0` title / `1` description. `dialog.row[N]` is a dialog's result list — the assign-repo
-contexts, the clone-repo matches, the create-worktree base refs.
+new-card `0` title / `1` description; card-property `0` query. `dialog.row[N]` is a dialog's
+result list — the assign-repo contexts, the clone-repo matches, the create-worktree base refs.
 
 Two names in the table are real but conditional, and a scenario that assumes them unconditionally
 will fail on an unknown target rather than on the thing it meant to check. `dialog.row[N]` exists
@@ -284,6 +311,12 @@ only in the dialogs that have a result list — no preset opens one today, so no
 far contains it. `agents.approval.edit` is painted only where the provider accepts an amended
 invocation (the `DecisionDock` contract in `docs/DESIGN-SYSTEM.md`); the other four approval
 controls are always there.
+
+`agents.composer` is the editor's own row, not the stack of editor, host badge and metadata strip
+it sits on top of: a target is aimed at, and a `click` resolves to the centre of its rectangle, so
+the rectangle has to be somewhere clicking does what the name says. Over the whole stack that
+centre falls in the metadata strip, where a mouse down reaches no editor and every keystroke after
+it is dropped in silence.
 
 `dialog.button[N]` is part of the vocabulary but is painted nowhere: Fleet's dialogs are confirmed
 from the keyboard and `Dialog::primary` renders text, not a control. It stays unpopulated until a
@@ -357,6 +390,16 @@ follow:
   `FEA-…` after the slug. `lists["board.cards"]` therefore says which of the two a surface is
   drawing, which is what `scenarios/workspace/board-tab.scenario` reads.
 
+A third additive preset, `board-workflow`, seeds what `agents-subagent` seeds — `acme/api#agent`,
+`acme/api#other` and the two scripted providers — plus `acme/api#agent`'s own board, asked for the
+same way and numbered `AGE-…` after the slug, carrying `fleet-core`'s workflow columns (Backlog,
+Todo, Ready, In Progress, In review, Done, Canceled) and `maxLiveRuns` of 1. Four cards start in
+Todo, which the preset deliberately leaves human: card 1 blocks card 3, and cards 1 and 2 block
+card 4. **No card is seeded into a column with an action**, because a run the seeding daemon
+started is gone by the time the scenario's own daemon reads the home — a scenario moves a card in
+and watches the run it started itself. The run's child is the scripted provider in its delegation
+role (§5), so Codex completes its card and Claude asks a question and parks it.
+
 ## 5. Scripted-agent transcripts
 
 The `fleet-harness agent --provider <claude|codex> --transcript <file>` subcommand reads one JSON
@@ -417,6 +460,14 @@ serves `subagent-caller.json` to Claude, and `agents-subagent-other-worktree` se
 so `^s A` reaches the Claude-child blocked path. Both seed `acme/api#agent` and
 `acme/api#other`. Each caller writes a brief to a temporary file and invokes the hermetic
 `fleet subagent run`; the other-worktree variant passes `--worktree acme/api#other`.
+
+**An unanswered gate is held for twenty seconds** (`agent::GATE_BUDGET`), and then the scripted
+child gives up and exits, which settles its turn as *cancelled*. That is the ceiling on every
+state a parked child can hold — a `needs you` mark, a run slot a board is counting, a caller
+painting the gate — so a scenario that means to read one has to act inside it. The budget is
+four times the default await rather than equal to it because a loaded machine can take seconds
+to show the run at all; a gate a scenario answers is answered in milliseconds, so the number
+only ever bounds the case where nobody answers.
 
 The launcher chooses by role. With `FLEET_DELEGATION` unset it plays the preset transcript —
 §4 clears an inherited one, so only this run's own daemon can set it. With
@@ -663,17 +714,31 @@ still short of it, so no other document has to claim a capability that does not 
   and `fleet-drive/src/{input.rs, predicate.rs}`.
   Each is one coherent subject rather than an accumulation, so splitting them is a deliberate
   refactor, not a drive-by.
-- **`dialog.message` is always empty, and `dialog.fields` is empty for the dialogs whose tab
-  cycle is not all text.** The dialog host entity, not `AppState`, owns both. `fields` is carried
-  for the dialogs whose whole cycle is live editors — new-card, new/edit context,
-  rename-terminal, clone-repo and edit-hooks — where `fields[N]` is exactly the field
+- **`dialog.message` is carried for the Confirm dialog alone, and `dialog.fields` is empty for the
+  dialogs whose tab cycle is not all text.** The dialog host entity, not `AppState`, owns both.
+  `fields` is carried for the dialogs whose whole cycle is live editors — new-card, new/edit
+  context, rename-terminal, clone-repo, edit-hooks and card-property, whose one editor is the
+  query it filters and types values into — where `fields[N]` is exactly the field
   `targets["dialog.field[N]"]` paints; the command about to answer a `dump`, an `assert` or an
   `await` poll reads them across in its update path the same way it brings the target table
   across. A dialog with a non-editor in its cycle (create-worktree's base list and host cycler,
   Settings' switch rows) reports `[]` rather than a partial numbering that would not line up with
-  its targets, and `message` stays `null` everywhere. Typing into a field does not itself notify
-  `AppState`, so a scenario reads a field with `assert` or `dump`, which project on demand, and
-  not with `await`.
+  its targets. `message` is the one sentence an open Confirm asks — the consequence line §3.8.3
+  has the user accept, read from the same draft the card is drawn from, including the board `X`
+  and transcript `x` cards that draw their own — and stays `null` over every other dialog, whose
+  body is elements rather than a sentence and would have to be invented to be named one. Board
+  settings is the one exception in the other direction: it reports a leading non-editor field
+  named `section`, whose value is the open rail section's own title (`General`, `Backend`,
+  `Columns`), because the section is draft state no projection can otherwise reach, and after it
+  the one row-scoped editor a row owns while it is open — named after that row in lower case
+  (`name`, `prefix`, `effort`, `on enter`, or a backend row's own name), which is the only place a
+  value *typed* into this dialog can be read back, since every other row is a cycler whose value
+  `settings.columns` or `AppState` already carries. A row the cursor is merely on in the Columns
+  pane owns no editor until `⏎` opens one, and a locked automation row never does, so the second
+  field is absent in both cases. Board settings paints no `dialog.field[N]` target at all, so
+  neither field can put the field↔target numbering out of step. Typing into a field does not
+  itself notify `AppState`, so a scenario reads a field with `assert` or `dump`, which project on
+  demand, and not with `await`.
 - **A headless `await` does not repaint, so `window.frame` freezes for the duration of the wait.**
   The await loop reprojects update-path state but does not draw another headless frame. Use
   `assert` or `dump`, which paint before projecting, when current frame geometry matters.

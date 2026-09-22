@@ -1,0 +1,197 @@
+# plans/board-workflows-2026-09-20-phase-9-plan.md P9-T05 · KEYMAP.md §Board and card ·
+# UX-SPEC.md §Board ("Keyboard") · TESTING-HARNESS.md §3 (`card.runs`, `dialog.message`) — the
+# five keys phase 9 gives a card's *run*, end to end against a real daemon and real children.
+#
+# What each step pins, and why it is the shape it is:
+#   `A` twice     the refusal first (`AGE-1 has no run`, contracts §5.5) and then the attach:
+#                 the run's thread is an ordinary agent tab titled `↳ AGE-1 — …`, and `A`
+#                 selects it with the keyboard in its composer, exactly as a delegated child is
+#                 selected. It is a *selection* rather than an attachment because a card-called
+#                 child has no caller thread and so is never hidden to begin with
+#                 (`state::agents::is_attached`): its tab joins the strip when the run starts.
+#   `^s u`        the way back. A card is a caller like a thread is, so the key that returns a
+#                 child to its caller returns this one to the board tab with its card focused.
+#   `^s d`        the AGENTS picker lists the run at *top level* — `badges[1] == caller` — and
+#                 labels it with the same tab title. That is the no-work claim of the phase: a
+#                 card-called child has `parent: None` (`delegation/run.rs`), so every list that
+#                 groups children under their caller thread already treats it as its own root.
+#   `>` twice     the refusal in a column that runs nothing (`Ready has no action`) and the
+#                 re-run ask on a card that has runs.
+#   `X`           the confirm, its sentence, and the run reaching a terminal outcome: the first
+#                 row of `card.runs` reads `cancelled …` and stays that way.
+#   `]` and `[`   `ConfirmRequest::MoveCancelsRun`, read back through `dialog.message` — the one
+#                 sentence a user confirms (§3.8.3). `[` is accepted on AGE-1 and `]` refused
+#                 with `n` on AGE-2, each in its own run's window, for the reason below.
+#
+# The board is the `board-workflow` preset's (§4): seven workflow columns, `maxLiveRuns` of 1,
+# and four cards in Todo whose links — AGE-1 blocks AGE-3, AGE-1 and AGE-2 block AGE-4 — are the
+# chain this file drives. The plan asked for that chain to be built by a scripted thread's
+# `shell` steps running `fleet board card new --blocked-by` and `card move`; the preset has
+# seeded exactly those links since P6-T05, and §9.2 is explicit that a scenario must not build
+# with lines what a preset already seeds. So the chain is read off the face and only the moves
+# are driven. The phase tracker records the deviation.
+#
+# Three limits shape the order everything below is done in, all three measured rather than
+# assumed (P6-T05, and this file's own first runs):
+#   * a scripted child parks on its permission gate for `agent::GATE_BUDGET` (5 s) and is then
+#     torn down, which ends its run. A run mark is therefore a state that arrives rather than one
+#     the board is already in, and every predicate about one here is an `await`, never an
+#     `assert`. (Until 2026-09-21 the column then started the card again, immediately and for
+#     ever; that was a defect and is fixed — a terminal run now leaves its card alone.)
+#   * one live run at a time. A second card is given a run once the first has ended or *left*
+#     its action column, and the accepted `[` below is the second of those: it is the move
+#     confirm and the way the board is quietened while a child is still out there.
+#   * the move confirm is asked only while a live card-called child stands behind the card's
+#     newest run (contracts §5.5); with none the plain move goes out and the daemon's `{KEY} is
+#     working; pass --cancel-run to move it` lands in the sticky slot instead. So each `[` / `]`
+#     here waits for the *delegation* to say `blocked` first: that is the child at its gate, the
+#     beginning of the twenty seconds it holds one, and the widest window a scenario can start a
+#     keystroke in. Waiting on the tile's `working` instead is what an earlier draft did, and it
+#     is not the same claim: that mark is also satisfied by the board view's own `live_runs`
+#     join, before any child exists to cancel. For the same reason the two confirms are in two
+#     windows — the accepted `[` on AGE-1, the refused `]` on AGE-2 — rather than back to back
+#     in one.
+# The consequence for `>`: now that a terminal run does not restart its own column, the key is
+# the only thing that can put a second run on a card standing still — so the second row below is
+# `>`'s own. What is pinned here is that the key reaches the daemon, that it refuses in the
+# column's own words where there is nothing to run, and that a second run stands on the card
+# afterwards; the sentence it refuses with is `screens::board::runs`' unit tests' half.
+#
+# No `shot`: this is a keyboard scenario, so it runs in the headless lane too (§7).
+fixture: board-workflow
+await idle 30000
+
+# The preset seeds two worktrees, and `agent` is the one carrying the board.
+assert lists.worktrees.rows[1].id == "acme/api#agent"
+key j
+await lists.worktrees.selected.id == "acme/api#agent" 10000
+key o
+await screen == Workspace 30000
+key ctrl-s b
+await lists.tabs.selected.label == "board" 30000
+await focused == "board.column[0].card[0]" 30000
+await key_contexts[2] == "Board" 20000
+
+# Todo is the one column the preset leaves human, and the chain is on its face: AGE-1 blocks
+# AGE-3, and AGE-1 and AGE-2 together block AGE-4.
+key l
+await lists.board.selected.label == "Todo" 10000
+assert lists["board.cards"].rows[0].badges[0] == "AGE-1" && lists["board.cards"].rows[0].marks[0] absent
+assert lists["board.cards"].rows[1].badges[0] == "AGE-2" && lists["board.cards"].rows[1].marks[0] absent
+assert lists["board.cards"].rows[2].badges[0] == "AGE-3" && lists["board.cards"].rows[2].marks[0] == "blocked:1"
+assert lists["board.cards"].rows[3].badges[0] == "AGE-4" && lists["board.cards"].rows[3].marks[0] == "blocked:2"
+
+# `A` on a card that has never run says so and does nothing else. A refusal is a sentence, not
+# silence (contracts §5.5).
+key shift-a
+await toasts[0].text == "AGE-1 has no run" 15000
+advance 20000
+await toasts[0] absent 10000
+
+# Into Ready, which routes a card nothing blocks no further (BOARD.md §11.7) and runs nothing:
+# `>` names the column rather than starting something no automation asked for.
+key ]
+await lists.board.selected.label == "Ready" 20000
+assert lists["board.cards"].rows[0].badges[0] == "AGE-1"
+key >
+await toasts[0].text == "Ready has no action" 15000
+advance 20000
+await toasts[0] absent 10000
+
+# In Progress is the prompt column, and the card's default provider is Claude, whose child asks
+# a question and parks on it. The tile is painted from the delegation mirror (BOARD.md §11.8), so
+# a child that opens its gate milliseconds after its turn starts reaches the face as `needs you`
+# without ever showing `working`; the delegation itself says `blocked` once the gate is open —
+# which is what gives `[` a live child to offer to cancel, and the beginning of the twenty
+# seconds (`agent::GATE_BUDGET`) the child holds it for.
+key ]
+await lists.board.selected.label == "In Progress" 20000
+await lists["board.cards"].rows[0].marks[0] == "needs you" 60000
+await agents.delegations[0].status == blocked 90000
+
+# `[` on a card whose child is out there: the move and the cancellation are one sentence,
+# answered once. Accepted, so AGE-1 lands in a column that runs nothing — which is what frees
+# the board's one run slot for the next card in the chain.
+key [
+await dialog.name == Confirm 15000
+assert dialog.message ~= "^AGE-1 is working \(.+\)\. Move to Ready and cancel the run\?$"
+key y
+await lists.board.selected.label == "Ready" 30000
+await lists["board.cards"].rows[0].badges[0] == "AGE-1" 15000
+
+# `A` — the run as an ordinary tab. A run that has ended still has its thread, and the tab it
+# opens is the ordinary one: the thread title the daemon minted is `↳ AGE-1 — …`
+# (`delegation/footer.rs::card_child_title`), which is what the strip carries, with the provider
+# as the badge beside it.
+key shift-a
+await lists.tabs.selected.label ~= "^↳ AGE-1 — " 30000
+assert lists.tabs.selected.badges[0] == claude
+assert mode == Agent && focused == agents.composer
+
+# `^s u` — the way back the card caller's pinned segment also offers: the board tab, with the
+# card the run worked for focused, in the column it is in now.
+key ctrl-s u
+await lists.tabs.selected.label == "board" 30000
+await focused == "board.column[2].card[0]" 20000
+assert key_contexts[2] == "Board"
+
+# `^s d` — the run is its own root in the AGENTS picker, labelled by its tab title. Every row
+# here is a run of AGE-1, because it is the only card that has run.
+key ctrl-s d
+await lists.palette.rows[0].label ~= "^claude — ↳ AGE-1 — " 15000
+assert lists.palette.rows[0].badges[0] == claude
+assert lists.palette.rows[0].badges[1] == caller
+assert lists.palette.rows[0].badges[2] == "acme/api#agent"
+assert lists.palette.rows[0].marks[1] == go
+key escape
+await overlay absent 10000
+await focused == "board.column[2].card[0]" 15000
+
+# The next card in the chain, through Ready into the column that runs it. Nothing is running
+# now, so this card is given the slot rather than owed it.
+key h
+await lists.board.selected.label == "Todo" 15000
+assert lists["board.cards"].rows[0].badges[0] == "AGE-2"
+key ]
+await lists.board.selected.label == "Ready" 20000
+key ]
+await lists.board.selected.label == "In Progress" 20000
+assert lists["board.cards"].rows[0].badges[0] == "AGE-2"
+await lists["board.cards"].rows[0].marks[0] == "needs you" 90000
+await agents.delegations[1].status == blocked 90000
+
+# `]` on this one, and refused: the same confirm, naming the column the move would land in, and
+# `n` leaves the card and its child exactly where they are.
+key ]
+await dialog.name == Confirm 15000
+assert dialog.message ~= "^AGE-2 is working \(.+\)\. Move to In review and cancel the run\?$"
+key n
+await dialog absent 10000
+await focused == "board.column[3].card[0]" 15000
+assert lists.board.selected.label == "In Progress"
+
+# `X` — the confirm states what stops, and only the accepted dialog reaches the wire. This one
+# asks nothing of the delegation mirror: the card is the authority on whether it has a run.
+key shift-x
+await dialog.name == Confirm 15000
+assert dialog.message == "Stops the run. What it already changed in the worktree is kept."
+key y
+await dialog absent 20000
+
+# The run the `y` stopped is terminal, and the detail is where a card's runs are read: the
+# oldest row is the cancelled one and stays so, whatever the column starts next.
+key enter
+await dialog.name == CardDetail 15000
+await lists["card.runs"].rows[0].label ~= "^cancelled " 90000
+assert lists["card.runs"].rows[0].badges[0] == "claude"
+dump runs
+
+# `>` from the detail asks the column to run the card again — and nothing else can, now that a
+# run ending where it started leaves its card alone, so the second row is this key's own work.
+key >
+await lists["card.runs"].rows[1] exists 90000
+key escape
+await dialog absent 10000
+await focused == "board.column[3].card[0]" 15000
+assert lists["board.cards"].rows[0].badges[0] == "AGE-2"
+quit

@@ -7,7 +7,7 @@
 | [UX-SPEC.md](UX-SPEC.md) | What every screen shows and why |
 | [KEYMAP.md](KEYMAP.md) | Which key does what, in which context |
 | [DESIGN-SYSTEM.md](DESIGN-SYSTEM.md) | The `fleet-ui-kit` tokens and component contracts |
-| [BOARD.md](BOARD.md) | The card model, the reconciliation engine, and the board surface |
+| [BOARD.md](BOARD.md) | The card model, the reconciliation engine, the column-automation engine that runs a card as a native subagent, and the board surface |
 | [BOARD-JIRA.md](BOARD-JIRA.md) | The Jira backend, and what `acli` can and cannot do |
 | [NATIVE-AGENTS.md](NATIVE-AGENTS.md) | Native Claude Code / Codex sessions: adapters, event model, thread state, the transcript, the decision surfaces, the agent tab |
 | [REMOTE-MACHINES.md](REMOTE-MACHINES.md) | Authoritative remote-machine config, protocol, provider, routing, mirror, and recovery contract |
@@ -50,3 +50,4 @@ what was rejected and why, and cites the research it was distilled from.
 | [0019](decisions/0019-worktree-scoped-boards.md) | Optional worktree-scoped boards with field-based lookup and deletion cascade |
 | [0020](decisions/0020-single-text-input.md) | One live `TextInput` for every text surface: one engine, entity-owned inputs, key ownership by context word |
 | [0021](decisions/0021-hosted-worktree-boards-route-to-owner.md) | A hosted worktree's board routes to the daemon that owns the worktree (supersedes 0019's addendum) |
+| [0022](decisions/0022-board-workflows.md) | The worktree board is a control plane: a column runs a card as a native subagent, and the document version bumps lazily |

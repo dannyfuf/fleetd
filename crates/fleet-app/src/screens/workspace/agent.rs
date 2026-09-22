@@ -15,7 +15,7 @@ use crate::{
     screens::agent_thread::{
         AgentThreadEvent, AgentThreadView, ThreadHost,
         picker::PickerKind,
-        presentation::{header_word, title_subject},
+        presentation::{self, header_word, title_subject},
     },
     views::workspace_tabs::TabTarget,
 };
@@ -81,7 +81,7 @@ pub(super) fn leave_agent_tab(state: &Entity<AppState>, cx: &mut App) {
         let Some(worktree) = active_worktree(app) else {
             return;
         };
-        if app.agents.deactivate(&worktree) {
+        if app.leave_agent_tab(&worktree) {
             cx.notify();
         }
     });
@@ -324,6 +324,7 @@ impl WorkspaceScreen {
             subscriptions.push(observe_view_state(&view, thread, state, cx));
             subscriptions.extend(observe_composer_focus(&view, thread, state, window, cx));
             let (relay_bridge, relay_state) = (bridge.clone(), state.clone());
+            let relay_local = Rc::clone(&self.local);
             subscriptions.push(cx.subscribe(&view, move |view, event, cx| match event {
                 // A send is the one command whose refusal the view has to hear about: the
                 // optimistic bubble it drew is otherwise `sending` for good.
@@ -355,6 +356,15 @@ impl WorkspaceScreen {
                         &relay_state,
                         *thread,
                         move |command| reopen_bridge.send_agent(command),
+                        cx,
+                    );
+                }
+                AgentThreadEvent::SelectCard(card) => {
+                    super::actions::jump_to_card(
+                        &relay_local,
+                        &relay_bridge,
+                        &relay_state,
+                        card.clone(),
                         cx,
                     );
                 }
@@ -415,6 +425,7 @@ impl WorkspaceScreen {
                 .collect();
             let delegations_revision = app.agents.delegations_revision();
             let caller = caller_context(app, thread);
+            let card_caller = card_caller_context(app, thread);
             let modes = app.agents.modes(thread);
             if let Some(projection) = app.agents.projection(thread) {
                 view.update(cx, |view, cx| {
@@ -425,6 +436,7 @@ impl WorkspaceScreen {
                         .map(|(summary, index)| (Some(summary), index))
                         .unwrap_or((None, None));
                     view.sync_caller(caller, caller_index, cx);
+                    view.sync_card_caller(card_caller, cx);
                     view.sync_delegations(delegations, delegation_titles, delegations_revision, cx);
                     if projection_replaced {
                         view.sync_replacement(projection, cx);
@@ -930,6 +942,29 @@ fn caller_context(app: &AppState, child: ThreadId) -> Option<(AgentThreadSummary
             .map(|position| session.terminals.len() + position + 1)
     });
     Some((summary, index))
+}
+
+/// The card a column-started run works for, when the shown board is the one holding it.
+///
+/// `None` for every ordinary thread and for a card run whose board is not the one loaded: the
+/// segment names a column and a board name, and neither can be invented from the delegation.
+fn card_caller_context(app: &AppState, child: ThreadId) -> Option<presentation::CardCaller> {
+    let delegation = app.agents.delegation_of_child(child)?;
+    let (board, card) = delegation.caller.card()?;
+    let view = app.board().filter(|view| &view.board.id == board)?;
+    let card = view.cards.iter().find(|candidate| &candidate.id == card)?;
+    let column = view
+        .board
+        .statuses
+        .iter()
+        .find(|status| status.id == card.status_id)
+        .map_or_else(String::new, |status| status.name.clone());
+    Some(presentation::CardCaller {
+        card: card.id.clone(),
+        key: card.display_key(&view.board),
+        column,
+        board: view.board.name.clone(),
+    })
 }
 
 /// Hides the active delegated child without touching the daemon-owned thread.

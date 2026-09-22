@@ -433,6 +433,8 @@ pub struct HarnessState {
     targets_revision: u64,
     /// The open dialog's live editors, in the order `dialog.field[N]` numbers them.
     dialog_fields: Vec<FieldSnapshot>,
+    /// The open dialog's message body — today the Confirm dialog's consequence sentence.
+    dialog_message: Option<String>,
     /// Shared with [`crate::bridge::Bridge`], which claims a slot when a request is admitted.
     /// Mutation replies transfer their claim to `settle` until a causally covering snapshot.
     /// Only legacy unstamped claims use the grace expiry; stamped claims warn and keep waiting.
@@ -558,6 +560,17 @@ impl HarnessState {
     #[must_use]
     pub fn dialog_fields(&self) -> &[FieldSnapshot] {
         &self.dialog_fields
+    }
+
+    /// Records the open dialog's message body, on the seam [`Self::set_dialog_fields`] uses.
+    pub fn set_dialog_message(&mut self, message: Option<String>) {
+        self.dialog_message = message;
+    }
+
+    /// The last recorded dialog message body.
+    #[must_use]
+    pub fn dialog_message(&self) -> Option<&str> {
+        self.dialog_message.as_deref()
     }
 
     /// Installs the bridge-owned idle counters and wake callback.

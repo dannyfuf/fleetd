@@ -91,6 +91,13 @@ pub(super) const MIGRATIONS: &[Migration] = &[
         source: m006::SOURCE,
         sha256: "9e8ed2c5c48dfc55d259b890ddf3862a76fd5ad9f9b86b97097d04b6b3d809b7",
     },
+    Migration {
+        id: 7,
+        name: "delegation_card_callers",
+        run: m007::run,
+        source: m007::SOURCE,
+        sha256: "8776653c0c5fe8ba83d896c5b579b4a10f95ed60aa8013e4502fd12740245e18",
+    },
 ];
 
 /// Slot 001 — create the log and every read model derived from it.
@@ -313,6 +320,74 @@ mod m006 {
     }
 }
 
+/// Slot 007 — let a board card call a delegation, beside the agent thread that always could.
+///
+/// The ladder's first table rebuild, and the reason is structural rather than cosmetic: SQLite
+/// can add a column but cannot drop `NOT NULL` from one, and `caller_thread`, `caller_turn` and
+/// `caller_item` have been `NOT NULL` since slot 003. A card caller has none of the three — it is
+/// a board and a card, with no turn and no transcript item to hang a child off — so the only way
+/// to hold one is to recreate the table with those columns nullable.
+///
+/// Every row is copied through an explicit column list in both positions, never `SELECT *`: a
+/// rebuild that leans on column order is exactly how a migration silently drops or transposes a
+/// column, and this ladder has no way to notice afterwards.
+///
+/// `caller_kind` carries the discriminant rather than leaving a reader to infer it from which
+/// columns are null, so a row reads back as the caller it was written as even once a third kind
+/// exists. It defaults to `'thread'`, which is what every row that predates this slot is.
+///
+/// `delegation_outbox` is untouched: its work is keyed by delegation id, and that did not move.
+mod m007 {
+    use rusqlite::Transaction;
+
+    pub(super) const SOURCE: &str = r#"CREATE TABLE delegations_v7 (
+  id TEXT PRIMARY KEY, token_sha256 TEXT NOT NULL,
+  caller_kind TEXT NOT NULL DEFAULT 'thread',
+  caller_thread TEXT, caller_turn TEXT, caller_item TEXT,
+  caller_board TEXT, caller_card TEXT,
+  child_thread TEXT NOT NULL UNIQUE, provider TEXT NOT NULL, depth INTEGER NOT NULL,
+  brief TEXT NOT NULL, expectation TEXT NOT NULL, eager INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL, status_payload TEXT, result TEXT, result_source TEXT,
+  result_files TEXT, result_elided INTEGER NOT NULL DEFAULT 0,
+  nudges INTEGER NOT NULL DEFAULT 0, recoveries INTEGER NOT NULL DEFAULT 0,
+  delivery TEXT NOT NULL, delivered_seq INTEGER, delivered_turn TEXT, delivery_reason TEXT,
+  headline TEXT,
+  reported_at TEXT, report_sha256 TEXT,
+  created TEXT NOT NULL, finished TEXT,
+  env_json TEXT
+);
+INSERT INTO delegations_v7 (
+  caller_kind,
+  id, token_sha256, caller_thread, caller_turn, caller_item, child_thread, provider, depth,
+  brief, expectation, eager, status, status_payload, result, result_source, result_files,
+  result_elided, nudges, recoveries, delivery, delivered_seq, delivered_turn, delivery_reason,
+  headline, reported_at, report_sha256, created, finished, env_json
+)
+SELECT
+  'thread',
+  id, token_sha256, caller_thread, caller_turn, caller_item, child_thread, provider, depth,
+  brief, expectation, eager, status, status_payload, result, result_source, result_files,
+  result_elided, nudges, recoveries, delivery, delivered_seq, delivered_turn, delivery_reason,
+  headline, reported_at, report_sha256, created, finished, env_json
+FROM delegations;
+DROP TABLE delegations;
+ALTER TABLE delegations_v7 RENAME TO delegations;
+CREATE INDEX idx_delegations_caller ON delegations(caller_thread, created);
+CREATE INDEX idx_delegations_card ON delegations(caller_board, caller_card);"#;
+
+    pub(super) fn run(transaction: &Transaction<'_>) -> rusqlite::Result<()> {
+        let mut statement = transaction.prepare("PRAGMA table_info(delegations)")?;
+        let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+        for column in columns {
+            if column? == "caller_kind" {
+                return Ok(());
+            }
+        }
+        drop(statement);
+        transaction.execute_batch(SOURCE)
+    }
+}
+
 /// Configures the connection and applies every pending migration in one transaction.
 ///
 /// Called once at store construction, before the manager exists. A failure here is fatal at
@@ -491,10 +566,17 @@ struct AppliedMigration {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use anyhow::Context;
-    use fleet_core::agents::DelegationId;
+    use chrono::{DateTime, Utc};
+    use fleet_core::{
+        agents::{
+            AgentKind, Delegation, DelegationCaller, DelegationId, DelegationStatus, DeliveryState,
+            ItemId, ThreadId, TurnId,
+        },
+        ids::{BoardId, CardId},
+    };
     use rusqlite::{Connection, params};
 
     use super::super::delegations;
@@ -508,7 +590,7 @@ mod tests {
         run(&mut conn, None)?;
 
         assert_eq!(objects(&conn, "table")?, expected(REQUIRED_TABLES));
-        assert_eq!(applied_slots(&conn)?, vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(applied_slots(&conn)?, vec![1, 2, 3, 4, 5, 6, 7]);
         Ok(())
     }
 
@@ -586,6 +668,19 @@ mod tests {
                 "idx_items_thread_parent",
             ),
             (
+                "live runs on one board",
+                "SELECT id FROM delegations WHERE caller_board = 'board' \
+                 AND status NOT IN ('succeeded', 'incomplete', 'failed', 'cancelled')",
+                "idx_delegations_card",
+            ),
+            (
+                "the live run of one card",
+                "SELECT id FROM delegations \
+                 WHERE caller_board = 'board' AND caller_card = 'card' \
+                 AND status NOT IN ('succeeded', 'incomplete', 'failed', 'cancelled')",
+                "idx_delegations_card",
+            ),
+            (
                 "threads with an open gate",
                 "SELECT thread_id FROM threads WHERE open_gate_count > 0",
                 "idx_threads_open_gates",
@@ -660,9 +755,13 @@ mod tests {
     /// derived from [`REQUIRED_TABLES`]: a column added to head without a note here fails loudly
     /// instead of being quietly assumed to have existed since slot 003.
     fn delegation_columns_at_slot(slot: u32) -> Vec<&'static str> {
+        const SLOT_007_COLUMNS: &[&str] = &["caller_board", "caller_card", "caller_kind"];
         REQUIRED_DELEGATION_COLUMNS
             .iter()
-            .filter(|column| slot >= 6 || **column != "env_json")
+            .filter(|column| {
+                (slot >= 6 || **column != "env_json")
+                    && (slot >= 7 || !SLOT_007_COLUMNS.contains(*column))
+            })
             .copied()
             .collect()
     }
@@ -803,6 +902,279 @@ mod tests {
     }
 
     #[test]
+    fn slot_007_rebuilds_delegations_with_a_caller_kind_on_the_slot_006_schema()
+    -> anyhow::Result<()> {
+        let mut conn = memory_database()?;
+        run(&mut conn, Some(6))?;
+        assert!(!table_columns(&conn, "delegations")?.contains("caller_kind"));
+        assert!(!objects(&conn, "index")?.contains("idx_delegations_card"));
+
+        run(&mut conn, Some(7))?;
+
+        assert_eq!(
+            table_columns(&conn, "delegations")?,
+            expected(&delegation_columns_at_slot(7))
+        );
+        // The rebuild drops the old table, so its index has to be recreated beside the new one.
+        let indexes = objects(&conn, "index")?;
+        assert!(indexes.contains("idx_delegations_caller"));
+        assert!(indexes.contains("idx_delegations_card"));
+        // The scaffolding table must not survive its own slot.
+        assert!(!objects(&conn, "table")?.contains("delegations_v7"));
+        assert_eq!(applied_slots(&conn)?, vec![1, 2, 3, 4, 5, 6, 7]);
+        Ok(())
+    }
+
+    /// The rebuild's real hazard: a copy written against column *order* rather than column
+    /// *names* drops or transposes a value, and nothing downstream can tell afterwards.
+    #[test]
+    fn slot_007_preserves_every_delegation_row_it_rebuilds() -> anyhow::Result<()> {
+        let mut conn = memory_database()?;
+        run(&mut conn, Some(6))?;
+        let id = DelegationId::new().to_string();
+        seed_full_delegation(&conn, &id)?;
+        let before = delegation_row(&conn, &id)?;
+
+        run(&mut conn, Some(7))?;
+
+        let after = delegation_row(&conn, &id)?;
+        for (column, value) in &before {
+            assert_eq!(
+                after.get(column),
+                Some(value),
+                "slot 007 changed `{column}` while rebuilding the table"
+            );
+        }
+        assert_eq!(
+            after.get("caller_kind").map(String::as_str),
+            Some("Text(\"thread\")"),
+            "every row that predates slot 007 is thread-called"
+        );
+        assert_eq!(after.get("caller_board"), Some(&"Null".to_owned()));
+        assert_eq!(after.get("caller_card"), Some(&"Null".to_owned()));
+        Ok(())
+    }
+
+    /// Rule 4: the body is guarded, so a retry before the ledger write cannot rebuild twice and
+    /// lose the rows the first pass already moved.
+    #[test]
+    fn slot_007_is_a_no_op_when_caller_kind_already_exists() -> anyhow::Result<()> {
+        let mut conn = memory_database()?;
+        run(&mut conn, None)?;
+        let id = DelegationId::new().to_string();
+        seed_full_delegation(&conn, &id)?;
+        let schema_before = schema_manifest(&conn)?;
+        let row_before = delegation_row(&conn, &id)?;
+
+        let transaction = conn.transaction().context("begin slot-007 retry probe")?;
+        super::m007::run(&transaction)?;
+        super::m007::run(&transaction)?;
+        transaction
+            .commit()
+            .context("commit slot-007 retry probe")?;
+
+        assert_eq!(schema_manifest(&conn)?, schema_before);
+        assert_eq!(delegation_row(&conn, &id)?, row_before);
+        Ok(())
+    }
+
+    #[test]
+    fn a_card_called_delegation_round_trips_through_the_rebuilt_table() -> anyhow::Result<()> {
+        let mut conn = memory_database()?;
+        run(&mut conn, None)?;
+        let delegation = card_delegation(DelegationStatus::Running);
+        let (board, card) = card_caller();
+        let id = delegation.id;
+        insert_delegation(&mut conn, &delegation)?;
+
+        assert_eq!(delegations::get(&conn, id)?.as_ref(), Some(&delegation));
+        assert_eq!(
+            delegations::live_for_card(&conn, &board, &card)?.as_ref(),
+            Some(&delegation)
+        );
+        assert_eq!(
+            delegations::live_for_board(&conn, &board)?,
+            vec![delegation]
+        );
+        Ok(())
+    }
+
+    /// A card caller's run stops being live the moment the child is terminal, which is what the
+    /// board read joins on: a finished run is history on the card, not a live one.
+    #[test]
+    fn a_terminal_card_run_is_no_longer_live_for_its_board() -> anyhow::Result<()> {
+        let mut conn = memory_database()?;
+        run(&mut conn, None)?;
+        let delegation = card_delegation(DelegationStatus::Succeeded);
+        let (board, card) = card_caller();
+        insert_delegation(&mut conn, &delegation)?;
+
+        assert_eq!(delegations::live_for_card(&conn, &board, &card)?, None);
+        assert!(delegations::live_for_board(&conn, &board)?.is_empty());
+        Ok(())
+    }
+
+    /// The repair sweep exists for a caller thread deleted while the daemon was down. A card
+    /// caller has no `caller_thread`, so without the kind predicate the sweep's `NOT EXISTS`
+    /// would mark every pending card run undeliverable the first time the worker drained.
+    #[test]
+    fn the_repair_sweep_skips_card_callers_and_still_sweeps_thread_callers() -> anyhow::Result<()> {
+        let mut conn = memory_database()?;
+        run(&mut conn, None)?;
+        let card_run = card_delegation(DelegationStatus::Succeeded);
+        let card_id = card_run.id;
+        insert_delegation(&mut conn, &card_run)?;
+        let orphan = DelegationId::new().to_string();
+        seed_full_delegation(&conn, &orphan)?;
+        conn.execute(
+            "UPDATE delegations SET delivery = 'pending', delivered_seq = NULL, \
+             delivered_turn = NULL, delivery_reason = NULL WHERE id = ?1",
+            params![orphan],
+        )
+        .context("make the seeded thread run await delivery")?;
+
+        let transaction = conn.transaction().context("begin the repair sweep")?;
+        let swept = delegations::mark_missing_callers_undeliverable(&transaction, stamp())?;
+        transaction.commit().context("commit the repair sweep")?;
+
+        assert_eq!(
+            swept
+                .iter()
+                .map(|delegation| delegation.id.to_string())
+                .collect::<Vec<_>>(),
+            vec![orphan],
+            "only the thread caller that no longer exists is swept"
+        );
+        assert_eq!(
+            delegations::get(&conn, card_id)?.map(|run| run.delivery),
+            Some(DeliveryState::Pending),
+            "a card run's delivery is ended by the board write, never by the sweep"
+        );
+        Ok(())
+    }
+
+    /// The constraint the rebuilt schema cannot state: a thread caller keeps its turn and item.
+    #[test]
+    fn a_thread_called_delegation_without_a_turn_is_refused_rather_than_stored()
+    -> anyhow::Result<()> {
+        let mut conn = memory_database()?;
+        run(&mut conn, None)?;
+        let mut malformed = card_delegation(DelegationStatus::Running);
+        malformed.caller = DelegationCaller::Thread(ThreadId::new());
+
+        let refused = insert_delegation(&mut conn, &malformed);
+
+        let message = format!(
+            "{:#}",
+            refused.expect_err("a thread caller without a turn must be refused")
+        );
+        assert!(
+            message.contains("without a caller turn and item"),
+            "message was: {message}"
+        );
+        Ok(())
+    }
+
+    fn card_caller() -> (BoardId, CardId) {
+        (
+            BoardId::try_from("acme-api-agent").expect("a valid board id"),
+            CardId::try_from("card-7").expect("a valid card id"),
+        )
+    }
+
+    fn card_delegation(status: DelegationStatus) -> Delegation {
+        let (board, card) = card_caller();
+        Delegation {
+            id: DelegationId::new(),
+            caller: DelegationCaller::Card { board, card },
+            caller_turn: None,
+            caller_item: None,
+            child: ThreadId::new(),
+            provider: AgentKind::Claude,
+            depth: 1,
+            brief: "implement the card".to_owned(),
+            expectation: "make lint and make test pass".to_owned(),
+            eager: false,
+            status,
+            status_payload: None,
+            result: None,
+            nudges: 0,
+            recoveries: 0,
+            delivery: DeliveryState::Pending,
+            created: stamp(),
+            finished: None,
+            headline: None,
+            usage: None,
+        }
+    }
+
+    fn insert_delegation(conn: &mut Connection, delegation: &Delegation) -> anyhow::Result<()> {
+        let transaction = conn.transaction().context("begin a delegation insert")?;
+        delegations::insert(&transaction, delegation, "token-hash", &BTreeMap::new())?;
+        transaction.commit().context("commit a delegation insert")?;
+        Ok(())
+    }
+
+    fn stamp() -> DateTime<Utc> {
+        DateTime::<Utc>::from_timestamp(0, 0).expect("the unix epoch is a valid timestamp")
+    }
+
+    /// Writes a `delegations` row with every slot-006 column populated, so a rebuild that dropped
+    /// or transposed one is visible in [`delegation_row`].
+    fn seed_full_delegation(conn: &Connection, id: &str) -> anyhow::Result<()> {
+        conn.execute(
+            "INSERT INTO delegations (id, token_sha256, caller_thread, caller_turn, caller_item, \
+             child_thread, provider, depth, brief, expectation, eager, status, status_payload, \
+             result, result_source, result_files, result_elided, nudges, recoveries, delivery, \
+             delivered_seq, delivered_turn, delivery_reason, headline, reported_at, \
+             report_sha256, created, finished, env_json) \
+             VALUES (?1, 'token-hash', ?2, ?3, ?4, \
+                     ?5, 'codex', 2, 'the brief', 'the expectation', 1, \
+                     'succeeded', 'the payload', 'the report', 'last_assistant_text', \
+                     '[\"src/lib.rs\"]', 1, 3, 1, 'delivered', 42, ?6, \
+                     'the reason', 'the headline', '1970-01-01T00:00:01Z', 'report-hash', \
+                     '1970-01-01T00:00:00Z', '1970-01-01T00:00:02Z', '{\"KEY\":\"value\"}')",
+            params![
+                id,
+                ThreadId::new().to_string(),
+                TurnId::new().to_string(),
+                ItemId::new().to_string(),
+                ThreadId::new().to_string(),
+                TurnId::new().to_string(),
+            ],
+        )
+        .context("seed a fully populated delegation")?;
+        Ok(())
+    }
+
+    /// Every column of one `delegations` row, keyed by name and rendered with its SQLite type, so
+    /// a value that moved between columns of the same type is still caught.
+    fn delegation_row(conn: &Connection, id: &str) -> anyhow::Result<BTreeMap<String, String>> {
+        let mut statement = conn
+            .prepare("SELECT * FROM delegations WHERE id = ?1")
+            .context("prepare the delegation row query")?;
+        let names: Vec<String> = statement
+            .column_names()
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect();
+        let mut rows = statement
+            .query(params![id])
+            .context("query the delegation row")?;
+        let row = rows
+            .next()
+            .context("read the delegation row")?
+            .context("the seeded delegation row is missing")?;
+        let mut values = BTreeMap::new();
+        for (index, name) in names.iter().enumerate() {
+            let value: rusqlite::types::Value =
+                row.get(index).with_context(|| format!("decode `{name}`"))?;
+            values.insert(name.clone(), format!("{value:?}"));
+        }
+        Ok(values)
+    }
+
+    #[test]
     fn every_slot_hash_matches_its_source() {
         for migration in MIGRATIONS {
             assert_eq!(
@@ -887,7 +1259,7 @@ mod tests {
 
         run(&mut conn, None)?;
 
-        assert_eq!(applied_slots(&conn)?, vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(applied_slots(&conn)?, vec![1, 2, 3, 4, 5, 6, 7]);
         Ok(())
     }
 

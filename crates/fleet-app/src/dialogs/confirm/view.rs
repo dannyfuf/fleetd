@@ -65,6 +65,40 @@ pub(crate) fn render(
 /// The compact / expanded facts confirm.
 pub(super) fn facts_card(request: &ConfirmRequest, draft: &ConfirmState) -> AnyElement {
     let now = now_unix();
+    let facts = facts_for(request, draft, now);
+    let compact = facts.list.is_compact();
+    let policy = confirmation_policy(draft, now);
+
+    let mut hints = KeyHintRow::new();
+    if request.rechecks() {
+        hints = hints.key("I", "re-check");
+    }
+    let title = request.title(compact);
+    let target = request.target();
+    let show_target = !title.contains(&target);
+    let consequence = request.consequence(&facts);
+    let mut card = ConfirmDialog::new(title, facts.list)
+        .consequence(consequence)
+        .icon(request.icon(compact))
+        .hints(hints)
+        .action_label(request.action_label(0));
+    // §3.8.3 puts the full id in exactly one place: the title, or row 1 of the expanded body.
+    if show_target {
+        card = card.target(target);
+    }
+    card = card.force_confirm_key(policy.key);
+    if let Some(age) = facts.age_secs {
+        card = card.stamp(FreshnessStamp::new("checked", age).action("I", "re-check"));
+    }
+    card.into_any_element()
+}
+
+/// The decisive facts this request states, and the risk flag its consequence sentence reads.
+///
+/// Split out of [`facts_card`] so the sentence the harness reports back is built by the same
+/// code that draws it: a second formatting of the same request would drift a word at a time
+/// (`docs/TESTING-HARNESS.md` §3, `dialog.message`).
+pub(super) fn facts_for(request: &ConfirmRequest, draft: &ConfirmState, now: i64) -> Facts {
     let mut facts = match request {
         ConfirmRequest::DeleteWorktree { .. } => {
             worktree_facts(draft.inspection.as_ref(), draft.loading, now)
@@ -103,31 +137,7 @@ pub(super) fn facts_card(request: &ConfirmRequest, draft: &ConfirmState) -> AnyE
     if let Some(error) = draft.error.as_ref() {
         facts.list = facts.list.fact(Fact::unknown(error.clone()));
     }
-    let compact = facts.list.is_compact();
-    let policy = confirmation_policy(draft, now);
-
-    let mut hints = KeyHintRow::new();
-    if request.rechecks() {
-        hints = hints.key("I", "re-check");
-    }
-    let title = request.title(compact);
-    let target = request.target();
-    let show_target = !title.contains(&target);
-    let consequence = request.consequence(&facts);
-    let mut card = ConfirmDialog::new(title, facts.list)
-        .consequence(consequence)
-        .icon(request.icon(compact))
-        .hints(hints)
-        .action_label(request.action_label(0));
-    // §3.8.3 puts the full id in exactly one place: the title, or row 1 of the expanded body.
-    if show_target {
-        card = card.target(target);
-    }
-    card = card.force_confirm_key(policy.key);
-    if let Some(age) = facts.age_secs {
-        card = card.stamp(FreshnessStamp::new("checked", age).action("I", "re-check"));
-    }
-    card.into_any_element()
+    facts
 }
 
 /// The 720 px multi-target prune body (§3.8.3).

@@ -25,7 +25,9 @@ pub(crate) fn render(
     let selected = draft.selected.clone();
     let accent = Tone::Accent.color(cx.theme());
     let list = FuzzyList::new(rows.iter().map(|option| {
-        let mut item = FuzzyItem::new(option.label.clone());
+        // A row that cannot be taken is drawn faint and never as the selection, so the reason
+        // in its trailing detail — `would cycle` — is the only thing left to read.
+        let mut item = FuzzyItem::new(option.label.clone()).disabled(option.disabled);
         if let Some(detail) = option.detail.clone() {
             item = item.trailing(detail);
         }
@@ -68,7 +70,15 @@ pub(crate) fn render(
         .icon(Icon::ArrowRightLeft)
         .width(Dialogs::CardPicker.width(cx))
         .subtitle(format!("\u{00b7} {label}"))
-        .body(div().flex().flex_col().child(input).child(list))
+        // The query is this dialog's whole tab cycle, so it is `dialog.field[0]` — the field
+        // `dialogs::dialog_fields` reports at the same index (`docs/TESTING-HARNESS.md` §3).
+        .body(
+            div()
+                .flex()
+                .flex_col()
+                .child(input.harness_target_indexed("dialog.field", 0))
+                .child(list),
+        )
         .hint_row(hints)
         .primary("\u{23ce} Apply");
     if let Some(message) = draft.error.clone() {

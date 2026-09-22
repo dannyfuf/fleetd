@@ -2,7 +2,10 @@
 
 use crate::{DaemonError, DaemonResult, adapters::files::Files};
 use fleet_core::{
-    board::{BOARD_DOCUMENT_VERSION, BoardDocument, validate_board, validate_card},
+    board::{
+        BOARD_DOCUMENT_MIN_VERSION, BOARD_DOCUMENT_VERSION, BoardDocument, document_version,
+        validate_board, validate_card,
+    },
     ids::BoardId,
     paths::FleetHome,
 };
@@ -95,10 +98,11 @@ impl BoardStore {
         // A document this build is too old to read is intact, not damaged: quarantining it
         // would make the board disappear from a downgraded daemon and never come back.
         if let Ok(version) = serde_json::from_str::<DocumentVersion>(&text)
-            && version.version != BOARD_DOCUMENT_VERSION
+            && !supported_version(version.version)
         {
             return Err(DaemonError::Unsupported(format!(
-                "board {id} uses document version {} (this build reads {BOARD_DOCUMENT_VERSION})",
+                "board {id} uses document version {} (this build reads \
+                 {BOARD_DOCUMENT_MIN_VERSION}..={BOARD_DOCUMENT_VERSION})",
                 version.version
             )));
         }
@@ -128,7 +132,15 @@ impl BoardStore {
         }
     }
     /// Validates and atomically replaces a complete board document.
+    ///
+    /// The version is stamped here rather than by the caller: it is a fact about the document's
+    /// contents, and a board that never opted into automation must keep writing the version a
+    /// daemon from before this feature can still read.
     pub fn save(&self, doc: &BoardDocument) -> DaemonResult<()> {
+        let doc = &BoardDocument {
+            version: document_version(&doc.board, &doc.cards),
+            ..doc.clone()
+        };
         validate_document(doc)?;
         self.files.create_dir_all(&self.home.boards_dir())?;
         let mut text = serde_json::to_string_pretty(doc)?;
@@ -253,8 +265,13 @@ struct DocumentVersion {
     version: u32,
 }
 
+/// Whether this build can read a document written at `version`.
+fn supported_version(version: u32) -> bool {
+    (BOARD_DOCUMENT_MIN_VERSION..=BOARD_DOCUMENT_VERSION).contains(&version)
+}
+
 fn validate_document(doc: &BoardDocument) -> DaemonResult<()> {
-    if doc.version != BOARD_DOCUMENT_VERSION {
+    if !supported_version(doc.version) {
         return Err(DaemonError::Validation(format!(
             "unsupported board document version {}",
             doc.version
@@ -281,7 +298,10 @@ mod tests {
         adapters::files::RealFiles,
         testing::fakes::{FakeFiles, FakeFilesCall},
     };
-    use fleet_core::{board::new_board, model::Context};
+    use fleet_core::{
+        board::{ColumnAutomation, new_board},
+        model::Context,
+    };
 
     fn fixture() -> (tempfile::TempDir, FleetHome, BoardStore, BoardDocument) {
         let temp = tempfile::tempdir().unwrap();
@@ -298,7 +318,7 @@ mod tests {
             "now",
         );
         let doc = BoardDocument {
-            version: BOARD_DOCUMENT_VERSION,
+            version: document_version(&board, &[]),
             board,
             cards: vec![],
         };
@@ -392,12 +412,18 @@ mod tests {
     }
 
     #[test]
-    fn rejects_version_and_filename_mismatches() {
+    fn a_save_restamps_the_version_from_the_document_and_rejects_a_filename_mismatch() {
         let (_temp, home, store, doc) = fixture();
         store.save(&doc).unwrap();
+        // The version is the store's to write, not the caller's: a document handed over with
+        // the wrong one is saved at the version its contents actually need.
         let mut bad = doc.clone();
-        bad.version += 1;
-        assert!(store.save(&bad).is_err());
+        bad.version = BOARD_DOCUMENT_VERSION + 1;
+        store.save(&bad).unwrap();
+        assert_eq!(
+            store.load(&doc.board.id).unwrap().map(|doc| doc.version),
+            Some(BOARD_DOCUMENT_MIN_VERSION)
+        );
         let other: BoardId = "other".parse().unwrap();
         std::fs::write(
             home.board_path(&other),
@@ -406,6 +432,56 @@ mod tests {
         .unwrap();
         assert!(store.load(&other).is_err());
         assert!(!home.board_path(&other).exists());
+    }
+
+    #[test]
+    fn a_document_without_automation_still_saves_at_the_version_an_older_daemon_reads() {
+        let (_temp, home, store, doc) = fixture();
+
+        store.save(&doc).unwrap();
+
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(home.board_path(&doc.board.id)).unwrap())
+                .unwrap();
+        assert_eq!(written["version"], 1);
+    }
+
+    #[test]
+    fn a_document_with_one_automated_column_saves_at_version_2() {
+        let (_temp, home, store, mut doc) = fixture();
+        doc.board.statuses[0].automation = Some(ColumnAutomation {
+            on_success: Some("done".parse().unwrap()),
+            ..ColumnAutomation::default()
+        });
+
+        store.save(&doc).unwrap();
+
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(home.board_path(&doc.board.id)).unwrap())
+                .unwrap();
+        assert_eq!(written["version"], 2);
+        assert_eq!(
+            store.load(&doc.board.id).unwrap().map(|doc| doc.version),
+            Some(BOARD_DOCUMENT_VERSION)
+        );
+    }
+
+    #[test]
+    fn a_document_from_before_automation_loads_saves_and_stays_at_version_1() {
+        let (_temp, home, store, doc) = fixture();
+        let mut legacy = serde_json::to_value(&doc).unwrap();
+        legacy["version"] = serde_json::json!(1);
+        std::fs::create_dir_all(home.boards_dir()).unwrap();
+        std::fs::write(home.board_path(&doc.board.id), legacy.to_string()).unwrap();
+
+        let loaded = store.load(&doc.board.id).unwrap().unwrap();
+        store.save(&loaded).unwrap();
+
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(home.board_path(&doc.board.id)).unwrap())
+                .unwrap();
+        assert_eq!(loaded.version, 1);
+        assert_eq!(written["version"], 1);
     }
 
     #[test]
@@ -419,10 +495,13 @@ mod tests {
             serde_json::to_string(&future).unwrap(),
         )
         .unwrap();
-        assert!(matches!(
-            store.load(&doc.board.id),
-            Err(DaemonError::Unsupported(_))
-        ));
+        assert_eq!(
+            store.load(&doc.board.id).unwrap_err().to_string(),
+            format!(
+                "unsupported: board {} uses document version 3 (this build reads 1..=2)",
+                doc.board.id
+            )
+        );
         // The document is intact and must still be there for a build that can read it.
         assert!(home.board_path(&doc.board.id).exists());
         assert_eq!(store.list().unwrap(), vec![doc.board.id.clone()]);

@@ -47,9 +47,9 @@ ordered per-thread cursor with `next(self) -> Seq` (saturating) and `Display`.
 ```rust
 Delegation {
     id: DelegationId,
-    caller: ThreadId,
-    caller_turn: TurnId,
-    caller_item: ItemId,
+    caller: DelegationCaller,
+    caller_turn: Option<TurnId>,
+    caller_item: Option<ItemId>,
     child: ThreadId,
     provider: AgentKind,
     depth: u8,
@@ -68,6 +68,14 @@ Delegation {
     usage: Option<DelegationUsage>,
 }
 ```
+
+`DelegationCaller` is `#[serde(untagged)]` with `Thread(ThreadId)` and `Card { board: BoardId, card:
+CardId }`, and exposes `thread()`, `card()` and `is_card()`. A thread caller therefore serializes as
+the bare id string it always was, so a record written before card callers existed decodes unchanged;
+a card caller serializes as `{"board":…,"card":…}`. `caller_turn` and `caller_item` are `Some`
+**iff** the caller is a thread — a card has neither a launching turn nor a transcript item — and
+both carry `#[serde(default, skip_serializing_if = "Option::is_none")]`, so a card-called record
+omits both keys.
 
 The JSON keys are `callerTurn`, `callerItem`, `statusPayload` and so on. `eager: false`, `None`
 optional fields and an empty result file list are omitted; `nudges` and `recoveries` default to
@@ -90,10 +98,15 @@ before this field is byte-identical to one with `usage: None`.
 - `DelegationResult { text: String, files_changed: Vec<String>, source: ResultSource,
   elided: bool }` is camel-case. `ResultSource = Reported | LastAssistantText` serializes as
   `reported | last_assistant_text`.
-- `DeliveryState = Pending | Delivered { seq: Seq, turn: TurnId } | Consumed | Undeliverable {
-  reason: String }` uses the tagged shape `{ "type": snake_case, "data": ... }`.
-  `is_pending` and `word() -> "pending" | "delivered" | "consumed" | "undeliverable"` are the
-  compact projection helpers; `is_pending` matches `Pending` only. `Consumed` carries no payload
+- `DeliveryState = Pending | Delivered { seq: Seq, turn: TurnId } | Consumed | Recorded |
+  Undeliverable { reason: String }` uses the tagged shape `{ "type": snake_case, "data": ... }`.
+  `is_pending` and `word() -> "pending" | "delivered" | "consumed" | "recorded" | "undeliverable"`
+  are the compact projection helpers; `is_pending` matches `Pending` only. `Recorded` is a **card**
+  caller's terminal delivery: the board write that recorded the run's outcome has committed. It
+  carries no payload, is never overwritten by the repair sweep — whose predicate is
+  `delivery = 'pending' AND caller_kind = 'thread'` — and is set only by the delegation worker's
+  card arm, after the boards service's `RunDeliveryHook::on_run_delivered` returns `Ok`.
+  `Consumed` carries no payload
   and is set when a caller's own `fleet subagent wait` takes the result before the delivery worker
   injects it. It is stored in the existing `delegations.delivery` TEXT column — there is no `CHECK`
   constraint, so no migration — leaving `delivered_seq`, `delivered_turn` and `delivery_reason`
@@ -559,6 +572,29 @@ named in `REQUIRED_DELEGATION_COLUMNS` so the column-set test protects it. It is
 resume path, through a targeted `SELECT env_json` rather than the ordinary `RawDelegation` decode,
 so it never reaches `Delegation`, the wire, the CLI or a log line. A row written before slot 6 reads
 as an empty map. Slot 5 is `closed_threads`; slots are never renumbered or edited after shipping.
+
+Migration slot 7 is named `delegation_card_callers` and is the ladder's **first table rebuild**,
+because SQLite cannot drop `NOT NULL` from the three caller columns slot 3 created. It builds
+`delegations_v7` with every other column verbatim plus:
+
+```sql
+caller_kind TEXT NOT NULL DEFAULT 'thread',
+caller_thread TEXT, caller_turn TEXT, caller_item TEXT,   -- now nullable
+caller_board TEXT, caller_card TEXT
+```
+
+then `INSERT INTO delegations_v7 (<all columns>) SELECT 'thread', <same columns> FROM delegations;`,
+`DROP TABLE delegations;`, `ALTER TABLE delegations_v7 RENAME TO delegations;`, and re-creates both
+`idx_delegations_caller(caller_thread, created)` and the new `idx_delegations_card(caller_board,
+caller_card)`, since dropping the table took them. `delegation_outbox` is untouched. The slot is
+guarded like every other: a database whose `PRAGMA table_info(delegations)` already lists
+`caller_kind` is left alone, so re-running the ladder changes nothing.
+`REQUIRED_DELEGATION_COLUMNS`, `REQUIRED_INDEXES` and `DELEGATION_COLUMNS` grew with it. The
+constraint the schema cannot state — `caller_kind = 'thread'` requires the three thread columns
+non-null, `'card'` requires board and card non-null — is enforced once in Rust on the way in, and
+`decode` branches on `caller_kind` rather than inferring the kind from which columns are null,
+hard-erroring on an unknown kind. Two read verbs seek the new index: `live_for_board(board)` and
+`live_for_card(board, card)`. A database at slot 7 cannot be opened by an earlier `fleetd`.
 
 The three `ALTER TABLE` operations of slot 3 use the migration ladder's `PRAGMA table_info` guard,
 as slot 2 does. Status/delivery values are snake-case, `result_files` is a JSON array, and

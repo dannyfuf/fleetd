@@ -1,0 +1,82 @@
+# plans/board-workflows-2026-09-20-phase-8-plan.md P8-T05 · UX-SPEC.md §Board settings ·
+# KEYMAP.md §Dialog > BoardSettings · BOARD.md §11.10 · TESTING-HARNESS.md §3
+# (`settings.columns`) and §11 (the `section` and row-editor fields) — the same `C`, the same
+# dialog, on a board that may not carry automation at all.
+#
+# A context board has no checkout to run anything in, so `board_settings::draft` locks the
+# automation rows rather than hiding them: the order and the names of the columns are still this
+# board's to change, and only what describes a *run* is refused. This scenario is the pair to
+# `workflow-columns.scenario`, which drives the same dialog on `acme/api#agent`'s worktree board
+# and edits the rows this one cannot.
+#
+# Two projections say it, and they say different halves of it:
+#   `settings.columns`  marks every column `disabled`, which is the board's own condition — no
+#                       worktree, or a backend that owns the columns — and not a per-row one
+#                       (`state/harness/projection.rs`). It is the *board's* answer.
+#   the row editor      is the per-row answer, and the only one that distinguishes Name from On
+#                       enter: `⏎` on Name mounts an editor, so `dialog.fields[1]` is `name` and
+#                       the key context becomes `BoardSettingsEditing`; `⏎` on On enter mounts
+#                       nothing, so the field is absent and the list keeps the keyboard. A
+#                       scenario that only read the list could not tell those two rows apart
+#                       (phase-8 tracker, 2026-09-21).
+#
+# Nothing here is saved: the dialog is left dirty on `quit`, because what is being pinned is
+# what the dialog refuses to *offer*, and an `^s` would only prove `UpdateBoard` again.
+#
+# The fields are read with `assert`, never `await`: typing does not notify `AppState`, and only
+# `assert` and `dump` project on demand (§11).
+#
+# No `shot`: this is a keyboard scenario, so it runs in the headless lane too (§7).
+fixture: board
+await idle 20000
+assert screen == Hub && hub_tab == Worktrees
+
+# `g b` is the Hub-wide jump, and the board tab in the Hub is the *context* board — five
+# default statuses, `FLT-…` cards (§4).
+key g b
+await hub_tab == Board 10000
+assert key_contexts[0] == "Hub" && key_contexts[1] == "Board"
+# The tab being the board is not the board being loaded: the columns arrive with the view, a few
+# frames after the key, so the first of them is awaited rather than asserted (§9.3).
+await lists.board.rows[0].label == "Backlog" 20000
+assert lists.board.rows[4].label == "Canceled"
+
+# The same `C` as on a worktree board, bound on this context too, and it opens on Columns.
+key shift-c
+await dialog.name == BoardSettings 15000
+assert dialog.fields[0].name == "section" && dialog.fields[0].value == "Columns"
+assert key_contexts[0] == "Dialog" && key_contexts[1] == "BoardSettings"
+
+# Every column is marked `disabled`, and none carries `action`: a board that cannot run anything
+# has no column that starts a run, which is the same fact stated from the other side.
+assert lists["settings.columns"].rows[0].label == "Backlog" && lists["settings.columns"].rows[0].marks[0] == "disabled"
+assert lists["settings.columns"].rows[1].label == "Todo" && lists["settings.columns"].rows[1].marks[0] == "disabled"
+assert lists["settings.columns"].rows[2].label == "In Progress" && lists["settings.columns"].rows[2].marks[0] == "disabled"
+assert lists["settings.columns"].rows[3].label == "Done" && lists["settings.columns"].rows[3].marks[0] == "disabled"
+assert lists["settings.columns"].rows[4].label == "Canceled" && lists["settings.columns"].rows[4].marks[0] == "disabled"
+
+# Into Backlog's form. A column that runs nothing draws five rows: Name, Category, On enter,
+# On success, When unblocked.
+key enter
+
+# The name row is this board's to change, lock or no lock: `⏎` mounts its editor, the key
+# context moves with it, and what is typed reaches the draft.
+key enter
+assert key_contexts[1] == "BoardSettingsEditing"
+assert dialog.fields[1].name == "name" && dialog.fields[1].value == "Backlog"
+type X
+assert dialog.fields[1].value == "BacklogX"
+
+# `esc` leaves the editor without leaving the form.
+key escape
+assert key_contexts[1] == "BoardSettings"
+
+# `On enter` is the first automation row, and on this board `⏎` opens nothing over it: no
+# editor, so no field beside the section, and the list still owns the keyboard.
+key j j
+key enter
+assert key_contexts[1] == "BoardSettings"
+assert dialog.fields[1] absent
+assert dialog.fields[0].value == "Columns"
+dump locked
+quit

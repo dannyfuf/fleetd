@@ -70,7 +70,7 @@ fn summary_excludes_archived_and_both_terminal_categories() {
         remote: Default::default(),
         fields: vec![],
     });
-    let summary = summarize(&board, &cards);
+    let summary = summarize(&board, &cards, &[], NOW);
     assert_eq!(
         (
             summary.card_count,

@@ -15,18 +15,22 @@
 //! all — which is exactly the property `docs/BOARD-JIRA.md` §6 asks for.
 
 use fleet_core::{
+    agents::{AgentKind, PermissionMode},
     board::{
-        BackendRef, BoardPatch, BoardSettings, ConflictPolicy, PropertyKind, PropertyOption,
-        PropertySchema,
+        Action, ActionKind, BackendRef, Board, BoardPatch, BoardSettings, ColumnAgentPrefs,
+        ColumnAutomation, ConflictPolicy, MAX_LIVE_RUNS_PER_BOARD, PropertyKind, PropertyOption,
+        PropertySchema, Status, StatusCategory, apply_workflow_preset, normalise_automation,
+        validate_automation,
     },
-    ids::{BoardId, RepoId},
+    ids::{BoardId, CardId, RepoId, StatusId},
 };
 use fleet_proto::{request::RequestBody, response::ResponseBody};
-use fleet_ui_kit::prelude::*;
+use fleet_ui_kit::{Icon, prelude::*};
 use gpui::{AnyElement, App, Entity, FocusHandle, Window, div, px};
+use std::rc::Rc;
 
 use crate::{
-    actions::{dialog, settings as settings_actions},
+    actions::{board_settings as board_settings_actions, dialog, settings as settings_actions},
     bridge::Bridge,
     dialogs::{
         DialogHost, Dialogs, host::complete_request, notify, read_host, root, step, with_host,
@@ -34,10 +38,15 @@ use crate::{
     state::AppState,
 };
 
+/// The section rail's width, matched to the global Settings dialog (§3.8.6) so the two rails
+/// line up when a user moves between them.
+const RAIL_WIDTH: f32 = 180.0;
 /// How wide the row labels are.
 const LABEL_WIDTH: f32 = 150.0;
 /// The longest identifier prefix the contract allows.
 const MAX_PREFIX: usize = 8;
+/// How many rows a multi-line column editor draws, matching the card description's.
+const MULTILINE_ROWS: usize = 8;
 /// What a multi-select settings row is typed as, and split back on.
 const MULTI_SEPARATOR: char = ',';
 
@@ -52,16 +61,23 @@ fn input_placeholder(row: &BackendRow) -> &'static str {
     }
 }
 
+mod columns;
 mod draft;
+mod keys;
 mod persistence;
 mod schema;
 #[cfg(test)]
 mod tests;
 mod view;
 
+use columns::*;
 pub(super) use draft::BoardSettingsState;
 use draft::*;
+/// `C` opens this dialog on one named section; `,` opens it on the remembered one.
+pub(crate) use keys::open_on_section;
+use keys::*;
 pub(crate) use persistence::seed;
 use persistence::*;
+pub(crate) use schema::BoardSection;
 use schema::*;
 pub(crate) use view::render;

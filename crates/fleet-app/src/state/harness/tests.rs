@@ -2,8 +2,8 @@ use std::time::Instant;
 
 use fleet_core::{
     agents::{
-        AgentKind, Delegation, DelegationId, DelegationStatus, DeliveryState, GateId, GateKind,
-        ItemId, OpenGate, Seq, ThreadId, ThreadProjection, ToolKind, TurnId,
+        AgentKind, Delegation, DelegationCaller, DelegationId, DelegationStatus, DeliveryState,
+        GateId, GateKind, ItemId, OpenGate, Seq, ThreadId, ThreadProjection, ToolKind, TurnId,
     },
     ids::TerminalId,
     model::Worktree,
@@ -458,9 +458,9 @@ fn native_children_and_delegations_are_additive_snapshot_fields() {
     assert!(state.agents.attach(child));
     let record = Delegation {
         id: DelegationId::new(),
-        caller,
-        caller_turn: TurnId::new(),
-        caller_item: ItemId::new(),
+        caller: DelegationCaller::Thread(caller),
+        caller_turn: Some(TurnId::new()),
+        caller_item: Some(ItemId::new()),
         child,
         provider: AgentKind::Codex,
         depth: 1,
@@ -711,4 +711,390 @@ fn the_daemon_link_is_reported_where_the_key_contexts_cannot_show_it() {
             restarted: true,
         }
     );
+}
+
+/// The board a workflow scenario reads: a worktree board whose second column runs a card.
+///
+/// Built through `apply_board_view` rather than by assignment, so the marks are the ones the
+/// app's own fold derives (contracts §5.2) instead of a set this test agreed with itself on.
+mod workflow {
+    use super::*;
+    use chrono::{Duration, Utc};
+    use fleet_core::{
+        board::{
+            Action, ActionKind, BoardView, Card, CardDraft, CardRun, ColumnAgentPrefs,
+            ColumnAutomation, LiveRun, PENDING_AMBER_AFTER_SECS, PendingRun, RunOutcome,
+            create_card, new_worktree_board,
+        },
+        model::{Context, Worktree},
+    };
+
+    const CREATED: &str = "2026-09-20T09:00:00Z";
+
+    fn context() -> Context {
+        Context {
+            id: "work".parse().unwrap_or_else(|error| panic!("{error}")),
+            name: "Fleet".into(),
+            owners: Vec::new(),
+            created_at: CREATED.to_owned(),
+        }
+    }
+
+    fn worktree() -> Worktree {
+        Worktree {
+            id: "acme/api#agent"
+                .parse()
+                .unwrap_or_else(|error| panic!("{error}")),
+            repo_id: "acme/api".parse().unwrap_or_else(|error| panic!("{error}")),
+            slug: "agent".to_owned(),
+            branch: "feat/agent".to_owned(),
+            base_ref: "main".to_owned(),
+            path: "/tmp/agent".to_owned(),
+            session: "acme/api#agent".to_owned(),
+            host: None,
+            created_at: CREATED.to_owned(),
+            last_opened_at: None,
+            degraded: None,
+        }
+    }
+
+    /// Three cards in the first column of a board whose *second* column runs on arrival.
+    fn view() -> BoardView {
+        let mut board = new_worktree_board(&context(), &worktree(), CREATED);
+        if let Some(status) = board.statuses.get_mut(1) {
+            status.automation = Some(ColumnAutomation {
+                on_enter: Some(Action {
+                    kind: ActionKind::Prompt,
+                    instructions: String::new(),
+                    expect: String::new(),
+                    agent: ColumnAgentPrefs::default(),
+                    env: Vec::new(),
+                }),
+                ..ColumnAutomation::default()
+            });
+        }
+        let mut cards = Vec::new();
+        for (index, title) in ["Fix login", "Ship the board", "Write the docs"]
+            .iter()
+            .enumerate()
+        {
+            let card = create_card(
+                &mut board,
+                &cards,
+                format!("card-{index}")
+                    .parse()
+                    .unwrap_or_else(|error| panic!("{error}")),
+                CardDraft {
+                    title: (*title).to_owned(),
+                    ..CardDraft::default()
+                },
+                CREATED,
+            )
+            .unwrap_or_else(|error| panic!("{error}"));
+            cards.push(card);
+        }
+        BoardView {
+            board,
+            cards,
+            live_runs: Vec::new(),
+        }
+    }
+
+    fn run(card: &Card, outcome: Option<RunOutcome>) -> CardRun {
+        CardRun {
+            id: DelegationId::new(),
+            thread_id: Some(ThreadId::new()),
+            status_id: card.status_id.clone(),
+            action: ActionKind::Prompt,
+            provider: AgentKind::Codex,
+            model: Some("gpt-5".to_owned()),
+            effort: Some("high".to_owned()),
+            started_at: CREATED.to_owned(),
+            ended_at: outcome.is_some().then(|| "2026-09-20T09:30:00Z".to_owned()),
+            outcome,
+            detail: None,
+            report_comment_id: None,
+            files_changed: 0,
+            cost_usd: None,
+            tokens: None,
+        }
+    }
+
+    /// The app on the Hub's board tab, pointed at that worktree board.
+    fn state_with(view: BoardView) -> AppState {
+        let now = Instant::now();
+        let mut state = state();
+        state.daemon = DaemonLink::Connected;
+        let mut snapshot = test_support::snapshot();
+        snapshot.active_context = Some(context().id.clone());
+        snapshot.contexts = vec![context()];
+        snapshot.worktrees = vec![worktree()];
+        state.apply_snapshot(snapshot, now);
+        state.board.scope = Some(crate::state::BoardScope::Worktree(worktree().id));
+        state.apply_board_view(view);
+        // `create_card` files a card under the first unstarted status, which is `Todo` — the
+        // column the board opens on is `Backlog`, and a scenario reading `board.cards` has
+        // moved to the cards first.
+        state.board.focus.column = 1;
+        state
+    }
+
+    fn marks_of(dump: &UiSnapshot, list: &str, row: usize) -> Vec<String> {
+        dump.lists
+            .get(list)
+            .unwrap_or_else(|| panic!("{list} list"))
+            .rows
+            .get(row)
+            .unwrap_or_else(|| panic!("{list} row {row}"))
+            .marks
+            .clone()
+    }
+
+    #[test]
+    fn a_card_states_its_run_and_its_blockers_in_the_frozen_vocabulary() {
+        let mut view = view();
+        let live = run(&view.cards[0], None);
+        view.live_runs.push(LiveRun {
+            card_id: view.cards[0].id.clone(),
+            run: live.id,
+            status: DelegationStatus::Running,
+            headline: None,
+            started: CREATED.to_owned(),
+        });
+        view.cards[0].runs.push(live);
+        let blocker = view.cards[0].id.clone();
+        view.cards[2].blocked_by = vec![blocker];
+        view.cards[2].assignee = Some("danny".to_owned());
+        let state = state_with(view);
+
+        let dump = state.harness_projection().snapshot;
+        assert_eq!(
+            marks_of(&dump, "board.cards", 0),
+            vec!["working".to_owned()]
+        );
+        assert_eq!(
+            marks_of(&dump, "board.cards", 2),
+            vec!["blocked:1".to_owned(), "danny".to_owned()],
+            "the run mark leads, the blocked count follows and the assignee comes last"
+        );
+        assert_eq!(
+            dump.lists["board.summary"].rows[0].label, "1/1 working",
+            "a count the header does not state is left out of the row"
+        );
+        assert_eq!(
+            marks_of(&dump, "board", 1),
+            vec!["action".to_owned()],
+            "only a column that runs a card on arrival is marked"
+        );
+        assert!(marks_of(&dump, "board", 0).is_empty());
+    }
+
+    #[test]
+    fn the_summary_row_is_absent_while_the_board_says_neither_count() {
+        let dump = state_with(view()).harness_projection().snapshot;
+        assert!(
+            !dump.lists.contains_key("board.summary"),
+            "a board with nothing running carries no header counts, so it carries no row"
+        );
+        assert!(marks_of(&dump, "board.cards", 0).is_empty());
+    }
+
+    /// `board.cards` is the column as the pane draws it, which is what makes `rows[R]` and
+    /// `focused == board.column[C].card[R]` the same card.
+    ///
+    /// The document keeps a card where it was created and only `position` says where the column
+    /// shows it, so a card `]` moved in sits last on screen while still being first in
+    /// `view.cards`. A list built straight off `view.cards` reported the two in different orders
+    /// and a scenario reading a row by the index `focused` had just given it got another card.
+    #[test]
+    fn the_card_list_is_the_column_in_the_order_the_pane_draws_it() {
+        let mut view = view();
+        view.cards[0].position = 30;
+        let mut state = state_with(view);
+        state.screen = Screen::Hub {
+            tab: crate::state::HubTab::Board,
+        };
+        state.board.focus.row = 2;
+
+        let dump = state.harness_projection().snapshot;
+        let titles: Vec<_> = dump.lists["board.cards"]
+            .rows
+            .iter()
+            .map(|row| row.label.clone())
+            .collect();
+        assert_eq!(
+            titles,
+            vec![
+                "Ship the board".to_owned(),
+                "Write the docs".to_owned(),
+                "Fix login".to_owned(),
+            ],
+            "the column is ordered by position, exactly as `visible_cards` orders it"
+        );
+        assert_eq!(dump.focused.as_deref(), Some("board.column[1].card[2]"));
+        assert_eq!(
+            dump.lists["board.cards"].rows[2].label, "Fix login",
+            "the row `focused` names is the card the cursor is on"
+        );
+    }
+
+    #[test]
+    fn a_mark_only_the_clock_changed_moves_the_revision() {
+        let mut view = view();
+        let since = Utc::now()
+            - Duration::seconds(i64::try_from(PENDING_AMBER_AFTER_SECS).unwrap_or(i64::MAX) - 5);
+        view.cards[0].pending_run = Some(PendingRun {
+            status_id: view.cards[0].status_id.clone(),
+            since: since.to_rfc3339(),
+        });
+        let mut state = state_with(view);
+        let before = state.harness_projection();
+        assert_eq!(
+            marks_of(&before.snapshot, "board.cards", 0),
+            vec!["pending".to_owned()]
+        );
+
+        // The tick the app already runs for its toasts, far enough on that the wait itself is
+        // worth noticing. Nothing else about the board moved.
+        state.refresh_card_marks(Utc::now() + Duration::seconds(10));
+        let after = state.harness_projection();
+        assert_eq!(
+            marks_of(&after.snapshot, "board.cards", 0),
+            vec!["stalled".to_owned()]
+        );
+        assert_ne!(
+            after.revision, before.revision,
+            "a mark the clock alone changed must wake a waiting `await`"
+        );
+    }
+
+    #[test]
+    fn the_open_card_detail_lists_its_runs_oldest_first() {
+        let mut view = view();
+        let first = run(&view.cards[0], Some(RunOutcome::Succeeded));
+        let second = run(&view.cards[0], None);
+        view.live_runs.push(LiveRun {
+            card_id: view.cards[0].id.clone(),
+            run: second.id,
+            status: DelegationStatus::Blocked,
+            headline: None,
+            started: CREATED.to_owned(),
+        });
+        view.cards[0].runs = vec![first, second];
+        let mut state = state_with(view);
+        assert!(
+            !state
+                .harness_projection()
+                .snapshot
+                .lists
+                .contains_key("card.runs"),
+            "the list belongs to the open dialog, not to the board behind it"
+        );
+
+        state.open_overlay(Overlay::Dialog(crate::dialogs::Dialogs::CardDetail));
+        let dump = state.harness_projection().snapshot;
+        let runs = &dump.lists["card.runs"];
+        assert_eq!(runs.rows.len(), 2);
+        assert!(runs.selected.is_none(), "the detail has no run cursor");
+        assert!(
+            runs.rows[0].label.starts_with("succeeded 30m"),
+            "the older run speaks for itself: {}",
+            runs.rows[0].label
+        );
+        assert_eq!(runs.rows[0].marks, vec!["done".to_owned()]);
+        assert_eq!(runs.rows[0].badges, vec!["codex".to_owned()]);
+        assert!(
+            runs.rows[1].label.starts_with("blocked"),
+            "a live run states the child's own status word: {}",
+            runs.rows[1].label
+        );
+        assert_eq!(
+            runs.rows[1].marks,
+            vec!["needs you".to_owned()],
+            "and the mark is the one the card's tile draws for the same run"
+        );
+        assert!(
+            runs.rows[1]
+                .label
+                .contains("codex \u{b7} gpt-5 \u{b7} high"),
+            "the label is the row the detail draws: {}",
+            runs.rows[1].label
+        );
+    }
+
+    #[test]
+    fn a_card_owed_a_run_leaves_its_finished_row_speaking_for_itself() {
+        let mut view = view();
+        view.cards[0].runs = vec![run(&view.cards[0], Some(RunOutcome::Succeeded))];
+        view.cards[0].pending_run = Some(PendingRun {
+            status_id: view.cards[0].status_id.clone(),
+            since: Utc::now().to_rfc3339(),
+        });
+        let mut state = state_with(view);
+        state.open_overlay(Overlay::Dialog(crate::dialogs::Dialogs::CardDetail));
+
+        let dump = state.harness_projection().snapshot;
+        assert_eq!(
+            marks_of(&dump, "board.cards", 0),
+            vec!["pending".to_owned()],
+            "the tile is about the run the card is owed"
+        );
+        assert_eq!(
+            dump.lists["card.runs"].rows[0].marks,
+            vec!["done".to_owned()],
+            "so the run that already ended is read from its own outcome"
+        );
+    }
+
+    #[test]
+    fn a_card_with_no_run_lists_none() {
+        let mut state = state_with(view());
+        state.open_overlay(Overlay::Dialog(crate::dialogs::Dialogs::CardDetail));
+        assert!(
+            !state
+                .harness_projection()
+                .snapshot
+                .lists
+                .contains_key("card.runs")
+        );
+    }
+
+    #[test]
+    fn the_settings_columns_state_their_action_and_whether_the_board_may_carry_one() {
+        let mut state = state_with(view());
+        state.open_overlay(Overlay::Dialog(crate::dialogs::Dialogs::BoardSettings));
+        let dump = state.harness_projection().snapshot;
+        let columns = &dump.lists["settings.columns"];
+        assert_eq!(
+            columns.rows.len(),
+            state.board().expect("board").board.statuses.len()
+        );
+        assert_eq!(columns.rows[1].marks, vec!["action".to_owned()]);
+        assert!(columns.rows[0].marks.is_empty());
+        assert_eq!(
+            columns.rows[1].label,
+            state.board().expect("board").board.statuses[1].name
+        );
+    }
+
+    #[test]
+    fn a_board_that_may_not_carry_automation_marks_every_column_disabled() {
+        let mut view = view();
+        view.board.worktree_id = None;
+        let mut state = state_with(view);
+        state.board.view = None;
+        // A context board: the same columns, and no checkout for any of them to run in.
+        let mut context_view = self::view();
+        context_view.board.worktree_id = None;
+        state.board.scope = Some(crate::state::BoardScope::Context(context().id));
+        state.apply_board_view(context_view);
+        state.open_overlay(Overlay::Dialog(crate::dialogs::Dialogs::BoardSettings));
+        let dump = state.harness_projection().snapshot;
+        let columns = &dump.lists["settings.columns"];
+        assert_eq!(columns.rows[0].marks, vec!["disabled".to_owned()]);
+        assert_eq!(
+            columns.rows[1].marks,
+            vec!["action".to_owned(), "disabled".to_owned()]
+        );
+    }
 }

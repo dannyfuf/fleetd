@@ -1,8 +1,27 @@
 use super::*;
 
+/// What one `esc` did, from the deepest thing it could leave outwards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum EscapeStep {
+    /// Left the editor open over a column row.
+    Editor,
+    /// Cancelled a delete that was waiting for a target.
+    Delete,
+    /// Left one column's form for the list.
+    Column,
+    /// Asked about the unsaved draft, which is the one question §5.4 allows.
+    Ask,
+    /// Nothing left to leave: the shell closes the dialog.
+    Close,
+}
+
 /// Editable board configuration, including its backend and that backend's own settings.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct BoardSettingsState {
+    /// Which section of the rail is open (contracts §5.4).
+    ///
+    /// Defaults to the one this app session last used, so `,` reopens where the user left off.
+    pub(super) section: BoardSection,
     /// Identity of this opening, used to ignore replies to discarded drafts.
     pub(super) generation: u64,
     /// A request is in flight; retain and freeze the draft until it answers.
@@ -46,11 +65,84 @@ pub(crate) struct BoardSettingsState {
     /// every render pinned the list to the focused row: the wheel scrolled and snapped
     /// straight back, and a nine-row backend form could not be read past the cursor.
     pub(super) revealed: Option<usize>,
+    /// The board the draft was seeded from.
+    ///
+    /// The column rules live in `fleet-core` and take a whole `Board`; this is the one the
+    /// dialog is editing, kept so the rules can be asked about a candidate column vector
+    /// without the dialog inventing a board of its own.
+    ///
+    /// Behind an `Rc` because the render reads the draft by cloning it, once per frame: what
+    /// the form costs a frame has to stay the size of the form, not the size of the board
+    /// (`docs/APP-CONTRACTS.md`, "render prepares nothing").
+    pub(super) board: Option<Rc<Board>>,
+    /// Live runs this board may have at once, as the model stores it: `None` is one.
+    pub(super) max_live_runs: Option<u32>,
+    /// The column vector being edited (contracts §5.4). Nothing here is sent until `^s`.
+    pub(super) columns: Vec<ColumnDraft>,
+    /// The column vector the board was opened with, for the dirty check.
+    pub(super) original_columns: Vec<ColumnDraft>,
+    /// Which column the Columns pane has drilled into, if any.
+    pub(super) opened_column: Option<usize>,
+    /// Whether an editor is open over a column row.
+    ///
+    /// The Columns form opens its editors on `\u{23ce}` rather than on arrival, which is what
+    /// §5.4 asks for and what leaves `n`, `d`, `J`/`K` and `P` meaning themselves in the list.
+    pub(super) editing: bool,
+    /// Whether this board may carry automation at all.
+    ///
+    /// A context board has no checkout to run in and a Jira board's columns are the backend's,
+    /// so the automation rows are drawn disabled rather than hidden: the order and the names
+    /// are still this board's to change.
+    pub(super) automation_locked: bool,
+    /// The cards each column holds, in board order, for the delete rule.
+    ///
+    /// Behind an `Rc` for the reason the board above is: this one is the whole board's cards,
+    /// and cloning a card id per card per frame is the one part of this draft that grows
+    /// without bound.
+    pub(super) cards_by_column: Rc<Vec<(StatusId, Vec<CardId>)>>,
+    /// The column `d` was pressed on, waiting for the user to point at where its cards go.
+    ///
+    /// A column holding cards cannot simply vanish: §5.4 requires a target, and the cards are
+    /// moved one `MoveCard` at a time before the column leaves the draft.
+    pub(super) pending_delete: Option<usize>,
+    /// Whether `esc` has already asked about the unsaved draft.
+    pub(super) discard_armed: bool,
+    /// What the last list key did, when it did something worth saying.
+    pub(super) notice: Option<String>,
+    /// The Columns pane's rows, prepared whenever the draft changes.
+    pub(super) prepared: Vec<ColumnRow>,
     /// Why the draft cannot be saved.
     pub(super) error: Option<String>,
 }
 
 impl BoardSettingsState {
+    /// The open section's own title, for the harness `dialog.section` field.
+    ///
+    /// The section is draft state, so the projection cannot read it from `AppState`; this is the
+    /// one accessor the dialog host uses to state it (`docs/TESTING-HARNESS.md` §3).
+    pub(crate) const fn section_title(&self) -> &'static str {
+        self.section.title()
+    }
+
+    /// What to call the one row-scoped editor, for the harness `dialog.fields` entry beside it.
+    ///
+    /// Every other row of this dialog is a cycler whose value the projection already carries —
+    /// a column's name and its `\u{26a1}` mark are `settings.columns`, and the board's own rows
+    /// are `AppState` — so the live editor is the only place a value *typed* into Board settings
+    /// can be read back at all. Naming it after the row it belongs to is what lets a scenario
+    /// say which row it read (`docs/TESTING-HARNESS.md` §11).
+    ///
+    /// `None` while no row owns an editor, which is the same condition
+    /// [`Self::focused_text`] answers: a cycler, or a locked automation row.
+    pub(crate) fn editor_row_name(&self) -> Option<String> {
+        self.focused_text()?;
+        Some(match self.focused() {
+            SettingRow::BackendSetting(index) => self.rows.get(index)?.name.to_lowercase(),
+            SettingRow::ColumnField(field) => field.label().to_lowercase(),
+            row => row.label().to_lowercase(),
+        })
+    }
+
     /// Completes only the request belonging to this opening.
     pub(super) fn finish_save(&mut self, generation: u64, error: Option<String>) -> bool {
         if self.generation != generation || !self.saving {
@@ -61,12 +153,132 @@ impl BoardSettingsState {
         self.error.is_none()
     }
 
-    /// Every row of this draft, in the order they are drawn.
+    /// The rows the open section draws, in order.
     #[must_use]
     pub(super) fn rows(&self) -> Vec<SettingRow> {
-        let mut rows = FIXED_ROWS.to_vec();
-        rows.extend((0..self.rows.len()).map(SettingRow::BackendSetting));
-        rows
+        match self.section {
+            BoardSection::General => GENERAL_ROWS.to_vec(),
+            BoardSection::Backend => {
+                let mut rows = vec![SettingRow::Backend];
+                rows.extend((0..self.rows.len()).map(SettingRow::BackendSetting));
+                rows
+            }
+            BoardSection::Columns => self.prepared.iter().map(|row| row.row).collect(),
+        }
+    }
+
+    /// Recomputes the Columns pane's rows.
+    ///
+    /// Called from every path that changes the column draft, so `render` never formats a value
+    /// or decides a disabled flag (`docs/APP-CONTRACTS.md`).
+    pub(super) fn prepare(&mut self) {
+        self.prepared = prepare(&self.columns, self.opened_column, self.automation_locked);
+        let len = self.rows().len();
+        if self.row >= len {
+            self.row = len.saturating_sub(1);
+        }
+    }
+
+    /// Live runs this board allows at once; one when it says nothing.
+    #[must_use]
+    pub(super) fn live_run_limit(&self) -> u32 {
+        self.max_live_runs.unwrap_or(1)
+    }
+
+    /// `h` / `l` on the throttle row, clamped rather than wrapped.
+    ///
+    /// Wrapping would put `h` on one run at eight — the difference between one agent in the
+    /// checkout and eight of them editing the same files.
+    pub(super) fn step_live_runs(&mut self, delta: isize) {
+        let next = self
+            .live_run_limit()
+            .saturating_add_signed(i32::try_from(delta).unwrap_or(0))
+            .clamp(1, MAX_LIVE_RUNS_PER_BOARD);
+        self.max_live_runs = Some(next);
+    }
+
+    /// What `esc` does next, from the deepest thing it can leave outwards.
+    ///
+    /// Split out from [`cancel`] so the whole ladder — and the one question §5.4 allows — can
+    /// be proven without a window.
+    pub(super) fn escape(&mut self) -> EscapeStep {
+        if self.editing {
+            self.editing = false;
+            return EscapeStep::Editor;
+        }
+        if self.pending_delete.take().is_some() {
+            self.notice = None;
+            return EscapeStep::Delete;
+        }
+        if let Some(index) = self.opened_column.take() {
+            self.row = index.min(self.columns.len().saturating_sub(1));
+            self.prepare();
+            return EscapeStep::Column;
+        }
+        // §5.4: one question, once. The second `esc` discards, which is what the line says.
+        if self.dirty() && !self.discard_armed {
+            self.discard_armed = true;
+            self.error = Some("unsaved changes \u{2014} esc again to discard them".to_owned());
+            return EscapeStep::Ask;
+        }
+        EscapeStep::Close
+    }
+
+    /// Whether anything the dialog would save differs from what it opened with.
+    ///
+    /// `esc` asks once on a dirty draft and closes a clean one, so this is what stands between
+    /// a user and four minutes of column edits. It compares against the board itself rather
+    /// than against a second copy of every row: the board is already kept for the column
+    /// rules, and one source of "what was stored" cannot drift from another.
+    #[must_use]
+    pub(super) fn dirty(&self) -> bool {
+        if self.columns != self.original_columns {
+            return true;
+        }
+        let Some(board) = self.board.as_ref() else {
+            return false;
+        };
+        // An empty settings object and no settings at all are the same board; `settings_json`
+        // already normalises its own side, and this normalises the stored one, so a dialog
+        // opened and closed on a backend that configures nothing is not "unsaved".
+        let stored = match &self.original_settings {
+            serde_json::Value::Object(object) if object.is_empty() => &serde_json::Value::Null,
+            other => other,
+        };
+        self.name != board.name
+            || self.prefix != board.prefix
+            || self.default_repo_id != board.default_repo_id
+            || self.start_on_worktree != board.settings.start_on_worktree
+            || self.push_new_cards != board.settings.push_new_cards
+            || self.conflict_policy != board.settings.conflict_policy
+            || self.max_live_runs != board.settings.max_live_runs
+            || !self.keeps_kind()
+            || self.settings_json() != *stored
+    }
+
+    /// The column the Columns pane has drilled into.
+    #[must_use]
+    pub(super) fn opened(&self) -> Option<&ColumnDraft> {
+        self.columns.get(self.opened_column?)
+    }
+
+    /// Whether the Columns pane is showing its list rather than one column's form.
+    #[must_use]
+    pub(super) fn in_column_list(&self) -> bool {
+        self.section == BoardSection::Columns && self.opened_column.is_none()
+    }
+
+    /// The cards a column holds, by its position in the draft.
+    #[must_use]
+    pub(super) fn cards_in(&self, index: usize) -> &[CardId] {
+        self.columns
+            .get(index)
+            .and_then(|column| {
+                self.cards_by_column
+                    .iter()
+                    .find(|(id, _)| *id == column.status.id)
+            })
+            .map_or(&[][..], |(_, cards)| cards.as_slice())
     }
 
     /// The row the cursor is on.
@@ -137,10 +349,19 @@ impl BoardSettingsState {
         if prefix.is_empty() || prefix.len() > MAX_PREFIX {
             return Some(format!("prefix must be 1\u{2013}{MAX_PREFIX} characters"));
         }
-        rows_error(&self.rows)
+        if let Some(message) = rows_error(&self.rows) {
+            return Some(message);
+        }
+        // The column rules are `fleet-core`'s, so the dialog refuses a routing loop, a nameless
+        // skill and a reserved env key in the daemon's own words before anything is sent.
+        validate(self.board.as_deref()?, &self.columns, self.live_run_limit())
     }
 
     /// The focused row's seed text, when that row owns a live input.
+    ///
+    /// A General or Backend text row materializes its editor on arrival, as §3.8.6 has it; a
+    /// column row materializes one only once `\u{23ce}` has opened it, which is what leaves the
+    /// list keys and the arrows meaning themselves inside the form.
     #[must_use]
     pub(super) fn focused_text(&self) -> Option<String> {
         match self.focused() {
@@ -152,6 +373,12 @@ impl BoardSettingsState {
                     return None;
                 }
                 Some(row.value.clone())
+            }
+            SettingRow::ColumnField(field) => {
+                if !self.editing || (self.automation_locked && field.is_automation()) {
+                    return None;
+                }
+                field_text(self.opened()?, field)
             }
             _ => None,
         }
@@ -179,9 +406,19 @@ impl BoardSettingsState {
                 Some(row) => row.value = text.to_owned(),
                 None => return,
             },
+            SettingRow::ColumnField(field) => {
+                let Some(index) = self.opened_column else {
+                    return;
+                };
+                let locked = self.automation_locked;
+                set_field_text(&mut self.columns, index, field, text, locked);
+                self.prepare();
+            }
             _ => return,
         }
         self.error = None;
+        self.notice = None;
+        self.discard_armed = false;
     }
 }
 
@@ -200,252 +437,4 @@ pub(super) fn repo_position(repos: &[RepoId], current: Option<&RepoId>) -> usize
 #[must_use]
 pub(super) fn repo_listed(repos: &[RepoId], current: Option<&RepoId>) -> bool {
     current.is_none_or(|repo| repos.iter().any(|entry| entry == repo))
-}
-
-/// `j` / `k`: move the cursor while no text row owns the keyboard.
-pub(super) fn move_row(state: &Entity<AppState>, delta: isize, cx: &mut App) {
-    with_host(state, cx, |host| {
-        let len = host.board_settings.rows().len();
-        host.board_settings.row = step(host.board_settings.row, delta, len);
-    });
-    cx.stop_propagation();
-}
-
-/// `h` / `l`: cycle a closed choice while no text row owns the keyboard.
-pub(super) fn cycle(state: &Entity<AppState>, delta: isize, cx: &mut App) {
-    let app = state.read(cx);
-    let repos = repo_choices(app);
-    let selected = read_host(state, cx, |host, _| {
-        host.board_settings.backend_kind.clone()
-    });
-    let kinds = backend_kinds(state.read(cx), &selected);
-    let next_kind = kinds
-        .iter()
-        .position(|kind| *kind == selected)
-        .map(|index| kinds[step(index, delta, kinds.len())].clone())
-        .unwrap_or(selected);
-    let schema = schema_for(state.read(cx), &next_kind);
-    with_host(state, cx, |host| {
-        let draft = &mut host.board_settings;
-        if draft.saving {
-            return;
-        }
-        match draft.focused() {
-            SettingRow::DefaultRepo => {
-                // A value the list does not carry has no position to step from: wrapping out
-                // of an invented `0` sent `h` to the *last* repository. From off the grid the
-                // step lands on the neighbour it names — `l` on the first repository, `h` on
-                // "none" — and never anywhere the arrows did not point.
-                if !repo_listed(&repos, draft.default_repo_id.as_ref()) {
-                    draft.default_repo_id = (delta > 0).then(|| repos.first().cloned()).flatten();
-                } else {
-                    let index = repo_position(&repos, draft.default_repo_id.as_ref());
-                    let next = step(index, delta, repos.len() + 1);
-                    draft.default_repo_id =
-                        next.checked_sub(1).and_then(|at| repos.get(at).cloned());
-                }
-            }
-            SettingRow::ConflictPolicy => {
-                if draft.backend_kind == BackendRef::LOCAL {
-                    return;
-                }
-                let index = POLICIES
-                    .iter()
-                    .position(|policy| *policy == draft.conflict_policy)
-                    .unwrap_or(0);
-                draft.conflict_policy = POLICIES[step(index, delta, POLICIES.len())];
-                return;
-            }
-            // `h` is off and `l` is on, never a flip: every other cycler row on this dialog
-            // steps by `delta`, and a row that flipped on both made `h l` land somewhere other
-            // than where it started.
-            SettingRow::StartOnWorktree => draft.start_on_worktree = delta > 0,
-            SettingRow::PushNewCards => {
-                if draft.backend_kind == BackendRef::LOCAL {
-                    return;
-                }
-                draft.push_new_cards = delta > 0;
-            }
-            SettingRow::Backend => {
-                draft.select_backend(&next_kind, &schema);
-                return;
-            }
-            SettingRow::BackendSetting(index) => {
-                cycle_backend_row(draft, index, delta);
-                return;
-            }
-            SettingRow::Name | SettingRow::Prefix => {}
-        }
-        draft.error = None;
-    });
-    notify(state, cx);
-    cx.stop_propagation();
-}
-
-/// `h` / `l` inside a backend row: step a number, cycle a select, flip a flag.
-pub(super) fn cycle_backend_row(draft: &mut BoardSettingsState, index: usize, delta: isize) {
-    let Some(row) = draft.rows.get_mut(index) else {
-        return;
-    };
-    match row.kind {
-        // `h` is off and `l` is on, for the reason the fixed toggle rows are: a flip on both
-        // makes `h l` land on the opposite of where it started. `space` is the toggle.
-        PropertyKind::Bool => {
-            row.value = (delta > 0).to_string();
-            row.present = true;
-        }
-        PropertyKind::Number => {
-            // Stepping *down* from an unset row would write `0` — a value the daemon is not
-            // using, that `backend_element` refuses to draw, that `ctrl-u` is the only way out
-            // of, and that on two of Jira's three number rows either fails the save or turns
-            // every pull into a full one. An empty row has nothing below it.
-            if row.value.trim().is_empty() && delta < 0 {
-                return;
-            }
-            let current: i64 = row.value.trim().parse().unwrap_or(0);
-            row.value = current
-                .saturating_add(i64::try_from(delta).unwrap_or(0))
-                .max(0)
-                .to_string();
-        }
-        PropertyKind::Select if !row.options.is_empty() => {
-            let at = row
-                .options
-                .iter()
-                .position(|option| option.value == row.value)
-                .unwrap_or(0);
-            row.value = row.options[step(at, delta, row.options.len())]
-                .value
-                .clone();
-        }
-        _ => return,
-    }
-    draft.error = None;
-}
-
-/// `space`: toggle the focused flag row; anywhere else it is a space.
-pub(super) fn toggle(state: &Entity<AppState>, cx: &mut App) {
-    let changed = with_host(state, cx, |host| {
-        if host.board_settings.saving {
-            return false;
-        }
-        match host.board_settings.focused() {
-            SettingRow::StartOnWorktree => {
-                host.board_settings.start_on_worktree = !host.board_settings.start_on_worktree;
-                true
-            }
-            SettingRow::PushNewCards => {
-                if host.board_settings.backend_kind == BackendRef::LOCAL {
-                    return false;
-                }
-                host.board_settings.push_new_cards = !host.board_settings.push_new_cards;
-                true
-            }
-            SettingRow::BackendSetting(index) => {
-                let Some(row) = host.board_settings.rows.get_mut(index) else {
-                    return false;
-                };
-                if !row.is_flag() {
-                    return false;
-                }
-                row.value = (!row.flag()).to_string();
-                row.present = true;
-                true
-            }
-            _ => false,
-        }
-    });
-    if changed {
-        notify(state, cx);
-    }
-    cx.stop_propagation();
-}
-
-/// Rebuild the one row-scoped entity after focus moves, dropping it on non-text rows.
-pub(super) fn materialize_input(
-    state: &Entity<AppState>,
-    window: Option<&mut Window>,
-    dialog_focus: Option<&FocusHandle>,
-    cx: &mut App,
-) {
-    let spec = read_host(state, cx, |host, _| {
-        let draft = &host.board_settings;
-        let row = draft.focused();
-        let text = draft.focused_text()?;
-        let (label, placeholder, mono, digits) = match row {
-            SettingRow::Name => (row.label().to_owned(), "Fleet", false, false),
-            SettingRow::Prefix => (row.label().to_owned(), "FLT", true, false),
-            SettingRow::BackendSetting(index) => {
-                let backend = draft.rows.get(index)?;
-                let label = if backend.required {
-                    format!("{} \u{2217}", backend.name)
-                } else {
-                    backend.name.clone()
-                };
-                (
-                    label,
-                    input_placeholder(backend),
-                    backend.kind == PropertyKind::Number,
-                    backend.kind == PropertyKind::Number,
-                )
-            }
-            _ => return None,
-        };
-        Some((row, text, label, placeholder, mono, digits))
-    });
-    let Some((row, text, label, placeholder, mono, digits)) = spec else {
-        with_host(state, cx, |host| {
-            host.board_settings_input = None;
-            host.board_settings_input_subscription = None;
-        });
-        if let (Some(window), Some(focus)) = (window, dialog_focus) {
-            window.focus(focus, cx);
-        }
-        notify(state, cx);
-        return;
-    };
-    let input = cx.new(|cx| {
-        let mut input = TextInput::new(InputMode::SingleLine, cx);
-        input.set_text(text, cx);
-        input.set_label(Some(label.into()), cx);
-        input.set_placeholder(placeholder, cx);
-        input.set_mono(mono, cx);
-        if digits {
-            input.set_filter(Some(|character| character.is_ascii_digit()), cx);
-        }
-        input
-    });
-    let host = crate::dialogs::host::host_for(state, cx);
-    let weak_host = host.downgrade();
-    let subscription = cx.subscribe(&input, move |input, event, cx| {
-        if !matches!(event, TextInputEvent::Changed) {
-            return;
-        }
-        let Some(host) = weak_host.upgrade() else {
-            return;
-        };
-        let raw = input.read(cx).text().to_owned();
-        let normalized = if row == SettingRow::Prefix {
-            raw.to_uppercase()
-        } else {
-            raw
-        };
-        // Mirror prefixes in their stored uppercase form, but leave the live editor untouched so
-        // selection and undo history remain user edits. Moving away and back materializes that
-        // normalized draft value.
-        host.update(cx, |host, cx| {
-            if host.board_settings.focused() == row {
-                host.board_settings.set_focused_text(&normalized);
-                cx.notify();
-            }
-        });
-    });
-    host.update(cx, |host, _| {
-        host.board_settings_input = Some(input.clone());
-        host.board_settings_input_subscription = Some(subscription);
-    });
-    if let Some(window) = window {
-        input.update(cx, |input, cx| input.focus(window, cx));
-    }
-    notify(state, cx);
 }

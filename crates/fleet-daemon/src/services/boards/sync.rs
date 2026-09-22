@@ -377,6 +377,9 @@ impl Boards {
             }
         }
         context.progress("saving board sync result")?;
+        // No `re_evaluate` here, unlike every other path that moves a card between columns: a
+        // pull is the remote's news, not a user's action, and a column the remote put a card in
+        // must not start a run nobody on this machine asked for.
         doc.board.sync.last_synced_at = Some(self.now());
         // The skipped keys stay visible where every surface already looks for a board's
         // trouble, instead of being lost with the job that reported them. `reconcile` clears
@@ -518,6 +521,9 @@ fn readopt_pulled_statuses(
             name,
             category: declared.unwrap_or(StatusCategory::Unstarted),
             color: None,
+            // A column adopted from a remote schema runs nothing: automation is refused on a
+            // board with a backend.
+            automation: None,
         };
         // A board reads left to right in workflow order, and appending put a *started* column
         // to the right of the completed one the moment a project gained a status between two

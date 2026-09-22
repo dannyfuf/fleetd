@@ -10,7 +10,10 @@
 
 use super::{Preset, apply_preset, plan};
 use crate::env::{Daemon, HarnessEnv};
-use fleet_core::{github::PrTab, ids::ContextId};
+use fleet_core::{
+    github::PrTab,
+    ids::{CardId, ContextId},
+};
 use fleet_proto::snapshot::Snapshot;
 use std::{path::Path, process::Stdio};
 
@@ -504,6 +507,123 @@ async fn the_board_preset_boots_with_cards_in_their_columns() {
             .iter()
             .all(|card| !context_titles.contains(&card.title)),
         "the two card sets must be disjoint"
+    );
+
+    drop(client);
+    daemon
+        .shutdown()
+        .await
+        .unwrap_or_else(|error| panic!("shut the verification daemon down: {error}"));
+}
+
+#[tokio::test]
+async fn the_board_workflow_preset_boots_with_an_automated_worktree_board() {
+    let (booted, mut daemon, _environment) = boot(Preset::BoardWorkflow).await;
+    assert_eq!(
+        booted.worktree_slugs(),
+        vec!["acme/api#agent".to_owned(), "acme/api#other".to_owned()],
+        "board-workflow seeds what agents-subagent seeds"
+    );
+    let client = daemon
+        .client()
+        .await
+        .unwrap_or_else(|error| panic!("connect for the workflow board: {error:#}"));
+    let boards = client
+        .list_boards(Some(booted.context()))
+        .await
+        .unwrap_or_else(|error| panic!("list boards: {error}"));
+    assert_eq!(
+        boards.len(),
+        1,
+        "board-workflow seeds one board and it is the worktree's"
+    );
+    let summary = &boards[0];
+    assert_eq!(
+        summary.worktree_id.as_ref().map(ToString::to_string),
+        Some("acme/api#agent".to_owned())
+    );
+    assert_eq!(
+        summary.prefix, "AGE",
+        "the prefix is the daemon's derivation from the slug, not the fixture's guess"
+    );
+
+    let view = client
+        .get_board(summary.id.clone())
+        .await
+        .unwrap_or_else(|error| panic!("read the workflow board: {error}"));
+    assert_eq!(
+        view.board
+            .statuses
+            .iter()
+            .map(|status| status.id.to_string())
+            .collect::<Vec<_>>(),
+        vec![
+            "backlog".to_owned(),
+            "todo".to_owned(),
+            "ready".to_owned(),
+            "in-progress".to_owned(),
+            "in-review".to_owned(),
+            "done".to_owned(),
+            "canceled".to_owned(),
+        ],
+        "the columns are fleet-core's workflow preset, applied through UpdateBoard"
+    );
+    assert_eq!(
+        view.board.settings.max_live_runs(),
+        1,
+        "a second card moved into an action column has to queue"
+    );
+    let action_columns: Vec<String> = view
+        .board
+        .statuses
+        .iter()
+        .filter(|status| {
+            status
+                .automation
+                .as_ref()
+                .is_some_and(|automation| automation.on_enter.is_some())
+        })
+        .map(|status| status.id.to_string())
+        .collect();
+    assert_eq!(
+        action_columns,
+        vec!["in-progress".to_owned(), "in-review".to_owned()],
+        "the two action columns are what a scenario moves a card into"
+    );
+
+    let mut cards = view.cards.clone();
+    cards.sort_by_key(|card| card.number);
+    assert_eq!(
+        cards.iter().map(|card| card.number).collect::<Vec<_>>(),
+        vec![1, 2, 3, 4],
+        "four cards, numbered AGE-1 to AGE-4"
+    );
+    assert!(
+        cards
+            .iter()
+            .all(|card| card.status_id.to_string() == "todo"),
+        "no card is seeded into an action column: a run the seeding daemon started would be \
+         gone by the time the scenario's own daemon reads the home"
+    );
+    let number_of = |id: &CardId| cards.iter().find(|card| &card.id == id).map(|c| c.number);
+    assert_eq!(
+        cards
+            .iter()
+            .map(|card| (
+                card.number,
+                card.blocked_by
+                    .iter()
+                    .filter_map(number_of)
+                    .collect::<Vec<_>>()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (1, Vec::new()),
+            (2, Vec::new()),
+            (3, vec![1]),
+            (4, vec![1, 2])
+        ],
+        "card 1 blocks card 3, and cards 1 and 2 block card 4"
     );
 
     drop(client);

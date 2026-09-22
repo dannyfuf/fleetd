@@ -1,0 +1,115 @@
+# plans/board-workflows-2026-09-20-phase-8-plan.md P8-T05 · UX-SPEC.md §Board settings ·
+# KEYMAP.md §Dialog > BoardSettings · BOARD.md §11.10 · TESTING-HARNESS.md §3
+# (`settings.columns`) and §11 (the `section` and row-editor fields) — `C` opens Board settings
+# on Columns, and a column's automation edited there survives one `^s` and a re-opening.
+#
+# The round trip is the point: the dialog is a *draft* until `^s`, and `settings.columns` is
+# projected from the board rather than from that draft (`state/harness/projection.rs`), so every
+# assertion below about the list is a statement about what the daemon actually stored. Three
+# things ride on that:
+#   `P`          the preset is idempotent. This board already carries every workflow column, so
+#                `P` must add none — and the proof is not the list while the dialog is open (it
+#                cannot move before a save) but the list after `^s` has written the whole column
+#                vector back: a `P` that duplicated a column would show it there.
+#   the `effort` the one row-scoped editor Board settings mounts is the only place a value typed
+#   field       into this dialog can be read back (§11); every other row is a cycler whose value
+#                `settings.columns` or the board already carries. It is named after its row, so
+#                asserting `fields[1].name == "effort"` also pins *which* row the walk landed on.
+#   `⏎` twice    in the Columns pane `⏎` drills into a column, and only inside the form does it
+#                open a row's editor — which is what leaves `n`, `d`, `J`/`K` and `P` meaning
+#                themselves in the list. The two key contexts are the proof: `BoardSettings`
+#                while the list owns the keys, `BoardSettingsEditing` while the editor does.
+#
+# `blistering` is an effort no catalogue offers, and nothing validates one (contracts §5.3), so
+# it cannot be confused with a value the column already carried or a default the app supplied.
+#
+# The fields are read with `assert`, never `await`: typing does not notify `AppState`, and only
+# `assert` and `dump` project on demand (§11). Everything that crosses the daemon — the save,
+# the re-opening — is awaited.
+#
+# No `shot`: this is a keyboard scenario, so it runs in the headless lane too (§7).
+fixture: board-workflow
+await idle 30000
+
+# The preset seeds two worktrees, and `agent` is the one carrying the board.
+assert lists.worktrees.rows[1].id == "acme/api#agent"
+key j
+await lists.worktrees.selected.id == "acme/api#agent" 10000
+key o
+await screen == Workspace 30000
+key ctrl-s b
+await lists.tabs.selected.label == "board" 30000
+await focused == "board.column[0].card[0]" 30000
+await key_contexts[2] == "Board" 20000
+
+# `C` opens the dialog on Columns whatever section it was last left on, and the rail section is
+# the one piece of draft state a projection cannot otherwise reach.
+key shift-c
+await dialog.name == BoardSettings 15000
+assert dialog.fields[0].name == "section" && dialog.fields[0].value == "Columns"
+assert key_contexts[0] == "Dialog" && key_contexts[1] == "BoardSettings"
+
+# The list is this board's own columns in board order, and the two that start a run on arrival
+# carry the same `action` mark the board face draws. Nothing is disabled: a worktree board on
+# the local backend is exactly the board that may carry automation.
+assert lists["settings.columns"].rows[0].label == "Backlog" && lists["settings.columns"].rows[0].marks[0] absent
+assert lists["settings.columns"].rows[3].label == "In Progress" && lists["settings.columns"].rows[3].marks[0] == "action"
+assert lists["settings.columns"].rows[4].label == "In review" && lists["settings.columns"].rows[4].marks[0] == "action"
+assert lists["settings.columns"].rows[6].label == "Canceled" && lists["settings.columns"].rows[7] absent
+
+# `P` on a board that already has every preset column: the draft must come out of it unchanged,
+# which the save below is what proves.
+key shift-p
+
+# Four rows down to In review, then into its form. The list keys stop meaning themselves here,
+# which is why the drill-in is a mode rather than a selection.
+key j j j j
+key enter
+
+# Name, Category, On enter, Provider, Model, Effort — the sixth row of a column that runs
+# something. `⏎` opens its editor and the key context says the editor owns the keyboard.
+key j j j j j
+key enter
+assert key_contexts[1] == "BoardSettingsEditing"
+assert dialog.fields[1].name == "effort"
+type blistering
+assert dialog.fields[1].value == "blistering"
+
+# `⏎` commits the editor back into the draft and the list takes the keyboard again.
+key enter
+assert key_contexts[1] == "BoardSettings"
+
+# One `^s` is the whole save: `UpdateBoard` carries every column, and the dialog closes only
+# once the daemon has answered it.
+key ctrl-s
+await dialog absent 30000
+await idle 30000
+
+# Re-opened on the board the daemon wrote back. The column vector is the one `P` was pressed on,
+# so a preset that had added a duplicate would be showing it here.
+key shift-c
+await dialog.name == BoardSettings 15000
+assert dialog.fields[0].value == "Columns"
+assert lists["settings.columns"].rows[0].label == "Backlog"
+assert lists["settings.columns"].rows[3].label == "In Progress" && lists["settings.columns"].rows[3].marks[0] == "action"
+assert lists["settings.columns"].rows[4].label == "In review" && lists["settings.columns"].rows[4].marks[0] == "action"
+assert lists["settings.columns"].rows[6].label == "Canceled" && lists["settings.columns"].rows[7] absent
+
+# The same walk to the same row, over a draft seeded from the stored board: the effort is what
+# was typed before the save.
+key j j j j
+key enter
+key j j j j j
+key enter
+assert key_contexts[1] == "BoardSettingsEditing"
+assert dialog.fields[1].name == "effort" && dialog.fields[1].value == "blistering"
+dump columns
+
+# `esc` climbs out one level at a time: the editor, then the column, then the dialog — and a
+# draft nothing has changed since the save closes without asking.
+key escape
+assert key_contexts[1] == "BoardSettings"
+key escape
+key escape
+await dialog absent 10000
+quit

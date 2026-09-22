@@ -2,7 +2,7 @@
 
 use fleet_core::{
     agents::{AttentionKind, Delegation},
-    board::{BackendDescriptor, BackendSchema, Board, BoardSummary, Card},
+    board::{BackendDescriptor, BackendSchema, Board, BoardSummary, BoardView, Card, LiveRun},
     inspection::WorktreeInspection,
     model::{Repo, Worktree},
     sessions::{AgentActivity, WorktreeStatus},
@@ -141,10 +141,39 @@ pub struct SleepEnvelope<'a> {
 
 /// A complete board and its cards in a protocol-one envelope.
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BoardEnvelope<'a> {
     pub protocol: u32,
     pub board: &'a Board,
     pub cards: &'a [Card],
+    /// The delegation join the view carries, never persisted and absent when nothing is live.
+    ///
+    /// Omitted rather than `[]` on a board with no live run, which is what keeps this envelope
+    /// byte-identical to the one every reader parsed before automation existed.
+    #[serde(skip_serializing_if = "no_live_runs")]
+    pub live_runs: &'a [LiveRun],
+}
+
+impl<'a> BoardEnvelope<'a> {
+    /// The envelope for a whole board view, joins included.
+    ///
+    /// Every `--json` board answer is built here rather than field by field: the view is the
+    /// one thing the daemon sends, and a call site that forgets a join silently ships a board
+    /// whose runs disappeared.
+    #[must_use]
+    pub fn from_view(view: &'a BoardView) -> Self {
+        Self {
+            protocol: PROTOCOL,
+            board: &view.board,
+            cards: &view.cards,
+            live_runs: &view.live_runs,
+        }
+    }
+}
+
+/// Whether a borrowed run join is empty, in the shape serde hands a slice field to.
+fn no_live_runs(runs: &&[LiveRun]) -> bool {
+    runs.is_empty()
 }
 
 /// Board summaries in a protocol-one envelope.
@@ -280,6 +309,43 @@ mod tests {
             json,
             r#"{"protocol":1,"error":{"kind":"not-found","message":"missing worktree"}}"#
         );
+    }
+
+    /// A board with nothing live serialises exactly as it did before runs existed, and a board
+    /// with a live run carries it under `liveRuns`.
+    #[test]
+    fn the_board_envelope_carries_live_runs_and_omits_an_empty_join() {
+        let view: BoardView = serde_json::from_value(serde_json::json!({
+            "board": {
+                "id": "work", "contextId": "ctx", "name": "Work", "prefix": "FLT",
+                "backend": {"kind": "local", "settings": {}},
+                "statuses": [{"id": "todo", "name": "Todo", "category": "unstarted"}],
+                "labels": [], "properties": [], "settings": {},
+                "nextNumber": 1, "sync": {}, "createdAt": "now", "updatedAt": "now"
+            },
+            "cards": [],
+            "liveRuns": [{
+                "cardId": "card-1", "run": "00000000-0000-4000-8000-000000000003",
+                "status": "running", "started": "2026-09-06T12:00:00Z"
+            }]
+        }))
+        .expect("the fixture is a board view");
+        let json = to_json(&BoardEnvelope::from_view(&view)).expect("the envelope serialises");
+        assert!(
+            json.contains(
+                r#""liveRuns":[{"cardId":"card-1","run":"00000000-0000-4000-8000-000000000003""#
+            ),
+            "{json}"
+        );
+
+        let empty = BoardView {
+            live_runs: Vec::new(),
+            ..view
+        };
+        let json = to_json(&BoardEnvelope::from_view(&empty)).expect("the envelope serialises");
+        assert!(json.starts_with(r#"{"protocol":1,"board":"#), "{json}");
+        assert!(json.ends_with(r#""cards":[]}"#), "{json}");
+        assert!(!json.contains("liveRuns"), "{json}");
     }
 
     #[test]

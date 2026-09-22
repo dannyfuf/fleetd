@@ -20,6 +20,10 @@ pub(crate) fn render(
     let (board, card) = (&board, &card);
     let now = now_unix();
     let theme = cx.theme().clone();
+    // The run row's facts are read here, where the whole state is in hand: the mark is the
+    // board's own fold, and the live status is the delegation mirror's, which is newer than
+    // the view's join between two board responses.
+    let run = run_line(state.read(cx), card, now);
     // Borrowed, never cloned: this runs on every frame, and the card set of a real board
     // carries every comment and activity entry on it.
     let rows = state.read(cx).board().map_or_else(Vec::new, |view| {
@@ -67,8 +71,11 @@ pub(crate) fn render(
         .track_scroll(&draft.scroll)
         .children(detail::conflict_banner(card))
         .child(title)
+        .children(run.as_ref().map(|run| detail::run_row(run, cx)))
+        // The run's own keys, beside the run they act on (contracts §5.3).
+        .children(run.as_ref().map(|_| detail::run_hints().into_any_element()))
         .child(description)
-        .child(detail::comments(card, now, cx))
+        .child(detail::comments(card, now, &draft.expanded_reports, cx))
         .children(comment_editor)
         .child(detail::activity(card, now, cx));
 
@@ -113,6 +120,12 @@ pub(crate) fn render(
             // `x` is otherwise nowhere on this surface: the conflict banner names `K`/`R` when
             // there is a conflict, but nothing ever names the key that opens the issue.
             .key("x", "remote")
+            // The run keys, which this dialog owns whether or not the card has run yet
+            // (contracts §5.5): `>` starts the column's action, and a card with no run says so
+            // rather than doing nothing.
+            .key("A", "attach")
+            .key("X", "cancel")
+            .key(">", "run")
             .key("esc", "close")
     };
 
@@ -242,6 +255,37 @@ pub(crate) fn render(
         })
         .child(dialog_card)
         .into_any_element()
+}
+
+/// What the run row states, from the card and the two places a live run is known.
+///
+/// A run the card calls live is asked of the delegation mirror first and of the board view's
+/// join second: `live_runs` is only as fresh as the last board response, while
+/// `DelegationChanged` keeps arriving between them.
+fn run_line(app: &AppState, card: &Card, now: i64) -> Option<detail::RunLine> {
+    let mark = app
+        .board
+        .marks
+        .by_card
+        .get(&card.id)
+        .and_then(|marks| marks.run);
+    let live = card
+        .runs
+        .last()
+        .filter(|run| run.is_live())
+        .and_then(|run| {
+            app.agents
+                .delegation(run.id)
+                .map(|delegation| delegation.status)
+                .or_else(|| {
+                    app.board()?
+                        .live_runs
+                        .iter()
+                        .find(|live| live.run == run.id)
+                        .map(|live| live.status)
+                })
+        });
+    detail::run_line(card, mark, live, now)
 }
 
 /// The card went away while the dialog was open — say so instead of showing an empty card.

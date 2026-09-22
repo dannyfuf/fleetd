@@ -36,7 +36,12 @@ await lists.tabs.selected.label == "board" 10000
 # The tab draws the board itself rather than handing its keys to an embedded view, so the chain
 # names the surface a third word deep and the cursor opens on the first card of the first column.
 await focused == "board.column[0].card[0]" 20000
-assert screen == Workspace && mode == Native
+# The mode word is awaited rather than asserted (§9.3): the tab is created and then selected, and
+# the select mutation is still in flight when the pane first draws — `select_terminal` cannot read
+# the kind of a terminal the mirror has not received yet, so the word is `Terminal` for the one
+# frame between the pane arriving and the snapshot that carries its record.
+await mode == Native 10000
+assert screen == Workspace
 assert key_contexts[0] == "Workspace" && key_contexts[1] == "Native"
 assert key_contexts[2] == "Board"
 

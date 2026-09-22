@@ -72,6 +72,8 @@ pub(crate) enum AgentThreadEvent {
     Copy(String),
     /// Attach and select another native thread named by prepared chrome.
     SelectThread(ThreadId),
+    /// Go back to the board tab with this card selected — the jump `^s u` makes from a card run.
+    SelectCard(fleet_core::ids::CardId),
     /// Say something short to the user, as a transient toast.
     Notice(SharedString),
     /// The reader reached the oldest row this client holds: load the page behind it.
@@ -175,6 +177,8 @@ pub struct AgentThreadView {
     caller: Option<AgentThreadSummary>,
     /// The caller's one-based combined-strip index, absent while its tab is hidden.
     caller_index: Option<usize>,
+    /// The card this run works for, when a column's automation started it (contracts §5.5).
+    card_caller: Option<presentation::CardCaller>,
 
     /// One inline diff surface per item that carries a patch, keyed by the row's item id.
     ///
@@ -303,6 +307,7 @@ impl AgentThreadView {
             metadata_rev: 0,
             caller: None,
             caller_index: None,
+            card_caller: None,
             diffs,
             expanded: HashSet::new(),
             unfolded: HashSet::new(),

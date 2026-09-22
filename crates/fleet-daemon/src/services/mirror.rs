@@ -542,6 +542,8 @@ mod tests {
             open_count: 0,
             dirty_count: 0,
             conflict_count: 0,
+            working_count: 0,
+            attention_count: 0,
             last_synced_at: None,
             last_error: None,
         }

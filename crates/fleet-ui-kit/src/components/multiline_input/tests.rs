@@ -181,6 +181,29 @@ fn enter_with_owner_policy_reaches_the_wrapper_fallback(cx: &mut gpui::TestAppCo
     );
 }
 
+/// A pointer click into the composer leaves it able to type and to submit.
+///
+/// The composer is hosted inside a `track_focus` container, and gpui transfers focus to the
+/// nearest tracked handle on every mouse down: without the editor's own focus-taking mouse
+/// handler winning that race, the click would leave the keyboard on the container and the
+/// characters that follow would go nowhere with nothing on screen saying so.
+#[gpui::test]
+fn a_click_into_the_composer_leaves_it_typing(cx: &mut gpui::TestAppContext) {
+    let (mut visual, input, events, _, _) = composer(cx);
+    let center = inner(&input, &visual).read_with(&visual, |inner, _| {
+        inner.test_bounds().expect("inner input bounds").center()
+    });
+    visual.simulate_mouse_down(center, MouseButton::Left, Modifiers::none());
+    visual.simulate_mouse_up(center, MouseButton::Left, Modifiers::none());
+    visual.simulate_input("ship it");
+    input.read_with(&visual, |input, cx| assert_eq!(input.text(cx), "ship it"));
+    visual.simulate_keystrokes("enter");
+    assert_eq!(
+        intents(&events),
+        [MultilineInputEvent::Submit("ship it".into())]
+    );
+}
+
 #[gpui::test]
 fn a_blank_composer_neither_submits_nor_clears(cx: &mut gpui::TestAppContext) {
     let (mut visual, input, events, _, _) = composer(cx);

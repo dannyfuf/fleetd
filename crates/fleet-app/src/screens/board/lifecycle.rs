@@ -1,4 +1,5 @@
 use super::*;
+use crate::dialogs::SessionTransport;
 
 /// Claims the active context's board whenever the tab is showing and its slot went stale.
 ///
@@ -13,6 +14,30 @@ pub(super) fn synchronize(state: &Entity<AppState>, bridge: &Bridge, cx: &mut Ap
     // The Hub tab owns the context scope: a worktree scope left behind by the Workspace's board
     // pane is taken back here, and pointing the mirror where it already is costs nothing.
     enter_context_scope(state, bridge, cx);
+}
+
+/// Reloads the shown board after a daemon event said something changed it.
+///
+/// Column automation writes to a worktree board without this app asking: it records a run,
+/// carries a card on through its column's `on_success` and releases one whose blockers
+/// finished. [`AppState::apply_daemon_event`] answers the `BoardChanged` that follows by
+/// marking the mirror stale and nothing else, and the Hub's tab is the only surface that ever
+/// consumed that flag by itself — through [`synchronize`] above, which the board screen calls
+/// from its observation of [`AppState`]. The Workspace's pane has no such trigger, so a run's
+/// marks, the header's counts and an auto-advanced card would sit there until a hand-typed `r`.
+///
+/// It belongs on the event loop rather than on that observation because the reload answers an
+/// *event*, not a repaint: an observation-driven claim would ask on every notify, including the
+/// ones a keystroke produces before any board has changed.
+///
+/// One request per stale flag: [`AppState::begin_board_load`] clears it and refuses a second
+/// claim, so a batch of twenty events costs one `EnsureWorktreeBoard`, and a batch that touched
+/// no board costs two field reads.
+pub(crate) fn refresh_after_daemon_change(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
+    if !state.read(cx).board_pane_is_active() {
+        return;
+    }
+    ensure_current(state, bridge, cx);
 }
 
 /// Points the board at the active context's board and loads it (the Hub tab's scope).
@@ -184,9 +209,13 @@ pub(super) fn send_card(
 }
 
 /// Sends a card mutation and writes a refusal to `refusal`.
-pub(crate) fn send_card_reporting(
+///
+/// Generic over the transport so the dialogs that reach it — the confirm's `X` and its
+/// `MoveCancelsRun` among them — can be tested against a recording transport rather than a
+/// live [`Bridge`]; every caller still passes one.
+pub(crate) fn send_card_reporting<T: SessionTransport>(
     state: &Entity<AppState>,
-    bridge: &Bridge,
+    bridge: &T,
     body: RequestBody,
     refusal: Refusal,
     cx: &mut App,

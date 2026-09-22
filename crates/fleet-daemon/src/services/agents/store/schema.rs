@@ -366,12 +366,17 @@ pub(super) const REQUIRED_TABLES: &[&str] = &[
 
 /// Every column the durable delegation record carries at head.
 ///
-/// Slot 003 created all of them but `env_json`, which slot 006 adds. The set is asserted by name
-/// so a column added without a slot fails loudly.
+/// Slot 003 created all of them but `env_json`, which slot 006 adds, and `caller_kind`,
+/// `caller_board` and `caller_card`, which slot 007's rebuild adds when it also makes the three
+/// thread-caller columns nullable. The set is asserted by name so a column added without a slot
+/// fails loudly.
 #[cfg(test)]
 pub(super) const REQUIRED_DELEGATION_COLUMNS: &[&str] = &[
     "brief",
+    "caller_board",
+    "caller_card",
     "caller_item",
+    "caller_kind",
     "caller_thread",
     "caller_turn",
     "child_thread",
@@ -415,6 +420,7 @@ pub(super) const REQUIRED_INDEXES: &[&str] = &[
     "idx_checkpoints_ordinal",
     "idx_delegation_outbox_open",
     "idx_delegations_caller",
+    "idx_delegations_card",
     "idx_gates_open",
     "idx_item_attachments_path",
     "idx_items_thread_parent",

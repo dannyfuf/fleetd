@@ -45,7 +45,11 @@ fn view() -> BoardView {
         .unwrap_or_else(|error| panic!("{error}"));
         cards.push(card);
     }
-    BoardView { board, cards }
+    BoardView {
+        board,
+        cards,
+        live_runs: Vec::new(),
+    }
 }
 
 #[test]
@@ -60,7 +64,7 @@ fn the_header_counts_only_the_cards_the_board_shows() {
         remote: fleet_core::board::RemoteCard::default(),
         fields: vec!["title".into()],
     });
-    let facts = HeaderFacts::of(&view, None, 0);
+    let facts = HeaderFacts::of(&view, None, 0, &BoardMarks::default());
     // An archived card is in no column and reachable by no key: a chip for one is a chip
     // pointing at nothing.
     assert_eq!((facts.dirty, facts.conflicts), (1, 0));
@@ -149,11 +153,111 @@ fn header_facts_count_dirty_and_conflicted_cards() {
     let mut view = view();
     view.cards[0].dirty = true;
     view.board.sync.last_synced_at = Some("2026-09-06T11:00:00Z".into());
-    let facts = HeaderFacts::of(&view, Some("Local"), 1_788_523_200);
+    let facts = HeaderFacts::of(&view, Some("Local"), 1_788_523_200, &BoardMarks::default());
     assert_eq!(facts.dirty, 1);
     assert_eq!(facts.conflicts, 0);
     assert!(facts.local);
     assert!(facts.synced.is_some());
+}
+
+/// The marks the app folded reach the rows that draw them, and nothing re-derives them.
+///
+/// `CardRow` is what the tile is built from in `fn tile`, so a mark that stops here is a mark
+/// the board never shows. A card the fold had nothing to say about carries neither.
+#[test]
+fn a_cards_marks_reach_its_row_by_card_id() {
+    let view = view();
+    let mut marks = BoardMarks::default();
+    marks.by_card.insert(
+        view.cards[0].id.clone(),
+        TileMark {
+            run: Some(RunMark::Working),
+            blocked: None,
+        },
+    );
+    marks.by_card.insert(
+        view.cards[2].id.clone(),
+        TileMark {
+            run: None,
+            blocked: Some((2, BlockedTone::Muted)),
+        },
+    );
+
+    let model = build(&view, "", None, 0, &marks);
+    let rows: Vec<&CardRow> = model
+        .columns
+        .iter()
+        .flat_map(|column| column.rows.iter())
+        .collect();
+    let row = |title: &str| {
+        *rows
+            .iter()
+            .find(|row| row.title == title)
+            .unwrap_or_else(|| panic!("no row for {title}"))
+    };
+    assert_eq!(row("Fix login").run, Some(RunMark::Working));
+    assert_eq!(row("Fix login").blocked, None);
+    assert_eq!(row("Polish").blocked, Some((2, BlockedTone::Muted)));
+    assert_eq!(
+        row("Ship the board").run,
+        None,
+        "a card the fold said nothing about carries nothing"
+    );
+}
+
+/// The header states the two counts as finished strings, and only while they say something.
+#[test]
+fn the_header_counts_are_composed_with_the_model_and_hidden_at_zero() {
+    let mut view = view();
+    view.board.settings.max_live_runs = Some(2);
+    let facts = |marks: &BoardMarks| HeaderFacts::of(&view, None, 0, marks);
+
+    let quiet = facts(&BoardMarks::default());
+    assert_eq!(quiet.working_label, None);
+    assert_eq!(quiet.needs_you_label, None);
+    assert_eq!(
+        (quiet.working, quiet.live_limit, quiet.needs_you),
+        (0, 2, 0)
+    );
+
+    let busy = facts(&BoardMarks {
+        working: 1,
+        needs_you: 1,
+        ..BoardMarks::default()
+    });
+    assert_eq!(busy.working_label.as_deref(), Some("1/2 working"));
+    assert_eq!(busy.needs_you_label.as_deref(), Some("1 needs you"));
+}
+
+/// A column wears the `⚡` for what it starts, not for where it sends a card afterwards.
+#[test]
+fn only_an_on_enter_column_carries_an_action() {
+    let mut view = view();
+    let destination = view.board.statuses[2].id.clone();
+    view.board.statuses[0].automation = Some(fleet_core::board::ColumnAutomation {
+        on_enter: Some(fleet_core::board::Action {
+            kind: fleet_core::board::ActionKind::Prompt,
+            instructions: String::new(),
+            expect: String::new(),
+            agent: fleet_core::board::ColumnAgentPrefs::default(),
+            env: Vec::new(),
+        }),
+        on_success: Some(destination.clone()),
+        advance_when_unblocked: None,
+    });
+    view.board.statuses[1].automation = Some(fleet_core::board::ColumnAutomation {
+        on_enter: None,
+        on_success: None,
+        advance_when_unblocked: Some(destination),
+    });
+
+    let model = build(&view, "", None, 0, &BoardMarks::default());
+    assert!(model.columns[0].has_action);
+    assert!(
+        !model.columns[1].has_action,
+        "advancing a card that is already done starts nothing"
+    );
+    assert!(!model.columns[2].has_action, "a plain column is unchanged");
 }
 
 #[test]
@@ -219,7 +323,7 @@ fn draw_board(cx: &mut gpui::TestAppContext) -> Vec<String> {
     cx.update(|cx| cx.set_global(fleet_ui_kit::Theme::dark()));
     let cx = cx.add_empty_window();
     let view = view();
-    let model = build(&view, "", None, 1_788_523_200);
+    let model = build(&view, "", None, 1_788_523_200, &BoardMarks::default());
     let lists = model
         .columns
         .iter()

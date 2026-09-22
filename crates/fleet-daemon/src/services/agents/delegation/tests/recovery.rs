@@ -1,8 +1,9 @@
 use chrono::Utc;
 use fleet_core::agents::{
-    AbortReason, AgentEvent, AgentKind, Delegation, DelegationId, DelegationResult,
-    DelegationStatus, DeliveryState, ItemId, ItemKind, MessageOrigin, PermissionMode, ResultSource,
-    SessionState, ThreadId, TurnId, TurnOutcome, TurnState, Usage, UserInput,
+    AbortReason, AgentEvent, AgentKind, Delegation, DelegationCaller, DelegationId,
+    DelegationResult, DelegationStatus, DeliveryState, ItemId, ItemKind, MessageOrigin,
+    PermissionMode, ResultSource, SessionState, ThreadId, TurnId, TurnOutcome, TurnState, Usage,
+    UserInput,
 };
 use fleet_proto::response::ResponseBody;
 use sha2::{Digest as _, Sha256};
@@ -210,9 +211,9 @@ async fn seed_running_delegation(
     let now = Utc::now();
     let delegation = Delegation {
         id: delegation_id,
-        caller,
-        caller_turn,
-        caller_item: ItemId::new(),
+        caller: DelegationCaller::Thread(caller),
+        caller_turn: Some(caller_turn),
+        caller_item: Some(ItemId::new()),
         child,
         provider: AgentKind::Claude,
         depth: 1,
@@ -248,7 +249,9 @@ async fn seed_running_delegation(
         .append_item(
             caller,
             caller_turn,
-            delegation.caller_item,
+            delegation
+                .caller_item
+                .expect("a thread caller has a transcript item"),
             ItemKind::Delegation {
                 id: delegation.id,
                 provider: delegation.provider,
@@ -421,7 +424,9 @@ async fn restart_delivers_to_an_idle_ready_caller_exactly_once() {
         .emit_to(
             caller,
             AgentEvent::TurnSettled {
-                turn: delegation.caller_turn,
+                turn: delegation
+                    .caller_turn
+                    .expect("a thread caller has a caller turn"),
                 outcome: TurnOutcome::Completed,
                 usage: Usage::default(),
                 duration_ms: 8,

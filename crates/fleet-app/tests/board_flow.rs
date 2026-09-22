@@ -87,7 +87,12 @@ async fn board_mutations_refresh_the_app_through_default_subscriptions() {
         .is_empty()
     );
     let moved = writer
-        .move_card(card.id.clone(), "in-progress".parse().unwrap(), Some(0))
+        .move_card(
+            card.id.clone(),
+            "in-progress".parse().unwrap(),
+            Some(0),
+            false,
+        )
         .await
         .unwrap();
     app.apply_card(moved.clone());
