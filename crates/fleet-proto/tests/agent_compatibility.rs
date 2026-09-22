@@ -27,15 +27,15 @@ use chrono::{DateTime, Utc};
 use fleet_core::{
     agents::{
         AbortReason, AccountInfo, AccountKind, AccountStatus, AgentEvent, AgentKind,
-        AgentThreadSummary, Attention, AttentionKind, CheckpointKind, Delegation, DelegationId,
-        DelegationResult, DelegationStatus, DelegationUsage, DeliveryState, FileDelta, GateAnswer,
-        GateId, GateKind, GateResolver, Item, ItemId, ItemKind, ItemPatch, ItemPayloadPatch,
-        ItemStatus, MessageOrigin, ModelDescriptor, ModelSelection, PermissionChoice,
-        PermissionMode, PlanAnswer, ProviderOptionId, Question, QuestionOption,
+        AgentThreadSummary, Attention, AttentionKind, CheckpointKind, Delegation, DelegationCaller,
+        DelegationId, DelegationResult, DelegationStatus, DelegationUsage, DeliveryState,
+        FileDelta, GateAnswer, GateId, GateKind, GateResolver, Item, ItemId, ItemKind, ItemPatch,
+        ItemPayloadPatch, ItemStatus, MessageOrigin, ModelDescriptor, ModelSelection,
+        PermissionChoice, PermissionMode, PlanAnswer, ProviderOptionId, Question, QuestionOption,
         ReasoningEffortDescriptor, ResultSource, Seq, SeqEvent, SessionState, StreamKind, ThreadId,
         ThreadProjection, ToolCall, ToolKind, TurnId, TurnOutcome, TurnState, Usage, UserInput,
     },
-    ids::WorktreeId,
+    ids::{BoardId, CardId, WorktreeId},
 };
 use fleet_proto::{
     agents::{
@@ -325,6 +325,7 @@ fn delegation_value_types_have_one_wire_golden_per_variant() {
         r#"{"type":"delivered","data":{"seq":42,"turn":"aaaaaaaa-2222-4333-8444-555555555555"}}"#,
     );
     assert_frame(DeliveryState::Consumed, r#"{"type":"consumed"}"#);
+    assert_frame(DeliveryState::Recorded, r#"{"type":"recorded"}"#);
     assert_frame(
         DeliveryState::Undeliverable {
             reason: "the caller thread was deleted".to_owned(),
@@ -372,6 +373,18 @@ fn delegation_value_types_have_one_wire_golden_per_variant() {
             ..starting_delegation()
         },
         r#"{"id":"dddddddd-2222-4333-8444-555555555555","caller":"11111111-2222-4333-8444-555555555555","callerTurn":"aaaaaaaa-2222-4333-8444-555555555555","callerItem":"bbbbbbbb-2222-4333-8444-555555555555","child":"22222222-3333-4444-8555-666666666666","provider":"codex","depth":1,"brief":"write protocol goldens","expectation":"all wire bytes are pinned","status":"starting","nudges":0,"recoveries":0,"delivery":{"type":"pending"},"created":"2026-09-07T12:00:00Z","usage":{"usage":{"inputTokens":1200,"outputTokens":340,"reasoningTokens":0,"cacheReadTokens":9000,"cacheWriteTokens":0,"totalTokens":10540,"webSearchRequests":0,"toolUses":7},"costUsd":0.42,"contextPct":12.5}}"#,
+    );
+}
+
+/// The card caller is the only new `caller` shape, and the only record that omits both caller
+/// keys. The thread fixture above is not edited: a thread caller is still a bare id string, so a
+/// record written by a build that had no card callers decodes here unchanged, and this build
+/// writes those same bytes back.
+#[test]
+fn a_card_called_delegation_carries_its_board_and_card_and_no_caller_turn() {
+    assert_frame(
+        card_called_delegation(),
+        r#"{"id":"dddddddd-2222-4333-8444-555555555555","caller":{"board":"work","card":"card-12"},"child":"22222222-3333-4444-8555-666666666666","provider":"codex","depth":1,"brief":"write protocol goldens","expectation":"all wire bytes are pinned","status":"starting","nudges":0,"recoveries":0,"delivery":{"type":"recorded"},"created":"2026-09-07T12:00:00Z"}"#,
     );
 }
 
@@ -559,9 +572,9 @@ fn model() -> ModelSelection {
 fn delegation() -> Delegation {
     Delegation {
         id: delegation_id(),
-        caller: thread(),
-        caller_turn: turn(),
-        caller_item: item(),
+        caller: DelegationCaller::Thread(thread()),
+        caller_turn: Some(turn()),
+        caller_item: Some(item()),
         child: child_thread(),
         provider: AgentKind::Codex,
         depth: 1,
@@ -604,6 +617,22 @@ fn starting_delegation() -> Delegation {
         finished: None,
         headline: None,
         ..delegation()
+    }
+}
+
+/// A card-called delegation: a board column started it, so the caller is the board and the card,
+/// there is no caller turn or transcript item, and its result is recorded on the board rather than
+/// delivered into a transcript.
+fn card_called_delegation() -> Delegation {
+    Delegation {
+        caller: DelegationCaller::Card {
+            board: BoardId::try_from("work".to_owned()).unwrap_or_else(|error| panic!("{error}")),
+            card: CardId::try_from("card-12".to_owned()).unwrap_or_else(|error| panic!("{error}")),
+        },
+        caller_turn: None,
+        caller_item: None,
+        delivery: DeliveryState::Recorded,
+        ..starting_delegation()
     }
 }
 

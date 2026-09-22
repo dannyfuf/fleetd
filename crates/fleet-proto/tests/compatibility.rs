@@ -160,6 +160,7 @@ fn request_wire_goldens() {
                 card_id: "card-12".parse().unwrap(),
                 status_id: "doing".parse().unwrap(),
                 index: Some(2),
+                cancel_run: false,
             },
         },
         r#"{"id":9,"body":{"type":"move_card","card_id":"card-12","status_id":"doing","index":2}}"#,
@@ -613,6 +614,78 @@ fn board_automation_wire_goldens() {
             result: Ok(ResponseBody::Board(automated_board_view())),
         },
         r#"{"id":6,"result":{"Ok":{"type":"board","data":{"board":{"id":"work","contextId":"work","name":"Fleet","prefix":"FLT","nextNumber":13,"backend":{"kind":"jira","settings":{"jql":"project = SP","project":"SP"}},"statuses":[{"id":"todo","name":"To do","category":"unstarted","color":null,"automation":{"onEnter":{"kind":{"kind":"skill","name":"deep-review","args":"--fast"},"instructions":"Review {key}.","expect":"the review finds no blocking issue","agent":{"provider":"claude","model":"opus","effort":"high","mode":"full_access"},"env":["CARD={key}"]},"onSuccess":"done","advanceWhenUnblocked":"done"}},{"id":"done","name":"Done","category":"completed","color":null}],"labels":[],"properties":[],"defaultRepoId":null,"settings":{"startOnWorktree":true,"branchTemplate":"{key}-{slug}","conflictPolicy":"manual","pushNewCards":false,"maxLiveRuns":2},"sync":{"lastSyncedAt":null,"cursor":null,"lastError":null,"statusMap":{"remoteToLocal":{},"localToRemote":{}},"readonlyFields":[]},"createdAt":"2026-09-06T12:00:00Z","updatedAt":"2026-09-06T12:00:00Z"},"cards":[{"id":"card-12","boardId":"work","number":12,"title":"Fix login","description":"","statusId":"todo","priority":"none","labels":[],"assignee":null,"estimate":null,"dueDate":null,"parentId":null,"repoId":null,"worktreeId":null,"properties":{},"comments":[{"id":"comment-1","author":null,"body":"report","createdAt":"2026-09-06T12:00:00Z","remoteId":null,"runId":"11111111-2222-4333-8444-555555555555"}],"activity":[],"remote":null,"conflict":null,"dirty":false,"archived":false,"position":0,"agent":{"provider":"codex","model":"gpt-5","effort":"high"},"blockedBy":["card-11"],"pendingRun":{"statusId":"todo","since":"2026-09-06T12:00:00Z"},"runs":[{"id":"11111111-2222-4333-8444-555555555555","threadId":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee","statusId":"todo","action":{"kind":"prompt"},"provider":"claude","model":"opus","effort":"high","startedAt":"2026-09-06T12:00:00Z","endedAt":"2026-09-06T12:30:00Z","outcome":"needs_you","detail":"reported blocked","reportCommentId":"comment-1","filesChanged":3,"costUsd":0.42,"tokens":1200}],"createdAt":"2026-09-06T12:00:00Z","updatedAt":"2026-09-06T12:00:00Z"}]}}}}"#,
+    );
+}
+
+/// A board view carrying one live run, joined onto the automated fixture above.
+///
+/// `liveRuns` is joined from the delegation store on read and skipped when it is empty, so
+/// every board golden written before automation existed is unchanged by its arrival.
+const BOARD_VIEW_WITH_A_LIVE_RUN: &str = r#"{"id":15,"result":{"Ok":{"type":"board","data":{"board":{"id":"work","contextId":"work","name":"Fleet","prefix":"FLT","nextNumber":13,"backend":{"kind":"jira","settings":{"jql":"project = SP","project":"SP"}},"statuses":[{"id":"todo","name":"To do","category":"unstarted","color":null,"automation":{"onEnter":{"kind":{"kind":"skill","name":"deep-review","args":"--fast"},"instructions":"Review {key}.","expect":"the review finds no blocking issue","agent":{"provider":"claude","model":"opus","effort":"high","mode":"full_access"},"env":["CARD={key}"]},"onSuccess":"done","advanceWhenUnblocked":"done"}},{"id":"done","name":"Done","category":"completed","color":null}],"labels":[],"properties":[],"defaultRepoId":null,"settings":{"startOnWorktree":true,"branchTemplate":"{key}-{slug}","conflictPolicy":"manual","pushNewCards":false,"maxLiveRuns":2},"sync":{"lastSyncedAt":null,"cursor":null,"lastError":null,"statusMap":{"remoteToLocal":{},"localToRemote":{}},"readonlyFields":[]},"createdAt":"2026-09-06T12:00:00Z","updatedAt":"2026-09-06T12:00:00Z"},"cards":[{"id":"card-12","boardId":"work","number":12,"title":"Fix login","description":"","statusId":"todo","priority":"none","labels":[],"assignee":null,"estimate":null,"dueDate":null,"parentId":null,"repoId":null,"worktreeId":null,"properties":{},"comments":[{"id":"comment-1","author":null,"body":"report","createdAt":"2026-09-06T12:00:00Z","remoteId":null,"runId":"11111111-2222-4333-8444-555555555555"}],"activity":[],"remote":null,"conflict":null,"dirty":false,"archived":false,"position":0,"agent":{"provider":"codex","model":"gpt-5","effort":"high"},"blockedBy":["card-11"],"pendingRun":{"statusId":"todo","since":"2026-09-06T12:00:00Z"},"runs":[{"id":"11111111-2222-4333-8444-555555555555","threadId":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee","statusId":"todo","action":{"kind":"prompt"},"provider":"claude","model":"opus","effort":"high","startedAt":"2026-09-06T12:00:00Z","endedAt":"2026-09-06T12:30:00Z","outcome":"needs_you","detail":"reported blocked","reportCommentId":"comment-1","filesChanged":3,"costUsd":0.42,"tokens":1200}],"createdAt":"2026-09-06T12:00:00Z","updatedAt":"2026-09-06T12:00:00Z"}],"liveRuns":[{"cardId":"card-12","run":"dddddddd-2222-4333-8444-555555555555","status":"running","headline":"Reading the login handler","started":"2026-09-06T12:05:00Z"}]}}}}"#;
+
+/// The three run verbs, the flag that rides on `MoveCard`, and a board view carrying a live run.
+///
+/// `cancel_run` is skipped when it is false, so the `MoveCard` golden above — written before the
+/// flag existed — is byte for byte what it always was, and only a move that really cancels a run
+/// puts the key on the wire.
+#[test]
+fn board_automation_request_and_live_run_wire_goldens() {
+    assert_frame(
+        Request {
+            id: 11,
+            body: RequestBody::CardRunStart {
+                card_id: "card-12".parse().unwrap(),
+            },
+        },
+        r#"{"id":11,"body":{"type":"card_run_start","card_id":"card-12"}}"#,
+    );
+    assert_frame(
+        Request {
+            id: 12,
+            body: RequestBody::CardRunCancel {
+                card_id: "card-12".parse().unwrap(),
+            },
+        },
+        r#"{"id":12,"body":{"type":"card_run_cancel","card_id":"card-12"}}"#,
+    );
+    assert_frame(
+        Request {
+            id: 13,
+            body: RequestBody::CardRunWait {
+                card_id: "card-12".parse().unwrap(),
+                timeout_ms: 30_000,
+            },
+        },
+        r#"{"id":13,"body":{"type":"card_run_wait","card_id":"card-12","timeout_ms":30000}}"#,
+    );
+    assert_frame(
+        Request {
+            id: 14,
+            body: RequestBody::MoveCard {
+                card_id: "card-12".parse().unwrap(),
+                status_id: "doing".parse().unwrap(),
+                index: None,
+                cancel_run: true,
+            },
+        },
+        r#"{"id":14,"body":{"type":"move_card","card_id":"card-12","status_id":"doing","index":null,"cancel_run":true}}"#,
+    );
+
+    let mut view = automated_board_view();
+    view.live_runs = serde_json::from_value(serde_json::json!([{
+        "cardId": "card-12",
+        "run": "dddddddd-2222-4333-8444-555555555555",
+        "status": "running",
+        "headline": "Reading the login handler",
+        "started": "2026-09-06T12:05:00Z"
+    }]))
+    .expect("live runs fixture");
+    assert_frame(
+        Response {
+            id: 15,
+            result: Ok(ResponseBody::Board(view)),
+        },
+        BOARD_VIEW_WITH_A_LIVE_RUN,
     );
 }
 
