@@ -17,7 +17,7 @@ pub(crate) const fn focus_key(screen: &Screen) -> &'static str {
     }
 }
 
-/// How much of an error the 26 px status bar can carry before the mode word is at risk.
+/// How much of an error the 28 px status bar can carry before the mode word is at risk.
 const MAX_LINE: usize = 72;
 
 /// One line of at most `budget` characters, so a long `gh` error cannot push the mode word out

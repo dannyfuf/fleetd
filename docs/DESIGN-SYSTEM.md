@@ -69,24 +69,36 @@ both `Render::render` and `RenderOnce::render`.
 
 ### 2.1 Color roles
 
-`bg` / `surface` / `elevated` / `overlay` are the four grounds; there is no fifth. `row_hover`
-exists only for the pointer and never expresses state.
+`chrome` / `bg` / `surface` / `surface_raised` / `elevated` are the grounds, darkest to highest,
+and `overlay` is the scrim between the base screen and whatever floats over it; there is no
+other ground. `row_hover` and `control_hover` exist only for the pointer and never express state.
 
 | Role | Dark | Light | Use |
 | --- | --- | --- | --- |
-| `bg` | `#0E1013` | `#FBFBFC` | app ground, context bar, status bar |
+| `bg` | `#111317` | `#FBFBFC` | app ground: the content area |
+| `chrome` | `#0E0F12` | `#F3F4F6` | window chrome: title / context bar, sidebar, status bar |
 | `surface` | `#16181D` | `#FFFFFF` | rails, panes, scroll pill, prefix hint |
-| `elevated` | `#1B1E24` | `#FFFFFF` | dialogs, sheets, toasts, palette |
-| `overlay` | `rgba(0,0,0,.45)` | `rgba(0,0,0,.25)` | dialog scrim (ghosts the base screen) |
+| `surface_raised` | `#1A1C22` | `#FFFFFF` | cards (board tiles, hub cards, grouped settings), always with a `border` hairline |
+| `elevated` | `#1B1E24` | `#FFFFFF` | dialogs, sheets, toasts, palette, menus, popovers, tooltips |
+| `overlay` | `rgba(5,6,8,.55)` | `rgba(0,0,0,.30)` | scrim behind a dialog, sheet or popover (see §2.6) |
 | `row_selected` | `#1E2430` | `#EDF2FB` | cursor row |
-| `row_hover` | `#191C22` | `#F3F4F6` | pointer hover only |
+| `row_hover` | `#191C22` | `#F3F4F6` | pointer hover on a row only |
 | `text` | `#E6E8EB` | `#16181D` | branch, title, value |
-| `text_secondary` | `#8A9099` | `#6B7280` | repo, host, age, counts, labels |
-| `text_muted` | `#5A6069` | `#9CA3AF` | draft, disabled, key hints, the null dash |
-| `text_inverse` | `#0E1013` | `#FBFBFC` | text on an accent or semantic fill |
-| `accent` | `#58A6FF` | `#0969DA` | cursor, focus and the primary-button fill **only** |
+| `text_secondary` | `#A3A9B5` | `#4B5563` | repo, host, age, counts, captions |
+| `text_muted` | `#808794` | `#636A77` | draft, disabled, key hints, labels, the null dash |
+| `text_inverse` | `#0E1013` | `#FBFBFC` | text on a semantic fill |
+| `accent` | `#58A6FF` | `#0969DA` | cursor, focus and links: the one blue |
+| `accent_fill` | `#58A6FF` | `#0969DA` | fill of a surface's one primary button |
+| `accent_fill_hover` | `#79B8FF` | `#0858C0` | pointer hover on `accent_fill` |
+| `accent_fill_text` | `#0B0E14` | `#FFFFFF` | label and key chip on `accent_fill` |
+| `accent_subtle` | `rgba(88,166,255,.14)` | `rgba(9,105,218,.12)` | wash behind a blue chip or an informational callout |
+| `control` | `#1A1D23` | `#FFFFFF` | resting fill of a secondary button or a control |
+| `control_hover` | `#22262D` | `#F3F4F6` | pointer hover on a control, ghost button or icon button |
+| `control_border` | `#2C3039` | `#D3D6DC` | hairline around a resting control |
+| `kbd_bg` | `#23262D` | `#F3F4F6` | key chip (`Kbd`) fill |
+| `kbd_border` | `#30343D` | `#D3D6DC` | key chip (`Kbd`) outline |
 | `success` | `#3FB950` | `#1A7F37` | attached, pass, approved, done |
-| `warning` | `#D29922` | `#9A6700` | running, pending, dirty, unknown, degraded |
+| `warning` | `#D29922` | `#9A6700` | needs a person: running, pending, dirty, unknown, degraded |
 | `danger` | `#F85149` | `#CF222E` | failed, changes requested, destructive |
 | `info` | `#58A6FF` | `#0969DA` | neutral information (same hue as accent; never state) |
 | `border` | `#22262E` | `#E3E5E9` | 1 px hairlines |
@@ -98,6 +110,14 @@ exists only for the pointer and never expresses state.
 | `skeleton` | `#1E222A` | `#EEF0F3` | cold-load placeholder rows |
 | `diff_added` | `rgba(63,185,80,.14)` | `rgba(26,127,55,.14)` | added-line wash inside reusable diff views |
 | `diff_removed` | `rgba(248,81,73,.14)` | `rgba(207,34,46,.14)` | removed-line wash inside reusable diff views |
+
+`accent` stays the single blue: `accent_fill`, `accent_subtle`, `focus_ring`, `cursor_bar` and
+`info` are all that hue, never a second one. Amber (`warning`) keeps meaning "needs a person".
+
+**Contrast.** `text`, `text_secondary` and `text_muted` each meet WCAG AA (4.5:1) on every
+ground from `chrome` to `elevated` in both modes, and `accent_fill_text` meets it on
+`accent_fill`. `theme::contrast_ratio(fg, bg)` computes the ratio; a unit test in
+`theme/contrast.rs` holds the palette to it, and the gallery's colour page prints each ratio.
 
 Semantic tones are selected through `Tone`, never by reaching for the field:
 `Tone::{Default, Secondary, Muted, Accent, Success, Warning, Danger, Info, Inverse}`.
@@ -153,20 +173,33 @@ rather than trusted. `Theme::with_mono_family` overrides the result.
 
 | Role | Family | Size / line height | Weight | Case | Used for |
 | --- | --- | --- | --- | --- | --- |
-| `ui` | system | 13 / 18 | 400 | as written | body text, values, row content |
+| `page_title` | system | 20 / 26 | 600 | as written | the one heading of a screen |
+| `section_title` | system | 16 / 22 | 600 | as written | a group heading inside a page or a sheet |
+| `ui` | system | 13 / 18 | 400 | as written | body text, values, row content (the design's `body` role) |
 | `ui_strong` | system | 13 / 18 | 500 | as written | active tab, row title, primary action |
 | `title` | system | 15 / 20 | 500 | as written | dialog and detail-panel titles |
+| `caption` | system | 12 / 16 | 400 | as written | supporting text under a title or beside a value |
+| `sentence_label` | system | 11 / 14 | 600 | **as written** (sentence case) | field labels, sidebar and card group headings |
 | `data` | mono | 12.5 / 18 | 400 | as written | branch, path, sha, target, head ref |
 | `data_small` | mono | 11.5 / 16 | 400 | as written | job progress sub-line, log tail |
-| `label` | system | 11 / 14 | 500 | **UPPERCASED** | pane and section labels, counts, mode word |
+| `label` | system | 11 / 14 | 500 | **UPPERCASED** | legacy micro-header: pane and section labels, counts, mode word |
 | `hint` | mono | 11 / 14 | 400 | as written | key hints |
+
+`Text::page_title`, `section_title`, `caption` and `sentence_label` are the constructors, with
+`TextRole` variants of the same names. `ui` is the body role; there is no second spelling.
+
+**The uppercase micro-header is retiring.** `label` keeps its uppercase until every screen that
+uses it is redesigned; a redesigned surface uses `sentence_label`, with the string written in
+sentence case (`Base branch`, not `BASE BRANCH`) and no tracking. When the last `label` call
+site is gone, the role is removed.
 
 One mono cell is **7.5 × 18 px**; `1 ch = 7.5 px` (`theme::CH`, `theme::ch(n)`). Every column
 budget in the UX spec is stated in `ch` and resolved with `ch()` or `ColumnLadder`.
 
-`TypeStyle::tracking` records the spec's `.06em` on the label role, but gpui 1.18.1's `Styled`
-exposes no letter-spacing setter, so `Text` cannot apply it yet. That is the one token in this
-document that is data rather than behaviour.
+`TypeStyle::tracking` records the spec's `.06em` on the legacy `label` role, but gpui 1.18.1's
+`Styled` exposes no letter-spacing setter, so `Text` cannot apply it yet. That is the one token in
+this document that is data rather than behaviour. Every other role, `sentence_label` included,
+has no tracking.
 
 ### 2.4 Spacing (4 px base)
 
@@ -177,25 +210,37 @@ is pane padding and dialog padding. `xxs` exists only inside a chip.
 
 ### 2.5 Radii
 
-`none 0` · `xs 3` · `sm 4` · `md 6` · `lg 12` · `full 9999`.
+The design's radii: `control 7` · `card 10` · `popover 12` · `dialog 12` · `pill 9999`.
+The older scale they sit beside: `none 0` · `xs 3` · `sm 4` · `md 6` · `lg 12` · `full 9999`.
 
-Rows, panes and the terminal grid are square (`none`). Inputs, badges and in-dialog lists are
-`sm`. Toasts and the scroll pill are `md`; the docked `Sheet` is square, because it is flush to the
-window edge. Dialogs and the palette are `lg`. Chips and
-status dots are `full`.
+Buttons, inputs, nav rows and segmented controls are `control`. Cards (`surface_raised`) are
+`card`. Menus, popovers and tooltips are `popover`; dialogs and the palette are `dialog`. Chips,
+status pills and avatars are `pill`. Rows, panes and the terminal grid are square (`none`), and the
+docked `Sheet` is square because it is flush to the window edge.
+
+The older names stay because existing components use them: `xs` for inline marks, `sm` for badges
+and in-dialog lists, `md` for toasts and the scroll pill. `lg` and `full` are the same values as
+`dialog` and `pill`; a redesigned component uses the design name.
 
 ### 2.6 Elevation
 
-Four levels, and only two of them have a shadow.
+Five levels, and only three of them have a shadow.
 
 | Level | Surface | Treatment |
 | --- | --- | --- |
-| 0 | `bg` | nothing |
-| 1 | `surface` | 1 px `border` hairline, no shadow |
-| 2 | `elevated` | `0 8px 24px rgba(0,0,0,.35)` dark / `.12` light — sheets, toasts |
-| 3 | `elevated` | `0 16px 48px rgba(0,0,0,.45)` dark / `.16` light — dialogs, palette |
+| 0 | `chrome`, `bg` | nothing |
+| 1 | `surface`, `surface_raised` | 1 px `border` hairline, no shadow |
+| 2 | `elevated` | `sheet`: `0 8px 24px rgba(0,0,0,.35)` dark / `.12` light — sheets, toasts |
+| 3 | `elevated` | `dialog`: `0 16px 48px rgba(0,0,0,.45)` dark / `.16` light — dialogs, palette |
+| 4 | `elevated` | `popover`: `0 24px 64px rgba(0,0,0,.55)` dark / `.20` light — menus, popovers, tooltips |
 
-`theme.sheet_shadow()` and `theme.dialog_shadow()` return the `Vec<BoxShadow>`.
+`theme.sheet_shadow()`, `theme.dialog_shadow()` and `theme.popover_shadow()` return the
+`Vec<BoxShadow>`.
+
+**The scrim does not blur.** The design blurs the window behind a dialog or sheet, but gpui 1.18.1
+has no in-window backdrop filter (its only blur is the OS window-background material). The
+`overlay` scrim is instead flat and darker than it would be with a blur: `rgba(5,6,8,.55)` in
+dark, `rgba(0,0,0,.30)` in light, so the base screen recedes by darkening alone.
 
 ### 2.7 Motion
 
@@ -206,7 +251,8 @@ durations, not animations: they time how long something waits or stays.
 
 | Token | ms | What |
 | --- | --- | --- |
-| `prefix_hint_delay` | 400 | how long `^S` waits before showing its keys |
+| `prefix_hint_delay` | 400 | how long a held `^S` waits before showing what comes next (the prefix menu) |
+| `tooltip_delay` | 500 | how long the pointer rests on a control before its tooltip appears |
 | `spinner` | 1000 | one turn of `loader-circle` |
 | `jump_chip_delay` | 150 | how long the transcript's jump-to-latest chip waits before appearing |
 | `working_tick` | 1000 | how often the working row's elapsed label re-reads the clock |
@@ -217,19 +263,27 @@ durations, not animations: they time how long something waits or stays.
 
 ### 2.8 Metrics
 
-`Metrics` holds the pixel constants the UX spec pins down, so no component hard-codes one.
-`crates/fleet-ui-kit/src/theme/tokens.rs` is the authoritative inventory; the ones a component
-author reaches for most often are:
-`context_bar_h 36` · `status_bar_h 26` · `pane_header_h 30` · `row_h 30` · `palette_row_h 34` ·
-`job_row_h 44` · `section_header_h 20` · `dialog_header_h 44` · `dialog_footer_h 44` ·
-`banner_h 28` · `strip_h 22` · `chip_h 22` · `rail_w 240` · `detail_w 340` · `sheet_w 440` ·
-`sheet_expanded_w 640` · `toast_w 320` · `palette_w 640` · `palette_top 120` ·
-`mode_word_w 84` · `scroll_thumb_w 3` · `focus_ring_w 2` · `cell_w 7.5` · `cell_h 18`.
-The smaller component metrics live here too: `hairline 1` · `dot_size 8` ·
-`dot_size_small 6` · `fact_label_w 104` · `doctor_check_w 120` · `doctor_status_w 64` ·
-`text_field_h 36` · `field_status_h 18` · `palette_input_h 44` · `number_field_w 96`.
-So do the Git UI's own dimensions: `status_pane_h 62` · `stash_pane_h 92` ·
-`overlay_help_w 640` · `editor_box_h 160` · `diff_caret_h 14`.
+`Metrics` holds the pixel constants the UX spec pins down, so no component hard-codes one. The
+list below is the complete inventory, in px unless marked `ch`; a unit test in
+`theme/tokens/tests.rs` fails when it and `crates/fleet-ui-kit/src/theme/tokens.rs` disagree.
+
+| Group | Tokens |
+| --- | --- |
+| Window chrome | `title_bar_h 44` · `context_bar_h 36` · `status_bar_h 28` · `traffic_light_inset 84` · `mode_word_w 84` · `banner_h 28` · `strip_h 22` |
+| Layout columns | `sidebar_w 232` · `rail_w 240` · `detail_w 344` · `detail_overlay_w 320` · `sheet_w 440` · `sheet_expanded_w 640` · `sheet_w_detail 736` |
+| Rows and headers | `row_h 30` · `row_h_comfortable 44` · `pane_header_h 30` · `section_header_h 20` · `palette_row_h 34` · `job_row_h 44` · `job_key_w 20` |
+| Controls | `button_h 30` · `button_h_compact 26` · `kbd_h 18` · `kbd_h_small 16` · `chip_h 22` · `text_field_h 36` · `field_status_h 18` · `number_field_w 96` |
+| Dialogs and floating layers | `dialog_w 560` · `confirm_compact_w 480` · `dialog_header_h 44` · `dialog_footer_h 44` · `palette_w 640` · `palette_top 120` · `palette_input_h 44` · `overlay_help_w 640` · `toast_w 320` · `toast_inset 12` · `scroll_pill_w 176` |
+| Lines and marks | `hairline 1` · `focus_ring_w 2` · `scroll_thumb_w 3` · `dot_size 8` · `dot_size_small 6` |
+| Terminal | `cell_w 7.5` · `cell_h 18` · `terminal_tab_min_w 84` · `terminal_tab_max_w 200` · `new_terminal_tab_w 36` |
+| Detail and doctor columns | `fact_label_w 104` · `doctor_check_w 120` · `doctor_status_w 64` |
+| Git UI | `status_pane_h 62` · `stash_pane_h 92` · `editor_box_h 160` · `diff_row_h 18` · `diff_caret_h 14` · `diff_scrollbar_w 5` · `diff_thumb_min_h 24` · `diff_horizontal_step 4ch` |
+
+`row_h` (30) is the dense row, for menus, pickers and terminal-side lists; `row_h_comfortable`
+(44) is the hub-list row. `title_bar_h` and `sidebar_w` are the redesigned chrome; `context_bar_h`
+and `rail_w` stay while the current context bar and repos rail are on screen. `kbd_h_small` is the
+key chip inside a compact button or a menu item.
+
 The same token set owns the opacity ladder, and *that* list is complete — derive a variant
 with one of these rather than adding a near-duplicate token or a bare float:
 `veil 0.55` · `dimmed 0.40` · `refreshing 0.60` · `stale 0.55` · `terminal_blink 0.70` ·
@@ -433,9 +487,10 @@ That is why a component records on every paint and never keeps last frame's boun
 #### `Theme` / tokens
 **Purpose.** One resolved token set per appearance, installed as a gpui `Global`.
 **API.** `Theme::{dark, light, for_mode, init, change, toggle, is_dark}`,
-`Theme::{resolve_mono_family, with_mono_family, shadow, dialog_shadow, sheet_shadow}`,
-`ThemeMode::{toggled, is_dark}`,
-`trait ActiveTheme { fn theme(&self) -> &Theme }`.
+`Theme::{resolve_mono_family, with_mono_family, shadow, dialog_shadow, sheet_shadow,
+popover_shadow}`, `ThemeMode::{toggled, is_dark}`,
+`trait ActiveTheme { fn theme(&self) -> &Theme }`, and
+`theme::contrast_ratio(fg, bg) -> f32` with `theme::CONTRAST_AA` (4.5) for §2.1's contrast rule.
 **Usage rule.** Read the theme **inside** `render`, never cache it in a struct: the mode can
 change between frames. Clone it (`cx.theme().clone()`) only when a `'static` closure needs it.
 
@@ -449,13 +504,15 @@ change between frames. Clone it (`cx.theme().clone()`) only when a `'static` clo
 nothing. Use `Spinner` rather than `.spinning(true)` when the glyph *is* the spinner.
 
 #### `Text`
-**Purpose.** A run of text in one of the seven type roles.
-**API.** `Text::{ui, ui_strong, title, data, data_small, label, hint}(impl Into<SharedString>)`,
+**Purpose.** A run of text in one of the eleven type roles (§2.3).
+**API.** `Text::{page_title, section_title, ui, ui_strong, title, caption, sentence_label, data,
+data_small, label, hint}(impl Into<SharedString>)`,
 then `.tone(Tone) .muted() .faint() .color(Hsla) .opacity(f32) .weight(FontWeight)
 .truncate_at(usize, Truncate) .ellipsize() .w(Pixels) .w_ch(f32) .flex_none()`. `Text::resolved_text()`
 returns the string after the `ch` budget, for tests.
 **Usage rule.** `truncate_at` when the spec names a `ch` budget; `ellipsize` when the column is
-flex. `label` uppercases for you — do not pre-uppercase the string.
+flex. A redesigned surface uses `sentence_label` with the string in sentence case; the legacy
+`label` uppercases for you — do not pre-uppercase the string.
 
 #### `Truncate`
 **Purpose.** Head / middle / tail ellipsis at a `char` budget.
@@ -477,7 +534,7 @@ resolved from the terminal palette.
 ### 6.2 Structure
 
 #### `AppFrame`
-**Purpose.** Context bar (36) + optional banner (28) + flexible body + status bar (26), plus the
+**Purpose.** Context bar (36) + optional banner (28) + flexible body + status bar (28), plus the
 overlay layer.
 **API.** `AppFrame::new().context_bar(..).banner(..).body(..).body_overlay(..).status_bar(..)
 .overlay(..)`.
@@ -529,7 +586,7 @@ is the session name).
 **API.** `Pane::{new, fixed(Pixels)}().header(..).body(..).footer(..).focused(bool)
 .width(Pixels).border(PaneBorder).raised(bool).scroll_thumb(offset: f32, visible: f32)`.
 **States.** default · focused (2 px ring) · scrolled (3 px thumb).
-**Usage rule.** `Pane::fixed` for the 240 px rail and the 340 px detail panel; `Pane::new` for
+**Usage rule.** `Pane::fixed` for the 240 px rail and the 344 px detail panel; `Pane::new` for
 the list, which must flex. Only one pane in a screen is `focused` at a time.
 
 #### `PaneHeader`

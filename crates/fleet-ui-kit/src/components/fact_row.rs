@@ -77,7 +77,7 @@ impl FactRow {
         }
     }
 
-    /// Width of the label column. 104 px in the 340 px detail panel.
+    /// Width of the label column. 104 px in the 344 px detail panel.
     pub fn label_width(mut self, width: Pixels) -> Self {
         self.label_width = Some(width);
         self

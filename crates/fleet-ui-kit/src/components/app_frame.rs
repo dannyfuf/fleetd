@@ -7,7 +7,7 @@
 //! | context bar | 36 px | `metrics.context_bar_h` |
 //! | banner (§3.12 case C, optional) | 28 px | `metrics.banner_h` |
 //! | body | flexible | — |
-//! | status bar | 26 px | `metrics.status_bar_h` |
+//! | status bar | 28 px | `metrics.status_bar_h` |
 //!
 //! The Workspace replaces the body region entirely but keeps the two bars at the same pixel
 //! positions, so the saccade never changes between screens — that is why the heights live on
@@ -79,7 +79,7 @@ impl AppFrame {
         self
     }
 
-    /// The 26 px bottom bar.
+    /// The 28 px bottom bar.
     pub fn status_bar(mut self, bar: impl IntoElement) -> Self {
         self.status_bar = Some(bar.into_any_element());
         self

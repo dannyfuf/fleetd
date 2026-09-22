@@ -130,10 +130,11 @@ fn pane_ch(width: f32, rail_collapsed: bool, detail_open: bool) -> f32 {
 
 #[test]
 fn the_ladder_matches_the_documented_frame() {
-    // §2.1: 1280 px gives the list 138 ch, and 93 ch with the detail panel inset.
+    // §2.1: 1280 px gives the list 138 ch, and 92 ch with the detail panel inset.
     assert!((pane_ch(1280.0, false, false) - 138.6).abs() < 0.2);
     assert!((pane_ch(1280.0, true, false) - 164.8).abs() < 0.2);
-    assert!((pane_ch(1280.0, false, true) - 93.3).abs() < 0.2);
+    let inset = pane_ch(1280.0, false, true);
+    assert!((inset - 92.8).abs() < 0.2, "{inset}");
 }
 
 #[test]

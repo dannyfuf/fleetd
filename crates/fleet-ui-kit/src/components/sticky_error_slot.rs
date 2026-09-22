@@ -86,7 +86,7 @@ impl RenderOnce for StickyErrorSlot {
             .h(theme.metrics.chip_h)
             .px(theme.space.xs)
             .rounded(theme.radii.sm)
-            // A low-alpha danger fill, not a solid one: the status bar is 26 px tall and a
+            // A low-alpha danger fill, not a solid one: the status bar is 28 px tall and a
             // saturated block there reads as a broken app rather than a failed job.
             .bg(Tone::Danger.fill(theme))
             .child(

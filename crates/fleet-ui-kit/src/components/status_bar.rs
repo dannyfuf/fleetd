@@ -1,6 +1,6 @@
 //! `StatusBar` — breadcrumb · mode word · job ticker · sticky error slot.
 //!
-//! §2.2 fixes four slots in one 26 px row, left to right:
+//! §2.2 fixes four slots in one 28 px row, left to right:
 //!
 //! | Slot | Width | Content |
 //! | --- | --- | --- |
@@ -106,7 +106,7 @@ impl RenderOnce for StatusBar {
             .size_full()
             .px(theme.space.md)
             .gap(theme.space.md)
-            .bg(theme.colors.bg)
+            .bg(theme.colors.chrome)
             .border_t(theme.metrics.hairline)
             .border_color(theme.colors.border)
             .child(

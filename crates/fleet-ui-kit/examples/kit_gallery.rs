@@ -16,6 +16,7 @@ const LAYOUT: support::layout::GalleryLayout = support::layout::GalleryLayout {
     compact: false,
 };
 use fleet_ui_kit::prelude::*;
+use fleet_ui_kit::theme::{CONTRAST_AA, contrast_ratio};
 use gpui::{
     AnyElement, App, Context, Entity, FocusHandle, Focusable, KeyBinding, SharedString,
     UniformListScrollHandle, Window, actions, div, px,
@@ -83,45 +84,258 @@ fn box_of(t: &Theme, height: gpui::Pixels, child: impl IntoElement) -> AnyElemen
         .into_any_element()
 }
 
-fn colors_section(cx: &mut App) -> AnyElement {
-    let t = cx.theme().clone();
-    let swatch = |name: &'static str, color: gpui::Hsla| {
+/// One colour role: a chip of the colour over its label, drawn in `palette`'s own colours so
+/// the dark and the light column can sit side by side whatever the active mode is.
+fn role_swatch(palette: &Theme, name: &'static str, color: gpui::Hsla) -> AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap(palette.space.xxs)
+        .w(px(120.0))
+        .child(
+            div()
+                .h(px(28.0))
+                .w_full()
+                .rounded(palette.radii.control)
+                .bg(color)
+                .border(palette.metrics.hairline)
+                .border_color(palette.colors.border),
+        )
+        .child(Text::hint(name).color(palette.colors.text_secondary))
+        .into_any_element()
+}
+
+/// A text role drawn on a ground, with its WCAG contrast ratio.
+fn contrast_swatch(palette: &Theme, name: &'static str, text: gpui::Hsla) -> AnyElement {
+    let ratios: Vec<AnyElement> = [
+        ("chrome", palette.colors.chrome),
+        ("bg", palette.colors.bg),
+        ("surface", palette.colors.surface),
+        ("raised", palette.colors.surface_raised),
+        ("elevated", palette.colors.elevated),
+    ]
+    .into_iter()
+    .map(|(ground_name, ground)| {
+        let ratio = contrast_ratio(text, ground);
         div()
             .flex()
             .flex_col()
-            .gap(t.space.xxs)
-            .w(px(104.0))
-            .child(
-                div()
-                    .h(px(28.0))
-                    .w_full()
-                    .rounded(t.radii.sm)
-                    .bg(color)
-                    .border(t.metrics.hairline)
-                    .border_color(t.colors.border),
-            )
-            .child(Text::hint(name).faint())
+            .px(palette.space.sm)
+            .py(palette.space.xs)
+            .rounded(palette.radii.control)
+            .bg(ground)
+            .child(Text::ui(name).color(text))
+            .child(Text::hint(format!("{ground_name} {ratio:.1}:1")).color(
+                if ratio >= CONTRAST_AA {
+                    palette.colors.text_secondary
+                } else {
+                    palette.colors.danger
+                },
+            ))
+            .into_any_element()
+    })
+    .collect();
+    strip(palette, ratios)
+}
+
+/// A key chip and a pair of buttons built from raw tokens, the way the kit's `Kbd` and `Button`
+/// will read them.
+fn control_samples(palette: &Theme) -> AnyElement {
+    let c = &palette.colors;
+    let m = &palette.metrics;
+    let kbd = |label: &'static str, height: gpui::Pixels, bg, border, fg| {
+        div()
+            .flex()
+            .items_center()
+            .justify_center()
+            .h(height)
+            .min_w(height)
+            .px(palette.space.xs)
+            .rounded(palette.radii.sm)
+            .bg(bg)
+            .border(m.hairline)
+            .border_color(border)
+            .child(Text::hint(label).color(fg))
             .into_any_element()
     };
-    let c = &t.colors;
-    let roles = vec![
-        swatch("bg", c.bg),
-        swatch("surface", c.surface),
-        swatch("elevated", c.elevated),
-        swatch("row_selected", c.row_selected),
-        swatch("border", c.border),
-        swatch("text", c.text),
-        swatch("text_secondary", c.text_secondary),
-        swatch("text_muted", c.text_muted),
-        swatch("accent", c.accent),
-        swatch("success", c.success),
-        swatch("warning", c.warning),
-        swatch("danger", c.danger),
-        swatch("info", c.info),
-        swatch("focus_ring", c.focus_ring),
-        swatch("selection", c.selection),
-        swatch("skeleton", c.skeleton),
-    ];
+    let button = |label: &'static str, height: gpui::Pixels, bg, border, fg, chip: AnyElement| {
+        div()
+            .flex()
+            .items_center()
+            .gap(palette.space.sm)
+            .h(height)
+            .px(palette.space.md)
+            .rounded(palette.radii.control)
+            .bg(bg)
+            .border(m.hairline)
+            .border_color(border)
+            .child(Text::ui_strong(label).color(fg))
+            .child(chip)
+            .into_any_element()
+    };
+    strip(
+        palette,
+        vec![
+            button(
+                "Create worktree",
+                m.button_h,
+                c.accent_fill,
+                c.accent_fill,
+                c.accent_fill_text,
+                kbd(
+                    "⏎",
+                    m.kbd_h,
+                    c.accent_fill_text
+                        .opacity(palette.metrics.semantic_fill_opacity),
+                    c.accent_fill_text
+                        .opacity(palette.metrics.semantic_fill_opacity),
+                    c.accent_fill_text,
+                ),
+            ),
+            button(
+                "hover",
+                m.button_h,
+                c.accent_fill_hover,
+                c.accent_fill_hover,
+                c.accent_fill_text,
+                div().into_any_element(),
+            ),
+            button(
+                "Cancel",
+                m.button_h,
+                c.control,
+                c.control_border,
+                c.text,
+                kbd("esc", m.kbd_h, c.kbd_bg, c.kbd_border, c.text_secondary),
+            ),
+            button(
+                "hover",
+                m.button_h,
+                c.control_hover,
+                c.control_border,
+                c.text,
+                div().into_any_element(),
+            ),
+            button(
+                "Compact",
+                m.button_h_compact,
+                c.control,
+                c.control_border,
+                c.text,
+                kbd(
+                    "⌃S",
+                    m.kbd_h_small,
+                    c.kbd_bg,
+                    c.kbd_border,
+                    c.text_secondary,
+                ),
+            ),
+            div()
+                .flex()
+                .items_center()
+                .h(m.chip_h)
+                .px(palette.space.sm)
+                .rounded(palette.radii.pill)
+                .bg(c.accent_subtle)
+                .child(Text::sentence_label("Accent subtle").color(c.accent))
+                .into_any_element(),
+        ],
+    )
+}
+
+/// Every colour role of one mode, on that mode's own ground.
+fn palette_column(palette: &Theme) -> AnyElement {
+    let c = &palette.colors;
+    let group = |title: &'static str, swatches: Vec<AnyElement>| {
+        div()
+            .flex()
+            .flex_col()
+            .gap(palette.space.xs)
+            .child(Text::sentence_label(title).color(c.text_muted))
+            .child(strip(palette, swatches))
+    };
+    let r = |name, color| role_swatch(palette, name, color);
+    div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_w_0()
+        .gap(palette.space.md)
+        .p(palette.space.lg)
+        .rounded(palette.radii.card)
+        .bg(c.bg)
+        .border(palette.metrics.hairline)
+        .border_color(c.border)
+        .child(Text::section_title(if palette.is_dark() { "Dark" } else { "Light" }).color(c.text))
+        .child(group(
+            "Grounds",
+            vec![
+                r("chrome", c.chrome),
+                r("bg", c.bg),
+                r("surface", c.surface),
+                r("surface_raised", c.surface_raised),
+                r("elevated", c.elevated),
+                r("overlay", c.overlay),
+                r("row_selected", c.row_selected),
+                r("row_hover", c.row_hover),
+            ],
+        ))
+        .child(group(
+            "Accent",
+            vec![
+                r("accent", c.accent),
+                r("accent_fill", c.accent_fill),
+                r("accent_fill_hover", c.accent_fill_hover),
+                r("accent_fill_text", c.accent_fill_text),
+                r("accent_subtle", c.accent_subtle),
+                r("focus_ring", c.focus_ring),
+                r("selection", c.selection),
+            ],
+        ))
+        .child(group(
+            "Controls and keys",
+            vec![
+                r("control", c.control),
+                r("control_hover", c.control_hover),
+                r("control_border", c.control_border),
+                r("kbd_bg", c.kbd_bg),
+                r("kbd_border", c.kbd_border),
+                r("border", c.border),
+                r("border_strong", c.border_strong),
+            ],
+        ))
+        .child(group(
+            "Semantic",
+            vec![
+                r("success", c.success),
+                r("warning", c.warning),
+                r("danger", c.danger),
+                r("info", c.info),
+                r("skeleton", c.skeleton),
+            ],
+        ))
+        .child(group(
+            "Text contrast (WCAG AA is 4.5:1)",
+            vec![
+                contrast_swatch(palette, "text", c.text),
+                contrast_swatch(palette, "text_secondary", c.text_secondary),
+                contrast_swatch(palette, "text_muted", c.text_muted),
+            ],
+        ))
+        .child(group("Controls", vec![control_samples(palette)]))
+        .into_any_element()
+}
+
+fn colors_section(cx: &mut App) -> AnyElement {
+    let t = cx.theme().clone();
+    let swatch = |name: &'static str, color: gpui::Hsla| role_swatch(&t, name, color);
+    let both = div()
+        .flex()
+        .w_full()
+        .gap(t.space.md)
+        .child(palette_column(&Theme::dark()))
+        .child(palette_column(&Theme::light()))
+        .into_any_element();
     let ansi: Vec<AnyElement> = (0u8..16)
         .map(|ix| {
             div()
@@ -144,7 +358,7 @@ fn colors_section(cx: &mut App) -> AnyElement {
         .collect();
 
     let children = vec![
-        LAYOUT.labeled("color roles", &t, strip(&t, roles)),
+        LAYOUT.labeled("color roles, both modes", &t, both),
         LAYOUT.labeled("terminal ansi", &t, strip(&t, ansi)),
         LAYOUT.labeled(
             "terminal default",
@@ -165,6 +379,8 @@ fn colors_section(cx: &mut App) -> AnyElement {
 fn type_section(cx: &mut App) -> AnyElement {
     let t = cx.theme().clone();
     let children = vec![
+        LAYOUT.labeled("page_title 20/26", &t, Text::page_title("Worktrees")),
+        LAYOUT.labeled("section_title 16/22", &t, Text::section_title("Agents")),
         LAYOUT.labeled(
             "ui 13/18",
             &t,
@@ -186,7 +402,17 @@ fn type_section(cx: &mut App) -> AnyElement {
             &t,
             Text::data_small("Receiving objects: 40% (81/202)"),
         ),
-        LAYOUT.labeled("label 11/14", &t, Text::label("worktrees")),
+        LAYOUT.labeled(
+            "caption 12/16",
+            &t,
+            Text::caption("Updated 2 minutes ago · 3 files changed"),
+        ),
+        LAYOUT.labeled(
+            "sentence_label 11/14",
+            &t,
+            Text::sentence_label("Base branch"),
+        ),
+        LAYOUT.labeled("label 11/14 (legacy)", &t, Text::label("worktrees")),
         LAYOUT.labeled("hint mono 11/14", &t, Text::hint("⏎ open · esc cancel")),
         LAYOUT.labeled(
             "truncate head/middle/tail",
@@ -204,6 +430,146 @@ fn type_section(cx: &mut App) -> AnyElement {
         ),
     ];
     LAYOUT.section("type", &t, children)
+}
+
+/// Radii, elevation, the redesign's control metrics and the delays, each shown at its value.
+fn geometry_section(cx: &mut App) -> AnyElement {
+    let t = cx.theme().clone();
+    let c = &t.colors;
+    let tile = |name: String, radius: gpui::Pixels| {
+        div()
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(px(72.0))
+            .rounded(radius)
+            .bg(c.surface_raised)
+            .border(t.metrics.hairline)
+            .border_color(c.border)
+            .child(Text::hint(name).faint())
+            .into_any_element()
+    };
+    let radii = vec![
+        tile(
+            format!("control {}", f32::from(t.radii.control)),
+            t.radii.control,
+        ),
+        tile(format!("card {}", f32::from(t.radii.card)), t.radii.card),
+        tile(
+            format!("popover {}", f32::from(t.radii.popover)),
+            t.radii.popover,
+        ),
+        tile(
+            format!("dialog {}", f32::from(t.radii.dialog)),
+            t.radii.dialog,
+        ),
+        tile("pill".into(), t.radii.pill),
+    ];
+    let level = |name: &'static str, shadow: Vec<gpui::BoxShadow>, radius: gpui::Pixels| {
+        div()
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(160.0))
+            .h(px(72.0))
+            .rounded(radius)
+            .bg(c.elevated)
+            .border(t.metrics.hairline)
+            .border_color(c.border_strong)
+            .shadow(shadow)
+            .child(Text::caption(name))
+            .into_any_element()
+    };
+    let elevation = div()
+        .flex()
+        .gap(t.space.xl)
+        .p(t.space.xl)
+        .rounded(t.radii.card)
+        .bg(c.overlay)
+        .child(level("sheet", t.sheet_shadow(), t.radii.md))
+        .child(level("dialog", t.dialog_shadow(), t.radii.dialog))
+        .child(level("popover", t.popover_shadow(), t.radii.popover))
+        .into_any_element();
+    let bar = |name: String, width: gpui::Pixels, height: gpui::Pixels| {
+        div()
+            .flex()
+            .items_center()
+            .px(t.space.sm)
+            .w(width)
+            .h(height)
+            .rounded(t.radii.xs)
+            .bg(c.accent_subtle)
+            .child(Text::hint(name).faint())
+            .into_any_element()
+    };
+    let m = &t.metrics;
+    let heights = vec![
+        bar(
+            format!("title_bar_h {}", f32::from(m.title_bar_h)),
+            px(180.0),
+            m.title_bar_h,
+        ),
+        bar(
+            format!("status_bar_h {}", f32::from(m.status_bar_h)),
+            px(180.0),
+            m.status_bar_h,
+        ),
+        bar(
+            format!("row_h_comfortable {}", f32::from(m.row_h_comfortable)),
+            px(180.0),
+            m.row_h_comfortable,
+        ),
+        bar(format!("row_h {}", f32::from(m.row_h)), px(180.0), m.row_h),
+        bar(
+            format!("button_h {}", f32::from(m.button_h)),
+            px(180.0),
+            m.button_h,
+        ),
+        bar(
+            format!("button_h_compact {}", f32::from(m.button_h_compact)),
+            px(180.0),
+            m.button_h_compact,
+        ),
+        bar(format!("kbd_h {}", f32::from(m.kbd_h)), px(120.0), m.kbd_h),
+        bar(
+            format!("kbd_h_small {}", f32::from(m.kbd_h_small)),
+            px(120.0),
+            m.kbd_h_small,
+        ),
+    ];
+    let widths = vec![
+        bar(
+            format!("sidebar_w {}", f32::from(m.sidebar_w)),
+            m.sidebar_w,
+            m.row_h,
+        ),
+        bar(
+            format!("detail_w {}", f32::from(m.detail_w)),
+            m.detail_w,
+            m.row_h,
+        ),
+        bar(
+            format!("sheet_w_detail {}", f32::from(m.sheet_w_detail)),
+            m.sheet_w_detail,
+            m.row_h,
+        ),
+    ];
+    let motion = Text::data(format!(
+        "tooltip_delay {} ms · prefix_hint_delay {} ms",
+        t.motion.tooltip_delay, t.motion.prefix_hint_delay
+    ));
+    let children = vec![
+        LAYOUT.labeled("radii", &t, strip(&t, radii)),
+        LAYOUT.labeled("elevation over overlay", &t, elevation),
+        LAYOUT.labeled("heights", &t, strip(&t, heights)),
+        LAYOUT.labeled(
+            "widths",
+            &t,
+            div().flex().flex_col().gap(t.space.xs).children(widths),
+        ),
+        LAYOUT.labeled("delays", &t, motion),
+    ];
+    LAYOUT.section("geometry", &t, children)
 }
 
 fn icons_section(cx: &mut App) -> AnyElement {
@@ -1688,6 +2054,7 @@ impl Render for Gallery {
         let sections = vec![
             colors_section(cx),
             type_section(cx),
+            geometry_section(cx),
             icons_section(cx),
             glyphs_section(cx),
             facts_section(cx),

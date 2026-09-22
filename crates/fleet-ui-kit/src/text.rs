@@ -1,4 +1,4 @@
-//! `Text` — the four type roles, with fixed line heights.
+//! `Text` — the type roles, with fixed line heights.
 //!
 //! Views never call `text_size`, `font_family` or `line_height` themselves; they pick a role.
 //! That is what keeps a branch name in one pane pixel-identical to the same branch name in
@@ -15,7 +15,11 @@ use crate::{
 /// One of the type roles of the design system.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum TextRole {
-    /// 13 / 18 regular, system face. The default for prose and values.
+    /// 20 / 26 semibold, system face. One screen heading per page.
+    PageTitle,
+    /// 16 / 22 semibold, system face. A group heading inside a page or a sheet.
+    SectionTitle,
+    /// 13 / 18 regular, system face. The body role: the default for prose and values.
     #[default]
     Ui,
     /// 13 / 18 medium, system face. Titles inside rows, active tabs.
@@ -26,7 +30,12 @@ pub enum TextRole {
     Data,
     /// mono 11.5 / 16. Job progress sub-lines, log tails.
     DataSmall,
-    /// 11 / 14 uppercase medium. Pane and section labels.
+    /// 12 / 16 regular, system face. Supporting text under a title or beside a value.
+    Caption,
+    /// 11 / 14 semibold, sentence case. Field labels and small group headings.
+    SentenceLabel,
+    /// 11 / 14 uppercase medium. The legacy micro-header, retiring in favour of
+    /// [`TextRole::SentenceLabel`].
     Label,
     /// mono 11 / 14. Key hints.
     Hint,
@@ -36,11 +45,15 @@ impl TextRole {
     /// The token entry for this role.
     pub fn style(self, theme: &Theme) -> TypeStyle {
         match self {
+            TextRole::PageTitle => theme.text.page_title,
+            TextRole::SectionTitle => theme.text.section_title,
             TextRole::Ui => theme.text.ui,
             TextRole::UiStrong => theme.text.ui_strong,
             TextRole::Title => theme.text.title,
             TextRole::Data => theme.text.data,
             TextRole::DataSmall => theme.text.data_small,
+            TextRole::Caption => theme.text.caption,
+            TextRole::SentenceLabel => theme.text.sentence_label,
             TextRole::Label => theme.text.label,
             TextRole::Hint => theme.text.hint,
         }
@@ -49,9 +62,14 @@ impl TextRole {
     /// The default tone for this role, used when the caller sets none.
     pub fn default_tone(self) -> Tone {
         match self {
-            TextRole::Ui | TextRole::UiStrong | TextRole::Title | TextRole::Data => Tone::Default,
-            TextRole::DataSmall | TextRole::Label => Tone::Secondary,
-            TextRole::Hint => Tone::Muted,
+            TextRole::PageTitle
+            | TextRole::SectionTitle
+            | TextRole::Ui
+            | TextRole::UiStrong
+            | TextRole::Title
+            | TextRole::Data => Tone::Default,
+            TextRole::DataSmall | TextRole::Caption | TextRole::Label => Tone::Secondary,
+            TextRole::SentenceLabel | TextRole::Hint => Tone::Muted,
         }
     }
 }
@@ -90,6 +108,27 @@ impl Text {
         }
     }
 
+    /// 20 / 26 semibold: the page heading.
+    pub fn page_title(text: impl Into<SharedString>) -> Self {
+        Self::new(TextRole::PageTitle, text)
+    }
+
+    /// 16 / 22 semibold: a section heading.
+    pub fn section_title(text: impl Into<SharedString>) -> Self {
+        Self::new(TextRole::SectionTitle, text)
+    }
+
+    /// 12 / 16 regular, secondary.
+    pub fn caption(text: impl Into<SharedString>) -> Self {
+        Self::new(TextRole::Caption, text)
+    }
+
+    /// 11 / 14 semibold, sentence case, muted. Use this, not [`Text::label`], on any
+    /// redesigned surface.
+    pub fn sentence_label(text: impl Into<SharedString>) -> Self {
+        Self::new(TextRole::SentenceLabel, text)
+    }
+
     /// 13 / 18 regular.
     pub fn ui(text: impl Into<SharedString>) -> Self {
         Self::new(TextRole::Ui, text)
@@ -115,7 +154,7 @@ impl Text {
         Self::new(TextRole::DataSmall, text)
     }
 
-    /// 11 / 14 uppercase.
+    /// 11 / 14 uppercase. Legacy; prefer [`Text::sentence_label`].
     pub fn label(text: impl Into<SharedString>) -> Self {
         Self::new(TextRole::Label, text)
     }
@@ -276,5 +315,15 @@ mod tests {
 
         assert_eq!(Text::label("Label").resolved_text_in(&theme), "Label");
         assert_eq!(Text::ui("straße").resolved_text_in(&theme), "STRASSE");
+    }
+
+    #[test]
+    fn the_sentence_label_keeps_the_case_it_was_given() {
+        let theme = Theme::default();
+        assert_eq!(
+            Text::sentence_label("Base branch").resolved_text_in(&theme),
+            "Base branch"
+        );
+        assert_eq!(theme.text.sentence_label.tracking, 0.0);
     }
 }

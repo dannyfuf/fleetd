@@ -287,11 +287,11 @@ fn app_frame_section(cx: &mut App) -> AnyElement {
     };
 
     LAYOUT.section(
-        "AppFrame — 36 context bar · 28 banner · flex body · 26 status bar",
+        "AppFrame — 36 context bar · 28 banner · flex body · 28 status bar",
         &t,
         vec![
             specimen(
-                "hub: context bar 36 + body + status bar 26",
+                "hub: context bar 36 + body + status bar 28",
                 &t,
                 stage(&t, px(220.0), mini(false)),
             ),

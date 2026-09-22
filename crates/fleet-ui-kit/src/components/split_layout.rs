@@ -73,7 +73,7 @@ impl SplitLayout {
         self
     }
 
-    /// Fix the trailing region's size, e.g. the 340 px detail panel.
+    /// Fix the trailing region's size, e.g. the 344 px detail panel.
     pub fn trailing_size(mut self, size: Pixels) -> Self {
         self.trailing_size = Some(size);
         self

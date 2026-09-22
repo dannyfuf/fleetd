@@ -186,7 +186,7 @@ fn board_row(state: &AppState) -> String {
         .unwrap_or_default()
 }
 
-/// The 26 px status bar (§2.2): breadcrumb · mode word · job ticker · sticky error slot.
+/// The 28 px status bar (§2.2): breadcrumb · mode word · job ticker · sticky error slot.
 #[must_use]
 fn status_bar(state: &AppState) -> AnyElement {
     let mut bar = StatusBar::new()

@@ -100,14 +100,14 @@ Responsive ladders are expressed in **ch of the pane that owns the columns**, no
 │              │                                                                   │
 │    240 px    │                     flex — 1039 px (138 ch)                       │
 ├──────────────┴───────────────────────────────────────────────────────────────────┤
-│ buk › payroll › feat/payroll-fix   NORMAL   ⟳ clone nixos 40%  +1        ⚠ !     │ 26  status bar
+│ buk › payroll › feat/payroll-fix   NORMAL   ⟳ clone nixos 40%  +1        ⚠ !     │ 28  status bar
 └──────────────────────────────────────────────────────────────────────────────────┘
                                             ┌──────────────────────────────┐
                                             │ ✓ Path copied                │  toasts, bottom-right
                                             └──────────────────────────────┘
 ```
 
-With the detail panel open (`i`) the worktrees list shrinks to **699 px (93 ch)** and a **340 px**
+With the detail panel open (`i`) the worktrees list shrinks to **695 px (92 ch)** and a **344 px**
 panel is inserted at the right; the repos rail never moves. Below **1120 px** total width the
 detail panel becomes a right-edge overlay (320 px) so the list never drops below **72 ch**.
 
@@ -131,7 +131,7 @@ content, like a list header — and it stays.
 | Daemon dot `◍` | Context bar, far right, 12 px inset | 8 px dot | Liveness of the process that owns every job and PTY. Always present, dot-only when healthy; expands to a labelled amber/red pill when not (§3.12). |
 | Repos rail | Left, fixed **240 px** (drag 200–320, remembered) | full height | Second coordinate. Narrow and left because it is a *filter*, not content. |
 | Pane header | Top of each pane | 30 px, label type, `fg.faint` | Carries scope, filter state, count and scroll position (§2.5), and hosts the filter bar with zero layout shift. |
-| Status bar | Bottom, full width | 26 px | Breadcrumb · mode word · job ticker · sticky error slot. |
+| Status bar | Bottom, full width | 28 px | Breadcrumb · mode word · job ticker · sticky error slot. |
 | Toast layer | Bottom-right, above the status bar, 320 px wide, 12 px insets | max 3 stacked | Only for events with no other home (§2.7). |
 | Focus ring | 2 px `blue` inset on the focused pane; 2 px `blue` left bar on the cursor row | — | The only blue in the app. |
 
@@ -269,7 +269,7 @@ Workspace and including zoom (`ctrl-s z`).
 
 ### 2.9 Column ladders (inventory §5 breakpoints, authoritative in ch)
 
-**Worktrees list**, measured in ch of the list pane (138 ch at default, 93 ch with detail open):
+**Worktrees list**, measured in ch of the list pane (138 ch at default, 92 ch with detail open):
 
 | # | Column | Width | Align | Shown when |
 | --- | --- | --- | --- | --- |
@@ -462,7 +462,7 @@ keeping previous · `n` create · `d` delete · `x` prune repo · `s` sleep · `
 
 ### 3.4 Hub — Detail panel (`i`, closed by default, never focusable)
 
-**Purpose:** *Everything deliberately kept out of the row, on demand, in one 340 px column —
+**Purpose:** *Everything deliberately kept out of the row, on demand, in one 344 px column —
 with the age of every job-derived fact.*
 
 ```
@@ -490,7 +490,7 @@ with the age of every job-derived fact.*
 │ opened 2h ago · created 5d ago       │
 │ inspected 4m ago · I refresh         │
 └──────────────────────────────────────┘
-            340 px, 12 px padding
+            344 px, 12 px padding
 ```
 
 | Element | Content | Position | Why here | Why needed |
@@ -678,7 +678,7 @@ what is running elsewhere.*
 ├─────────────────────────────────────────────────────────────────────────────┤
 │ ⚠ process exited (1) · ^s r restart · ^s x close · ^s c new                 │ 22  only on exit
 ├─────────────────────────────────────────────────────────────────────────────┤
-│ payroll/feat-payroll-fix          TERMINAL          ⟳ prune payroll      ◍  │ 26  status bar
+│ payroll/feat-payroll-fix          TERMINAL          ⟳ prune payroll      ◍  │ 28  status bar
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -823,7 +823,7 @@ this section is what the screen shows.
 │        │ asks before edits                                · 48m    │        │
 │        └───────────────────────────────────────────────────────────┘        │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│ payroll/feat-payroll-fix   AGENT   y allow once · a allow for this session  │  26  status bar
+│ payroll/feat-payroll-fix   AGENT   y allow once · a allow for this session  │  28  status bar
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -1840,7 +1840,7 @@ each component's full API. `Modal` is an alias of `Dialog` and `TabBar` an alias
 
 | Component | Responsibility | Used by |
 | --- | --- | --- |
-| `AppFrame` | Context bar + body region + status bar; fixed heights 36 / flex / 26 | Hub, PR screen, Workspace |
+| `AppFrame` | Context bar + body region + status bar; fixed heights 36 / flex / 28 | Hub, PR screen, Workspace |
 | `ContextBar` | Numbered context tabs, overflow chip, chip tray, daemon dot | all screens (§3.1) |
 | `StatusBar` | Breadcrumb · `ModeWord` · job ticker · sticky error slot | all screens (§2.2) |
 | `Pane` | Bordered region with a header slot, a body slot and a scroll thumb | repos rail, lists, detail panel |

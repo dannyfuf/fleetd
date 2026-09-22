@@ -201,7 +201,7 @@ impl RenderOnce for ContextBar {
                 .unwrap_or(theme.metrics.traffic_light_inset))
             .pr(theme.space.md)
             .gap(theme.space.md)
-            .bg(theme.colors.bg)
+            .bg(theme.colors.chrome)
             .border_b(theme.metrics.hairline)
             .border_color(theme.colors.border)
             .child(left)
