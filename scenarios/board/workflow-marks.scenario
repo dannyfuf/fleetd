@@ -1,0 +1,149 @@
+# plans/board-workflows-2026-09-20-phase-6-plan.md P6-T05 · UX-SPEC.md §Board ("The pane" and
+# "States") · BOARD.md §11.8 · DESIGN-SYSTEM.md §5.2 — the states the board face learns, driven
+# by a real daemon and a real child rather than by a fixture that hands them over.
+#
+# The `board-workflow` preset seeds `acme/api#agent`'s own board with `fleet-core`'s workflow
+# columns, `maxLiveRuns` of 1, and four cards in Todo — the one column the preset deliberately
+# leaves human, because a run the *seeding* daemon started is gone by the time this run's daemon
+# reads the home (TESTING-HARNESS.md §4). Every run below is one this scenario started itself.
+#
+# What each mark comes from, so a failure names a cause rather than a glyph:
+#   `action`      a column whose automation carries an `on_enter`, and only that one —
+#                 `on_success` and `advance_when_unblocked` move a card their column has already
+#                 finished with, and a bolt promising a run for either would lie.
+#   `blocked:n`   the cards still blocking this one: AGE-1 blocks AGE-3, and AGE-1 and AGE-2
+#                 together block AGE-4. Read off the face with nothing moved.
+#   `working`     AGE-1's child, from the moment the daemon records the run on the card.
+#   `pending`     AGE-2 behind it. One live run is allowed and AGE-1's child is still holding the
+#                 checkout, so the second card is owed a run rather than given one.
+#
+# The child's park itself is read from the *delegation*, not from the tile: the preset serves
+# Claude `subagent-child-blocked.json`, whose permission gate stands in for a child that cannot
+# finish alone (§5), and its delegation goes `blocked` — but the board face keeps drawing
+# `working` for the whole park, which is a gap of its own (phase-6 tracker, 2026-09-21). The
+# `needs you` **mark** is pinned by `state::board`'s unit tests, which feed the reducer the
+# delegation the face is supposed to read.
+#
+# `done` and `stalled` are the two marks this board cannot show, and each for a reason rather
+# than an omission. `done`: both action columns carry an `on_success`, so a run that succeeds is
+# announced by the card *moving*, not by a check beside its key
+# (`state/board.rs::auto_advances`). `stalled`: it is `pending` plus `PENDING_AMBER_AFTER_SECS`
+# (60 s) of waiting, and the wait ends when the child ahead gives its slot up at
+# `agent::GATE_BUDGET` (20 s) — a scripted child cannot hold a run open longer than that, and a
+# card owed a run is given it the moment the one ahead ends. Both are pinned by `state::board`'s
+# own unit tests, `stalled` by `an_owed_run_turns_amber_once_the_wait_is_the_story`, which drives
+# the clock the app derives it from. `stalled` *was* asserted here, back when a terminal run
+# restarted its own column for ever and so held the slot for ever; that restart was a defect
+# (phase-6 tracker, fixed 2026-09-21), and a scenario state that existed only because of a defect
+# goes with it.
+#
+# Ready is entered and left on the way through: it carries `advance_when_unblocked`, not an
+# action, and the engine only advances the *dependants* of a card it has just visited, so a card
+# nothing blocks waits there until a person moves it on (BOARD.md §11.7). Hence two `]` per card.
+#
+# Every predicate about a run mark is an `await`, never an `assert`, and that is load-bearing
+# rather than stylistic: a mark is written by an event this scenario did not send, and the window
+# between the gesture and the event is the harness's to wait out rather than to guess at.
+#
+# The run's own arc is what this file walks. The scripted child holds its gate for
+# `agent::GATE_BUDGET` (20 s) and then gives up, which settles its run as `cancelled` — and the
+# face **settles** with it: an action column runs its action on *entry*, and a card whose run ended
+# where it started entered nothing, so nothing starts it again (BOARD.md §11.7). The slot that
+# run was holding goes to the card that has been waiting for it, which is what the last awaits
+# pin — and it is the difference between a board that hands its one slot on and one that spends
+# the whole allowance re-running a single card.
+#
+# `board.summary` is the header's count of what *occupies a run slot*, so a blocked child — still
+# out there holding the checkout — is counted as working, and so is the card merely owed a run
+# behind it: `2/1 working` over a ceiling of one. Both readings are deliberate and both are
+# pinned below, so a change to either has to be argued.
+#
+# Headless: virtual-lane only, because of its `shot`. Every other line here runs in the headless
+# lane, which is where this file was written and first made to pass (§7).
+#
+# **No baseline is recorded for that shot.** What it photographs is now one settled twenty-second
+# window rather than a moment inside a restart loop — no toast stack, no failed-run count that
+# grows with however many restarts came first — so a reproducible baseline has become possible.
+# §9.8 still forbids recording one nobody has looked at, and nobody has looked at this one since
+# the restart was fixed: recording it belongs to the next session with a compositor.
+fixture: board-workflow
+await idle 30000
+
+# The preset seeds two worktrees, and `agent` is the one carrying the board.
+assert lists.worktrees.rows[1].id == "acme/api#agent"
+key j
+await lists.worktrees.selected.id == "acme/api#agent" 10000
+key o
+await screen == Workspace 30000
+key ctrl-s b
+await lists.tabs.selected.label == "board" 30000
+await focused == "board.column[0].card[0]" 30000
+# The cursor lands on the first card one settle before the strip hands the pane its keys, so the
+# chain is awaited rather than asserted beside it.
+await key_contexts[2] == "Board" 20000
+assert key_contexts[0] == "Workspace" && key_contexts[1] == "Native"
+
+# Seven columns, and exactly the two that start a run on arrival carry the bolt.
+assert lists.board.rows[2].label == "Ready" && lists.board.rows[2].marks[0] absent
+assert lists.board.rows[3].label == "In Progress" && lists.board.rows[3].marks[0] == "action"
+assert lists.board.rows[4].label == "In review" && lists.board.rows[4].marks[0] == "action"
+assert lists.board.rows[5].label == "Done" && lists.board.rows[5].marks[0] absent
+
+# Nothing has run, so the header states nothing at all and the only marks are the links.
+assert lists["board.summary"] absent
+key l
+await lists.board.selected.label == "Todo" 10000
+assert lists["board.cards"].rows[0].badges[0] == "AGE-1" && lists["board.cards"].rows[0].marks[0] absent
+assert lists["board.cards"].rows[1].badges[0] == "AGE-2" && lists["board.cards"].rows[1].marks[0] absent
+assert lists["board.cards"].rows[2].badges[0] == "AGE-3" && lists["board.cards"].rows[2].marks[0] == "blocked:1"
+assert lists["board.cards"].rows[3].badges[0] == "AGE-4" && lists["board.cards"].rows[3].marks[0] == "blocked:2"
+
+# AGE-1 through Ready into In Progress, whose action starts its child.
+key ]
+await lists.board.selected.label == "Ready" 20000
+assert lists["board.cards"].rows[0].badges[0] == "AGE-1" && lists["board.cards"].rows[0].marks[0] absent
+key ]
+await lists.board.selected.label == "In Progress" 20000
+assert lists["board.cards"].rows[0].badges[0] == "AGE-1"
+await lists["board.cards"].rows[0].marks[0] == "needs you" 30000
+await lists["board.summary"].rows[0].label == "1/1 working" 20000
+
+# The child asks its question and parks on it — the tile already says `needs you` because the face
+# is painted from the delegation mirror (BOARD.md §11.8); the delegation itself is read too. The
+# header counts the slot that child is holding either way, which is the reading that matters here.
+await agents.delegations[0].status == blocked 30000
+await lists["board.summary"].rows[0].label == "1/1 working" 20000
+
+# Back to Todo, which is three cards now and still says what blocks the last two of them.
+key h
+await lists.board.selected.label == "Ready" 10000
+key h
+await lists.board.selected.label == "Todo" 10000
+assert lists.board.rows[1].badges[0] == "3" && lists.board.rows[3].badges[0] == "1"
+assert lists["board.cards"].rows[1].badges[0] == "AGE-3" && lists["board.cards"].rows[1].marks[0] == "blocked:1"
+assert lists["board.cards"].rows[2].badges[0] == "AGE-4" && lists["board.cards"].rows[2].marks[0] == "blocked:2"
+
+# AGE-2 the same way, while AGE-1's child still holds the board's one slot: this card is *owed* a
+# run rather than given one, and the header's numerator counts the owed run beside the live one.
+key ]
+await lists.board.selected.label == "Ready" 20000
+key ]
+await lists.board.selected.label == "In Progress" 20000
+assert lists["board.cards"].rows[1].badges[0] == "AGE-2"
+await lists["board.cards"].rows[1].marks[0] == "pending" 40000
+await agents.delegations[0].status == blocked 30000
+await lists["board.summary"].rows[0].label == "2/1 working" 20000
+assert lists.board.rows[3].badges[0] == "2" && lists.board.rows[3].marks[0] == "action"
+shot workflow-marks
+
+# Then the gate goes unanswered for `GATE_BUDGET` and the child gives up, which settles AGE-1's
+# run as **cancelled** — a run nobody is waiting on any more, so the tile draws nothing at all
+# (§11.8). **Nothing starts the card again**: a column runs its action on entry and this card
+# entered nothing (BOARD.md §11.7), so what the freed slot goes to is the card that has been
+# waiting for it. AGE-2 is given its run, its Codex child reports, and `on_success` carries it
+# into In review — which is the whole chain this board exists to show, ending in a board where
+# one card is done with its column and the other is standing where its run stopped.
+await lists.board.rows[4].badges[0] == "1" 120000
+assert lists["board.cards"].rows[0].badges[0] == "AGE-1" && lists["board.cards"].rows[0].marks[0] absent
+assert lists.board.rows[3].badges[0] == "1"
+quit

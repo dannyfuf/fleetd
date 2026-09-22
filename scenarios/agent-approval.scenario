@@ -12,7 +12,11 @@ await screen == Workspace 20000
 key ctrl-s A
 await agents.threads[0].provider == codex 20000
 
-# A new thread hands focus to its tab, not its composer, so click the composer before typing.
+# A new thread already focuses its composer, so this click changes nothing a user can see — and
+# that is what it is here to prove: `agents.composer` names the editor's own row, so a click on
+# it puts the caret where a hand would. Named on the whole composer stack instead, the target's
+# centre lands in the metadata strip below the editor, the mouse down never reaches it, and the
+# two lines under this one type into nothing while `focused` still says `agents.composer`.
 click agents.composer
 type apply the README fix
 key enter

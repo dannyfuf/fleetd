@@ -14,14 +14,14 @@
 
 use super::{
     git,
-    plan::{Board, Card, Fixture, Repository, Worktree},
+    plan::{Board, Card, Fixture, Repository, Workflow, Worktree},
 };
 use crate::env::{Daemon, HarnessEnv};
 use anyhow::Context as _;
 use fleet_client::Client;
 use fleet_core::{
-    board::{BoardView, CardDraft},
-    ids::{ContextId, JobId, RepoId, WorktreeId},
+    board::{BoardPatch, BoardView, CardDraft, workflow_preset},
+    ids::{CardId, ContextId, JobId, RepoId, WorktreeId},
     model::RepoHooks,
 };
 use fleet_proto::{job::JobStatus, request::RequestBody};
@@ -201,8 +201,8 @@ async fn publish(
         )
         .await?;
     }
-    if !worktree.board.is_empty() {
-        seed_worktree_board(client, &result.worktree.id, &worktree.board).await?;
+    if !worktree.board.is_empty() || worktree.workflow.is_some() {
+        seed_worktree_board(client, &result.worktree.id, worktree).await?;
     }
     Ok(())
 }
@@ -211,17 +211,56 @@ async fn publish(
 ///
 /// `ensure_worktree_board` is the same request `ctrl-s b` sends, so the id, name and prefix
 /// the fixture ends up with are the daemon's own derivation and a preset cannot drift from
-/// what the app would have created for itself.
+/// what the app would have created for itself. Column automation, when the description asks
+/// for it, is applied before the cards exist: the preset inserts columns, and a card names
+/// its column by index into the list the board actually ends up with.
 async fn seed_worktree_board(
     client: &Client,
-    worktree: &WorktreeId,
-    cards: &[Card],
+    worktree_id: &WorktreeId,
+    worktree: &Worktree,
 ) -> anyhow::Result<()> {
     let view = client
-        .ensure_worktree_board(worktree.clone())
+        .ensure_worktree_board(worktree_id.clone())
         .await
-        .map_err(|error| anyhow::anyhow!("ensure {worktree}'s board: {error}"))?;
-    create_cards(client, &view, cards).await
+        .map_err(|error| anyhow::anyhow!("ensure {worktree_id}'s board: {error}"))?;
+    let view = match worktree.workflow {
+        Some(workflow) => automate(client, view, workflow).await?,
+        None => view,
+    };
+    create_cards(client, &view, &worktree.board).await
+}
+
+/// Gives the board `fleet-core`'s workflow columns and its run throttle.
+///
+/// The columns are `workflow_preset()` itself, not `apply_workflow_preset` over the five a new
+/// board starts with: that function deliberately never rewrites a column the board already has
+/// (`board::defaults`), so on a fresh board it adds Ready and In review *around* the existing
+/// In Progress and leaves it running nothing — which the CLI's `preset_notes` says out loud.
+/// A fixture whose whole point is a card that runs cannot ship that board. Taking the preset
+/// wholesale is safe here and only here: the board was created moments ago, has no cards, and
+/// nobody has renamed anything. The list is still `fleet-core`'s, so the columns, actions and
+/// routing a run sees are the ones the preset defines, and it is persisted with the same
+/// `UpdateBoard` the settings dialog sends.
+async fn automate(
+    client: &Client,
+    view: BoardView,
+    workflow: Workflow,
+) -> anyhow::Result<BoardView> {
+    let mut board = view.board;
+    board.statuses = workflow_preset();
+    let mut settings = board.settings;
+    settings.max_live_runs = Some(workflow.max_live_runs);
+    client
+        .update_board(
+            board.id.clone(),
+            BoardPatch {
+                statuses: Some(board.statuses),
+                settings: Some(settings),
+                ..BoardPatch::default()
+            },
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("automate the board {}: {error}", board.id))
 }
 
 /// Puts the repository's hooks back to none once its worktrees are published.
@@ -261,24 +300,42 @@ async fn seed_board(client: &Client, context: &ContextId, board: &Board) -> anyh
 }
 
 /// Writes one description's cards into the columns of the board that was just created.
+///
+/// Cards are created in list order and their ids kept, so a description's `blocked_by`
+/// indices become real links in the same pass. An index that does not name an
+/// already-created card is a bug in the description and fails the seeding rather than
+/// quietly producing an unlinked board.
 async fn create_cards(client: &Client, view: &BoardView, cards: &[Card]) -> anyhow::Result<()> {
     let statuses = &view.board.statuses;
     anyhow::ensure!(
         !statuses.is_empty(),
         "a new board must come with at least one column"
     );
+    let mut created: Vec<CardId> = Vec::with_capacity(cards.len());
     for card in cards {
         let column = card.column.min(statuses.len() - 1);
+        let mut blocked_by = Vec::with_capacity(card.blocked_by.len());
+        for index in &card.blocked_by {
+            let blocker = created.get(*index).cloned().with_context(|| {
+                format!(
+                    "the card {:?} is blocked by card {index}, which is not seeded before it",
+                    card.title
+                )
+            })?;
+            blocked_by.push(blocker);
+        }
         let draft = CardDraft {
             title: card.title.clone(),
             description: card.description.clone(),
             status_id: Some(statuses[column].id.clone()),
+            blocked_by,
             ..CardDraft::default()
         };
-        client
+        let record = client
             .create_card(view.board.id.clone(), draft)
             .await
             .map_err(|error| anyhow::anyhow!("create the card {:?}: {error}", card.title))?;
+        created.push(record.id);
     }
     Ok(())
 }

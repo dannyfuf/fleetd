@@ -1,0 +1,140 @@
+# plans/board-workflows-2026-09-20-phase-7-plan.md P7-T04 · UX-SPEC.md §Card detail ·
+# KEYMAP.md §Dialog > CardDetail · TESTING-HARNESS.md §3 (`card.runs`) — the card detail as the
+# place a run is read and the next one is configured, driven by two real runs of one card.
+#
+# One card, two runs, on the `board-workflow` preset (§4):
+#   run 1  In Progress carries a *prompt* action, so the provider is the card's own. `m` sets it
+#          to Codex before the card moves, and Codex's delegation child reports and completes
+#          (`subagent-child.json`), so the run succeeds and `on_success` moves the card on.
+#   run 2  In review carries a *skill* action, and a skill runs on Claude whatever the card asked
+#          for (`board::automation::resolve_prefs`). Claude's child parks on its permission gate
+#          (`subagent-child-blocked.json`), so the card reaches `needs you` and stays there.
+# That is why the two rows of `card.runs` carry different providers, and it is the whole reason
+# this scenario sets a provider at all.
+#
+# What each step pins:
+#   `card.runs`     one row per run, oldest first, each with its own provider badge and mark
+#                   word — the succeeded Codex run reads `done`, the parked Claude one reads the
+#                   card's own `needs you` (§3).
+#   `⏎` twice       `card_detail::draft::enter_target`: while a run report is folded, `⏎` opens
+#                   it and nothing else, and only once none is folded does the key go back to
+#                   meaning "edit the selected property". The proof is the *dialog*, twice on
+#                   one row: the first `⏎` leaves the detail standing on Status — a picker row,
+#                   so a card with nothing folded would have opened one — and the second `⏎`, on
+#                   that same row, opens it. The child's report is nine lines and
+#                   `REPORT_COLLAPSE_LINES` is eight, so exactly one report is folded, and no
+#                   run after it delivers another to fold.
+#   the Effort row  the fourth property row on a card whose column has an action (Status,
+#                   Provider, Model, Effort), and the one kind whose value nothing validates:
+#                   `blistering` is in no catalogue, the picker offers it as its own "use this"
+#                   row, and re-opening the picker seeds the query from the card the daemon
+#                   wrote — `dialog.fields[0]`, which is the query field the dialog paints as
+#                   `dialog.field[0]` (§3). The row's own text is not projected; the seeded
+#                   query is the same `card.agent.effort` the row resolves, read back through
+#                   the daemon.
+#
+# Every run predicate is an `await`, never an `assert`: a run row is written by an event this
+# file did not send, and the window between the move and the row is the harness's to wait out.
+# The card ends this scenario with exactly the two rows it names — In review's torn-down child
+# ends its run and the column does not start another, because a column runs its action on entry
+# and a card whose run ended where it started entered nothing (BOARD.md §11.7). Until
+# 2026-09-21 it did restart, for ever; the rows this file names outlived that too.
+#
+# No `shot`: this is a keyboard scenario, so it runs in the headless lane too (§7).
+fixture: board-workflow
+await idle 30000
+
+# The preset seeds two worktrees, and `agent` is the one carrying the board.
+assert lists.worktrees.rows[1].id == "acme/api#agent"
+key j
+await lists.worktrees.selected.id == "acme/api#agent" 10000
+key o
+await screen == Workspace 30000
+key ctrl-s b
+await lists.tabs.selected.label == "board" 30000
+await focused == "board.column[0].card[0]" 30000
+await key_contexts[2] == "Board" 20000
+
+# Todo is the one column the preset leaves human, and AGE-1 is the card this file drives.
+key l
+await lists.board.selected.label == "Todo" 10000
+assert lists["board.cards"].rows[0].badges[0] == "AGE-1"
+
+# `m` picks the provider the prompt column will run the card with. Typing narrows the three
+# rows — `column default`, `claude`, `codex` — to the one this card wants.
+key m
+await dialog.name == CardPicker 10000
+assert dialog.fields[0].name == "query" && dialog.fields[0].value == ""
+type codex
+assert dialog.fields[0].value == "codex"
+key enter
+await dialog absent 20000
+# The provider has to be on the card before the card reaches a column that reads it: the move
+# below is a second mutation, and a run started from the card as it was would be Claude's.
+await idle 20000
+
+# Two `]`: Ready routes a card nothing blocks no further than Ready (BOARD.md §11.7), and the
+# second move is what hands In Progress the card its action then runs.
+key ]
+await lists.board.selected.label == "Ready" 20000
+key ]
+await lists.board.selected.label == "In Progress" 20000
+await lists["board.cards"].rows[0].marks[0] == "working" 60000
+
+# The Codex child reports and completes, so the run succeeds and `on_success` moves the card
+# into In review, whose skill action starts the child that parks.
+await lists.board.rows[4].badges[0] == "1" 90000
+key l
+await lists.board.selected.label == "In review" 15000
+await lists["board.cards"].rows[0].badges[0] == "AGE-1" 15000
+await lists["board.cards"].rows[0].marks[0] == "needs you" 60000
+
+# The detail opens on the card the board cursor is holding, and states both runs oldest first.
+key enter
+await dialog.name == CardDetail 15000
+await lists["card.runs"].rows[1] exists 60000
+assert lists["card.runs"].rows[0].badges[0] == "codex"
+assert lists["card.runs"].rows[0].marks[0] == "done"
+assert lists["card.runs"].rows[0].label ~= "^succeeded "
+assert lists["card.runs"].rows[1].badges[0] == "claude"
+dump runs
+
+# The cursor is on Status, which is a picker row: this `⏎` opens the folded run report instead,
+# and the dialog that is still standing is the proof.
+key enter
+assert dialog.name == CardDetail && overlay == Dialog
+
+# The same key on the same row, now that nothing is folded, opens that row's picker. The only
+# thing that changed between these two `⏎`s is the report the first one expanded.
+key enter
+await dialog.name == CardPicker 15000
+key escape
+await dialog.name == CardDetail 15000
+
+# Status, Provider, Model, Effort — the four rows a column with an action gives a card.
+key j j j
+key enter
+await dialog.name == CardPicker 15000
+assert dialog.fields[0].value == ""
+
+# An effort no catalogue offers: the picker takes the typed query as its own row, and nothing
+# validates it (contracts §5.3).
+type blistering
+assert dialog.fields[0].value == "blistering"
+key enter
+await dialog.name == CardDetail 30000
+
+# The picker closes on the keystroke and the daemon answers milliseconds later, so the write has
+# to settle before the row is asked about it: `seed` reads the card once, when the picker opens,
+# and a picker opened over the card as it was would stay empty for ever. `idle` is false until
+# the app has applied a snapshot covering the mutation's own revision (§2).
+await idle 30000
+
+# The same row, re-opened: the query is seeded from the card the daemon wrote back.
+key enter
+await dialog.name == CardPicker 15000
+assert dialog.fields[0].value == "blistering"
+key escape
+await dialog.name == CardDetail 15000
+dump detail
+quit

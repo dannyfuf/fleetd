@@ -41,8 +41,16 @@ pub use launcher::{launcher_script, write_launcher};
 use serde::{Deserialize, Serialize};
 use std::{path::Path, time::Duration};
 
-/// Gate waits are sized against `DEFAULT_AWAIT_TIMEOUT_MS`, the scenario await default.
-pub(crate) const GATE_BUDGET: Duration = Duration::from_secs(5);
+/// How long a scripted child holds an unanswered permission gate before it gives up.
+///
+/// It is the ceiling on every state a parked child can hold: a scenario reading `needs you`, a
+/// board counting the slot that child occupies, a caller painting the gate. Four times
+/// `DEFAULT_AWAIT_TIMEOUT_MS` rather than one, because the ceiling has to be wider than the
+/// *whole* of what a scenario does inside the window — on a loaded machine the app has taken
+/// five seconds simply to show the run, and a park that expires while the harness is still
+/// settling is a state no scenario can read. A gate a scenario *does* answer is answered in
+/// milliseconds, so this only ever bounds the failure.
+pub(crate) const GATE_BUDGET: Duration = Duration::from_secs(20);
 
 /// Which native agent protocol a scripted run imitates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

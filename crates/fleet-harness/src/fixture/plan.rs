@@ -85,8 +85,12 @@ pub struct Worktree {
     /// The board itself is asked for with `EnsureWorktreeBoard`, so its id, name and prefix
     /// are the daemon's derivation rather than a fixture's guess; only the cards are described
     /// here. An empty list is a worktree with no board at all, which is every worktree but the
-    /// `board` preset's.
+    /// `board` and `board-workflow` presets'.
     pub board: Vec<Card>,
+    /// The column automation this worktree's board opts into, applied before its cards are
+    /// created so a card can name a column the preset adds.
+    #[serde(default)]
+    pub workflow: Option<Workflow>,
 }
 
 impl Worktree {
@@ -99,6 +103,7 @@ impl Worktree {
             dirty_files: Vec::new(),
             hook: Hook::None,
             board: Vec::new(),
+            workflow: None,
         }
     }
 
@@ -143,6 +148,19 @@ impl Hook {
             Self::Fails => vec!["printf 'fixture hook failed\\n'; exit 3".to_owned()],
         }
     }
+}
+
+/// What a seeded worktree board asks of `fleet_core::board::apply_workflow_preset`.
+///
+/// The preset itself is the daemon's, not the fixture's: applying it through `UpdateBoard`
+/// means a run sees the same seven columns, the same actions and the same routing a person
+/// gets from `fleet board columns --preset`, and a fixture cannot drift from them. Only the
+/// run throttle is stated here, because a board that leaves it unset is already at one and a
+/// scenario proving the `pending` mark needs to say so out loud.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Workflow {
+    /// Live runs the board allows at once.
+    pub max_live_runs: u32,
 }
 
 /// One pull request the fake `gh` reports, in the fields the daemon's adapter reads.
@@ -213,6 +231,33 @@ pub struct Card {
     pub description: String,
     /// Index into the board's own status list, clamped to the last column.
     pub column: usize,
+    /// Cards that block this one, as indices into the same list.
+    ///
+    /// Cards are created in list order, so an index here always names a card that already
+    /// exists; a forward reference is a fixture bug and [`super::seed`] says so rather than
+    /// seeding a board with a link missing.
+    #[serde(default)]
+    pub blocked_by: Vec<usize>,
+}
+
+impl Card {
+    /// A card in one column that nothing blocks.
+    #[must_use]
+    pub fn new(title: &str, description: &str, column: usize) -> Self {
+        Self {
+            title: title.to_owned(),
+            description: description.to_owned(),
+            column,
+            blocked_by: Vec::new(),
+        }
+    }
+
+    /// The same card, blocked by the cards at these indices.
+    #[must_use]
+    pub fn blocked_by(mut self, cards: &[usize]) -> Self {
+        self.blocked_by = cards.to_vec();
+        self
+    }
 }
 
 /// A native-agent provider wired to a scripted transcript.
@@ -282,6 +327,7 @@ pub fn describe(preset: Preset) -> Fixture {
             include_str!("../../transcripts/subagent-caller-other-worktree.json"),
             "subagent-caller-other-worktree.json",
         ),
+        Preset::BoardWorkflow => board_workflow(),
     }
 }
 
@@ -411,21 +457,21 @@ fn board() -> Fixture {
             branches: Vec::new(),
             worktrees: vec![Worktree {
                 board: vec![
-                    Card {
-                        title: "Open the tab with ctrl-s b".to_owned(),
-                        description: "Created on demand, selected every time.".to_owned(),
-                        column: 0,
-                    },
-                    Card {
-                        title: "Scope the mirror to this worktree".to_owned(),
-                        description: "One BoardState, two scopes.".to_owned(),
-                        column: 0,
-                    },
-                    Card {
-                        title: "Draw the board inside the Workspace".to_owned(),
-                        description: "The Hub's board view, lent to the tab.".to_owned(),
-                        column: 1,
-                    },
+                    Card::new(
+                        "Open the tab with ctrl-s b",
+                        "Created on demand, selected every time.",
+                        0,
+                    ),
+                    Card::new(
+                        "Scope the mirror to this worktree",
+                        "One BoardState, two scopes.",
+                        0,
+                    ),
+                    Card::new(
+                        "Draw the board inside the Workspace",
+                        "The Hub's board view, lent to the tab.",
+                        1,
+                    ),
                 ],
                 ..Worktree::clean("feature")
             }],
@@ -434,31 +480,31 @@ fn board() -> Fixture {
         board: Some(Board {
             prefix: "FLT".to_owned(),
             cards: vec![
-                Card {
-                    title: "Photograph the daemon-down screen".to_owned(),
-                    description: "Kill fleetd and assert the banner.".to_owned(),
-                    column: 0,
-                },
-                Card {
-                    title: "Freeze the scenario grammar".to_owned(),
-                    description: "Phase 5 writes against it.".to_owned(),
-                    column: 0,
-                },
-                Card {
-                    title: "Seed the board preset".to_owned(),
-                    description: "Cards through the daemon's own API.".to_owned(),
-                    column: 1,
-                },
-                Card {
-                    title: "Wire the fake acli".to_owned(),
-                    description: "Board scenarios must not reach Atlassian.".to_owned(),
-                    column: 1,
-                },
-                Card {
-                    title: "Build real git origins".to_owned(),
-                    description: "Fleet's git layer deserves real input.".to_owned(),
-                    column: 2,
-                },
+                Card::new(
+                    "Photograph the daemon-down screen",
+                    "Kill fleetd and assert the banner.",
+                    0,
+                ),
+                Card::new(
+                    "Freeze the scenario grammar",
+                    "Phase 5 writes against it.",
+                    0,
+                ),
+                Card::new(
+                    "Seed the board preset",
+                    "Cards through the daemon's own API.",
+                    1,
+                ),
+                Card::new(
+                    "Wire the fake acli",
+                    "Board scenarios must not reach Atlassian.",
+                    1,
+                ),
+                Card::new(
+                    "Build real git origins",
+                    "Fleet's git layer deserves real input.",
+                    2,
+                ),
             ],
         }),
         ..base(Preset::Board)
@@ -513,6 +559,83 @@ fn subagent_agents(preset: Preset, document: &str, caller: &str) -> Fixture {
         ],
         ..base(preset)
     }
+}
+
+/// The board-workflow preset: the subagent world, plus a worktree board that runs cards.
+///
+/// The agent wiring is `agents-subagent`'s, because the transcript that decides what a run
+/// does here is the *child* one. A card run is a delegation, so the launcher serves Codex
+/// `subagent-child.json`, which reports a result and completes, and Claude
+/// `subagent-child-blocked.json`, whose permission gate stands in for a child that has to ask
+/// its caller something (`crate::agent::launcher`). One provider therefore drives a column
+/// through `on_success` and the other parks a card on `needs you`, and this preset needs no
+/// transcript of its own to get both.
+///
+/// The board is `acme/api#agent`'s — `EnsureWorktreeBoard`'s own derivation, so its id, name
+/// and `AGE` prefix are the daemon's — with the workflow preset applied and one live run
+/// allowed, which is what makes a second card moved into an action column `pending` rather
+/// than a second run. All four cards start in Todo, the one column the preset deliberately
+/// leaves human: a run started by the *seeding* daemon would be gone by the time the
+/// scenario's own daemon reads the home, so every run a scenario sees is one it started.
+fn board_workflow() -> Fixture {
+    let agents = subagent_agents(
+        Preset::BoardWorkflow,
+        include_str!("../../transcripts/subagent-caller.json"),
+        "subagent-caller.json",
+    )
+    .agents;
+    Fixture {
+        repositories: vec![Repository {
+            owner: "acme".to_owned(),
+            name: "api".to_owned(),
+            branches: Vec::new(),
+            worktrees: vec![
+                Worktree {
+                    board: workflow_cards(),
+                    workflow: Some(Workflow { max_live_runs: 1 }),
+                    ..Worktree::clean("agent")
+                },
+                Worktree::clean("other"),
+            ],
+            pull_requests: Vec::new(),
+        }],
+        agents,
+        ..base(Preset::BoardWorkflow)
+    }
+}
+
+/// The four linked cards `board-workflow` seeds, in creation order.
+///
+/// Card 1 blocks card 3, and cards 1 and 2 both block card 4, so a scenario reads `⊘ 1` and
+/// `⊘ 2` off the face without moving anything, and completing card 1 releases exactly one of
+/// the two.
+fn workflow_cards() -> Vec<Card> {
+    /// Index of `Todo` in the workflow preset's seven columns.
+    const TODO_COLUMN: usize = 1;
+    vec![
+        Card::new(
+            "Throttle the board to one run",
+            "Every card on a worktree board edits the same checkout.",
+            TODO_COLUMN,
+        ),
+        Card::new(
+            "Give the column an action",
+            "A column decides what running a card means.",
+            TODO_COLUMN,
+        ),
+        Card::new(
+            "Review the throttle",
+            "Runs once the throttle is in.",
+            TODO_COLUMN,
+        )
+        .blocked_by(&[0]),
+        Card::new(
+            "Ship the workflow",
+            "Waits for the throttle and the action together.",
+            TODO_COLUMN,
+        )
+        .blocked_by(&[0, 1]),
+    ]
 }
 
 /// The three-turn conversation the `agents` preset gives Claude.
@@ -596,6 +719,54 @@ mod tests {
                         == Some("Selected model is at capacity. Please try a different model.")
             }),
             "the third turn must preserve error-mid-stream's provider error"
+        );
+    }
+
+    #[test]
+    fn the_board_workflow_preset_seeds_four_linked_cards_in_one_human_column() {
+        let fixture = describe(Preset::BoardWorkflow);
+        let worktree = fixture
+            .repositories
+            .first()
+            .and_then(|repository| repository.worktrees.first())
+            .unwrap_or_else(|| panic!("board-workflow must seed acme/api#agent"));
+
+        assert_eq!(
+            worktree.slug, "agent",
+            "the board hangs off the first worktree"
+        );
+        assert_eq!(
+            worktree.workflow,
+            Some(Workflow { max_live_runs: 1 }),
+            "a second card in an action column has to queue rather than run"
+        );
+        assert_eq!(worktree.board.len(), 4);
+        let columns: std::collections::BTreeSet<usize> =
+            worktree.board.iter().map(|card| card.column).collect();
+        assert_eq!(
+            columns.len(),
+            1,
+            "every seeded card starts in Todo, which the preset leaves human, saw {columns:?}"
+        );
+        assert_eq!(
+            worktree
+                .board
+                .iter()
+                .map(|card| card.blocked_by.as_slice())
+                .collect::<Vec<_>>(),
+            vec![&[][..], &[][..], &[0][..], &[0, 1][..]],
+            "card 1 blocks card 3, and cards 1 and 2 block card 4"
+        );
+        for (index, card) in worktree.board.iter().enumerate() {
+            assert!(
+                card.blocked_by.iter().all(|blocker| *blocker < index),
+                "a blocker has to be created before the card it blocks: {}",
+                card.title
+            );
+        }
+        assert_eq!(
+            fixture.board, None,
+            "board-workflow seeds no context board, so a dump names one board only"
         );
     }
 
