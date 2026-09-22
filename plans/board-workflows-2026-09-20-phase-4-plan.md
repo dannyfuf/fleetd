@@ -180,13 +180,13 @@ make test && make restart
 
 ## Definition of done
 
-- [ ] Every task above is `[x]` in the tracker.
+- [x] Every task above is `[x]` in the tracker.
 - [ ] `make lint` is clean and `make test` passes.
 - [ ] A non-git worktree and a checkpoint-less thread both answer an empty list, and the run still
   succeeds.
 - [ ] `CardRun.files_changed` and `DelegationResult.files_changed` agree with the list.
-- [ ] `docs/BOARD.md` §11 and `docs/NATIVE-AGENTS.md` §5 match the code.
-- [ ] The tracker reflects reality; follow-ups are captured.
+- [x] `docs/BOARD.md` §11 and `docs/NATIVE-AGENTS.md` §5 match the code.
+- [x] The tracker reflects reality; follow-ups are captured.
 
 ## Risks and rollback
 

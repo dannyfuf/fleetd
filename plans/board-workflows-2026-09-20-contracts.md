@@ -270,7 +270,7 @@ pub fn validate_env(env: &[String]) -> Result<(), BoardError>;   // the five `--
 Refusals, all `BoardError::Invalid { field, reason }`:
 | field | reason |
 | --- | --- |
-| `on_success` / `advance_when_unblocked` | `must name a status on this board` · `may not name its own column` · `must name a later column` |
+| `on_success` / `advance_when_unblocked` | `{column} routes to {target}, which is not a column on this board` · `{column} may not route to itself` · `{column} routes to {target}, which is not a later column` — each names the column carrying the route, because the edit that raises it is usually to another column |
 | `on_enter` | `a skill action needs a name` · `skill actions run on claude only; put the invocation in the column's instructions for codex` |
 | `env` | the five sentences from `crates/fleet-cli/src/commands/subagents.rs:357-380` with `--env ` dropped |
 | `max_live_runs` | `must be between 1 and 8` |
@@ -331,6 +331,12 @@ pub fn re_evaluate(
     board: &Board, cards: &mut [Card], seeds: &[CardId],
     live: &LiveIndex, in_flight: &mut BTreeSet<CardId>, now: &str,
 ) -> Result<Plan, BoardError>;
+/// The same walk from seeds that did *not* enter their column — a run that ended where it
+/// started — so rule 1 is skipped for them and rule 2 is not.
+pub fn re_evaluate_settled(
+    board: &Board, cards: &mut [Card], seeds: &[CardId],
+    live: &LiveIndex, in_flight: &mut BTreeSet<CardId>, now: &str,
+) -> Result<Plan, BoardError>;
 
 /// Candidate order when a slot frees: later column first, then oldest `since`.
 pub fn next_pending<'a>(board: &Board, cards: &'a [Card]) -> Option<&'a Card>;
@@ -344,7 +350,8 @@ pub fn brief(action: &Action, key: &str, card: &Card, reports: &[&Comment]) -> S
 ```
 Seeds are the cards whose column changed (entry, auto-advance, outcome move) plus every card
 whose blocker changed satisfaction. Rules inside `re_evaluate`, in order for each visited card:
-1. If the card's column has `on_enter`, the card has no live run and is not in `in_flight`:
+1. (Skipped for a *settled* seed, which entered nothing.) If the card's column has `on_enter`,
+   the card has no live run and is not in `in_flight`:
    if `live.len() + in_flight.len() < max_live_runs` push `StartRun`, insert into `in_flight`,
    push activity `RunStarted`; else set `pending_run = { status_id, since: now }` and write nothing.
 2. For each dependant in `blocks(cards, card)` whose column has `advance_when_unblocked`, whose
@@ -479,7 +486,9 @@ section. The paths go to `DelegationResult.files_changed` (a `Vec<String>`) thro
 pub(crate) struct Automation {
     delegations: DelegationService,
     checkpoints: Arc<Checkpoints>,                   // phase 4 uses it; phase 3 stores it
-    in_flight: Mutex<BTreeSet<CardId>>,             // the reservation
+    in_flight: Mutex<BTreeMap<BoardId, BTreeSet<CardId>>>,  // the reservation, per board: the
+                                                    // ceiling it counts against is one board's
+                                                    // (amended 2026-09-21, review fix F2)
     pending_boards: Mutex<BTreeSet<BoardId>>,       // memo: boards holding a pending_run
 }
 impl Boards {
@@ -513,10 +522,12 @@ drop oldest), clear `pending_run`, remove from `in_flight`, save; on `Err` re-ac
 `CardRun { id: DelegationId::new(), thread_id: None, outcome: Some(Failed), ended_at: Some(now),
 detail: Some(sentence), .. }`, clear, remove, save, and emit `BoardChanged { CardChanged }`. The app
 raises the sticky error when a view arrives carrying a run id it did not hold before whose
-`failed_to_start()` is true (§5.5). `card attach` on such a run answers `{KEY}'s last run never
-started`.
+`failed_to_start()` is true (§5.5). `card attach` on such a run answers `{KEY}'s runs never
+reached a thread`, and `{KEY} has no run` on a card that never ran at all; the app's `A` says
+the same two sentences about the same two cards (amended 2026-09-21, review fix F5 — the
+contract had a third spelling nothing implemented).
 
-`on_run_delivered`: under the gate write `ended_at`, `outcome` (table in the design doc:
+`on_run_delivered` (amended 2026-09-21, review fix F1): under the gate write `ended_at`, `outcome` (table in the design doc:
 Succeeded→Succeeded; Failed with payload `reported blocked`→NeedsYou; Failed→Failed;
 Incomplete→Incomplete; Cancelled→Cancelled), `detail` = `status_payload`, `files_changed`,
 `cost_usd`/`tokens` from `delegations.get(id)` (usage read path); add the report comment (`run_id`
@@ -524,8 +535,13 @@ set, body capped at `REPORT_EXCERPT_CAP_BYTES` with `…` and the trailing line 
 full report is in the run's thread)`), drop the oldest report comment past
 `MAX_REPORT_COMMENTS_PER_CARD` (clearing that run's `report_comment_id`); if Succeeded and
 `on_success` is set on the *current* board, `ops::move_card` to it with the outcome `Moved`
-sentence; `re_evaluate` with the card as seed; save once; drop; apply starts. Idempotent: a run
-already terminal on the card returns `Ok` and writes nothing.
+sentence; then evaluate with the card as seed — through `re_evaluate` when that move *moved* it,
+and through `re_evaluate_settled` otherwise, which skips rule 1 for the seed; save once; drop;
+apply starts. Idempotent: a run already terminal on the card returns `Ok` and writes nothing.
+
+The entered/settled split is the F1 fix: a column runs its action on entry, and a run that ended
+where it started leaves a card that entered nothing — seeded through `re_evaluate` it starts its
+own column again the moment it ends, for ever (`docs/BOARD.md` §11.7).
 
 Refusals (daemon):
 | Situation | Error | Sentence |
@@ -534,7 +550,8 @@ Refusals (daemon):
 | delete or archive a card with a live run | `Conflict` | `{KEY} is working; cancel the run first` |
 | remove a column with live runs | `Conflict` | `column has {n} live runs; cancel them first` |
 | `start_run` on a column with no action | `Validation` | `{column name} has no action` |
-| `cancel_run` with no live run | `NotFound` | `{KEY} has no live run` |
+| `cancel_run` with neither a live run nor an owed one | `NotFound` | `{KEY} has no live run` |
+| `move_card --cancel-run` that comes back to a *different* live run | `Conflict` | `{KEY} is working; cancel the run first` |
 | automation on a context / Jira / hosted board | `Validation` | §1.7 `automation` sentences |
 | no delegation service | `Unsupported` | `the native-agent database is unavailable, so board automation is refused` |
 
@@ -686,9 +703,16 @@ run`, `Cancel run` and `Run now` are valid when `board_pane_is_active()` or when
 CardDetail` is open over a `BoardScope::Worktree` board; never over the Hub's context board.
 `ConfirmRequest::MoveCancelsRun { card: CardId, key: String, target: String, elapsed: String }`
 with title `Move {KEY}?` and consequence `{KEY} is working ({elapsed}). Move to {target} and cancel
-the run?`; the app asks only when its delegation mirror holds a live card-called delegation for
-`latest_run.id` (elapsed from `Delegation::elapsed`); otherwise it sends the plain move and a
-daemon `Conflict` is reported through `lifecycle::fail`. Confirming sends `MoveCard { cancel_run:
+the run?`; the app asks only when its delegation mirror holds a live card-called delegation **for
+this card** — joined on the delegation's own `caller == Card { board, card }`, never on
+`latest_run.id`, because the card's `runs` row arrives a board round trip after the mirror does
+and a `[` pressed in that window would otherwise send a plain move (elapsed from
+`Delegation::elapsed`); a run the card's own row has already given an outcome outranks a mirror
+row that has not caught up, exactly as §5.2's fold treats it. Otherwise it sends the plain move
+and a daemon `Conflict` is reported through `lifecycle::fail`. `X`'s `{KEY} has no live run`
+reads the same mirror-first join (`screens/board/actions.rs::has_live_or_pending_run`, consumed
+by `runs.rs::target`), so the tile, the move confirm and the cancel key cannot disagree about one
+card. Confirming sends `MoveCard { cancel_run:
 true }`. The failed-start sticky error is defined in §5.2.
 
 ### 5.6 Harness (additive, `docs/TESTING-HARNESS.md` §3 and §4)

@@ -1,43 +1,47 @@
 # Resume prompt for the board-workflows session
 
-Paste everything below the line into the new session.
+Paste everything below the line into the new session. It describes the tree as of 2026-09-21,
+after all nine phases were built.
 
 ---
 
-Continue implementing plans/board-workflows-2026-09-20-roadmap.md on branch feat/workflows-v1.
-A previous session paused mid phase 1. Read, in this order, before doing anything:
+Finish and land plans/board-workflows-2026-09-20-roadmap.md on branch feat/workflows-v1, in the
+worktree /home/df/.fleet/worktrees/dannyfuf/fleetd/feat-workflows-v1. The building is done; what
+is left is one bug, the commits, and a manual smoke. Read, in this order, before doing anything:
 
-1. plans/board-workflows-2026-09-20-handoff.md — the resume procedure, what is already committed,
-   the plan amendments already made (do not redo them), and the board friction noticed so far.
-2. plans/board-workflows-2026-09-20-contracts.md, then the roadmap, then the phase-1 plan and tracker.
-3. `fleet board --worktree=dannyfuf/fleetd#feat-workflows-v1 show` — the board is the source of
-   truth for card state. FEA-1 and FEA-10 are In Progress, FEA-2..9 are Todo, FEA-11 is Done.
+1. plans/board-workflows-2026-09-20-handoff.md — the state of the tree, what is verified, what is
+   not, and the fourteen-commit plan by area.
+2. plans/board-workflows-2026-09-20-phase-9-tracker.md, its Follow-ups section in particular: it
+   carries the measurements for the one red thing and the manual smoke that is owed.
+3. plans/board-workflows-2026-09-20-contracts.md §0 and the phase tracker for whatever you touch.
 
 Facts you must not rediscover:
-- HEAD is a9bf3ec (or later). Commit 4f54602 is a WIP snapshot of phase 1 (P1-T01 and P1-T02 done
-  and verified, P1-T03 mid-edit in crates/fleet-daemon/src/stores/board.rs). Squash it before any PR.
-- origin/main (PR #43, hosted worktree boards route to their owner, ADR 0021) is already merged.
-  The feature ADR is 0022. The three run requests route by host_of_card, not Target::Local.
-- FEA-10's fix is finished and reviewed: commit b869742 on branch worktree-agent-a08887fddd105783c
-  (git worktree under .claude/worktrees/). Cherry-pick it right after phase 1 is committed, then
-  remove that worktree and branch, then move FEA-10 to Done.
-- Line numbers in the phase plans predate the PR #43 merge; re-grep symbols.
+- HEAD is ab5f195. Phase 1 and the old FEA-10 are committed; **phases 2 through 9 are entirely
+  uncommitted in the working tree** — ~159 files, ~16.7k lines, nothing staged. That is expected:
+  the build agents were forbidden every state-changing git command.
+- `make lint` is clean. Every crate's own suite is green alone. The documents were audited against
+  the shipped code on 2026-09-21 and agree with it.
+- `make test` is **red** in exactly one place: fleet-app's `harness_headless`, on
+  scenarios/board/workflow-chain.scenario and one sibling, deterministically. The board tile never
+  paints a live run's mark — a card-called child that goes `blocked` does not repaint its tile,
+  and the face can lag a run by the whole of that run. The reducer is right
+  (`state::board::tests::a_child_that_goes_blocked_turns_its_card_amber_without_a_board_reload`);
+  the wiring into it from the delegation mirror is not. Fix that first: it is the only thing
+  between this tree and a PR, and it is a real user-visible bug, not a test artifact.
+- No phase ever ran a real `claude` or `codex`. Every run was a scripted `fleet-harness agent`
+  replaying a transcript. The manual smoke owed before announcing the feature is written out step
+  by step in the phase-9 tracker's Follow-ups. Do it on a real worktree board against your own
+  daemon, both providers, and record what you saw.
+- Line numbers in every phase plan predate the PR #43 merge; re-grep every symbol.
 
 How to work:
-- Codex and Grok are out of quota. Use only Opus subagents (Agent tool, model "opus"). You are the
-  orchestrator: scope each brief tightly from the contracts and phase plan, review every diff
-  yourself, run `make lint` and `make test` yourself, and only then move a card.
-- One agent editing the main worktree at a time. Two agents in one tree broke each other's builds.
-  For parallel work use `isolation: "worktree"` with its own CARGO_TARGET_DIR.
-- Agents never run git or `fleet board`; you commit and you move cards. Commit form is
-  `<area>: <imperative lowercase summary>`, no Co-Authored-By or any Claude attribution trailer.
-- Order: finish phase 1 (resume one Opus agent with the brief described in the handoff, telling it
-  T01/T02 are done and T03 is partial), land FEA-10, `make restart`, then phase 2, then phase 3,
-  then the rest per the roadmap's Suggested order.
-- Dogfood the board as you go: move cards only when the state really changes, comment decisions
-  and hand-offs, and add a Backlog card for any board friction worth fixing (the handoff lists
-  three candidates: noisy `card comment` output, no `--comment` on `card move`, Done meaning
-  "merged on this branch"). Fix small friction items now if they are fleet-cli-only and do not
-  collide with the running phase.
-- Update the phase tracker files and my memory note board-workflows-progress.md whenever a phase
-  or card changes state, so the next restart costs nothing.
+- Delegate the execution — the bug fix, and any follow-up sweep — with a tightly scoped brief; you
+  own the architecture, the review and the commits. Never hand over a task you have not scoped.
+- Commit form `<area>: <imperative lowercase summary>`, one logical change each, the doc update
+  riding with its code. No Co-Authored-By and no Claude attribution of any kind.
+- Before the PR: `make lint`, `make test`, and `make harness` — this round changed the keymap, two
+  screens, a dialog and the fixture set, so the GUI corpus is not optional. Run
+  `make harness-one SCENARIO=scenarios/board/workflow-chain.scenario` first.
+- `make restart` after landing daemon code, so the running fleetd matches the build.
+- Keep the trackers current as you go: tick a box only with a "verified: <how>" line under it, and
+  put anything non-obvious in that tracker's Notes/decisions log rather than in a chat message.

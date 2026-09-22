@@ -130,6 +130,11 @@ child's result.
 Supporting this requires routing creation, status and delivery through the caller's owning host;
 silently creating a local child would split the durable record from the authoritative transcript.
 
+A **card** caller has the same boundary from the other side: `run_for_card` refuses a worktree
+another host owns with `automation is unavailable on a worktree owned by host <id>`, because a run
+edits a checkout this daemon must be able to reach (`docs/BOARD.md` §11.4). Both refusals are the
+same missing piece — host-routed delegation — and either one being lifted should lift the other.
+
 - **Start in:** `crates/fleet-daemon/src/services/agents/delegation/run.rs`, at the mirrored-caller
   refusal, then the existing host-routing boundary.
 - **Done when:** a mirrored caller delegates on its owning host and every status transition and

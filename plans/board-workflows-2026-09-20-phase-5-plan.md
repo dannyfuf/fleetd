@@ -264,12 +264,17 @@ make test
 
 ## Definition of done
 
-- [ ] Every task above is `[x]` in the tracker.
-- [ ] `make lint` is clean; `cargo test -p fleet-cli` and `make test` pass.
-- [ ] `make smoke-workflow` drives four cards to Done and `card wait` exits 0.
-- [ ] Every new request shape has a socket test and the help test names every new verb and flag.
-- [ ] `docs/BOARD.md` §6 and both skills match the shipped flags.
-- [ ] The tracker reflects reality; follow-ups are captured.
+- [x] Every task above is `[x]` in the tracker.
+- [ ] `make lint` is clean; `cargo test -p fleet-cli` and `make test` pass. (`cargo test -p
+      fleet-cli` passes, 187 + 9 + 0; `make lint` and `make test` are the integration stage's —
+      no phase-5 task ran either, and neither is a task's to claim.)
+- [x] `make smoke-workflow` drives four cards to Done and `card wait` exits 0. (Twice in a row,
+      2026-09-21; eight scripted runs, no daemon or temp home left behind.)
+- [x] Every new request shape has a socket test and the help test names every new verb and flag.
+      (P5-T06; the 187 passing tests include them.)
+- [x] `docs/BOARD.md` §6 and both skills match the shipped flags. (Checked flag by flag against
+      `args.rs`, not against the plan's prose, on 2026-09-21.)
+- [x] The tracker reflects reality; follow-ups are captured.
 
 ## Risks and rollback
 

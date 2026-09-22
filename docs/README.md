@@ -7,7 +7,7 @@
 | [UX-SPEC.md](UX-SPEC.md) | What every screen shows and why |
 | [KEYMAP.md](KEYMAP.md) | Which key does what, in which context |
 | [DESIGN-SYSTEM.md](DESIGN-SYSTEM.md) | The `fleet-ui-kit` tokens and component contracts |
-| [BOARD.md](BOARD.md) | The card model, the reconciliation engine, and the board surface |
+| [BOARD.md](BOARD.md) | The card model, the reconciliation engine, the column-automation engine that runs a card as a native subagent, and the board surface |
 | [BOARD-JIRA.md](BOARD-JIRA.md) | The Jira backend, and what `acli` can and cannot do |
 | [NATIVE-AGENTS.md](NATIVE-AGENTS.md) | Native Claude Code / Codex sessions: adapters, event model, thread state, the transcript, the decision surfaces, the agent tab |
 | [REMOTE-MACHINES.md](REMOTE-MACHINES.md) | Authoritative remote-machine config, protocol, provider, routing, mirror, and recovery contract |

@@ -140,13 +140,13 @@ No screen changes, so `make harness` is **not** required for this phase. Run `ma
 
 ## Definition of done
 
-- [ ] Every task above is `[x]` in the tracker.
+- [x] Every task above is `[x]` in the tracker.
 - [ ] `make lint` and `cargo check --workspace --all-targets` are clean.
 - [ ] `make test` passes; the shipped thread-caller golden and every legacy fixture are byte-identical.
-- [ ] A slot-006 database reaches slot 007 with every row preserved, and re-running the ladder changes nothing.
-- [ ] A terminal card run's `Deliver` row closes only after the hook returns `Ok`; an unset hook yields `Undeliverable { reason: "no board service" }`.
+- [x] A slot-006 database reaches slot 007 with every row preserved, and re-running the ladder changes nothing.
+- [x] A terminal card run's `Deliver` row closes only after the hook returns `Ok`; an unset hook yields `Undeliverable { reason: "no board service" }`.
 - [ ] No code below `transition.rs` calls the manager or a board.
-- [ ] `docs/NATIVE-AGENTS.md` §15.7 and `docs/research/agents-contracts.md` ride with the code.
+- [x] `docs/NATIVE-AGENTS.md` §15.7 and `docs/research/agents-contracts.md` ride with the code.
 
 ## Risks and rollback
 

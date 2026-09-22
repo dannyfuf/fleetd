@@ -306,10 +306,10 @@ make test && make restart
 
 - [ ] Every task above is `[x]` in the tracker.
 - [ ] `make lint` and `cargo check --workspace --all-targets` are clean; `make test` passes.
-- [ ] `board.automation` is advertised and gates the three requests on the client.
+- [x] `board.automation` is advertised and gates the three requests on the client.
 - [ ] No `Boards` method calls a `pub` verb of `Boards`; the reviewer checked the call graph.
-- [ ] `docs/BOARD.md` §4, §5, §6, §11 and `docs/NATIVE-AGENTS.md` §15.7 match the code.
-- [ ] The tracker reflects reality; follow-ups are captured.
+- [x] `docs/BOARD.md` §4, §5, §6, §11 and `docs/NATIVE-AGENTS.md` §15.7 match the code.
+- [x] The tracker reflects reality; follow-ups are captured.
 
 ## Risks and rollback
 
