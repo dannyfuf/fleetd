@@ -14,7 +14,7 @@ unless a declaration below says otherwise.
 >
 > Phase 5a replaced the `fleet-ui-kit` half. `components/agent/decision_card.rs` is gone:
 > approvals and questions live in a `DecisionDock` docked to the composer (`decision.rs` +
-> `decision_dock.rs`), a proposed plan is a transcript row with no buttons, and `AllowDirectory`,
+> `decision_dock.rs`), a proposed plan is a transcript row with no actions of its own, and `AllowDirectory`,
 > `ApprovePlan`, `AskForChanges` and `ViewPlan` were retired for `Implement` / `Refine` /
 > `Previous`. `TranscriptRow` is a struct — `{ id: TranscriptRowId, kind: TranscriptRowKind,
 > attached }` — with the eighteen kinds of §5, `ToolRowState` gained `Stopped` and `Severe` and

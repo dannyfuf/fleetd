@@ -29,14 +29,24 @@ something the kit does not have, the kit gains a component — that is the mecha
    `circle-help`; `StatusKind::NoSession` is a `dot` at 30 % opacity; a truly blank cell means
    "this column does not apply". `FactValue::Null` renders `—`, **never `0`**.
 4. **Four colors, all semantic, never decorative.** `success`, `warning`, `danger`, and
-   `accent` — and `accent` is *only* the cursor and the focus ring. Draft, muted, disabled and
-   "not applicable" lower contrast; they never add a hue. This is why components take a
-   [`Tone`], not a color.
+   `accent`. `accent` is the cursor, the focus ring and the fill of a surface's one primary
+   button, and nothing else; `danger` also fills the strong form of a destructive button. Draft,
+   muted, disabled and "not applicable" lower contrast; they never add a hue. This is why
+   components take a [`Tone`], not a color.
 5. **Errors are sticky; successes are transient.** `StickyErrorSlot` persists until dismissed;
    `Toast` decays. `Toast` never carries `Tone::Danger`.
-6. **The mode is always a visible word.** `ModeWord` is mandatory on every screen, at a fixed
-   84 px, including the Workspace and including zoom.
-7. **Everything is a key.** There are no buttons anywhere in Fleet. Affordances are `KeyHint`s.
+6. **The state is visible where it matters.** There is no mode word. A state that changes what
+   keys do is shown by the surface that has it: the scroll pill, the filter bar, the open overlay,
+   the focused pane's ring, the ⌃S command menu. The status bar shows where you are and what is
+   running, never which key context is active.
+7. **Every action has a key and a control.** An action valid on a surface is reachable there by a
+   visible control (a button, a menu item, a clickable row or chip) that shows its key as a `Kbd`
+   chip from the live keymap. Controls are not focusable: the keyboard path is the key, and
+   `Tab`, `j`/`k` and pane focus keep their meaning. Nothing lives only behind hover, and no key
+   is taken away (ADR 0023).
+
+Until a surface is rebuilt under §1.6 and §1.7, its §6 entry describes what ships; the entry is
+rewritten in the commit that rebuilds it (ADR 0023, *Consequences*).
 
 ---
 
@@ -74,7 +84,7 @@ exists only for the pointer and never expresses state.
 | `text_secondary` | `#8A9099` | `#6B7280` | repo, host, age, counts, labels |
 | `text_muted` | `#5A6069` | `#9CA3AF` | draft, disabled, key hints, the null dash |
 | `text_inverse` | `#0E1013` | `#FBFBFC` | text on an accent or semantic fill |
-| `accent` | `#58A6FF` | `#0969DA` | cursor and focus **only** |
+| `accent` | `#58A6FF` | `#0969DA` | cursor, focus and the primary-button fill **only** |
 | `success` | `#3FB950` | `#1A7F37` | attached, pass, approved, done |
 | `warning` | `#D29922` | `#9A6700` | running, pending, dirty, unknown, degraded |
 | `danger` | `#F85149` | `#CF222E` | failed, changes requested, destructive |
@@ -271,20 +281,26 @@ panel mirrors it.
 
 ## 4. Keyboard hint conventions
 
-- A hint is `KeyHint::labeled(keys, label)`; a footer is a `KeyHintRow`, whose items are joined
-  with `·`.
-- Keys render in the `hint` role (mono 11, `text_muted`). The label is `text_muted` too; raise
-  the **key** with `.key_tone(Tone::Default)` only for a dialog's primary action.
+- **A hint lives inside the control that performs the action**: in the button, at the right of
+  the menu item, in the tooltip of an icon-only button, on the palette or Help row. It is a `Kbd`
+  chip resolved from the live keymap for the focused context and never a typed string; an
+  action with no binding there shows no chip. Modifier glyphs follow the platform.
+- **No footer legends.** A `KeyHintRow` is allowed only on a surface that has no controls to
+  carry its keys: the terminal `ExitStrip` and the `ScrollPill`.
 - **Lowercase = safe, uppercase = stronger variant.** `FactList::confirm_key()` returns
-  `ConfirmKey::Lower` (`y`, and `Enter` is accepted) or `ConfirmKey::Upper` (`Y`, and `Enter` is
-  **not** accepted). Never hand-write that decision.
-- **Inside the Workspace every hint carries its prefix.** Terminal mode sends all keys to the
-  PTY except `ctrl-s`, so bare-key hints are forbidden there: write `^s r`, `^s x`, `^s ⏎`.
-  `ExitStrip` defaults to the prefixed form for exactly this reason.
+  `ConfirmKey::Lower` (`y`, and `Enter` is accepted), drawn as the primary button, or
+  `ConfirmKey::Upper` (`Y`, and `Enter` is **not** accepted), drawn as a `danger` button. Never
+  hand-write that decision.
+- **Inside the Workspace every chip carries its prefix.** Terminal mode sends all keys to the
+  PTY except `ctrl-s`, so a bare-key chip is forbidden there: `⌃S` `x`, never `x`. The chip gets
+  this from the binding itself. The one exception is the ⌃S command menu, which shows only the
+  second key because the prefix is already held.
 - A list **under a text field** moves with `ctrl-n`/`ctrl-p` or `↓`/`↑` and never `j`/`k`; a
   dialog with no text field does bind `j`/`k`. `FuzzyList::binds_jk()` states which case a list
   is in.
-- An invalid command is **not listed**, never greyed: a greyed row costs a `j`.
+- **An action invalid here is hidden, never greyed**: a greyed row costs a `j`. A control is
+  disabled only when it will become valid on this surface without leaving it, such as Save
+  before anything changed.
 
 ---
 
@@ -1263,8 +1279,8 @@ body, then a row of `KeyHint`s.
 `.action_for_key(&str) -> Option<DecisionAction>`.
 **Variants.** `DecisionKind::{Approval(ApprovalRequest), Question(QuestionSet), PlanReady{title,
 markdown}}`, in that strict priority order — one slot, one occupant, and **no "approve all"**.
-The proposed plan itself is a transcript row (`TranscriptRowKind::Plan`) with no buttons; only
-its verbs live here.
+The proposed plan itself is a transcript row (`TranscriptRowKind::Plan`) with no actions of its
+own; its verbs live here.
 **States.** approval (with and without `[e]`, with a caution) · question (single, multi-select,
 free-text) · wizard at `i+1/n` with `[p]` · plan ready · queued `1/N` · `answering…`.
 **Usage rule (keys).** The type owns the key *vocabulary*; the surface holding the focus handle
@@ -1451,14 +1467,13 @@ same components as a static overview in both themes.
 
 ## 7. What is deliberately not in the kit
 
-- **Buttons.** There are none in Fleet. Affordances are `KeyHint`s.
-- **Tooltips.** Every affordance already states its key.
 - **A generic `Card`.** `Pane`, `Dialog`, `Sheet` and `Overlay` are the four surfaces; a fifth
   would erode the meaning of the other four.
 - **Progress bars.** A phase word (`copying files…`, `hooks 2/3`) is more honest than a
   percentage, and `JobRow` shows a percent only when the job actually parses one.
-- **A disabled visual style.** "You cannot edit this here" is said by the *absence* of an input
-  box (a read-only `FactRow`), and an unavailable command is not listed at all.
+- **A disabled row or field.** "You cannot edit this here" is said by the *absence* of an input
+  box (a read-only `FactRow`), and an unavailable command is not listed at all. Only a button
+  that becomes valid on the same surface is drawn disabled (§4).
 - **Decorative color.** Four semantic colors and three neutrals. Nothing else.
 
 ## 8. Changing the system

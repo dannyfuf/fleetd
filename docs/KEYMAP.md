@@ -12,6 +12,10 @@ also binds direct `ctrl-q` to hide itself; its other commands use `ctrl-s`.
 This file is the single source of truth for keys. `docs/UX-SPEC.md` describes screens and cites
 this file; where the two disagree, this file wins.
 
+Every action here also has a visible control, and every control shows its key as a chip resolved
+from this table at runtime, never typed (ADR 0023). Controls are not focusable, so no binding
+below gains or loses a meaning because a button exists: the key stays the keyboard path.
+
 ## Modes and key contexts
 
 | Mode | gpui key context | Entered by | Left by |
@@ -565,6 +569,12 @@ opens `config.json` in a new terminal tab. The two never coexist in one key cont
 | `Esc` | first press leaves the input keeping the filter, second press clears it — **never quits** [A13] |
 
 ## Palette mode (`:`)
+
+⌘K on macOS and `ctrl-k` on other platforms open the palette alongside `:`, in every context
+where `:` does, and so does clicking the title bar's command field. `:` stays bound. Where
+`ctrl-k` already has an owner it keeps it: a terminal grid, where it belongs to the shell, and a
+focused `FleetTextInput`, where it deletes to the line end (ADR 0020). ⌘K also opens the palette
+from the Workspace; on other platforms the Workspace uses `ctrl-s k`.
 
 | Key | Action |
 | --- | --- |

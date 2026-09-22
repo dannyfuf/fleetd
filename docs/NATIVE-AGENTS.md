@@ -913,8 +913,8 @@ what the run left behind rather than what any one turn produced (`BOARD.md` §11
 ### 6.1 Placement
 
 **Permission approvals and model questions render in a drawer docked to the top edge of the
-composer. The proposed plan renders as an in-transcript card with no buttons. Nothing is ever a
-modal.** This reverses the previous revision of §2 and §5, deliberately:
+composer. The proposed plan renders as an in-transcript card with no actions of its own. Nothing
+is ever a modal.** This reverses the previous revision of §2 and §5, deliberately:
 
 - **A transcript card can be scrolled off screen while it owns the keyboard.** Fleet's decision
   contexts derive from daemon state, so `y` answers a permission whether or not the card is
@@ -989,9 +989,9 @@ gate rather than duplicating it, and the answer is delivered as a **new message*
 
 ### 6.4 Proposed plans
 
-The only rich decision artifact in the transcript, and it carries **no buttons**. The title is the
-plan's first Markdown heading, promoted out of the body and removed from it. Actions live on the
-composer: `[y] implement`, `[n] refine`. One plan per turn, upserted, keyed `(thread, turn)`.
+The only rich decision artifact in the transcript, and it carries **no actions of its own**. The
+title is the plan's first Markdown heading, promoted out of the body and removed from it. Actions
+live on the composer: `[y] implement`, `[n] refine`. One plan per turn, upserted, keyed `(thread, turn)`.
 Claude's arrives as an always-denied `ExitPlanMode`; Codex's as an `item/completed` of type
 `plan`.
 

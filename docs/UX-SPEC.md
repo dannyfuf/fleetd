@@ -48,8 +48,9 @@ Responsive ladders are expressed in **ch of the pane that owns the columns**, no
    `none`; only remote failure uses safer `unknown`"*.
 4. **Four colors, all semantic, never decorative.** `green` = healthy / done / approved,
    `amber` = needs attention / in flight / unknown, `red` = broken / destructive, `blue` = *only*
-   the cursor and the focus ring. Everything else is one of three neutrals. Draft, muted,
-   disabled and "not applicable" are rendered by *lowering contrast*, never by adding a hue.
+   the cursor, the focus ring and the fill of a surface's one primary button. Everything else is
+   one of three neutrals. Draft, muted, disabled and "not applicable" are rendered by *lowering
+   contrast*, never by adding a hue.
 5. **Progressive disclosure with a stable frame.** The detail panel is closed by default (`i`)
    and never focusable; the filter replaces the pane header in place; dialogs are the only layer
    that ghosts the base; the Jobs panel docks to the right instead of covering the list. Nothing
@@ -70,9 +71,12 @@ Responsive ladders are expressed in **ch of the pane that owns the columns**, no
    slot in the status bar (`!` focuses it). Successes get at most a 3.2 s toast, and only under
    the toast law (§2.7). Nothing blinks, nothing re-announces itself, nothing decays on a timer
    that the user did not set.
-9. **The mode is always a visible word.** The app is modal with eight modes; a fixed word in the
-   status bar prevents the single most expensive mistake in a modal app — typing a command into a
-   PTY, or a PTY key into a list.
+9. **Every action has a key and a visible control, and the state is shown where it matters.**
+   Every key keeps working, and every action also has a control that shows its key, so the app
+   teaches its keys where they are used (ADR 0023). There is no mode word: the surface that owns
+   the keyboard shows it — the terminal grid, the focused pane's ring, the open overlay, the filter
+   bar, the scroll pill, the ⌃S command menu — which is what prevents typing a command into a PTY,
+   or a PTY key into a list.
 10. **Cut anything that does not change the next keystroke.** Every element below had to answer
     *which decision does this change?* The full data still exists behind `i`, `I`, `J`, `,` and `:`.
 
@@ -244,6 +248,9 @@ duplicate spam §6 attributes to overlapping operations with no duplicate suppre
 stacked; oldest evicted first.
 
 ### 2.8 Mode word
+
+Retired by ADR 0023: no mode word is drawn once the title bar replaces the context bar. The table
+stays authoritative for the modes, their key contexts and the harness snapshot's `mode` field.
 
 | Mode | Word | gpui key context |
 | --- | --- | --- |
@@ -848,7 +855,7 @@ toast; the URL is also a `Notice` row, so it stays reachable when the browser do
 | Error card | the failure, or `rate limited · retrying in 12s` with a spinner while a backoff counts down | transcript | a backoff is progress, a failure is not; they must not look alike | `RuntimeError`, `Retrying` |
 | Notice | one muted line with an amber glyph — a config warning, a deprecation, `Stop hook error occurred`, or `Claude Code started this turn on its own` | transcript; a turn-scoped one leads the turn it explains and never folds | the provider is talking to the user, not failing; an unrecognised frame is a tracing diagnostic and never a notice | `Notice`, `ThreadProjection.notices`, `ItemKind::Notice` |
 | Decision drawer | 760 px, `bg.panel`, top corners only, **2 px amber bar** flush left, docked to the composer's top edge with the shared border masked | above the composer | a card in the transcript can be scrolled out of the viewport while it still owns the keyboard, which is a modal with the chrome removed; the drawer is always on screen by construction | `OpenGate` |
-| Plan card | the plan's promoted title, its body faded out past 900 chars or 20 lines, and **no buttons** | transcript | a plan is a durable artifact the user scrolls back to and quotes; its *verbs* live on the composer, because whether you implement or refine is decided by whether you typed anything | `ItemKind::Plan` |
+| Plan card | the plan's promoted title, its body faded out past 900 chars or 20 lines, and no actions of its own | transcript | a plan is a durable artifact the user scrolls back to and quotes; its *verbs* live on the composer, because whether you implement or refine is decided by whether you typed anything | `ItemKind::Plan` |
 | Settled gate row | one line — `allowed once · bash: git push --force`, `answered · which package manager? → pnpm`, `withdrawn · the agent stopped waiting` | transcript, where it was asked | docking the live drawer must not lose the narrative | resolved `OpenGate` |
 | Live activity row | one row, one id, present tense: `working 1m 12s` → `thought 6s` → `running cargo` | pinned in the running turn | thinking → tool A running → tool A done → tool B running is one row changing its label, not four mounts | `RowId::LiveActivity` |
 | Steered message | an ordinary user bubble with a leading `↳` | transcript, inside the running turn | a message sent while a turn runs is a steer, dispatched immediately — there is no queue and no queued row | `UserRow.steered` |
@@ -1720,19 +1727,33 @@ Median for the four highest-frequency tasks (open, switch session, switch tab, c
 
 1. One row height (30 px), one glyph vocabulary (§2.5), one color law (§1.4), one dialog frame
    (§3.8) across every screen.
-2. Blue is used **only** for cursor and focus. Nothing else, ever.
+2. Blue is used **only** for cursor, focus and the one primary button's fill. Nothing else, ever.
 3. `unknown` never renders like `none`; `none` never renders like an empty cell.
 4. A nullable inspection fact renders `—` and its verbatim warning; it never renders `0`.
 5. Every job-derived fact on screen has a stamp available (row → detail panel → confirm), and
    every confirm quotes its stamp inline.
 6. No surface auto-hides a failure.
-7. No bare-key affordance is drawn over a terminal (§3.6, D-8).
-8. The mode word is visible on every screen, in every mode, including zoom.
+7. No bare-key affordance is drawn over a terminal (§3.6, D-8): every Workspace key chip carries
+   its `⌃S` prefix, except inside the ⌃S command menu, where the prefix is already held.
+8. Every action valid on a surface has a visible control there, and every control shows its key
+   as a chip from the live keymap. No surface has a footer key legend; the terminal exit strip and
+   the scroll pill, which have no controls, are the only `KeyHintRow`s. No mode word is drawn;
+   the surface that owns the keyboard says so itself.
 9. Every toast passes the toast law (§2.7).
 10. The detail panel is never in the focus cycle; the Jobs panel restores the exact prior focus.
 11. Background events never move the cursor, re-sort a list, or steal focus.
 12. Every destructive confirm states facts and their age; every unknown decisive fact escalates
-    the key to `Y`.
+    the key to `Y`, drawn as a red button that does not accept `⏎`.
+
+### 5.1 Pointer
+
+1. Hovering a row shows its actions; every one of them is also in the row's ⋯ / right-click menu,
+   so nothing lives only behind hover.
+2. A click selects a row; a double-click or `⏎` opens it.
+3. Clicking outside a dialog or sheet closes it, through the same cancel action as `Esc`.
+4. Buttons and menu triggers are not focusable. The keyboard reaches them by their key, and
+   `Tab`, `j`/`k` and pane focus keep their KEYMAP meaning.
+5. A control runs the same action as its key, so pointer and keyboard can never diverge.
 
 ---
 
