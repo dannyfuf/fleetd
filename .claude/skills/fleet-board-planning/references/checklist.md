@@ -19,6 +19,23 @@ list before declaring the pass done. Each item names the rule in `SKILL.md`.
       `board set --add-label`. (Rule 10)
 - [ ] I am not creating a board just to see whether one exists. (Rule 15)
 
+## Before building a chain (a board that runs its own cards)
+
+- [ ] The plan has real dependencies and every card's brief is complete enough for an agent to
+      act on alone; otherwise I am doing this work myself. ("Building a chain")
+- [ ] The columns carry their actions and routes already — `columns preset workflow`, then
+      `columns edit`, then `columns` read back — before any card can reach one.
+- [ ] Every card was created in Todo and every `--blocked-by` / `--blocks` link was written
+      **before** the card reached an action column. (Chain rule 1)
+- [ ] The head of the chain is the one card I move by hand, or start with `card run`; nothing
+      releases a card that nothing blocks. (Chain rule 2)
+- [ ] I am watching with `board show` at phase boundaries, not polling; `card wait` is a barrier
+      for one run, never for a chain. (Chain rule 4)
+- [ ] I am not moving a card that has a live run; `--cancel-run` is the deliberate way to say
+      stop it. (Chain rule 5)
+- [ ] `board set --max-live-runs N` above 1 is a decision I made about one shared checkout, not a
+      default. (Chain rule 6)
+
 ## While working
 
 - [ ] I moved a card to `in-progress` when I started it, and I have one card in progress. (Rule 6)
@@ -52,3 +69,5 @@ list before declaring the pass done. Each item names the rule in `SKILL.md`.
 - `card delete` on a card that had work recorded → finding.
 - A bare `--worktree` in a script that may run outside a worktree terminal or agent thread →
   finding.
+- A card that reached an action column before its links were written, or a chain left waiting in
+  Ready with no head moved by hand → finding.

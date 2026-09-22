@@ -3,8 +3,9 @@
 mod parsing {
     use crate::{
         args::{
-            BoardArgs, BoardCardCommand, BoardCommand, BoardConflictPolicy, BoardPriority,
-            BoardWorktreeSelector, Cli, Command,
+            AgentChoice, AgentModeChoice, BoardArgs, BoardCardCommand, BoardColumnsCommand,
+            BoardColumnsPreset, BoardCommand, BoardConflictPolicy, BoardPriority,
+            BoardStatusCategory, BoardWorktreeSelector, Cli, Command,
         },
         envelope::{
             BoardBackendSchemaEnvelope, BoardBackendsEnvelope, BoardCardEnvelope, BoardEnvelope,
@@ -258,7 +259,7 @@ mod parsing {
             "acme/api",
             "--json",
         ]);
-        let BoardCardCommand::New { title, fields } = command else {
+        let BoardCardCommand::New { title, fields, .. } = command else {
             panic!("expected new")
         };
         assert_eq!(title, "Fix login");
@@ -320,6 +321,7 @@ mod parsing {
             title,
             fields,
             archive,
+            ..
         } = command
         else {
             panic!("expected edit")
@@ -362,7 +364,7 @@ mod parsing {
     #[test]
     fn parses_card_move() {
         assert!(
-            matches!(card_command(&["card", "move", "FLT-12", "done", "--index", "0"]), BoardCardCommand::Move { key, status, index: Some(0) } if key == "FLT-12" && status == "done")
+            matches!(card_command(&["card", "move", "FLT-12", "done", "--index", "0"]), BoardCardCommand::Move { key, status, index: Some(0), .. } if key == "FLT-12" && status == "done")
         );
     }
 
@@ -415,6 +417,501 @@ mod parsing {
                 card_command(&["card", "resolve", "FLT-12", resolution]),
                 BoardCardCommand::Resolve { .. }
             ));
+        }
+    }
+
+    /// Every `columns` verb and every flag it takes reach the command tree intact. The
+    /// verb-less form is the listing, not a usage error: `fleet board columns` prints a table.
+    #[test]
+    fn parses_the_columns_family_and_every_flag_its_verbs_take() {
+        let columns = |arguments: &[&str]| {
+            let argv: Vec<&str> = ["columns"]
+                .into_iter()
+                .chain(arguments.iter().copied())
+                .collect();
+            let BoardCommand::Columns(args) = parse(&argv).command else {
+                panic!("expected columns")
+            };
+            args.command
+        };
+        assert_eq!(columns(&[]), None);
+
+        let Some(BoardColumnsCommand::Add {
+            name,
+            id,
+            category,
+            after,
+            before,
+        }) = columns(&[
+            "add",
+            "In review",
+            "--id",
+            "in-review",
+            "--category",
+            "started",
+            "--after",
+            "in-progress",
+        ])
+        else {
+            panic!("expected add")
+        };
+        assert_eq!(name, "In review");
+        assert_eq!(id.as_deref(), Some("in-review"));
+        assert_eq!(category, Some(BoardStatusCategory::Started));
+        assert_eq!(after.as_deref(), Some("in-progress"));
+        assert_eq!(before, None);
+        // Every category the contract names is spelled the same way on the command line as it
+        // is in the document the daemon writes.
+        for (value, expected) in [
+            ("backlog", BoardStatusCategory::Backlog),
+            ("unstarted", BoardStatusCategory::Unstarted),
+            ("started", BoardStatusCategory::Started),
+            ("completed", BoardStatusCategory::Completed),
+            ("canceled", BoardStatusCategory::Canceled),
+        ] {
+            let Some(BoardColumnsCommand::Add {
+                category, before, ..
+            }) = columns(&["add", "Column", "--category", value, "--before", "done"])
+            else {
+                panic!("expected add")
+            };
+            assert_eq!(category, Some(expected));
+            assert_eq!(before.as_deref(), Some("done"));
+        }
+
+        let Some(BoardColumnsCommand::Edit {
+            id,
+            name,
+            category,
+            color,
+            on_enter,
+            provider,
+            model,
+            effort,
+            mode,
+            instructions,
+            instructions_file,
+            expect,
+            on_success,
+            no_on_success,
+            when_unblocked,
+            no_when_unblocked,
+            env,
+            clear_env,
+        }) = columns(&[
+            "edit",
+            "in-progress",
+            "--name",
+            "In Progress",
+            "--category",
+            "started",
+            "--color",
+            "#ff8800",
+            "--on-enter",
+            "skill:deep-review:--fast",
+            "--provider",
+            "codex",
+            "--model",
+            "gpt-5.6-sol",
+            "--effort",
+            "high",
+            "--mode",
+            "accept-edits",
+            "--instructions",
+            "Implement {key}",
+            "--expect",
+            "make test is green",
+            "--on-success",
+            "in-review",
+            "--when-unblocked",
+            "ready",
+            "--env",
+            "RUST_LOG=debug",
+            "--env",
+            "CI=1",
+        ])
+        else {
+            panic!("expected edit")
+        };
+        assert_eq!(id, "in-progress");
+        assert_eq!(name.as_deref(), Some("In Progress"));
+        assert_eq!(category, Some(BoardStatusCategory::Started));
+        assert_eq!(color.as_deref(), Some("#ff8800"));
+        // `--on-enter` is free text the verb parses itself: the CLI never has to know which
+        // skills exist, and `skill:<name>:<args>` survives with its colons.
+        assert_eq!(on_enter.as_deref(), Some("skill:deep-review:--fast"));
+        assert_eq!(provider, Some(AgentChoice::Codex));
+        assert_eq!(model.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(effort.as_deref(), Some("high"));
+        assert_eq!(mode, Some(AgentModeChoice::AcceptEdits));
+        assert_eq!(instructions.as_deref(), Some("Implement {key}"));
+        assert_eq!(instructions_file, None);
+        assert_eq!(expect.as_deref(), Some("make test is green"));
+        assert_eq!(on_success.as_deref(), Some("in-review"));
+        assert_eq!(when_unblocked.as_deref(), Some("ready"));
+        assert_eq!(env, ["RUST_LOG=debug", "CI=1"]);
+        assert!(!no_on_success && !no_when_unblocked && !clear_env);
+
+        // The clearing half of the same verb: three switches and the file form of the
+        // instructions, none of which can be given beside the value flag it replaces.
+        let Some(BoardColumnsCommand::Edit {
+            on_enter,
+            instructions,
+            instructions_file,
+            no_on_success,
+            no_when_unblocked,
+            clear_env,
+            env,
+            ..
+        }) = columns(&[
+            "edit",
+            "ready",
+            "--on-enter",
+            "none",
+            "--instructions-file",
+            "notes/brief.md",
+            "--no-on-success",
+            "--no-when-unblocked",
+            "--clear-env",
+        ])
+        else {
+            panic!("expected edit")
+        };
+        assert_eq!(on_enter.as_deref(), Some("none"));
+        assert_eq!(instructions, None);
+        assert_eq!(
+            instructions_file.as_deref(),
+            Some(std::path::Path::new("notes/brief.md"))
+        );
+        assert!(no_on_success && no_when_unblocked && clear_env);
+        assert!(env.is_empty());
+
+        for (arguments, expected_after, expected_before) in [
+            (
+                vec!["move", "in-review", "--after", "in-progress"],
+                Some("in-progress"),
+                None,
+            ),
+            (
+                vec!["move", "in-review", "--before", "done"],
+                None,
+                Some("done"),
+            ),
+        ] {
+            let Some(BoardColumnsCommand::Move { id, after, before }) = columns(&arguments) else {
+                panic!("expected move")
+            };
+            assert_eq!(id, "in-review");
+            assert_eq!(after.as_deref(), expected_after);
+            assert_eq!(before.as_deref(), expected_before);
+        }
+
+        for (arguments, expected) in [
+            (vec!["remove", "ready"], None),
+            (
+                vec!["remove", "ready", "--move-cards-to", "todo"],
+                Some("todo"),
+            ),
+        ] {
+            let Some(BoardColumnsCommand::Remove { id, move_cards_to }) = columns(&arguments)
+            else {
+                panic!("expected remove")
+            };
+            assert_eq!(id, "ready");
+            assert_eq!(move_cards_to.as_deref(), expected);
+        }
+
+        assert_eq!(
+            columns(&["preset", "workflow"]),
+            Some(BoardColumnsCommand::Preset {
+                which: BoardColumnsPreset::Workflow
+            })
+        );
+    }
+
+    /// The five run verbs take a key and nothing else, except `wait`, whose timeout defaults to
+    /// the 540 seconds that sit under a caller's own shell-tool timeout.
+    #[test]
+    fn parses_the_five_run_verbs_and_the_waits_default_timeout() {
+        for (arguments, expected) in [
+            (
+                vec!["card", "run", "FLT-12"],
+                BoardCardCommand::Run {
+                    key: "FLT-12".into(),
+                },
+            ),
+            (
+                vec!["card", "cancel", "flt-12"],
+                BoardCardCommand::Cancel {
+                    key: "flt-12".into(),
+                },
+            ),
+            (
+                vec!["card", "runs", "Card-12"],
+                BoardCardCommand::Runs {
+                    key: "Card-12".into(),
+                },
+            ),
+            (
+                vec!["card", "attach", "FLT-12"],
+                BoardCardCommand::Attach {
+                    key: "FLT-12".into(),
+                },
+            ),
+            (
+                vec!["card", "wait", "FLT-12"],
+                BoardCardCommand::Wait {
+                    key: "FLT-12".into(),
+                    timeout: 540,
+                },
+            ),
+            (
+                vec!["card", "wait", "FLT-12", "--timeout", "30"],
+                BoardCardCommand::Wait {
+                    key: "FLT-12".into(),
+                    timeout: 30,
+                },
+            ),
+        ] {
+            assert_eq!(card_command(&arguments), expected, "{arguments:?}");
+        }
+    }
+
+    /// `card new` and `card edit` carry the agent block, the description file and both
+    /// directions of a link; `card move` carries the flag that cancels a live run.
+    #[test]
+    fn parses_the_card_agent_link_and_run_flags() {
+        let command = card_command(&[
+            "card",
+            "new",
+            "Ship it",
+            "--desc-file",
+            "notes/brief.md",
+            "--provider",
+            "codex",
+            "--model",
+            "gpt-5.6-sol",
+            "--effort",
+            "high",
+            "--blocked-by",
+            "FLT-11",
+            "--blocked-by",
+            "FLT-12",
+            "--blocks",
+            "FLT-13",
+        ]);
+        let BoardCardCommand::New {
+            title,
+            fields,
+            blocked_by,
+            blocks,
+        } = command
+        else {
+            panic!("expected new")
+        };
+        assert_eq!(title, "Ship it");
+        assert_eq!(
+            fields.desc_file.as_deref(),
+            Some(std::path::Path::new("notes/brief.md"))
+        );
+        assert_eq!(fields.desc, None);
+        assert_eq!(fields.provider, Some(AgentChoice::Codex));
+        assert_eq!(fields.model.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(fields.effort.as_deref(), Some("high"));
+        assert!(!fields.clear_agent);
+        assert_eq!(blocked_by, ["FLT-11", "FLT-12"]);
+        assert_eq!(blocks, ["FLT-13"]);
+
+        let command = card_command(&[
+            "card",
+            "edit",
+            "FLT-12",
+            "--provider",
+            "claude",
+            "--add-blocked-by",
+            "FLT-11",
+            "--remove-blocked-by",
+            "FLT-10",
+            "--add-blocks",
+            "FLT-13",
+            "--remove-blocks",
+            "FLT-14",
+        ]);
+        let BoardCardCommand::Edit {
+            key,
+            fields,
+            add_blocked_by,
+            remove_blocked_by,
+            clear_blocked_by,
+            add_blocks,
+            remove_blocks,
+            ..
+        } = command
+        else {
+            panic!("expected edit")
+        };
+        assert_eq!(key, "FLT-12");
+        assert_eq!(fields.provider, Some(AgentChoice::Claude));
+        assert_eq!(add_blocked_by, ["FLT-11"]);
+        assert_eq!(remove_blocked_by, ["FLT-10"]);
+        assert!(!clear_blocked_by);
+        assert_eq!(add_blocks, ["FLT-13"]);
+        assert_eq!(remove_blocks, ["FLT-14"]);
+
+        // The two flags that stand alone: clearing the agent block, and clearing the blockers.
+        let BoardCardCommand::Edit {
+            fields,
+            clear_blocked_by,
+            ..
+        } = card_command(&[
+            "card",
+            "edit",
+            "FLT-12",
+            "--clear-agent",
+            "--clear-blocked-by",
+        ])
+        else {
+            panic!("expected edit")
+        };
+        assert!(fields.clear_agent);
+        assert_eq!(fields.clear_flag(), Some("--clear-agent"));
+        assert!(clear_blocked_by);
+
+        assert_eq!(
+            card_command(&["card", "move", "FLT-12", "done", "--cancel-run"]),
+            BoardCardCommand::Move {
+                key: "FLT-12".into(),
+                status: "done".into(),
+                index: None,
+                cancel_run: true,
+            }
+        );
+        let BoardCardCommand::Move { cancel_run, .. } =
+            card_command(&["card", "move", "FLT-12", "done"])
+        else {
+            panic!("expected move")
+        };
+        assert!(!cancel_run);
+    }
+
+    /// The board's run ceiling is an ordinary `board set` flag, so a board that runs more than
+    /// one card at a time is one command away.
+    #[test]
+    fn parses_board_set_max_live_runs() {
+        let BoardCommand::Set(args) = parse(&["set", "--max-live-runs", "3"]).command else {
+            panic!("expected set")
+        };
+        assert_eq!(args.max_live_runs, Some(3));
+        let BoardCommand::Set(args) = parse(&["set", "--name", "Fleet"]).command else {
+            panic!("expected set")
+        };
+        assert_eq!(args.max_live_runs, None);
+    }
+
+    /// Each pair here says two contradictory things about one column, card or run, and clap
+    /// refuses it before a request is built — the cheapest place for a caller to learn.
+    #[test]
+    fn refuses_the_workflow_flag_pairs_that_contradict_each_other() {
+        for arguments in [
+            // A column cannot land both after and before another one, and a move must say which.
+            vec![
+                "columns", "add", "Ready", "--after", "todo", "--before", "done",
+            ],
+            vec!["columns", "move", "ready"],
+            vec![
+                "columns", "move", "ready", "--after", "todo", "--before", "done",
+            ],
+            // Instructions come from the flag or from the file, never from both.
+            vec![
+                "columns",
+                "edit",
+                "ready",
+                "--instructions",
+                "Go",
+                "--instructions-file",
+                "brief.md",
+            ],
+            // Setting a route and clearing it in one command.
+            vec![
+                "columns",
+                "edit",
+                "ready",
+                "--on-success",
+                "done",
+                "--no-on-success",
+            ],
+            vec![
+                "columns",
+                "edit",
+                "ready",
+                "--when-unblocked",
+                "done",
+                "--no-when-unblocked",
+            ],
+            // Values the CLI's own vocabulary does not contain.
+            vec!["columns", "edit", "ready", "--provider", "gemini"],
+            vec!["columns", "edit", "ready", "--mode", "yolo"],
+            vec!["columns", "add", "Ready", "--category", "in-progress"],
+            vec!["columns", "preset", "kanban"],
+            // Every verb that names a column needs one named.
+            vec!["columns", "add"],
+            vec!["columns", "edit"],
+            vec!["columns", "move"],
+            vec!["columns", "remove"],
+            vec!["columns", "preset"],
+            // A description from the flag or from the file, never both.
+            vec![
+                "card",
+                "new",
+                "Task",
+                "--desc",
+                "Go",
+                "--desc-file",
+                "brief.md",
+            ],
+            // Clearing the agent block while asking it for something.
+            vec![
+                "card",
+                "new",
+                "Task",
+                "--provider",
+                "claude",
+                "--clear-agent",
+            ],
+            vec!["card", "new", "Task", "--model", "opus", "--clear-agent"],
+            vec!["card", "new", "Task", "--effort", "high", "--clear-agent"],
+            vec!["card", "new", "Task", "--provider", "gemini"],
+            // Clearing the blockers while editing them.
+            vec![
+                "card",
+                "edit",
+                "FLT-12",
+                "--clear-blocked-by",
+                "--add-blocked-by",
+                "FLT-11",
+            ],
+            vec![
+                "card",
+                "edit",
+                "FLT-12",
+                "--clear-blocked-by",
+                "--remove-blocked-by",
+                "FLT-11",
+            ],
+            // Every run verb names a card, and a timeout is a count of seconds.
+            vec!["card", "run"],
+            vec!["card", "cancel"],
+            vec!["card", "runs"],
+            vec!["card", "attach"],
+            vec!["card", "wait"],
+            vec!["card", "wait", "FLT-12", "--timeout", "-1"],
+            vec!["set", "--max-live-runs", "-1"],
+            vec!["set", "--max-live-runs", "many"],
+        ] {
+            let argv = ["fleet", "board"]
+                .into_iter()
+                .chain(arguments.iter().copied());
+            assert!(Cli::try_parse_from(argv).is_err(), "accepted {arguments:?}");
         }
     }
 
@@ -490,6 +987,7 @@ mod parsing {
                     protocol: PROTOCOL,
                     board: &view.board,
                     cards: &view.cards,
+                    live_runs: &view.live_runs,
                 })
                 .unwrap(),
                 json!({"protocol": 1, "board": view.board, "cards": view.cards}),
@@ -1232,6 +1730,70 @@ mod parsing {
         let text = help(&["create", "--help"]);
         assert!(text.contains("--setting <KEY=VALUE>"), "{text}");
         assert!(help(&["sync", "--help"]).contains("--full"));
+
+        // The workflow surface: the columns family, its verbs, the run verbs and the flags a
+        // chain is built with. Help is the only place a caller with no docs open can find them.
+        let text = help(&["--help"]);
+        assert!(text.contains("columns"), "{text}");
+        let text = help(&["columns", "--help"]);
+        for expected in ["add", "edit", "move", "remove", "preset"] {
+            assert!(text.contains(expected), "missing {expected:?} in {text}");
+        }
+        let text = help(&["columns", "edit", "--help"]);
+        for expected in [
+            "--on-enter <ACTION>",
+            "--instructions-file",
+            "--expect",
+            "--on-success",
+            "--no-on-success",
+            "--when-unblocked",
+            "--no-when-unblocked",
+            "--env <KEY=VALUE>",
+            "--clear-env",
+            "--provider",
+            "--model",
+            "--effort",
+            "--mode",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in {text}");
+        }
+        assert!(
+            help(&["columns", "add", "--help"]).contains("--category"),
+            "{text}"
+        );
+        assert!(
+            help(&["columns", "remove", "--help"]).contains("--move-cards-to <ID>"),
+            "{text}"
+        );
+        let text = help(&["card", "--help"]);
+        for expected in ["run", "cancel", "runs", "attach", "wait"] {
+            assert!(text.contains(expected), "missing {expected:?} in {text}");
+        }
+        let text = help(&["card", "new", "--help"]);
+        for expected in [
+            "--blocked-by <KEY>",
+            "--blocks <KEY>",
+            "--desc-file",
+            "--provider",
+            "--model",
+            "--effort",
+            "--clear-agent",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in {text}");
+        }
+        let text = help(&["card", "edit", "--help"]);
+        for expected in [
+            "--add-blocked-by <KEY>",
+            "--remove-blocked-by <KEY>",
+            "--clear-blocked-by",
+            "--add-blocks <KEY>",
+            "--remove-blocks <KEY>",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in {text}");
+        }
+        assert!(help(&["card", "move", "--help"]).contains("--cancel-run"));
+        assert!(help(&["card", "wait", "--help"]).contains("--timeout"));
+        assert!(help(&["set", "--help"]).contains("--max-live-runs"));
     }
 }
 
@@ -1240,8 +1802,13 @@ mod orchestration {
     use crate::commands::board::*;
     use clap::Parser;
     use fleet_core::{
-        agents::{AgentKind, AgentThreadSummary, Attention, Seq, SessionState, TurnState},
-        board::{RemoteLink, new_board},
+        agents::{
+            AgentKind, AgentThreadSummary, Attention, PermissionMode, Seq, SessionState, TurnState,
+        },
+        board::{
+            Action, ActionKind, ColumnAgentPrefs, ColumnAutomation, RemoteLink, Status,
+            StatusCategory, apply_workflow_preset, new_board, workflow_preset,
+        },
         config::Agent,
         model::Context,
         sessions::{Session, SessionKind},
@@ -1251,7 +1818,10 @@ mod orchestration {
         codec::FleetCodec,
         job::JobKind,
         request::{Request, RequestBody},
-        response::{BOARD_WORKTREE_CAPABILITY, HelloResponse, Response, ResponseBody},
+        response::{
+            BOARD_AUTOMATION_CAPABILITY, BOARD_WORKTREE_CAPABILITY, HelloResponse, Response,
+            ResponseBody,
+        },
         snapshot::Snapshot,
     };
     use futures_util::{SinkExt, StreamExt};
@@ -2110,6 +2680,7 @@ mod orchestration {
                     card_id: id.clone(),
                     status_id: "done".parse().unwrap(),
                     index: Some(0),
+                    cancel_run: false,
                 },
                 ResponseBody::Card(view.cards[0].clone()),
             ),
@@ -2616,5 +3187,838 @@ mod orchestration {
         .await
         .unwrap();
         assert!(!output.text.contains("Jira (acli)"), "{}", output.text);
+    }
+
+    const LIVE_RUN: &str = "00000000-0000-4000-8000-000000000001";
+    const DONE_RUN: &str = "00000000-0000-4000-8000-000000000002";
+    const LIVE_THREAD: &str = "00000000-0000-4000-8000-0000000000a1";
+    const DONE_THREAD: &str = "00000000-0000-4000-8000-0000000000a2";
+
+    /// The view a run verb reads: one card with a finished run and a live one, joined by the
+    /// `liveRuns` the daemon answers `GetBoard` with.
+    fn view_with_runs() -> BoardView {
+        let mut view = view();
+        view.cards[0] = serde_json::from_value(json!({
+            "id": "Card-12", "boardId": "work", "number": 12, "title": "Fix login",
+            "statusId": "in-progress", "createdAt": "now", "updatedAt": "now",
+            "runs": [
+                {
+                    "id": DONE_RUN, "threadId": DONE_THREAD, "statusId": "in-progress",
+                    "action": {"kind": "prompt"}, "provider": "codex",
+                    "model": "gpt-5.6-sol", "effort": "high",
+                    "startedAt": "2026-09-06T11:50:00Z", "endedAt": "2026-09-06T11:52:30Z",
+                    "outcome": "succeeded", "tokens": 1200, "costUsd": 0.5
+                },
+                {
+                    "id": LIVE_RUN, "threadId": LIVE_THREAD, "statusId": "in-progress",
+                    "action": {"kind": "prompt"}, "provider": "codex",
+                    "startedAt": "2026-09-06T11:58:00Z"
+                }
+            ]
+        }))
+        .expect("the run fixture is a card");
+        view.live_runs = serde_json::from_value(json!([{
+            "cardId": "Card-12", "run": LIVE_RUN, "status": "running",
+            "started": "2026-09-06T11:58:00Z"
+        }]))
+        .expect("the run fixture is a join");
+        view
+    }
+
+    /// A second card, so the link flags have another card to edit.
+    fn other_card() -> Card {
+        serde_json::from_value(json!({
+            "id": "Card-13", "boardId": "work", "number": 13, "title": "Ship login",
+            "statusId": "todo", "createdAt": "now", "updatedAt": "now"
+        }))
+        .expect("the link fixture is a card")
+    }
+
+    /// Every `columns` verb is one read-modify-write: the `GetBoard` the dispatcher already
+    /// paid, then a single `UpdateBoard` carrying the whole column vector — never a second read
+    /// and never a patch of one column.
+    #[tokio::test]
+    async fn every_columns_verb_sends_one_update_board_carrying_the_whole_vector() {
+        let view = view();
+        let update = |statuses: Vec<Status>| RequestBody::UpdateBoard {
+            board_id: view.board.id.clone(),
+            patch: BoardPatch {
+                statuses: Some(statuses),
+                ..BoardPatch::default()
+            },
+        };
+        let steps = |request: RequestBody| -> Vec<(RequestBody, Result<ResponseBody, ProtoError>)> {
+            vec![
+                (get_board(), Ok(ResponseBody::Board(view.clone()))),
+                (request, Ok(ResponseBody::Board(view.clone()))),
+            ]
+        };
+
+        // add: the column lands where `--after` names, in the category it was given.
+        let mut statuses = view.board.statuses.clone();
+        statuses.insert(
+            3,
+            Status {
+                id: "in-review".parse().unwrap(),
+                name: "In review".into(),
+                category: StatusCategory::Started,
+                color: None,
+                automation: None,
+            },
+        );
+        run(
+            &[
+                "columns",
+                "add",
+                "In review",
+                "--category",
+                "started",
+                "--after",
+                "in-progress",
+                "--board",
+                "work",
+            ],
+            steps(update(statuses)),
+        )
+        .await
+        .unwrap();
+
+        // edit: the action, the agent it runs with, its environment and one route, all on the
+        // column the flags named and on no other.
+        let mut statuses = view.board.statuses.clone();
+        statuses[2].automation = Some(ColumnAutomation {
+            on_enter: Some(Action {
+                kind: ActionKind::Prompt,
+                instructions: "Implement {key}".into(),
+                expect: "make test is green".into(),
+                agent: ColumnAgentPrefs {
+                    provider: Some(AgentKind::Codex),
+                    model: None,
+                    effort: None,
+                    mode: Some(PermissionMode::AcceptEdits),
+                },
+                env: vec!["RUST_LOG=debug".into()],
+            }),
+            on_success: Some("done".parse().unwrap()),
+            advance_when_unblocked: None,
+        });
+        run(
+            &[
+                "columns",
+                "edit",
+                "in-progress",
+                "--on-enter",
+                "prompt",
+                "--instructions",
+                "Implement {key}",
+                "--expect",
+                "make test is green",
+                "--provider",
+                "codex",
+                "--mode",
+                "accept-edits",
+                "--env",
+                "RUST_LOG=debug",
+                "--on-success",
+                "done",
+                "--board",
+                "work",
+            ],
+            steps(update(statuses)),
+        )
+        .await
+        .unwrap();
+
+        // move: the vector reordered, never a per-column index on the wire.
+        let mut statuses = view.board.statuses.clone();
+        let done = statuses.remove(3);
+        statuses.insert(2, done);
+        run(
+            &[
+                "columns",
+                "move",
+                "done",
+                "--before",
+                "in-progress",
+                "--board",
+                "work",
+            ],
+            steps(update(statuses)),
+        )
+        .await
+        .unwrap();
+
+        // remove: the vector without the column. The board's one card sits elsewhere, so
+        // nothing has to move first.
+        let mut statuses = view.board.statuses.clone();
+        statuses.remove(4);
+        run(
+            &["columns", "remove", "canceled", "--board", "work"],
+            steps(update(statuses)),
+        )
+        .await
+        .unwrap();
+
+        // preset: the two missing workflow columns, each in its place, and every column the
+        // board already had left exactly as it was.
+        let mut preset = view.board.clone();
+        assert!(apply_workflow_preset(&mut preset));
+        assert_eq!(
+            preset
+                .statuses
+                .iter()
+                .map(|status| status.id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "backlog",
+                "todo",
+                "ready",
+                "in-progress",
+                "in-review",
+                "done",
+                "canceled"
+            ]
+        );
+        run(
+            &["columns", "preset", "workflow", "--board", "work"],
+            steps(update(preset.statuses)),
+        )
+        .await
+        .unwrap();
+    }
+
+    /// `remove --move-cards-to` empties the column before dropping it: the daemon refuses to
+    /// remove a status any card still names, archived cards included.
+    #[tokio::test]
+    async fn removing_a_column_moves_every_card_out_of_it_first() {
+        let mut view = view();
+        let mut archived = other_card();
+        archived.archived = true;
+        view.cards.push(archived);
+        // Both cards sit in Todo; the card in another column is not moved.
+        view.cards[1].status_id = "todo".parse().unwrap();
+        let mut elsewhere = other_card();
+        elsewhere.id = "Card-14".parse().unwrap();
+        elsewhere.number = 14;
+        elsewhere.status_id = "done".parse().unwrap();
+        view.cards.push(elsewhere);
+        let mut statuses = view.board.statuses.clone();
+        statuses.remove(1);
+        let moved = |card: &str| RequestBody::MoveCard {
+            card_id: card.parse().unwrap(),
+            status_id: "backlog".parse().unwrap(),
+            index: None,
+            cancel_run: false,
+        };
+        let output = run(
+            &[
+                "columns",
+                "remove",
+                "todo",
+                "--move-cards-to",
+                "backlog",
+                "--board",
+                "work",
+            ],
+            vec![
+                (get_board(), Ok(ResponseBody::Board(view.clone()))),
+                (
+                    moved("Card-12"),
+                    Ok(ResponseBody::Card(view.cards[0].clone())),
+                ),
+                (
+                    moved("Card-13"),
+                    Ok(ResponseBody::Card(view.cards[1].clone())),
+                ),
+                (
+                    RequestBody::UpdateBoard {
+                        board_id: view.board.id.clone(),
+                        patch: BoardPatch {
+                            statuses: Some(statuses),
+                            ..BoardPatch::default()
+                        },
+                    },
+                    Ok(ResponseBody::Board(view.clone())),
+                ),
+            ],
+        )
+        .await
+        .unwrap();
+        assert!(
+            output.text.contains("moved 2 cards to Backlog"),
+            "{}",
+            output.text
+        );
+    }
+
+    /// A preset that has nothing to add writes nothing at all, and says so: a board already
+    /// carrying the workflow columns must not be rewritten just to be told it is fine.
+    #[tokio::test]
+    async fn a_preset_with_nothing_to_add_sends_no_request_and_says_so() {
+        let mut complete = view();
+        complete.board.statuses = workflow_preset();
+        let output = run(
+            &["columns", "preset", "workflow", "--board", "work"],
+            vec![(get_board(), Ok(ResponseBody::Board(complete)))],
+        )
+        .await
+        .unwrap();
+        assert!(
+            output
+                .text
+                .contains("every workflow column is already on this board"),
+            "{}",
+            output.text
+        );
+        // The listing is a read as well: one `GetBoard` and the table.
+        let output = run(
+            &["columns", "--board", "work"],
+            vec![(get_board(), Ok(ResponseBody::Board(view())))],
+        )
+        .await
+        .unwrap();
+        assert!(output.text.contains("ON ENTER"), "{}", output.text);
+    }
+
+    /// `--cancel-run` is the one thing that lets a move take a working card: without it the
+    /// daemon refuses, and the CLI never decides that on its own.
+    #[tokio::test]
+    async fn a_move_carries_the_flag_that_cancels_the_cards_run() {
+        let view = view_with_runs();
+        run(
+            &[
+                "card",
+                "move",
+                "FLT-12",
+                "done",
+                "--cancel-run",
+                "--board",
+                "work",
+                "--json",
+            ],
+            vec![
+                (get_board(), Ok(ResponseBody::Board(view.clone()))),
+                (
+                    RequestBody::MoveCard {
+                        card_id: "Card-12".parse().unwrap(),
+                        status_id: "done".parse().unwrap(),
+                        index: None,
+                        cancel_run: true,
+                    },
+                    Ok(ResponseBody::Card(view.cards[0].clone())),
+                ),
+            ],
+        )
+        .await
+        .unwrap();
+    }
+
+    /// The three run verbs that write send one request each and print what the daemon answered;
+    /// `wait` carries its timeout in milliseconds and exits 0 only for a run that has ended.
+    #[tokio::test]
+    async fn the_writing_run_verbs_send_one_request_each_and_wait_reports_by_exit_code() {
+        let view = view_with_runs();
+        let card = view.cards[0].clone();
+        // The three writing verbs are the daemon's newest requests, so each asks for the
+        // capability first and refuses an older daemon rather than sending one.
+        let run = |arguments: &'static [&'static str], steps| {
+            run_with_capabilities(
+                arguments,
+                vec![BOARD_AUTOMATION_CAPABILITY.to_owned()],
+                steps,
+            )
+        };
+        let output = run(
+            &["card", "run", "FLT-12", "--board", "work"],
+            vec![
+                (get_board(), Ok(ResponseBody::Board(view.clone()))),
+                (
+                    RequestBody::CardRunStart {
+                        card_id: "Card-12".parse().unwrap(),
+                    },
+                    Ok(ResponseBody::Card(card.clone())),
+                ),
+            ],
+        )
+        .await
+        .unwrap();
+        assert!(
+            output
+                .text
+                .starts_with(&format!("run {LIVE_RUN} started, thread {LIVE_THREAD}\n")),
+            "{}",
+            output.text
+        );
+
+        run(
+            &["card", "cancel", "FLT-12", "--board", "work", "--json"],
+            vec![
+                (get_board(), Ok(ResponseBody::Board(view.clone()))),
+                (
+                    RequestBody::CardRunCancel {
+                        card_id: "Card-12".parse().unwrap(),
+                    },
+                    Ok(ResponseBody::Card(card.clone())),
+                ),
+            ],
+        )
+        .await
+        .unwrap();
+
+        // The newest run is still live, so the wait timed out: exit 2, with the card printed.
+        let wait = RequestBody::CardRunWait {
+            card_id: "Card-12".parse().unwrap(),
+            timeout_ms: 30_000,
+        };
+        let output = run(
+            &[
+                "card",
+                "wait",
+                "FLT-12",
+                "--timeout",
+                "30",
+                "--board",
+                "work",
+                "--json",
+            ],
+            vec![
+                (get_board(), Ok(ResponseBody::Board(view.clone()))),
+                (wait.clone(), Ok(ResponseBody::Card(card.clone()))),
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.exit_code, 2);
+
+        // The same wait once the run has ended.
+        let mut finished = card.clone();
+        finished.runs.pop();
+        let output = run(
+            &[
+                "card",
+                "wait",
+                "FLT-12",
+                "--timeout",
+                "30",
+                "--board",
+                "work",
+                "--json",
+            ],
+            vec![
+                (get_board(), Ok(ResponseBody::Board(view.clone()))),
+                (wait.clone(), Ok(ResponseBody::Card(finished))),
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.exit_code, 0);
+
+        // A card the board still *owes* a run is unfinished too: its newest row is an older
+        // attempt, and reading 0 off that would tell a script the run it is waiting for had
+        // finished before anything started.
+        let mut owed = card.clone();
+        owed.runs.pop();
+        owed.pending_run = Some(fleet_core::board::PendingRun {
+            status_id: "in-progress".parse().expect("a static status slug"),
+            since: "now".into(),
+        });
+        let output = run(
+            &[
+                "card",
+                "wait",
+                "FLT-12",
+                "--timeout",
+                "30",
+                "--board",
+                "work",
+                "--json",
+            ],
+            vec![
+                (get_board(), Ok(ResponseBody::Board(view.clone()))),
+                (wait.clone(), Ok(ResponseBody::Card(owed))),
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.exit_code, 2);
+
+        // A card whose column never started one is as unfinished as a card still running.
+        let mut never_ran = card;
+        never_ran.runs.clear();
+        let output = run(
+            &[
+                "card",
+                "wait",
+                "FLT-12",
+                "--timeout",
+                "30",
+                "--board",
+                "work",
+                "--json",
+            ],
+            vec![
+                (get_board(), Ok(ResponseBody::Board(view.clone()))),
+                (wait, Ok(ResponseBody::Card(never_ran))),
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.exit_code, 2);
+
+        // A daemon too old to run cards says so once, and the card is never asked to start.
+        let error = run_with_capabilities(
+            &["card", "run", "FLT-12", "--board", "work"],
+            Vec::new(),
+            vec![(get_board(), Ok(ResponseBody::Board(view)))],
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.message,
+            "this daemon does not support board automation; run `fleet daemon restart`"
+        );
+    }
+
+    /// `card runs` and `card attach` answer from the view the dispatcher already read: a second
+    /// request would be a second round trip for facts the card carries.
+    #[tokio::test]
+    async fn the_reading_run_verbs_answer_from_the_board_they_were_given() {
+        let with_runs = view_with_runs();
+        let output = run(
+            &["card", "runs", "FLT-12", "--board", "work"],
+            vec![(get_board(), Ok(ResponseBody::Board(with_runs.clone())))],
+        )
+        .await
+        .unwrap();
+        let lines: Vec<&str> = output.text.lines().collect();
+        assert_eq!(
+            lines[0],
+            format!(
+                "{DONE_RUN}\tIn Progress\tsucceeded\tcodex\tgpt-5.6-sol\thigh\t2m 30s\t1200\t$0.50\t{DONE_THREAD}"
+            )
+        );
+        // The live run takes its word from the join, and what nobody reported is an em dash.
+        let live: Vec<&str> = lines[1].split('\t').collect();
+        assert_eq!(live.len(), 10);
+        assert_eq!(live[0], LIVE_RUN);
+        assert_eq!(live[2], "running");
+        assert_eq!(&live[4..6], ["\u{2014}", "\u{2014}"]);
+        assert_eq!(live[9], LIVE_THREAD);
+
+        let output = run(
+            &["card", "attach", "FLT-12", "--board", "work"],
+            vec![(get_board(), Ok(ResponseBody::Board(with_runs)))],
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.text, LIVE_THREAD);
+
+        // A card nothing ever ran has no thread to attach to, and says so before the wire.
+        let error = run(
+            &["card", "attach", "FLT-12", "--board", "work"],
+            vec![(get_board(), Ok(ResponseBody::Board(view())))],
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.message, "FLT-12 has no run");
+
+        // A card that *did* run, whose runs never reached a thread, gets the other sentence —
+        // the app's `A` says the same two about the same two cards (contracts §5.5). The run is
+        // on the card and its failure is in the detail, so "has no run" would be a lie.
+        let mut never_started = view_with_runs();
+        never_started.live_runs.clear();
+        never_started.cards[0].runs.truncate(1);
+        never_started.cards[0].runs[0].thread_id = None;
+        let error = run(
+            &["card", "attach", "FLT-12", "--board", "work"],
+            vec![(get_board(), Ok(ResponseBody::Board(never_started)))],
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.message, "FLT-12's runs never reached a thread");
+    }
+
+    /// `card new` carries the agent block and the blockers in the draft itself, then writes the
+    /// other direction of `--blocks` as a patch of the card that flag named.
+    #[tokio::test]
+    async fn a_new_card_carries_its_agent_and_blockers_then_links_the_other_direction() {
+        let mut view = view();
+        view.cards.push(other_card());
+        let created: Card = serde_json::from_value(json!({
+            "id": "Card-14", "boardId": "work", "number": 14, "title": "Ship it",
+            "statusId": "todo", "createdAt": "now", "updatedAt": "now",
+            "blockedBy": ["Card-12"]
+        }))
+        .expect("the created card is a card");
+        let mut linked = other_card();
+        linked.blocked_by = vec!["Card-14".parse().unwrap()];
+        let output = run(
+            &[
+                "card",
+                "new",
+                "Ship it",
+                "--blocked-by",
+                "FLT-12",
+                "--blocks",
+                "FLT-13",
+                "--provider",
+                "codex",
+                "--model",
+                "gpt-5.6-sol",
+                "--effort",
+                "high",
+                "--board",
+                "work",
+            ],
+            vec![
+                (get_board(), Ok(ResponseBody::Board(view.clone()))),
+                (
+                    RequestBody::CreateCard {
+                        board_id: view.board.id.clone(),
+                        draft: CardDraft {
+                            title: "Ship it".into(),
+                            agent: Some(CardAgentPrefs {
+                                provider: Some(AgentKind::Codex),
+                                model: Some("gpt-5.6-sol".into()),
+                                effort: Some("high".into()),
+                            }),
+                            blocked_by: vec!["Card-12".parse().unwrap()],
+                            ..CardDraft::default()
+                        },
+                    },
+                    Ok(ResponseBody::Card(created)),
+                ),
+                (
+                    RequestBody::UpdateCard {
+                        card_id: "Card-13".parse().unwrap(),
+                        patch: CardPatch {
+                            blocked_by: Some(vec!["Card-14".parse().unwrap()]),
+                            ..CardPatch::default()
+                        },
+                    },
+                    Ok(ResponseBody::Card(linked)),
+                ),
+            ],
+        )
+        .await
+        .unwrap();
+        // The card the verb was about, then the card its sugar changed.
+        assert!(output.text.contains("Ship it"), "{}", output.text);
+        assert!(output.text.contains("Ship login"), "{}", output.text);
+        // The dependant names its new blocker by key: the view was read before the card
+        // existed, and rendered against that list the blocker prints as a raw id and
+        // `blocked()` — which calls a blocker it cannot find canceled — marks the dependant
+        // amber for a card created a moment ago.
+        assert!(
+            output.text.contains("Blocked by: FLT-14"),
+            "{}",
+            output.text
+        );
+        assert!(
+            !output.text.contains("canceled or archived"),
+            "{}",
+            output.text
+        );
+    }
+
+    /// `card edit` sends the clear as an explicit null, and `--add-blocks` alone patches only
+    /// the card it names — this card's own document has nothing to change.
+    #[tokio::test]
+    async fn card_edit_clears_the_agent_and_links_without_patching_the_wrong_card() {
+        let mut view = view();
+        view.cards.push(other_card());
+        let card = view.cards[0].clone();
+        run(
+            &[
+                "card",
+                "edit",
+                "FLT-12",
+                "--clear-agent",
+                "--board",
+                "work",
+                "--json",
+            ],
+            vec![
+                (get_board(), Ok(ResponseBody::Board(view.clone()))),
+                (
+                    RequestBody::UpdateCard {
+                        card_id: "Card-12".parse().unwrap(),
+                        patch: CardPatch {
+                            agent: Some(None),
+                            ..CardPatch::default()
+                        },
+                    },
+                    Ok(ResponseBody::Card(card.clone())),
+                ),
+            ],
+        )
+        .await
+        .unwrap();
+
+        // `--add-blocks` names the other card: exactly one `UpdateCard`, and it is not this one.
+        let mut linked = other_card();
+        linked.blocked_by = vec!["Card-12".parse().unwrap()];
+        run(
+            &[
+                "card",
+                "edit",
+                "FLT-12",
+                "--add-blocks",
+                "FLT-13",
+                "--board",
+                "work",
+                "--json",
+            ],
+            vec![
+                (get_board(), Ok(ResponseBody::Board(view.clone()))),
+                (
+                    RequestBody::UpdateCard {
+                        card_id: "Card-13".parse().unwrap(),
+                        patch: CardPatch {
+                            blocked_by: Some(vec!["Card-12".parse().unwrap()]),
+                            ..CardPatch::default()
+                        },
+                    },
+                    Ok(ResponseBody::Card(linked)),
+                ),
+            ],
+        )
+        .await
+        .unwrap();
+
+        // `--add-blocked-by` is the same link from this card's side: the whole vector, computed
+        // from the card the CLI already read.
+        run(
+            &[
+                "card",
+                "edit",
+                "FLT-12",
+                "--add-blocked-by",
+                "FLT-13",
+                "--board",
+                "work",
+                "--json",
+            ],
+            vec![
+                (get_board(), Ok(ResponseBody::Board(view))),
+                (
+                    RequestBody::UpdateCard {
+                        card_id: "Card-12".parse().unwrap(),
+                        patch: CardPatch {
+                            blocked_by: Some(vec!["Card-13".parse().unwrap()]),
+                            ..CardPatch::default()
+                        },
+                    },
+                    Ok(ResponseBody::Card(card)),
+                ),
+            ],
+        )
+        .await
+        .unwrap();
+    }
+
+    /// The board's run ceiling rides on the settings patch every other `board set` flag uses.
+    #[tokio::test]
+    async fn board_set_max_live_runs_rides_on_the_settings_patch() {
+        let view = view();
+        let mut settings = view.board.settings.clone();
+        settings.max_live_runs = Some(3);
+        run(
+            &["set", "--max-live-runs", "3", "--board", "work", "--json"],
+            vec![
+                (get_board(), Ok(ResponseBody::Board(view.clone()))),
+                (
+                    RequestBody::UpdateBoard {
+                        board_id: view.board.id.clone(),
+                        patch: BoardPatch {
+                            settings: Some(settings),
+                            ..BoardPatch::default()
+                        },
+                    },
+                    Ok(ResponseBody::Board(view)),
+                ),
+            ],
+        )
+        .await
+        .unwrap();
+    }
+
+    /// A run may not move the card it is running for: the report moves it when the run ends, so
+    /// a move from inside the run races its own outcome.
+    ///
+    /// The refusal is a pure function of the command and the two variables the daemon injects,
+    /// which is what lets this assert it without putting `FLEET_CARD` in the environment of a
+    /// test binary running its cases in parallel — no test in this workspace sets one. `board`
+    /// calls it above `resolve_board`, so the refused path builds no request at all, and the
+    /// error it returns is the exit 1 every refusal exits with.
+    #[test]
+    fn a_run_is_refused_the_move_of_its_own_card_and_asks_for_nothing() {
+        let command = |arguments: &[&str]| args(arguments).command;
+        let moved = command(&["card", "move", "flt-12", "done"]);
+        let error = refuse_self_move(&moved, Some("delegation-1"), Some("FLT-12"))
+            .expect_err("a run may not move its own card");
+        assert_eq!(error.message, SELF_MOVE_REFUSAL);
+        assert_eq!(
+            error.message,
+            "a run cannot move its own card; its report moves the card when it finishes"
+        );
+        let mut stdout = Vec::<u8>::new();
+        let mut stderr = Vec::<u8>::new();
+        assert_eq!(
+            crate::commands::error_result(
+                crate::commands::print_error(&error, false, &mut stdout, &mut stderr),
+                false,
+            ),
+            1
+        );
+        assert!(stdout.is_empty());
+        assert_eq!(
+            String::from_utf8(stderr).expect("the refusal is printed as text"),
+            format!("fleet: {SELF_MOVE_REFUSAL}\n")
+        );
+
+        // Everything else passes: another card, another verb, and the same move outside a run —
+        // where `FLEET_CARD` is only whatever the caller's shell happens to export.
+        assert!(refuse_self_move(&moved, Some("delegation-1"), Some("FLT-13")).is_ok());
+        assert!(refuse_self_move(&moved, Some("delegation-1"), None).is_ok());
+        assert!(refuse_self_move(&moved, None, Some("FLT-12")).is_ok());
+        for arguments in [
+            vec!["card", "show", "flt-12"],
+            vec!["card", "run", "flt-12"],
+            vec!["card", "cancel", "flt-12"],
+            vec!["card", "comment", "flt-12", "done"],
+        ] {
+            assert!(
+                refuse_self_move(&command(&arguments), Some("delegation-1"), Some("FLT-12"))
+                    .is_ok(),
+                "{arguments:?}"
+            );
+        }
+    }
+
+    /// The same move, from a run working on another card, reaches the daemon untouched: the
+    /// refusal is advisory and narrow, never a guard on moving cards from inside a run.
+    #[tokio::test]
+    async fn a_run_may_still_move_every_card_but_its_own() {
+        let view = view();
+        run(
+            &[
+                "card", "move", "FLT-12", "done", "--board", "work", "--json",
+            ],
+            vec![
+                (get_board(), Ok(ResponseBody::Board(view.clone()))),
+                (
+                    RequestBody::MoveCard {
+                        card_id: "Card-12".parse().unwrap(),
+                        status_id: "done".parse().unwrap(),
+                        index: None,
+                        cancel_run: false,
+                    },
+                    Ok(ResponseBody::Card(view.cards[0].clone())),
+                ),
+            ],
+        )
+        .await
+        .unwrap();
     }
 }

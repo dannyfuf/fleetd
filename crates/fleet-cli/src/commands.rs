@@ -15,7 +15,7 @@ use crate::{
 };
 use board::board;
 use clap::{Parser, error::ErrorKind as ClapErrorKind};
-use fleet_client::{Client, SpawnError, ensure_daemon, restart_daemon};
+use fleet_client::{Client, ConnectError, SpawnError, ensure_daemon, restart_daemon};
 use fleet_proto::{
     error::{ErrorKind, ProtoError},
     event::Event,
@@ -25,7 +25,7 @@ use sessions::{agent_status, sleep};
 use std::{
     ffi::OsString,
     io::{self, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     str::FromStr,
     time::Duration,
 };
@@ -173,6 +173,16 @@ async fn run_command(mut command: Command) -> Result<CommandOutput, ProtoError> 
     if let Command::Subagent(arguments) = &command {
         subagents::validate_context(&arguments.command, &subagents::Environment::from_process())?;
     }
+    // Both refusals a child makes about its own identity sit here, before `fleet_home` and the
+    // daemon autostart: neither needs a daemon to know the answer, and spawning one to say no
+    // is a cost the caller never asked for.
+    if let Command::Board(arguments) = &command {
+        board::refuse_self_move(
+            &arguments.command,
+            subagents::Environment::from_process().delegation.as_deref(),
+            subagents::Environment::card_from_process().as_deref(),
+        )?;
+    }
     let home = fleet_home()?;
     if matches!(
         command,
@@ -183,8 +193,70 @@ async fn run_command(mut command: Command) -> Result<CommandOutput, ProtoError> 
         let _client = restart_daemon(&home, None).await.map_err(spawn_error)?;
         return Ok(CommandOutput::success("Restarted fleetd".to_owned()));
     }
-    let client = ensure_daemon(&home, None).await.map_err(spawn_error)?;
+    let access = daemon_access(subagents::Environment::from_process().delegation.as_deref());
+    let client = connect_daemon(&home, access).await?;
     execute(&client, command).await
+}
+
+/// How far this process may go to reach a daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DaemonAccess {
+    /// Connect, and start a detached `fleetd` when nothing answers.
+    Autostart,
+    /// Connect to a daemon that is already running, and refuse rather than start one.
+    ConnectOnly,
+}
+
+/// Chooses that reach from the delegation identity the daemon injected (`FLEET_DELEGATION`).
+///
+/// A delegated child reports to **the daemon that started it**. When that daemon is gone, a fresh
+/// one is not a replacement: it is a long-lived process nobody asked for, holding a `FLEET_HOME`
+/// the session that created the child had already finished with. A scripted child outliving a
+/// harness scenario leaks exactly one such daemon per run, and the harness cannot defend itself —
+/// the `fleet` shim it puts on the child's `PATH` to refuse autostart during teardown is shadowed
+/// by the directory the daemon prepends for the child (`docs/NATIVE-AGENTS.md`, "The child gets a
+/// `fleet` on its `PATH`"), so the refusal has to be the CLI's own rule and not a `PATH` accident.
+///
+/// Nothing is lost by refusing: the delegation and its outbox row are durable, and the next daemon
+/// the *user* starts adopts what the child could not report. A daemon that merely restarted while
+/// the child worked is unaffected — one is listening again, so the connect succeeds.
+fn daemon_access(delegation: Option<&str>) -> DaemonAccess {
+    if delegation.is_some() {
+        DaemonAccess::ConnectOnly
+    } else {
+        DaemonAccess::Autostart
+    }
+}
+
+async fn connect_daemon(home: &Path, access: DaemonAccess) -> Result<Client, ProtoError> {
+    match access {
+        DaemonAccess::Autostart => ensure_daemon(home, None).await.map_err(spawn_error),
+        DaemonAccess::ConnectOnly => {
+            let client = Client::connect(home)
+                .await
+                .map_err(|error| connect_only_error(home, error))?;
+            client.daemon_ping().await?;
+            Ok(client)
+        }
+    }
+}
+
+/// Explains a failed connect for a child that is not allowed to start a daemon itself.
+fn connect_only_error(home: &Path, error: ConnectError) -> ProtoError {
+    match error {
+        ConnectError::Protocol(error) => error,
+        // The socket is the whole signal: a delegated child is told what is missing and which
+        // `FLEET_HOME` it looked in, because the daemon it must report to is chosen by that path.
+        ConnectError::Io(_) => ProtoError {
+            kind: ErrorKind::NotFound,
+            message: single_line(&format!(
+                "no Fleet daemon is running at {}; a delegated child reports to the daemon that \
+                 started it and never starts one",
+                home.display()
+            )),
+        },
+        other => unknown(other.to_string()),
+    }
 }
 
 async fn execute(client: &Client, command: Command) -> Result<CommandOutput, ProtoError> {

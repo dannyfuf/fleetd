@@ -19,6 +19,8 @@ and output reference: `references/commands.md`. Pre-flight lists: `references/ch
 ## Which role am I in?
 
 - `FLEET_DELEGATION` is set → you are a **child**. Read "As the child" and do that.
+- `FLEET_DELEGATION` **and** `FLEET_CARD` are set → you are a **card's run**: a board column
+  started you, and rule 9 of "As the child" is the part that is different for you.
 - `FLEET_SESSION` is a UUID and `FLEET_DELEGATION` is not set → you are a **native thread** and
   can be a **caller**.
 - `FLEET_SESSION` looks like `owner/name#slug` or you are in a plain shell → you are a
@@ -176,17 +178,29 @@ is the contract; this is how to honour it without wasting the caller's tokens or
    reach you the same way.
 8. **Never set or forward `FLEET_*` variables**, never `cancel` your own delegation, and do not
    `wait` on yourself.
+9. **If `FLEET_CARD` is set, you are a card's run — do not move your own card.** A column started
+   you, and that column's `on-success` route is what moves the card when your report lands. Moving
+   it yourself races the route you are about to be given, so `fleet board card move` on the key in
+   `FLEET_CARD` is refused: *a run cannot move its own card; its report moves the card when it
+   finishes*. The refusal compares the key you typed, so it is advisory — the point is the rule,
+   not the check. Report with `complete` and let the board route you.
+
+   `FLEET_CARD` and `FLEET_BOARD` are read-only context, not a licence: read the card with `fleet
+   board --board "$FLEET_BOARD" card show "$FLEET_CARD"` when the brief is not enough, and leave a
+   `card comment` when you found something the next run needs. Everything else about the card —
+   its column, its links, its runs — belongs to whoever is orchestrating.
 
 ## Reading the output
 
 `run` prints `delegation <id> started, child thread <child>` and, when you omitted
 `--worktree`, the sharing warning on a second line.
 
-`list` and the first line of `status` print eight tab-separated fields: id, status, provider,
-child thread, duration, total tokens, cost, delivery. A `-` in the spend fields means the
-daemon has no usage yet, not zero. Status words: `starting`, `running`, `blocked`, `settling`,
+`list` and the first line of `status` print nine tab-separated fields: id, status, provider,
+child thread, duration, total tokens, cost, delivery, caller. A `-` in the spend fields means the
+daemon has no usage yet, not zero. The caller reads `thread <id>`, or `card <KEY>` for a run a
+board column started. Status words: `starting`, `running`, `blocked`, `settling`,
 `succeeded`, `incomplete`, `failed`, `cancelled`. Delivery words include `pending`,
-`delivered`, `consumed`, `undeliverable`.
+`delivered`, `consumed`, `recorded` (a card run's board write committed), `undeliverable`.
 
 A finished `wait`, and the message injected into your transcript, both read:
 

@@ -190,19 +190,33 @@ pub fn doctor(checks: &[DoctorCheck]) -> String {
     lines.join("\n")
 }
 
+/// The display key of every card caller in a listing, resolved by the command that read them.
+///
+/// A delegation records the board and card that started it, not the key a person types: turning
+/// one into `FLT-7` costs a `GetBoard`, which is a request a renderer may not make. The command
+/// resolves what it can and hands it over; a caller missing from the map prints its raw card id,
+/// which is still a selector every board verb accepts.
+pub type CallerKeys = std::collections::BTreeMap<fleet_core::ids::CardId, String>;
+
 /// Formats one fixed-field line per delegation.
 ///
-/// Eight tab-separated fields: id, status, provider, child thread, duration, total tokens, cost,
-/// delivery. The two spend fields print `-` rather than `0` when the daemon has no usage for the
-/// child — a delegation that has not reported a number yet and one that genuinely spent nothing
-/// are different facts, and a zero would claim the second.
+/// Nine tab-separated fields: id, status, provider, child thread, duration, total tokens, cost,
+/// delivery, caller. The two spend fields print `-` rather than `0` when the daemon has no usage
+/// for the child — a delegation that has not reported a number yet and one that genuinely spent
+/// nothing are different facts, and a zero would claim the second. The caller is `thread {id}`
+/// or `card {KEY}`: a run started by a column is not a run any thread is waiting on, and a
+/// listing that could not say which was which sent readers to the wrong transcript.
 #[must_use]
-pub fn subagents(delegations: &[Delegation], now: SystemTime) -> String {
+pub fn subagents_with_keys(
+    delegations: &[Delegation],
+    now: SystemTime,
+    keys: &CallerKeys,
+) -> String {
     delegations
         .iter()
         .map(|delegation| {
             format!(
-                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                 delegation.id,
                 delegation_status_word(delegation.status),
                 delegation.provider.executable(),
@@ -210,11 +224,26 @@ pub fn subagents(delegations: &[Delegation], now: SystemTime) -> String {
                 duration(elapsed_seconds(delegation, now)),
                 total_tokens_field(delegation),
                 cost_field(delegation),
-                delegation.delivery.word()
+                delegation.delivery.word(),
+                caller_field(delegation, keys)
             )
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// The list line's caller field: `thread {id}`, or `card {KEY}` for a column's own run.
+fn caller_field(delegation: &Delegation, keys: &CallerKeys) -> String {
+    match &delegation.caller {
+        fleet_core::agents::DelegationCaller::Thread(thread) => format!("thread {thread}"),
+        fleet_core::agents::DelegationCaller::Card { card, .. } => format!(
+            "card {}",
+            keys.get(card).map_or_else(
+                || crate::envelope::single_line(card.as_str()),
+                |key| crate::envelope::single_line(key)
+            )
+        ),
+    }
 }
 
 /// Formats the whole of `fleet subagent status` for one delegation.
@@ -226,9 +255,13 @@ pub fn subagents(delegations: &[Delegation], now: SystemTime) -> String {
 /// grep the other, and a report whose `wait` was missed is still reachable without going and
 /// reading files out of a temporary directory.
 #[must_use]
-pub fn subagent_status(delegation: &Delegation, now: SystemTime) -> String {
+pub fn subagent_status_with_keys(
+    delegation: &Delegation,
+    now: SystemTime,
+    keys: &CallerKeys,
+) -> String {
     let mut sections = vec![
-        subagents(std::slice::from_ref(delegation), now),
+        subagents_with_keys(std::slice::from_ref(delegation), now, keys),
         format!("brief:\n{}", crate::envelope::safe_block(&delegation.brief)),
     ];
     // A child that has reported nothing prints no line at all: a row of zeros would claim it
@@ -364,6 +397,8 @@ pub fn boards(boards: &[fleet_core::board::BoardSummary]) -> String {
         "OPEN",
         "DIRTY",
         "CONFLICTS",
+        "WORKING",
+        "NEEDS YOU",
     ]
     .map(str::to_owned)
     .to_vec();
@@ -382,6 +417,8 @@ pub fn boards(boards: &[fleet_core::board::BoardSummary]) -> String {
             board.open_count.to_string(),
             board.dirty_count.to_string(),
             board.conflict_count.to_string(),
+            board.working_count.to_string(),
+            board.attention_count.to_string(),
         ];
         // A failing sync is a per-board fact, not a column every clean board pays a dash for, so
         // it rides along as an extra trailing cell that only an unhealthy board grows.
@@ -455,20 +492,36 @@ pub fn board(
         scope,
         board_header(view, backend, now)
     )];
+    let stamp = rfc3339_utc(now);
     for status in &view.board.statuses {
         let cards = fleet_core::board::column_cards(&view.cards, &status.id);
         let mut lines = vec![format!(
-            "{} ({})",
+            "{} ({}){}",
             crate::envelope::single_line(&status.name),
-            cards.len()
+            cards.len(),
+            // The bolt says this column runs something, which is the one column fact a reader
+            // needs before moving a card into it: the move starts work.
+            if column_runs_an_action(status) {
+                " \u{26a1}"
+            } else {
+                ""
+            }
         )];
         for card in cards {
-            let mut row = format!(
-                "{}  {}  {}",
-                display_key(&view.board, card),
+            let mut row = display_key(&view.board, card);
+            // The run mark sits before the priority word because it is the more urgent fact:
+            // a row a reader scans says "this one is moving" before it says how much it matters.
+            if let Some(mark) = run_mark(view, card, &stamp) {
+                row.push_str(&format!("  {mark}"));
+            }
+            row.push_str(&format!(
+                "  {}  {}",
                 card.priority.label().to_lowercase(),
                 crate::envelope::single_line(&card.title)
-            );
+            ));
+            if let Some(blocked) = fleet_core::board::blocked(&view.board, &view.cards, card) {
+                row.push_str(&format!("  \u{2298} {}", blocked.unsatisfied));
+            }
             // `card_labels` answers an em dash for a card with none — it is written for the
             // report's one-per-line fields — so the emptiness test is the card's, not the
             // string's. Testing the string printed `[—]` beside every unlabeled card.
@@ -513,6 +566,43 @@ pub fn board(
     sections.join("\n\n")
 }
 
+/// Whether a column starts something when a card enters it.
+fn column_runs_an_action(status: &fleet_core::board::Status) -> bool {
+    status
+        .automation
+        .as_ref()
+        .is_some_and(|automation| automation.on_enter.is_some())
+}
+
+/// Whether a card has work in flight: a joined live delegation, or a run it has not ended.
+///
+/// Both are asked because they answer different questions. The join is the daemon's live view
+/// and is absent from a board read by a client that never asked for one; the card's own last
+/// run is what the document remembers, and a run whose daemon has gone is still unfinished.
+fn is_working(view: &fleet_core::board::BoardView, card: &fleet_core::board::Card) -> bool {
+    view.live_runs.iter().any(|run| run.card_id == card.id)
+        || fleet_core::board::latest_run(card).is_some_and(fleet_core::board::CardRun::is_live)
+}
+
+/// The mark a board row carries before its priority word, when it carries one.
+///
+/// One mark, in this order: a card that is running says so, a card waiting on a person says so
+/// next, and a card owed a run it could not start says so last. A row with two marks would be a
+/// row nobody can scan, and these three are ordered by what the reader has to do about them.
+fn run_mark(
+    view: &fleet_core::board::BoardView,
+    card: &fleet_core::board::Card,
+    now: &str,
+) -> Option<&'static str> {
+    if is_working(view, card) {
+        return Some("\u{25cf} working");
+    }
+    if fleet_core::board::attention(card, now) {
+        return Some("! needs you");
+    }
+    card.pending_run.as_ref().map(|_| "\u{2026} pending")
+}
+
 /// How many of the backend's own settings the board header names.
 const HEADER_SETTINGS: usize = 2;
 
@@ -527,6 +617,12 @@ fn board_header(
     now: i64,
 ) -> String {
     let backend = &view.board.backend;
+    // One summary for the whole line, over the view's own run join and a real stamp: `attention`
+    // and the working count compare RFC 3339 timestamps, and the epoch seconds this renderer is
+    // handed are the only clock it has. Passing `""` — which is what the CLI did before this
+    // line counted runs — made every card's attention test fail to parse and answer no.
+    let summary =
+        fleet_core::board::summarize(&view.board, &view.cards, &view.live_runs, &rfc3339_utc(now));
     let mut parts = vec![format!(
         "backend: {}",
         crate::envelope::single_line(descriptor.map_or(backend.kind.as_str(), |descriptor| {
@@ -557,10 +653,20 @@ fn board_header(
             ));
         }
     }
+    // What the board is doing right now comes before what its remote is doing: a run in flight
+    // is this minute's fact, and a sync stamp is not. Both counts are dropped while they are
+    // zero, so a board nobody has automated prints exactly the header it always printed.
+    if summary.working_count > 0 {
+        parts.push(format!(
+            "{}/{} working",
+            summary.working_count,
+            view.board.settings.max_live_runs()
+        ));
+    }
+    if summary.attention_count > 0 {
+        parts.push(format!("{} needs you", summary.attention_count));
+    }
     if !backend.is_local() {
-        // The header prints the dirty and conflict counts only, and `now` here is epoch
-        // seconds rather than an RFC 3339 stamp.
-        let summary = fleet_core::board::summarize(&view.board, &view.cards, &[], "");
         parts.push(synced_age(view.board.sync.last_synced_at.as_deref(), now));
         parts.push(format!("{} dirty", summary.dirty_count));
         parts.push(format!("{} conflict", summary.conflict_count));
@@ -628,6 +734,48 @@ fn epoch_secs(iso: &str) -> Option<i64> {
         seconds -= sign * (hours * 3_600 + minutes * 60);
     }
     Some(seconds)
+}
+
+/// The RFC 3339 UTC stamp for `epoch` seconds: the format every board clock writes.
+///
+/// `attention`, `summarize` and the pending-run age compare stamps, not integers, and the board
+/// renderers are handed the same epoch clock `synced 3m ago` uses. Converting here keeps them
+/// pure functions of their arguments rather than giving the run counts a second, hidden clock
+/// that a test could not move. Public so a command holding the same epoch clock can stamp its
+/// own `summarize` call rather than passing the `""` that counts nothing.
+#[must_use]
+pub fn rfc3339_utc(epoch: i64) -> String {
+    let (year, month, day) = civil_from_days(epoch.div_euclid(86_400));
+    let seconds = epoch.rem_euclid(86_400);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        seconds / 3_600,
+        (seconds % 3_600) / 60,
+        seconds % 60
+    )
+}
+
+/// The civil date `days` after 1970-01-01, by Howard Hinnant's algorithm — [`days_from_civil`]
+/// read backwards.
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let shifted = days + 719_468;
+    let era = if shifted >= 0 {
+        shifted
+    } else {
+        shifted - 146_096
+    } / 146_097;
+    let day_of_era = shifted - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_position = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_position + 2) / 5 + 1;
+    let month = if month_position < 10 {
+        month_position + 3
+    } else {
+        month_position - 9
+    };
+    (year_of_era + era * 400 + i64::from(month <= 2), month, day)
 }
 
 /// Days from 1970-01-01 to `y-m-d`, by Howard Hinnant's civil-calendar algorithm.
@@ -813,6 +961,171 @@ fn card_labels(board: &fleet_core::board::Board, card: &fleet_core::board::Card)
         .join(", ")
 }
 
+/// One tab-separated line per run on a card: `id  column  state  provider  model  effort
+/// duration  tokens  cost  thread`, with an em dash for anything unknown.
+///
+/// The same line `card runs` prints and `card show` lists, in the shape of [`subagents`]: these
+/// are the two reports an orchestrator parses, and a run is the same row wherever it is read.
+/// `live` is the view's delegation join, which is what turns a run the card has not ended into
+/// the word the daemon would use for it. `now` is epoch seconds, and `None` says the surface
+/// has no clock — a live run then prints no duration rather than counting from 1970.
+#[must_use]
+pub fn card_runs(
+    board: &fleet_core::board::Board,
+    card: &fleet_core::board::Card,
+    live: &[fleet_core::board::LiveRun],
+    now: Option<i64>,
+) -> String {
+    card.runs
+        .iter()
+        .map(|run| {
+            let column = board
+                .statuses
+                .iter()
+                .find(|status| status.id == run.status_id)
+                .map_or(run.status_id.as_str(), |status| status.name.as_str());
+            format!(
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                run.id,
+                crate::envelope::single_line(column),
+                run_state(run, live),
+                run.provider.executable(),
+                or_dash(run.model.as_deref()),
+                or_dash(run.effort.as_deref()),
+                run_duration(run, now),
+                run.tokens
+                    .map_or_else(|| "\u{2014}".to_owned(), |tokens| tokens.to_string()),
+                run.cost_usd
+                    .map_or_else(|| "\u{2014}".to_owned(), |cost| format!("${cost:.2}")),
+                run.thread_id
+                    .as_ref()
+                    .map_or_else(|| "\u{2014}".to_owned(), ToString::to_string),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A run's state word: its outcome once it has one, else what the daemon says it is doing.
+///
+/// A run the card has not ended and the join does not carry is still `running`: the card is the
+/// durable record, and a daemon that has forgotten a delegation has not finished it.
+fn run_state(
+    run: &fleet_core::board::CardRun,
+    live: &[fleet_core::board::LiveRun],
+) -> &'static str {
+    run.outcome.map_or_else(
+        || {
+            live.iter()
+                .find(|joined| joined.run == run.id)
+                .map_or("running", |joined| delegation_status_word(joined.status))
+        },
+        fleet_core::board::RunOutcome::word,
+    )
+}
+
+/// How long a run took, or has been going; an em dash when neither can be told.
+fn run_duration(run: &fleet_core::board::CardRun, now: Option<i64>) -> String {
+    let Some(started) = epoch_secs(&run.started_at) else {
+        return "\u{2014}".to_owned();
+    };
+    let end = match run.ended_at.as_deref() {
+        Some(ended) => epoch_secs(ended),
+        None => now,
+    };
+    end.filter(|end| *end >= started)
+        .map_or_else(|| "\u{2014}".to_owned(), |end| duration_secs(end - started))
+}
+
+/// A duration in the `14m 02s` shape, from a signed count of seconds.
+fn duration_secs(seconds: i64) -> String {
+    duration(u64::try_from(seconds).unwrap_or_default())
+}
+
+/// A value, or the em dash every empty field in these reports prints.
+fn or_dash(value: Option<&str>) -> String {
+    value.map_or_else(|| "\u{2014}".to_owned(), crate::envelope::single_line)
+}
+
+/// `Agent: codex, model gpt-5 (column default), effort high`, or nothing to say.
+///
+/// A field the card did not set is marked as the column's, because that is the difference
+/// between an agent this card asks for and one the workflow hands it: moving the card to
+/// another column changes the second and not the first.
+fn card_agent_line(
+    board: &fleet_core::board::Board,
+    card: &fleet_core::board::Card,
+) -> Option<String> {
+    use fleet_core::board::ActionKind;
+
+    let action = board
+        .statuses
+        .iter()
+        .find(|status| status.id == card.status_id)
+        .and_then(|status| status.automation.as_ref())
+        .and_then(|automation| automation.on_enter.as_ref());
+    let prefs = card.agent.as_ref();
+    let (provider, model, effort) = match action {
+        Some(action) => {
+            let resolved = fleet_core::board::resolve_prefs(card, action);
+            (resolved.provider, resolved.model, resolved.effort)
+        }
+        None => (
+            prefs.and_then(|prefs| prefs.provider),
+            prefs.and_then(|prefs| prefs.model.clone()),
+            prefs.and_then(|prefs| prefs.effort.clone()),
+        ),
+    };
+    // A skill column runs on Claude whatever the card asked for, so the provider it prints is
+    // the column's even on a card that named one.
+    let provider_is_the_cards = prefs.and_then(|prefs| prefs.provider).is_some()
+        && !matches!(
+            action.map(|action| &action.kind),
+            Some(ActionKind::Skill { .. })
+        );
+    let mut parts = Vec::new();
+    if let Some(provider) = provider {
+        parts.push(format!(
+            "{}{}",
+            provider.executable(),
+            inherited(provider_is_the_cards)
+        ));
+    }
+    if let Some(model) = model {
+        parts.push(format!(
+            "model {}{}",
+            crate::envelope::single_line(&model),
+            inherited(prefs.is_some_and(|prefs| prefs.model.is_some()))
+        ));
+    }
+    if let Some(effort) = effort {
+        parts.push(format!(
+            "effort {}{}",
+            crate::envelope::single_line(&effort),
+            inherited(prefs.is_some_and(|prefs| prefs.effort.is_some()))
+        ));
+    }
+    (!parts.is_empty()).then(|| format!("Agent: {}", parts.join(", ")))
+}
+
+/// The tail that says a field came from the column rather than the card.
+const fn inherited(from_the_card: bool) -> &'static str {
+    if from_the_card {
+        ""
+    } else {
+        " (column default)"
+    }
+}
+
+/// The display keys of some cards, in board order, or the em dash when there are none.
+fn card_keys<'a>(
+    board: &fleet_core::board::Board,
+    cards: impl Iterator<Item = &'a fleet_core::board::Card>,
+) -> String {
+    let keys: Vec<String> = cards.map(|card| display_key(board, card)).collect();
+    list_or_dash(&keys)
+}
+
 /// Formats a card's identity, properties, Markdown description, and comments.
 ///
 /// `cards` is the board's card set, used to name the parent by the key the user typed rather
@@ -888,6 +1201,43 @@ pub fn board_card(
             crate::envelope::single_line(&card.updated_at)
         ),
     ];
+    // The workflow rows appear only when the card has something to say through them: a board
+    // nobody has automated prints exactly the report it printed before automation existed, and
+    // three em dashes on every card is not a feature anybody asked for.
+    if let Some(agent) = card_agent_line(board, card) {
+        lines.push(agent);
+    }
+    if !card.blocked_by.is_empty() {
+        // A blocker the view no longer carries still says something the reader can look up,
+        // exactly as the parent row does for a card outside the set it was handed.
+        let keys: Vec<String> = card
+            .blocked_by
+            .iter()
+            .map(|blocker| {
+                cards.iter().find(|other| other.id == *blocker).map_or_else(
+                    || crate::envelope::single_line(blocker.as_str()),
+                    |other| display_key(board, other),
+                )
+            })
+            .collect();
+        let mut line = format!("Blocked by: {}", list_or_dash(&keys));
+        if let Some(blocked) = fleet_core::board::blocked(board, cards, card) {
+            line.push_str(&format!("  \u{2298} {} waiting", blocked.unsatisfied));
+            // A blocker nobody can finish will never release this card on its own, and the row
+            // that only counts says nothing about the one thing the reader has to go and fix.
+            if blocked.tone == fleet_core::board::BlockedTone::Warning {
+                line.push_str(" (a blocker was canceled or archived)");
+            }
+        }
+        lines.push(line);
+    }
+    let dependants = fleet_core::board::blocks(cards, &card.id);
+    if !dependants.is_empty() {
+        lines.push(format!(
+            "Blocks: {}",
+            card_keys(board, dependants.into_iter())
+        ));
+    }
     // Only an unlinked card answers to its local key, so only an unlinked card is told one:
     // `resolve_card` refuses `FLT-7` on a mirrored card, and printing it here handed the reader
     // a selector the very next command rejected.
@@ -955,6 +1305,13 @@ pub fn board_card(
         "\nDescription\n{}",
         crate::envelope::safe_block(&card.description)
     ));
+    // The run history, in the line `card runs` prints. This report has no delegation join and no
+    // clock, so a run still going prints its state and no duration: `card runs` is the verb with
+    // both, and inventing a duration from a clock this renderer does not have is worse than a
+    // dash.
+    if !card.runs.is_empty() {
+        lines.push(format!("\nRuns\n{}", card_runs(board, card, &[], None)));
+    }
     lines.push("\nComments".to_owned());
     for comment in &card.comments {
         // Locally authored comments carry no author; "@unknown" would name a person.
@@ -993,4 +1350,289 @@ pub fn board_sync(
         ));
     }
     lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fleet_core::board::BoardView;
+    use serde_json::json;
+
+    /// 2026-09-06T12:00:00Z, the stamp every fixture below is written against.
+    const NOW: i64 = 1_788_696_000;
+
+    /// A board whose Ready column runs the card, holding one card in each state the marks name.
+    fn view() -> BoardView {
+        serde_json::from_value(json!({
+            "board": {
+                "id": "work", "contextId": "work", "name": "Fleet", "prefix": "FLT",
+                "backend": {"kind": "local", "settings": {}},
+                "statuses": [
+                    {"id": "todo", "name": "Todo", "category": "unstarted"},
+                    {"id": "ready", "name": "Ready", "category": "unstarted", "automation": {
+                        "onEnter": {
+                            "kind": {"kind": "prompt"},
+                            "agent": {"provider": "codex", "model": "gpt-5", "effort": "high"}
+                        }
+                    }},
+                    {"id": "done", "name": "Done", "category": "completed"}
+                ],
+                "labels": [], "properties": [], "settings": {"maxLiveRuns": 2},
+                "nextNumber": 5, "sync": {}, "createdAt": "now", "updatedAt": "now"
+            },
+            "cards": [
+                {
+                    "id": "card-1", "boardId": "work", "number": 1, "title": "Design",
+                    "statusId": "done", "priority": "medium", "position": 0,
+                    "createdAt": "now", "updatedAt": "now"
+                },
+                {
+                    "id": "card-2", "boardId": "work", "number": 2, "title": "Build",
+                    "statusId": "ready", "priority": "high", "position": 1,
+                    "blockedBy": ["card-1"],
+                    "agent": {"effort": "low"},
+                    "runs": [{
+                        "id": "00000000-0000-4000-8000-000000000001",
+                        "threadId": "00000000-0000-4000-8000-0000000000a1",
+                        "statusId": "ready", "action": {"kind": "prompt"}, "provider": "codex",
+                        "model": "gpt-5", "startedAt": "2026-09-06T11:58:00Z"
+                    }],
+                    "createdAt": "now", "updatedAt": "now"
+                },
+                {
+                    "id": "card-3", "boardId": "work", "number": 3, "title": "Test",
+                    "statusId": "todo", "priority": "low", "position": 2,
+                    "blockedBy": ["card-2"],
+                    "runs": [{
+                        "id": "00000000-0000-4000-8000-000000000002",
+                        "threadId": "00000000-0000-4000-8000-0000000000a2",
+                        "statusId": "ready", "action": {"kind": "prompt"}, "provider": "claude",
+                        "startedAt": "2026-09-06T11:50:00Z", "endedAt": "2026-09-06T11:52:30Z",
+                        "outcome": "needs_you", "tokens": 1200, "costUsd": 0.5
+                    }],
+                    "createdAt": "now", "updatedAt": "now"
+                },
+                {
+                    "id": "card-4", "boardId": "work", "number": 4, "title": "Ship",
+                    "statusId": "ready", "priority": "none", "position": 3,
+                    "pendingRun": {"statusId": "ready", "since": "2026-09-06T11:59:50Z"},
+                    "createdAt": "now", "updatedAt": "now"
+                }
+            ],
+            "liveRuns": [{
+                "cardId": "card-2", "run": "00000000-0000-4000-8000-000000000001",
+                "status": "blocked", "started": "2026-09-06T11:58:00Z"
+            }]
+        }))
+        .expect("the fixture is a board view")
+    }
+
+    /// Each mark says a different thing a reader has to do, and none of them moves the fields a
+    /// board row already printed.
+    #[test]
+    fn a_board_row_marks_work_attention_and_a_run_it_is_owed() {
+        let text = board(&view(), None, NOW);
+        assert!(
+            text.contains("FLT-2  \u{25cf} working  high  Build"),
+            "{text}"
+        );
+        assert!(text.contains("FLT-3  ! needs you  low  Test"), "{text}");
+        assert!(
+            text.contains("FLT-4  \u{2026} pending  none  Ship"),
+            "{text}"
+        );
+        // A card nothing is happening to keeps exactly the row it had before runs existed.
+        assert!(text.contains("FLT-1  medium  Design"), "{text}");
+    }
+
+    /// The block count follows the title, and a satisfied blocker is not one.
+    #[test]
+    fn a_blocked_card_counts_only_the_blockers_that_have_not_finished() {
+        let text = board(&view(), None, NOW);
+        assert!(text.contains("Test  \u{2298} 1"), "{text}");
+        // FLT-2's only blocker sits in a Completed column, so it is not waiting on anything.
+        assert!(!text.contains("Build  \u{2298}"), "{text}");
+    }
+
+    /// The bolt is the warning a move into this column starts work, and the header says how much
+    /// of the board's budget is already spent.
+    #[test]
+    fn the_columns_and_the_header_say_what_the_board_is_running() {
+        let text = board(&view(), None, NOW);
+        assert!(text.contains("Ready (2) \u{26a1}"), "{text}");
+        assert!(text.contains("Todo (1)\n"), "{text}");
+        let header = text.lines().nth(1).expect("the header is the second line");
+        assert_eq!(
+            header, "backend: local \u{b7} 2/2 working \u{b7} 1 needs you",
+            "{text}"
+        );
+    }
+
+    /// A board running nothing prints the header it always printed.
+    #[test]
+    fn a_board_with_no_runs_keeps_its_header_and_its_rows() {
+        let mut view = view();
+        view.live_runs.clear();
+        for card in &mut view.cards {
+            card.runs.clear();
+            card.pending_run = None;
+        }
+        let text = board(&view, None, NOW);
+        assert_eq!(text.lines().nth(1), Some("backend: local"), "{text}");
+        assert!(
+            !text.contains('\u{25cf}') && !text.contains('\u{2026}'),
+            "{text}"
+        );
+    }
+
+    /// `board list` carries the same two counts the daemon summarises.
+    #[test]
+    fn the_board_table_carries_the_working_and_attention_counts() {
+        let view = view();
+        let summary = fleet_core::board::summarize(
+            &view.board,
+            &view.cards,
+            &view.live_runs,
+            &rfc3339_utc(NOW),
+        );
+        let text = boards(&[summary]);
+        let header = text.lines().next().expect("a header");
+        assert!(header.ends_with("CONFLICTS  WORKING  NEEDS YOU"), "{text}");
+        let row = text.lines().nth(1).expect("one board");
+        let counts: Vec<&str> = row.split_whitespace().rev().take(2).collect();
+        assert_eq!(counts, ["1", "2"], "{text}");
+    }
+
+    /// The run line is the same ten fields wherever it is printed, and the live join names the
+    /// state the daemon would use.
+    #[test]
+    fn a_run_line_names_its_column_state_spend_and_thread() {
+        let view = view();
+        let live = card_runs(&view.board, &view.cards[1], &view.live_runs, Some(NOW));
+        let fields: Vec<&str> = live.split('\t').collect();
+        assert_eq!(fields.len(), 10, "{live}");
+        assert_eq!(fields[1], "Ready", "{live}");
+        assert_eq!(fields[2], "blocked", "{live}");
+        assert_eq!(fields[3], "codex", "{live}");
+        assert_eq!(fields[5], "\u{2014}", "{live}");
+        assert_eq!(fields[6], "2m 00s", "{live}");
+        // A surface with no clock prints no duration for a run that has not ended, rather than
+        // counting from the epoch.
+        let clockless = card_runs(&view.board, &view.cards[1], &[], None);
+        assert_eq!(
+            clockless.split('\t').nth(6),
+            Some("\u{2014}"),
+            "{clockless}"
+        );
+        assert_eq!(clockless.split('\t').nth(2), Some("running"), "{clockless}");
+
+        let ended = card_runs(&view.board, &view.cards[2], &[], Some(NOW));
+        let fields: Vec<&str> = ended.split('\t').collect();
+        assert_eq!(fields[2], "needs you", "{ended}");
+        assert_eq!(fields[6], "2m 30s", "{ended}");
+        assert_eq!(fields[7], "1200", "{ended}");
+        assert_eq!(fields[8], "$0.50", "{ended}");
+    }
+
+    /// The card report gains the workflow sections, and a field the card did not set is named as
+    /// the column's.
+    #[test]
+    fn a_card_report_names_its_agent_its_links_and_its_runs() {
+        let view = view();
+        let text = board_card(&view.board, &view.cards, &view.cards[1]);
+        assert!(
+            text.contains(
+                "Agent: codex (column default), model gpt-5 (column default), effort low"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("Blocked by: FLT-1"), "{text}");
+        assert!(!text.contains("\u{2298}"), "{text}");
+        assert!(text.contains("Blocks: FLT-3"), "{text}");
+        assert!(
+            text.contains("\nRuns\n00000000-0000-4000-8000-000000000001\tReady"),
+            "{text}"
+        );
+
+        // The card waiting on this one says what it is waiting for, and how loudly.
+        let blocked = board_card(&view.board, &view.cards, &view.cards[2]);
+        assert!(
+            blocked.contains("Blocked by: FLT-2  \u{2298} 1 waiting"),
+            "{blocked}"
+        );
+    }
+
+    /// A board nobody has automated prints the report it printed before automation existed.
+    #[test]
+    fn a_card_with_no_workflow_grows_no_sections() {
+        let view = view();
+        let plain = view.cards[0].clone();
+        let text = board_card(&view.board, std::slice::from_ref(&plain), &plain);
+        for absent in ["Agent:", "Blocked by:", "Blocks:", "\nRuns\n"] {
+            assert!(!text.contains(absent), "{absent:?} in {text}");
+        }
+    }
+
+    /// The ninth field says which surface is waiting on the child.
+    #[test]
+    fn a_delegation_line_names_its_caller() {
+        let thread: Delegation = serde_json::from_value(json!({
+            "id": "00000000-0000-4000-8000-000000000003",
+            "caller": "00000000-0000-4000-8000-000000000001",
+            "callerTurn": "00000000-0000-4000-8000-000000000004",
+            "callerItem": "00000000-0000-4000-8000-000000000005",
+            "child": "00000000-0000-4000-8000-000000000002",
+            "provider": "codex", "depth": 1, "brief": "b", "expectation": "e",
+            "status": "running", "delivery": {"type": "pending"},
+            "created": "2026-09-18T12:00:00Z"
+        }))
+        .expect("the fixture is a delegation");
+        let line = subagents_with_keys(
+            std::slice::from_ref(&thread),
+            SystemTime::UNIX_EPOCH,
+            &CallerKeys::new(),
+        );
+        assert!(
+            line.ends_with("\tpending\tthread 00000000-0000-4000-8000-000000000001"),
+            "{line}"
+        );
+
+        let card: Delegation = serde_json::from_value(json!({
+            "id": "00000000-0000-4000-8000-000000000003",
+            "caller": {"board": "work", "card": "card-2"},
+            "child": "00000000-0000-4000-8000-000000000002",
+            "provider": "codex", "depth": 1, "brief": "b", "expectation": "e",
+            "status": "running", "delivery": {"type": "pending"},
+            "created": "2026-09-18T12:00:00Z"
+        }))
+        .expect("the fixture is a delegation");
+        // With no key resolved the raw card id is still a selector every board verb accepts.
+        let line = subagents_with_keys(
+            std::slice::from_ref(&card),
+            SystemTime::UNIX_EPOCH,
+            &CallerKeys::new(),
+        );
+        assert!(line.ends_with("\tcard card-2"), "{line}");
+
+        let keys = CallerKeys::from([("card-2".parse().expect("a card id"), "FLT-2".to_owned())]);
+        let line = subagents_with_keys(std::slice::from_ref(&card), SystemTime::UNIX_EPOCH, &keys);
+        assert!(line.ends_with("\tcard FLT-2"), "{line}");
+        assert!(
+            subagent_status_with_keys(&card, SystemTime::UNIX_EPOCH, &keys)
+                .lines()
+                .next()
+                .is_some_and(|first| first.ends_with("\tcard FLT-2")),
+            "the status report opens with the list line"
+        );
+    }
+
+    /// The stamp the run counts are measured against is the epoch clock the header already had.
+    #[test]
+    fn the_board_clock_round_trips_through_rfc_3339() {
+        assert_eq!(rfc3339_utc(0), "1970-01-01T00:00:00Z");
+        assert_eq!(rfc3339_utc(NOW), "2026-09-06T12:00:00Z");
+        for epoch in [0, 1, 86_399, 951_782_400, NOW, 4_102_444_800] {
+            assert_eq!(epoch_secs(&rfc3339_utc(epoch)), Some(epoch), "{epoch}");
+        }
+    }
 }

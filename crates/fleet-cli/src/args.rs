@@ -31,6 +31,10 @@ pub struct Cli {
 }
 
 /// A daemon-backed Fleet operation.
+// `board card edit` carries the widest flag set in the CLI, so `Board` is several hundred bytes
+// wider than its siblings. One of these is parsed once per process and consumed immediately;
+// boxing it would buy nothing and cost every match site a dereference.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum Command {
     /// Manage configured remote machines.
@@ -1096,8 +1100,151 @@ pub enum BoardCommand {
         #[arg(long)]
         full: bool,
     },
+    /// Inspect and edit the board's columns and the automation they carry.
+    Columns(BoardColumnsArgs),
     /// Create, inspect, and update cards.
     Card(BoardCardArgs),
+}
+
+/// Nested column operations.
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct BoardColumnsArgs {
+    /// Column operation; without one the columns are listed.
+    #[command(subcommand)]
+    pub command: Option<BoardColumnsCommand>,
+}
+
+/// Operations accepted by `fleet board columns`.
+///
+/// Every verb is a read-modify-write of the whole column vector and sends one `UpdateBoard`:
+/// a concurrent editor loses, exactly as `board set` already behaves.
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum BoardColumnsCommand {
+    /// Add a column.
+    Add {
+        /// Column name.
+        name: String,
+        /// Column ID; defaults to a slug of the name.
+        #[arg(long)]
+        id: Option<String>,
+        /// Category the backend sorts and reports the column under.
+        #[arg(long, value_enum)]
+        category: Option<BoardStatusCategory>,
+        /// Insert after this column ID or name.
+        #[arg(long, conflicts_with = "before")]
+        after: Option<String>,
+        /// Insert before this column ID or name.
+        #[arg(long)]
+        before: Option<String>,
+    },
+    /// Edit a column and the automation it carries.
+    Edit {
+        /// Column ID or name (case-insensitive).
+        id: String,
+        /// Replacement name.
+        #[arg(long)]
+        name: Option<String>,
+        /// Replacement category.
+        #[arg(long, value_enum)]
+        category: Option<BoardStatusCategory>,
+        /// Replacement color, as the backend spells it.
+        #[arg(long)]
+        color: Option<String>,
+        /// What entering the column starts: `none`, `prompt`, or `skill:<name>[:<args>]`.
+        #[arg(long = "on-enter", value_name = "ACTION")]
+        on_enter: Option<String>,
+        /// Provider the column's runs launch.
+        #[arg(long, value_enum)]
+        provider: Option<AgentChoice>,
+        /// Provider-native model for the column's runs.
+        #[arg(long)]
+        model: Option<String>,
+        /// Provider-native reasoning effort for the column's runs.
+        ///
+        /// Free text, never an enum: the legal ladder is per provider and per model, so Fleet
+        /// passes whatever is given straight through.
+        #[arg(long)]
+        effort: Option<String>,
+        /// Permission mode the column's runs start in.
+        #[arg(long, value_enum)]
+        mode: Option<AgentModeChoice>,
+        /// Markdown prepended to every brief this column starts; `{key}` and `{title}` are
+        /// substituted.
+        #[arg(long, conflicts_with = "instructions_file")]
+        instructions: Option<String>,
+        /// Read the instructions from this file instead.
+        #[arg(long)]
+        instructions_file: Option<std::path::PathBuf>,
+        /// Completion criteria printed in the brief's footer.
+        #[arg(long = "expect")]
+        expect: Option<String>,
+        /// Column a succeeding run moves the card into.
+        #[arg(long = "on-success", conflicts_with = "no_on_success")]
+        on_success: Option<String>,
+        /// Clear the success route.
+        #[arg(long = "no-on-success")]
+        no_on_success: bool,
+        /// Column a card here moves into once nothing blocks it.
+        #[arg(long = "when-unblocked", conflicts_with = "no_when_unblocked")]
+        when_unblocked: Option<String>,
+        /// Clear the unblocked route.
+        #[arg(long = "no-when-unblocked")]
+        no_when_unblocked: bool,
+        /// Environment variable for the column's runs, repeatable: `--env KEY=VALUE`.
+        #[arg(long = "env", value_name = "KEY=VALUE")]
+        env: Vec<String>,
+        /// Clear the column's environment before applying any `--env`.
+        #[arg(long)]
+        clear_env: bool,
+    },
+    /// Move a column; one of `--after` and `--before` is required.
+    Move {
+        /// Column ID or name (case-insensitive).
+        id: String,
+        /// Place after this column ID or name.
+        #[arg(long, conflicts_with = "before", required_unless_present = "before")]
+        after: Option<String>,
+        /// Place before this column ID or name.
+        #[arg(long)]
+        before: Option<String>,
+    },
+    /// Remove a column.
+    Remove {
+        /// Column ID or name (case-insensitive).
+        id: String,
+        /// Move the column's cards into this column first; without it the daemon refuses to
+        /// remove a column a card still uses.
+        #[arg(long, value_name = "ID")]
+        move_cards_to: Option<String>,
+    },
+    /// Add the columns a named preset expects, leaving existing ones untouched.
+    Preset {
+        /// Preset to apply.
+        #[arg(value_enum)]
+        which: BoardColumnsPreset,
+    },
+}
+
+/// Column categories with the contract's snake_case CLI spelling.
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub enum BoardStatusCategory {
+    /// Not yet planned.
+    Backlog,
+    /// Planned, not started.
+    Unstarted,
+    /// In progress.
+    Started,
+    /// Finished.
+    Completed,
+    /// Abandoned.
+    Canceled,
+}
+
+/// Column presets `fleet board columns preset` applies.
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub enum BoardColumnsPreset {
+    /// The workflow columns: the automation lane a card travels from Ready to Done.
+    Workflow,
 }
 
 /// Splits one `--setting key=value` pair, leaving the value untouched for
@@ -1160,6 +1307,9 @@ pub struct BoardSetArgs {
     /// Branch name template for worktrees started from a card, e.g. `{key}-{slug}`.
     #[arg(long)]
     pub branch_template: Option<String>,
+    /// Live card runs allowed at once across this board; defaults to 1.
+    #[arg(long)]
+    pub max_live_runs: Option<u32>,
     /// Label to add to the board; repeat for multiple labels.
     #[arg(long = "add-label")]
     pub add_labels: Vec<String>,
@@ -1230,6 +1380,12 @@ pub enum BoardCardCommand {
         /// Initial card properties.
         #[command(flatten)]
         fields: BoardCardFields,
+        /// Card that must finish before this one may advance; repeat for more.
+        #[arg(long = "blocked-by", value_name = "KEY")]
+        blocked_by: Vec<String>,
+        /// Card this one blocks; repeat for more. Sugar for editing that card's `blocked-by`.
+        #[arg(long = "blocks", value_name = "KEY")]
+        blocks: Vec<String>,
     },
     /// Show card properties, description, and comments.
     Show {
@@ -1249,6 +1405,21 @@ pub enum BoardCardCommand {
         /// Archive (`--archive`, `--archive true`) or restore (`--archive false`) the card.
         #[arg(long, num_args = 0..=1, default_missing_value = "true")]
         archive: Option<bool>,
+        /// Card to add to this card's blockers; repeat for more.
+        #[arg(long = "add-blocked-by", value_name = "KEY")]
+        add_blocked_by: Vec<String>,
+        /// Card to remove from this card's blockers; repeat for more.
+        #[arg(long = "remove-blocked-by", value_name = "KEY")]
+        remove_blocked_by: Vec<String>,
+        /// Clear this card's blockers.
+        #[arg(long, conflicts_with_all = ["add_blocked_by", "remove_blocked_by"])]
+        clear_blocked_by: bool,
+        /// Card this one blocks; repeat for more. Sugar for editing that card's `blocked-by`.
+        #[arg(long = "add-blocks", value_name = "KEY")]
+        add_blocks: Vec<String>,
+        /// Card this one stops blocking; repeat for more.
+        #[arg(long = "remove-blocks", value_name = "KEY")]
+        remove_blocks: Vec<String>,
     },
     /// Move a card into a status column.
     Move {
@@ -1259,6 +1430,45 @@ pub enum BoardCardCommand {
         /// Position in the target column; defaults to the end.
         #[arg(long)]
         index: Option<usize>,
+        /// Cancel the card's live run instead of refusing the move.
+        #[arg(long)]
+        cancel_run: bool,
+    },
+    /// Start a run for a card sitting in an action column.
+    Run {
+        /// Display key, local key, or card ID (case-insensitive).
+        key: String,
+    },
+    /// Cancel the card's live run.
+    Cancel {
+        /// Display key, local key, or card ID (case-insensitive).
+        key: String,
+    },
+    /// List the card's runs, newest last.
+    Runs {
+        /// Display key, local key, or card ID (case-insensitive).
+        key: String,
+    },
+    /// Print the thread the card's run is talking in.
+    ///
+    /// The live run's thread, or the newest run's when none is live.
+    Attach {
+        /// Display key, local key, or card ID (case-insensitive).
+        key: String,
+    },
+    /// Wait for the card's newest run to finish.
+    ///
+    /// Exits 0 once that run is terminal, and 2 when it is still live or none started within
+    /// the timeout — the pair an orchestrator scripts against.
+    Wait {
+        /// Display key, local key, or card ID (case-insensitive).
+        key: String,
+        /// Maximum wait in seconds; defaults to 540.
+        ///
+        /// 540 is a default, not a ceiling: it sits under the Claude Code shell-tool timeout so
+        /// the common caller outlives its own wait.
+        #[arg(long, default_value_t = 540)]
+        timeout: u64,
     },
     /// Add a comment.
     Comment {
@@ -1302,6 +1512,9 @@ pub struct BoardCardFields {
     /// Markdown description.
     #[arg(long)]
     pub desc: Option<String>,
+    /// Read the description from this file instead.
+    #[arg(long, conflicts_with = "desc")]
+    pub desc_file: Option<std::path::PathBuf>,
     /// Status ID or name.
     #[arg(long)]
     pub status: Option<String>,
@@ -1338,6 +1551,21 @@ pub struct BoardCardFields {
     /// Clear repo.
     #[arg(long, conflicts_with = "repo")]
     pub clear_repo: bool,
+    /// Provider this card's runs launch; without it the column's provider is used.
+    #[arg(long, value_enum)]
+    pub provider: Option<AgentChoice>,
+    /// Provider-native model for this card's runs.
+    #[arg(long)]
+    pub model: Option<String>,
+    /// Provider-native reasoning effort for this card's runs.
+    ///
+    /// Free text, never an enum: the legal ladder is per provider and per model, so Fleet
+    /// passes whatever is given straight through.
+    #[arg(long)]
+    pub effort: Option<String>,
+    /// Clear the card's agent preferences, leaving the column's.
+    #[arg(long, conflicts_with_all = ["provider", "model", "effort"])]
+    pub clear_agent: bool,
 }
 
 impl BoardCardFields {
@@ -1350,6 +1578,7 @@ impl BoardCardFields {
             () if self.clear_estimate => Some("--clear-estimate"),
             () if self.clear_due => Some("--clear-due"),
             () if self.clear_repo => Some("--clear-repo"),
+            () if self.clear_agent => Some("--clear-agent"),
             () => None,
         }
     }

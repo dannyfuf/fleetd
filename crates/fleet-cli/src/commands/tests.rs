@@ -145,6 +145,16 @@ fn watch_session_prefers_explicit_and_requires_a_valid_fallback() {
 
 type ServerTransport = Framed<tokio::net::UnixStream, FleetCodec<serde_json::Value, Request>>;
 
+/// The calling thread of a fixture the tests build thread-called, for the `--caller` flag and the
+/// thread-shaped request fields the CLI still speaks in.
+fn caller_thread(delegation: &fleet_core::agents::Delegation) -> fleet_core::agents::ThreadId {
+    delegation
+        .caller
+        .thread()
+        .copied()
+        .expect("a thread-called delegation fixture")
+}
+
 fn sample_watch() -> fleet_core::watches::Watch {
     fleet_core::watches::Watch {
         id: fleet_core::watches::WatchId(42),
@@ -1339,7 +1349,7 @@ async fn subagent_verbs_use_typed_requests_and_render_human_and_json_output() {
         assert_eq!(
             request.body,
             RequestBody::DelegationRun {
-                caller: expected.caller,
+                caller: caller_thread(&expected),
                 provider: AgentKind::Codex,
                 brief: "inspect the parser".to_owned(),
                 expectation: "tests pass".to_owned(),
@@ -1444,7 +1454,7 @@ async fn subagent_verbs_use_typed_requests_and_render_human_and_json_output() {
         assert_eq!(
             request.body,
             RequestBody::DelegationList {
-                caller: Some(expected.caller)
+                caller: Some(caller_thread(&expected))
             }
         );
         send_result(
@@ -1493,7 +1503,7 @@ async fn subagent_verbs_use_typed_requests_and_render_human_and_json_output() {
             eager: true,
             // The environment below is the child's (its session, delegation and token), so the
             // caller is named explicitly, exactly as a shell without FLEET_SESSION would.
-            caller: Some(delegation.caller),
+            caller: Some(caller_thread(&delegation)),
             json: false,
         }),
         &environment,
@@ -1600,7 +1610,7 @@ async fn subagent_verbs_use_typed_requests_and_render_human_and_json_output() {
     assert_eq!(
         status.text,
         format!(
-            "{id}\tsucceeded\tcodex\t{child}\t14m 02s\t-\t-\tpending\n\
+            "{id}\tsucceeded\tcodex\t{child}\t14m 02s\t-\t-\tpending\tthread {caller}\n\
              \n\
              brief:\n\
              inspect the parser\n\
@@ -1610,14 +1620,15 @@ async fn subagent_verbs_use_typed_requests_and_render_human_and_json_output() {
              \n\
              verified",
             id = delegation.id,
-            child = delegation.child
+            child = delegation.child,
+            caller = delegation.caller.thread().expect("a thread caller")
         )
     );
 
     let listed = subagents::execute(
         &client,
         SubagentCommand::List(SubagentListArgs {
-            caller: Some(delegation.caller),
+            caller: Some(caller_thread(&delegation)),
             json: true,
         }),
         &environment,
@@ -1774,7 +1785,7 @@ async fn subagent_run_sends_an_effort_without_a_model_as_the_default_model_senti
             title: None,
             env: Vec::new(),
             eager: false,
-            caller: Some(delegation.caller),
+            caller: Some(caller_thread(&delegation)),
             json: false,
         }),
         &subagents::Environment::default(),
@@ -1892,8 +1903,10 @@ async fn a_status_prints_the_report_body_a_wait_prints_and_adds_the_childs_spend
     assert_eq!(
         listed.text,
         format!(
-            "{}\tsucceeded\tcodex\t{}\t14m 02s\t11040\t$0.42\tpending",
-            delegation.id, delegation.child
+            "{}\tsucceeded\tcodex\t{}\t14m 02s\t11040\t$0.42\tpending\tthread {}",
+            delegation.id,
+            delegation.child,
+            delegation.caller.thread().expect("a thread caller")
         )
     );
     assert!(!listed.text.contains("verified"), "{}", listed.text);
@@ -1907,8 +1920,12 @@ fn an_unknown_spend_prints_a_dash_rather_than_a_zero() {
 
     let mut delegation = sample_delegation();
     assert_eq!(delegation.usage, None);
-    let line = human::subagents(std::slice::from_ref(&delegation), SystemTime::now());
-    assert!(line.ends_with("\t14m 02s\t-\t-\tpending"), "{line}");
+    let line = human::subagents_with_keys(
+        std::slice::from_ref(&delegation),
+        SystemTime::now(),
+        &human::CallerKeys::new(),
+    );
+    assert!(line.contains("\t14m 02s\t-\t-\tpending\t"), "{line}");
 
     // A provider that reports tokens but no cost keeps the count and dashes only the money.
     delegation.usage = Some(fleet_core::agents::DelegationUsage {
@@ -1919,11 +1936,16 @@ fn an_unknown_spend_prints_a_dash_rather_than_a_zero() {
         cost_usd: None,
         context_pct: 0.0,
     });
-    let line = human::subagents(std::slice::from_ref(&delegation), SystemTime::now());
-    assert!(line.ends_with("\t14m 02s\t7\t-\tpending"), "{line}");
+    let line = human::subagents_with_keys(
+        std::slice::from_ref(&delegation),
+        SystemTime::now(),
+        &human::CallerKeys::new(),
+    );
+    assert!(line.contains("\t14m 02s\t7\t-\tpending\t"), "{line}");
     // …and its `status` still prints a usage line, with no `$` tail, because a provider that
     // reports no cost is not a provider that reported a cost of zero.
-    let status = human::subagent_status(&delegation, SystemTime::now());
+    let status =
+        human::subagent_status_with_keys(&delegation, SystemTime::now(), &human::CallerKeys::new());
     assert!(
         status.contains("usage: 7 tokens, 0 in, 0 out, 0 cache read, 0 cache write, context 0%"),
         "{status}"
@@ -2004,7 +2026,7 @@ async fn run_wait_and_list_elide_the_brief_that_status_and_cancel_keep_whole() {
                 title: None,
                 env: Vec::new(),
                 eager: false,
-                caller: Some(delegation.caller),
+                caller: Some(caller_thread(&delegation)),
                 json: true,
             }),
             &environment,
@@ -2131,7 +2153,7 @@ async fn subagent_run_refuses_a_reserved_env_entry_before_sending_anything() {
             title: None,
             env: vec!["FLEET_DELEGATION_TOKEN=forged".to_owned()],
             eager: false,
-            caller: Some(delegation.caller),
+            caller: Some(caller_thread(&delegation)),
             json: false,
         }),
         &subagents::Environment::default(),
@@ -2674,5 +2696,59 @@ async fn create_uses_default_remote_host_without_ensuring_the_repo_locally() {
         serde_json::from_str::<serde_json::Value>(&output.text).unwrap(),
         serde_json::json!({ "protocol": 1, "created": true, "worktree": expected })
     );
+    server.await.unwrap();
+}
+
+#[test]
+fn a_delegated_child_may_not_start_a_daemon_but_a_plain_shell_may() {
+    assert_eq!(daemon_access(None), DaemonAccess::Autostart);
+    assert_eq!(
+        daemon_access(Some("9f2b2a4e-0b31-4f3f-8a4a-4c0e5f6f1f10")),
+        DaemonAccess::ConnectOnly
+    );
+}
+
+/// The leak this rule exists for: a scripted child that outlived its harness daemon ran
+/// `fleet subagent complete`, `ensure_daemon` started a replacement, and that daemon then held its
+/// run directory open forever because nothing was left to stop it.
+#[tokio::test]
+async fn connect_only_refuses_instead_of_starting_a_daemon_for_a_delegated_child() {
+    let home = TempDir::new().unwrap();
+
+    let error = connect_daemon(home.path(), DaemonAccess::ConnectOnly)
+        .await
+        .expect_err("a delegated child must not reach a daemon that is not running");
+
+    assert_eq!(error.kind, ErrorKind::NotFound);
+    assert!(
+        error.message.contains("never starts one"),
+        "the refusal must say why: {}",
+        error.message
+    );
+    // `ensure_daemon` opens `logs/fleetd.out` before it spawns, so an absent one is proof that
+    // nothing was spawned — the assertion a leaked process cannot make about itself.
+    assert!(
+        !home.path().join("logs").exists(),
+        "no daemon may have been started"
+    );
+}
+
+#[tokio::test]
+async fn connect_only_still_reaches_a_daemon_that_is_running() {
+    let home = TempDir::new().unwrap();
+    let listener = bind(home.path()).await;
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut transport = Framed::new(socket, FleetCodec::new());
+        authenticate(&mut transport).await;
+        let ping = next_request(&mut transport).await;
+        assert_eq!(ping.body, RequestBody::DaemonPing);
+        send_result(&mut transport, ping.id, Ok(ResponseBody::Pong)).await;
+    });
+
+    connect_daemon(home.path(), DaemonAccess::ConnectOnly)
+        .await
+        .expect("a restarted daemon still takes the child's report");
+
     server.await.unwrap();
 }

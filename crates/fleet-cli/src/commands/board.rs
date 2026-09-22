@@ -1,8 +1,9 @@
-use super::{CommandOutput, unknown, validation, worktrees::parse_host};
+use super::{CommandOutput, subagents::read_text, unknown, validation, worktrees::parse_host};
 use crate::{
     args::{
-        BoardArgs, BoardCardCommand, BoardCardFields, BoardCommand, BoardConflictPolicy,
-        BoardCreateArgs, BoardPriority, BoardResolution, BoardSetArgs, BoardWorktreeSelector,
+        AgentChoice, BoardArgs, BoardCardCommand, BoardCardFields, BoardCommand,
+        BoardConflictPolicy, BoardCreateArgs, BoardPriority, BoardResolution, BoardSetArgs,
+        BoardWorktreeSelector,
     },
     envelope::{
         BoardBackendSchemaEnvelope, BoardBackendsEnvelope, BoardCardEnvelope, BoardEnvelope,
@@ -12,12 +13,13 @@ use crate::{
 };
 use fleet_client::Client;
 use fleet_core::{
-    agents::{AgentThreadSummary, ThreadId},
+    agents::{AgentKind, AgentThreadSummary, ThreadId},
     board::{
-        BackendDescriptor, BackendRef, Board, BoardPatch, BoardView, Card, CardDraft, CardPatch,
-        ConflictPolicy, ConflictResolution, Label, Priority, merge_settings, summarize, valid_date,
+        BackendDescriptor, BackendRef, Board, BoardPatch, BoardView, Card, CardAgentPrefs,
+        CardDraft, CardPatch, ConflictPolicy, ConflictResolution, Label, Priority, latest_run,
+        merge_settings, summarize, valid_date,
     },
-    ids::{BoardId, ContextId, JobId, LabelId, RepoId, SessionId, StatusId, WorktreeId},
+    ids::{BoardId, CardId, ContextId, JobId, LabelId, RepoId, SessionId, StatusId, WorktreeId},
     sessions::SessionKind,
 };
 use fleet_proto::{
@@ -26,6 +28,8 @@ use fleet_proto::{
     snapshot::Snapshot,
 };
 use std::time::Duration;
+
+mod columns;
 
 pub(super) async fn board(
     client: &Client,
@@ -74,6 +78,9 @@ pub(super) async fn board(
                 BoardCommand::Sync { wait, full } => {
                     sync(client, view.board.id, wait, full, json).await
                 }
+                BoardCommand::Columns(arguments) => {
+                    columns::run(client, &view, arguments, json).await
+                }
                 BoardCommand::Card(arguments) => {
                     card_command(client, &view, arguments.command, json).await
                 }
@@ -83,6 +90,55 @@ pub(super) async fn board(
             }
         }
     }
+}
+
+/// What `card attach` answers on a card that has never run at all.
+///
+/// The app's `A` says the same thing about the same card (`screens/board/runs.rs`): §5.5 asks
+/// the two surfaces to refuse in one another's words, and a person who reads one and then the
+/// other must not have to work out whether they mean the same thing.
+pub(crate) const NO_RUN: &str = "has no run";
+
+/// What it answers when the card *has* run, but no run of it ever reached a thread.
+///
+/// A start that never reached a provider is still a run on the card — the detail carries what
+/// went wrong — so it is not the same sentence as a card that never ran.
+pub(crate) const NO_THREAD: &str = "'s runs never reached a thread";
+
+/// The sentence a run gets when it tries to move the card it is running for.
+const SELF_MOVE_REFUSAL: &str =
+    "a run cannot move its own card; its report moves the card when it finishes";
+
+/// Refuses `card move` on the card this process is a run for, before any request goes out.
+///
+/// The card advances when the run's report lands, so a move from inside the run races the
+/// outcome and usually loses it. The check is advisory on purpose: it compares the raw key the
+/// caller typed against `FLEET_CARD`, so a run naming its own card by id, or by a key spelt
+/// another way, is not caught — and it costs no round trip, which is what lets it sit in front
+/// of every `card move` rather than only the ones a daemon would refuse anyway.
+///
+/// It is called from `run_command`, beside `subagents::validate_context` and before the daemon
+/// is ensured, for that last reason: a refusal that first autostarts a `fleetd` has paid for a
+/// round trip after all.
+pub(super) fn refuse_self_move(
+    command: &BoardCommand,
+    delegation: Option<&str>,
+    card: Option<&str>,
+) -> Result<(), ProtoError> {
+    let BoardCommand::Card(arguments) = command else {
+        return Ok(());
+    };
+    let BoardCardCommand::Move { key, .. } = &arguments.command else {
+        return Ok(());
+    };
+    // Outside a delegation `FLEET_CARD` is whatever the user's shell happens to export.
+    if delegation.is_none() {
+        return Ok(());
+    }
+    if card.is_some_and(|card| card.eq_ignore_ascii_case(key)) {
+        return Err(validation(SELF_MOVE_REFUSAL));
+    }
+    Ok(())
 }
 
 /// Prints every board the daemon knows, or the one `--board` names.
@@ -385,6 +441,7 @@ fn board_patch(board: &Board, arguments: BoardSetArgs) -> Result<BoardPatch, Pro
         || arguments.conflict_policy.is_some()
         || arguments.push_new_cards.is_some()
         || arguments.branch_template.is_some()
+        || arguments.max_live_runs.is_some()
     {
         let mut settings = board.settings.clone();
         if let Some(start) = arguments.start_on_worktree {
@@ -398,6 +455,11 @@ fn board_patch(board: &Board, arguments: BoardSetArgs) -> Result<BoardPatch, Pro
         }
         if let Some(push) = arguments.push_new_cards {
             settings.push_new_cards = push;
+        }
+        // The legal range is the daemon's to enforce: it owns the ceiling every surface shares,
+        // and a second copy of `1..=MAX_LIVE_RUNS_PER_BOARD` here would drift from it.
+        if let Some(limit) = arguments.max_live_runs {
+            settings.max_live_runs = Some(limit);
         }
         if let Some(policy) = arguments.conflict_policy {
             settings.conflict_policy = match policy {
@@ -483,11 +545,7 @@ fn board_show_output(
     json: bool,
 ) -> Result<CommandOutput, ProtoError> {
     let text = if json {
-        to_json(&BoardEnvelope {
-            protocol: PROTOCOL,
-            board: &view.board,
-            cards: &view.cards,
-        })?
+        to_json(&BoardEnvelope::from_view(view))?
     } else {
         human::board(view, backend, now_epoch())
     };
@@ -510,15 +568,56 @@ fn card_output(
     card: &Card,
     json: bool,
 ) -> Result<CommandOutput, ProtoError> {
+    card_output_headed(board, cards, card, None, json)
+}
+
+/// A card, under a line saying what the verb just did to it.
+///
+/// The headline is human-only: JSON carries the same facts on the card itself, and a script
+/// that has to parse a sentence to learn a run's id is a script the envelope failed.
+fn card_output_headed(
+    board: &Board,
+    cards: &[Card],
+    card: &Card,
+    headline: Option<&str>,
+    json: bool,
+) -> Result<CommandOutput, ProtoError> {
     let text = if json {
         to_json(&BoardCardEnvelope {
             protocol: PROTOCOL,
             card,
         })?
     } else {
-        human::board_card(board, cards, card)
+        let card = human::board_card(board, cards, card);
+        match headline {
+            Some(headline) => format!("{headline}\n{card}"),
+            None => card,
+        }
     };
     Ok(CommandOutput::success(text))
+}
+
+/// The card a verb was about, followed by every card its `--blocks` sugar changed.
+///
+/// JSON stays one card: `BoardCardEnvelope` is the shape every card verb answers in, and the
+/// linked cards are an effect of the verb rather than its subject.
+fn cards_output(
+    board: &Board,
+    cards: &[Card],
+    card: &Card,
+    linked: &[Card],
+    json: bool,
+) -> Result<CommandOutput, ProtoError> {
+    if json || linked.is_empty() {
+        return card_output(board, cards, card, json);
+    }
+    let mut sections = vec![human::board_card(board, cards, card)];
+    sections.extend(
+        linked
+            .iter()
+            .map(|card| human::board_card(board, cards, card)),
+    );
+    Ok(CommandOutput::success(sections.join("\n\n")))
 }
 
 fn resolve_card<'a>(view: &'a BoardView, key: &str) -> Result<&'a Card, ProtoError> {
@@ -600,6 +699,50 @@ fn resolve_labels(board: &Board, values: &[String]) -> Result<Vec<LabelId>, Prot
     Ok(labels)
 }
 
+/// The agent block the `--provider/--model/--effort/--clear-agent` flags ask for.
+///
+/// `None` leaves the card's block alone, `Some(None)` clears it, and `Some(Some(..))` carries
+/// only the flags that were given — `card edit` merges that onto what the card already asks for,
+/// because `apply_card_patch` replaces the block wholesale.
+fn agent_prefs(
+    provider: Option<AgentChoice>,
+    model: Option<String>,
+    effort: Option<String>,
+    clear: bool,
+) -> Option<Option<CardAgentPrefs>> {
+    if clear {
+        return Some(None);
+    }
+    let prefs = CardAgentPrefs {
+        provider: provider.map(|choice| match choice {
+            AgentChoice::Claude => AgentKind::Claude,
+            AgentChoice::Codex => AgentKind::Codex,
+        }),
+        model,
+        effort,
+    };
+    if prefs.is_empty() {
+        None
+    } else {
+        Some(Some(prefs))
+    }
+}
+
+/// `base` with every preference the flags named written over it.
+fn merge_agent(base: Option<&CardAgentPrefs>, flags: CardAgentPrefs) -> CardAgentPrefs {
+    let mut merged = base.cloned().unwrap_or_default();
+    if flags.provider.is_some() {
+        merged.provider = flags.provider;
+    }
+    if flags.model.is_some() {
+        merged.model = flags.model;
+    }
+    if flags.effort.is_some() {
+        merged.effort = flags.effort;
+    }
+    merged
+}
+
 fn priority(value: BoardPriority) -> Priority {
     match value {
         BoardPriority::Urgent => Priority::Urgent,
@@ -621,8 +764,20 @@ fn card_patch(board: &Board, fields: BoardCardFields) -> Result<CardPatch, Proto
             "`{due}` is not a valid YYYY-MM-DD date"
         )));
     }
+    // A description long enough to want a file is a description nobody wants to quote for a
+    // shell; `--desc-file` reads one the way `subagent run --brief-file` reads a brief.
+    let description = match fields.desc_file.as_deref() {
+        Some(path) => Some(read_text(Some(path), "description")?),
+        None => fields.desc,
+    };
     Ok(CardPatch {
-        description: fields.desc,
+        description,
+        agent: agent_prefs(
+            fields.provider,
+            fields.model,
+            fields.effort,
+            fields.clear_agent,
+        ),
         status_id: fields
             .status
             .as_deref()
@@ -667,9 +822,12 @@ async fn card_command(
     json: bool,
 ) -> Result<CommandOutput, ProtoError> {
     match command {
-        BoardCardCommand::New { title, fields } => {
-            card_new(client, view, title, fields, json).await
-        }
+        BoardCardCommand::New {
+            title,
+            fields,
+            blocked_by,
+            blocks,
+        } => card_new(client, view, title, fields, &blocked_by, &blocks, json).await,
         BoardCardCommand::Show { key } => {
             card_output(&view.board, &view.cards, resolve_card(view, &key)?, json)
         }
@@ -678,9 +836,38 @@ async fn card_command(
             title,
             fields,
             archive,
-        } => card_edit(client, view, &key, title, fields, archive, json).await,
-        BoardCardCommand::Move { key, status, index } => {
-            card_move(client, view, &key, &status, index, json).await
+            add_blocked_by,
+            remove_blocked_by,
+            clear_blocked_by,
+            add_blocks,
+            remove_blocks,
+        } => {
+            let edit = CardEdit {
+                title,
+                fields,
+                archive,
+                links: CardLinks {
+                    add_blocked_by,
+                    remove_blocked_by,
+                    clear_blocked_by,
+                    add_blocks,
+                    remove_blocks,
+                },
+            };
+            card_edit(client, view, &key, edit, json).await
+        }
+        BoardCardCommand::Move {
+            key,
+            status,
+            index,
+            cancel_run,
+        } => card_move(client, view, &key, &status, index, cancel_run, json).await,
+        BoardCardCommand::Run { key } => card_run(client, view, &key, json).await,
+        BoardCardCommand::Cancel { key } => card_run_cancel(client, view, &key, json).await,
+        BoardCardCommand::Runs { key } => card_runs(view, &key, json),
+        BoardCardCommand::Attach { key } => card_attach(view, &key, json),
+        BoardCardCommand::Wait { key, timeout } => {
+            card_wait(client, view, &key, timeout, json).await
         }
         BoardCardCommand::Comment { key, body } => {
             card_comment(client, view, &key, body, json).await
@@ -698,12 +885,31 @@ async fn card_command(
     }
 }
 
+/// Everything `card edit` was asked to change about one card.
+struct CardEdit {
+    title: Option<String>,
+    fields: BoardCardFields,
+    archive: Option<bool>,
+    links: CardLinks,
+}
+
+/// The five `card edit` link flags, so one argument carries what one concern asks for.
+struct CardLinks {
+    add_blocked_by: Vec<String>,
+    remove_blocked_by: Vec<String>,
+    clear_blocked_by: bool,
+    add_blocks: Vec<String>,
+    remove_blocks: Vec<String>,
+}
+
 /// Creates a card from the `card new` value flags.
 async fn card_new(
     client: &Client,
     view: &BoardView,
     title: String,
     fields: BoardCardFields,
+    blocked_by: &[String],
+    blocks: &[String],
     json: bool,
 ) -> Result<CommandOutput, ProtoError> {
     // The contract gives `new` the value flags only: a clear flag would be a silent no-op on
@@ -713,6 +919,11 @@ async fn card_new(
             "{flag} applies to `card edit`, not `card new`"
         )));
     }
+    // Both key lists are resolved before the card exists, so a typo costs nothing: a created
+    // card whose links were refused afterwards is the shape a chain-building script cannot
+    // recover from without reading the board back.
+    let blocked_by = resolve_cards(view, blocked_by)?;
+    let blocks = resolve_cards(view, blocks)?;
     let patch = card_patch(&view.board, fields)?;
     let card = client
         .create_card(
@@ -727,36 +938,154 @@ async fn card_new(
                 estimate: patch.estimate.flatten(),
                 due_date: patch.due_date.flatten(),
                 repo_id: patch.repo_id.flatten(),
+                agent: patch.agent.flatten(),
+                blocked_by: blocked_by.iter().map(|card| card.id.clone()).collect(),
                 ..CardDraft::default()
             },
         )
         .await?;
-    card_output(&view.board, &view.cards, &card, json)
+    let linked = link_blocks(client, &card.id, blocks, Vec::new()).await?;
+    // The view was read before this card existed, and every dependant printed below resolves
+    // its `Blocked by` against that list: without the new card in it the blocker prints as a
+    // raw id and `blocked()` — which calls a blocker it cannot find canceled or archived —
+    // marks the dependant amber for a card that was created a moment ago.
+    let cards: Vec<Card> = view
+        .cards
+        .iter()
+        .cloned()
+        .chain(std::iter::once(card.clone()))
+        .collect();
+    cards_output(&view.board, &cards, &card, &linked, json)
 }
 
-/// Applies the `card edit` field flags and `--archive` to one card.
+/// Applies the `card edit` field flags, `--archive` and the link flags to one card.
 async fn card_edit(
     client: &Client,
     view: &BoardView,
     key: &str,
-    title: Option<String>,
-    fields: BoardCardFields,
-    archive: Option<bool>,
+    edit: CardEdit,
     json: bool,
 ) -> Result<CommandOutput, ProtoError> {
+    let CardEdit {
+        title,
+        fields,
+        archive,
+        links,
+    } = edit;
     let card = resolve_card(view, key)?;
     let mut patch = card_patch(&view.board, fields)?;
     patch.title = title;
     patch.archived = archive;
+    // `apply_card_patch` replaces the agent block wholesale, so `--model` alone would drop the
+    // provider the card already asks for. The flags are merged onto the card here, exactly as
+    // the labels and the blocker set are.
+    patch.agent = match patch.agent {
+        Some(Some(flags)) => Some(Some(merge_agent(card.agent.as_ref(), flags))),
+        cleared_or_absent => cleared_or_absent,
+    };
+    patch.blocked_by = blockers(view, card, &links)?;
+    let add_blocks = resolve_cards(view, &links.add_blocks)?;
+    let remove_blocks = resolve_cards(view, &links.remove_blocks)?;
+    let changes_others = !add_blocks.is_empty() || !remove_blocks.is_empty();
     // `board set` refuses an empty patch for the same reason: a request that changes nothing
-    // still asks the daemon to rewrite the document.
-    if patch.is_empty() {
+    // still asks the daemon to rewrite the document. `--add-blocks` alone is not empty — it
+    // changes the cards it names, and this card's own document is untouched by design.
+    if patch.is_empty() && !changes_others {
         return Err(validation(
             "card edit requires at least one field or --archive",
         ));
     }
-    let card = client.update_card(card.id.clone(), patch).await?;
-    card_output(&view.board, &view.cards, &card, json)
+    let card_id = card.id.clone();
+    let edited = if patch.is_empty() {
+        card.clone()
+    } else {
+        client.update_card(card_id.clone(), patch).await?
+    };
+    let linked = link_blocks(client, &card_id, add_blocks, remove_blocks).await?;
+    cards_output(&view.board, &view.cards, &edited, &linked, json)
+}
+
+/// The whole `blocked_by` set the link flags ask for, or `None` when none of them was given.
+///
+/// The set is computed from the card the CLI already read rather than merged by the daemon:
+/// `CardPatch.blocked_by` is the whole vector, which is what makes `--clear-blocked-by` a patch
+/// like any other instead of a second request shape.
+fn blockers(
+    view: &BoardView,
+    card: &Card,
+    links: &CardLinks,
+) -> Result<Option<Vec<CardId>>, ProtoError> {
+    if links.clear_blocked_by {
+        return Ok(Some(Vec::new()));
+    }
+    if links.add_blocked_by.is_empty() && links.remove_blocked_by.is_empty() {
+        return Ok(None);
+    }
+    let mut blockers = card.blocked_by.clone();
+    for removed in resolve_cards(view, &links.remove_blocked_by)? {
+        blockers.retain(|id| id != &removed.id);
+    }
+    for added in resolve_cards(view, &links.add_blocked_by)? {
+        if !blockers.contains(&added.id) {
+            blockers.push(added.id.clone());
+        }
+    }
+    Ok(Some(blockers))
+}
+
+/// Writes the other direction of a link: one `UpdateCard` per card `--blocks` names.
+///
+/// A card stores only what blocks it, because that is the direction a person edits; `--blocks`
+/// is sugar that edits the named cards instead, and each one it changed comes back so the verb
+/// can print what it did to a card the caller never named.
+async fn link_blocks(
+    client: &Client,
+    card: &CardId,
+    add: Vec<&Card>,
+    remove: Vec<&Card>,
+) -> Result<Vec<Card>, ProtoError> {
+    let mut updated = Vec::new();
+    for (target, adding) in add
+        .into_iter()
+        .map(|target| (target, true))
+        .chain(remove.into_iter().map(|target| (target, false)))
+    {
+        let mut blockers = target.blocked_by.clone();
+        if adding {
+            if blockers.contains(card) {
+                continue;
+            }
+            blockers.push(card.clone());
+        } else if let Some(index) = blockers.iter().position(|id| id == card) {
+            blockers.remove(index);
+        } else {
+            continue;
+        }
+        updated.push(
+            client
+                .update_card(
+                    target.id.clone(),
+                    CardPatch {
+                        blocked_by: Some(blockers),
+                        ..CardPatch::default()
+                    },
+                )
+                .await?,
+        );
+    }
+    Ok(updated)
+}
+
+/// The cards `keys` name, in the order they were given and without repeats.
+fn resolve_cards<'a>(view: &'a BoardView, keys: &[String]) -> Result<Vec<&'a Card>, ProtoError> {
+    let mut cards: Vec<&Card> = Vec::new();
+    for key in keys {
+        let card = resolve_card(view, key)?;
+        if !cards.iter().any(|seen| seen.id == card.id) {
+            cards.push(card);
+        }
+    }
+    Ok(cards)
 }
 
 /// Moves a card to another column, optionally at a position inside it.
@@ -766,13 +1095,144 @@ async fn card_move(
     key: &str,
     status: &str,
     index: Option<usize>,
+    cancel_run: bool,
     json: bool,
 ) -> Result<CommandOutput, ProtoError> {
     let card = resolve_card(view, key)?;
+    // Without `--cancel-run` a card with a live run refuses to move, in the daemon's own words:
+    // it is the only surface that knows whether the run is still live by the time this lands.
     let card = client
-        .move_card(card.id.clone(), resolve_status(&view.board, status)?, index)
+        .move_card(
+            card.id.clone(),
+            resolve_status(&view.board, status)?,
+            index,
+            cancel_run,
+        )
         .await?;
     card_output(&view.board, &view.cards, &card, json)
+}
+
+/// Starts a run for a card sitting in an action column.
+async fn card_run(
+    client: &Client,
+    view: &BoardView,
+    key: &str,
+    json: bool,
+) -> Result<CommandOutput, ProtoError> {
+    let card = client
+        .card_run_start(resolve_card(view, key)?.id.clone())
+        .await?;
+    // A board already at its limit owes the card a run instead of starting one, and says so
+    // rather than printing a run line for a delegation that does not exist yet.
+    let headline = match latest_run(&card) {
+        Some(run) if run.is_live() => match &run.thread_id {
+            Some(thread) => format!("run {} started, thread {thread}", run.id),
+            // A run whose start failed before a thread existed is still a run on the card, and
+            // the card printed under this line carries what went wrong.
+            None => format!("run {} started", run.id),
+        },
+        _ if card.pending_run.is_some() => {
+            "run pending; it starts when a run slot frees".to_owned()
+        }
+        _ => "run requested".to_owned(),
+    };
+    card_output_headed(&view.board, &view.cards, &card, Some(&headline), json)
+}
+
+/// Cancels the card's live run, or the slot it is waiting for.
+async fn card_run_cancel(
+    client: &Client,
+    view: &BoardView,
+    key: &str,
+    json: bool,
+) -> Result<CommandOutput, ProtoError> {
+    // `{KEY} has no live run` is the daemon's refusal: only it knows whether the run this CLI
+    // read a moment ago is still live.
+    let card = client
+        .card_run_cancel(resolve_card(view, key)?.id.clone())
+        .await?;
+    card_output(&view.board, &view.cards, &card, json)
+}
+
+/// Lists the card's runs, one tab-separated line each.
+///
+/// The board view the dispatcher already read carries both the runs and the delegation join,
+/// so this verb takes no client: it sends nothing beyond the `GetBoard` every card verb pays.
+fn card_runs(view: &BoardView, key: &str, json: bool) -> Result<CommandOutput, ProtoError> {
+    let card = resolve_card(view, key)?;
+    if json {
+        return card_output(&view.board, &view.cards, card, json);
+    }
+    Ok(CommandOutput::success(human::card_runs(
+        &view.board,
+        card,
+        &view.live_runs,
+        Some(now_epoch()),
+    )))
+}
+
+/// Prints the thread the card's run is talking in.
+///
+/// Answered from the view as well; a thread id is a fact the card already carries.
+fn card_attach(view: &BoardView, key: &str, json: bool) -> Result<CommandOutput, ProtoError> {
+    let card = resolve_card(view, key)?;
+    if card.runs.is_empty() {
+        return Err(validation(format!(
+            "{} {NO_RUN}",
+            card.display_key(&view.board)
+        )));
+    }
+    // The live run is the one a person wants to watch; once it ends, the newest run is where
+    // the transcript of what happened lives.
+    let thread = card
+        .runs
+        .iter()
+        .rev()
+        .find(|run| run.is_live() && !run.failed_to_start())
+        .or_else(|| card.runs.iter().rev().find(|run| !run.failed_to_start()))
+        .and_then(|run| run.thread_id.as_ref())
+        .ok_or_else(|| validation(format!("{}{NO_THREAD}", card.display_key(&view.board))))?;
+    if json {
+        return card_output(&view.board, &view.cards, card, json);
+    }
+    Ok(CommandOutput::success(thread.to_string()))
+}
+
+/// Waits for the card's newest run to finish.
+///
+/// Exit 0 means the newest run is terminal and 2 means it is not — the pair an orchestrator
+/// scripts against, and the same pair `fleet subagent wait` answers with.
+async fn card_wait(
+    client: &Client,
+    view: &BoardView,
+    key: &str,
+    timeout: u64,
+    json: bool,
+) -> Result<CommandOutput, ProtoError> {
+    let card = client
+        .card_run_wait(
+            resolve_card(view, key)?.id.clone(),
+            timeout.saturating_mul(1_000),
+        )
+        .await?;
+    // No run at all is the timeout's other shape: a card whose column never started one is as
+    // unfinished as a card whose run is still going. A card the board still *owes* a run is the
+    // same shape again: its newest row is an older attempt, and answering 0 for it would tell a
+    // script that the run it is waiting for had finished.
+    let terminal =
+        card.pending_run.is_none() && latest_run(&card).is_some_and(|run| !run.is_live());
+    let text = if json {
+        to_json(&BoardCardEnvelope {
+            protocol: PROTOCOL,
+            card: &card,
+        })?
+    } else {
+        human::board_card(&view.board, &view.cards, &card)
+    };
+    Ok(CommandOutput::with_exit_code(
+        text,
+        if terminal { 0 } else { 2 },
+    ))
 }
 
 /// Appends a comment to a card.
@@ -887,9 +1347,12 @@ async fn sync(
     }
     let job = wait_for_sync(client, &job_id).await?;
     let view = client.get_board(board_id).await?;
-    // No live runs are joined into a CLI-side summary and this command has no RFC 3339 clock:
-    // it reads the sync counts, and the daemon's own summaries carry the run counts.
-    let summary = summarize(&view.board, &view.cards, &[], "");
+    let summary = summarize(
+        &view.board,
+        &view.cards,
+        &view.live_runs,
+        &human::rfc3339_utc(now_epoch()),
+    );
     match &job.status {
         JobStatus::Cancelled => {
             return Err(ProtoError {
