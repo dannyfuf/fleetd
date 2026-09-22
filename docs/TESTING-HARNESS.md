@@ -351,7 +351,14 @@ the scenario that hits them:
   attaches background and bar layers to every new output — that is not Fleet. The structured
   assertions still pass, because they never look at pixels; only the picture is wrong.
 
-  So the lane checks what it photographed. It keeps one capture of the isolated output taken in
+  So the lane asks the compositor first. Hyprland reports `LOCK` in every monitor's
+  `solitaryBlockedBy` while a session-lock surface owns the outputs, whoever drew it — a shell
+  that paints its own lock screen runs no separate lock process and leaves logind's `LockedHint`
+  unset, so neither is a usable signal. A run that starts locked warns once, and every `shot` taken
+  while the session is locked fails before anything is photographed, naming the lock. The pixel
+  check below is the second line, for whatever paints over an output without being a lock.
+
+  Then the lane checks what it photographed. It keeps one capture of the isolated output taken in
   the moment before the window is moved onto it, and every `shot` must differ from that reference
   by at least a third of the window's own area — Fleet is opaque chrome over most of the output,
   and a capture of a lock surface differs from it by nothing. A shot that does not clear the bar
@@ -686,10 +693,14 @@ still short of it, so no other document has to claim a capability that does not 
 - **The `virtual` lane needs an unlocked session, and one that does not paint over new
   outputs.** `grim -o` photographs the output, so a session lock surface or a shell that attaches
   background and bar layers to every created output is what lands in the file (§4). On the
-  Hyprland session this was last exercised on, both are true while the screen is locked: every
-  `shot` is refused by the empty-output guard with *"across the rectangle the window occupies,
-  only 0.0% differs … has to change at least 33.3%"*, and the structured half of the same
-  scenario passes. The guard is correct and must not be relaxed — it is what keeps a corpus of
+  Hyprland session this was last exercised on (Omarchy, whose quickshell draws the lock screen
+  itself after an idle timeout), both are true while the screen is locked: every `shot` is
+  refused — now up front by the session-lock check, *"the compositor session is locked …"*, and
+  before that check existed by the empty-output guard with *"only 0.0% differs … has to change at
+  least 33.3%"* — and the structured half of the same scenario passes. The lock check exists
+  because the pixel guard alone is not enough: when the reference is taken before the lock
+  surface reaches the freshly created output, two blank captures agree, and a photograph of the
+  lock screen then clears the bar and was filed as a passing `shot`. The guard is correct and must not be relaxed — it is what keeps a corpus of
   lock-screen photographs out of `shots/`. It compares the window's own rectangle rather than the
   whole output, because a locked session animates: an output-wide comparison answers "did
   anything move?" instead of "is Fleet here?", and let 7 of 41 lock screens through as evidence
