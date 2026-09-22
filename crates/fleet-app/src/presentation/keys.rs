@@ -1,4 +1,7 @@
 /// Action-name spelling shared with the Git UI: `hub::MoveDown` reads "move down".
+///
+/// A debugging aid only. Nothing a person reads may be spelled from an action's type name:
+/// labels come from [`crate::action_catalogue`], and its tests fail on a call outside this file.
 pub use fleet_lazygit::keymap::humanize;
 
 /// Prepared once per query; matching borrows each candidate without allocating a lowercase copy.

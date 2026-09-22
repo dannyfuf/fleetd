@@ -16,6 +16,32 @@ Every action here also has a visible control, and every control shows its key as
 from this table at runtime, never typed (ADR 0023). Controls are not focusable, so no binding
 below gains or loses a meaning because a button exists: the key stays the keyboard path.
 
+## Action catalogue — where labels live
+
+This file says which key runs which action; `crates/fleet-app/src/action_catalogue.rs` says what
+a person calls that action. Every action bound in `keymap::table()` has one hand-written entry
+there (`action_catalogue/entries.rs`):
+
+- **label** — a sentence-case verb phrase a newcomer understands: "Go to tab 1–9", "Allow the
+  agent's request once", "Delete the worktree safely". Never generated from the action's type
+  name; `humanize` survives only as a debugging aid, and a test fails if anything else calls it.
+- **short label** — the same, where space is tight (the `^s` command menu, a compact button).
+- **description** — one line saying what happens, including safety ("Asks first", "keeps running
+  in fleetd").
+- **place** — where the entry is filed: `Everywhere`, `Hub`, `Worktrees`, `Pull requests`,
+  `Board`, `Card`, `Terminal`, `Agent thread`, `Agent window`, `Scrolling`, `Jobs`, `Dialogs`,
+  `Editing text` or `fleetd`. Every key context above maps to one place.
+- **group** — the heading Help and the `^s` menu list it under (Tabs, Session, Terminal, Agents,
+  Panels, Navigation, Worktree, Card, …).
+- **destructive** and **palette** — whether it always goes through a confirm, and whether the
+  command palette offers it.
+
+A numbered range (`SelectTab1`–`9`, `SelectContext1`–`9`, `Choose1`–`5`) is one entry whose keys
+are shown as `1`–`9`. Help, the palette, the `^s` menu, buttons and tooltips read their words from
+the catalogue — `action_catalogue::info(action)` for one action, `for_place(place)` for what works
+somewhere — so a binding added below without an entry fails the tests rather than shipping
+unlabelled. Change a row here and its entry there in the same commit.
+
 ## Modes and key contexts
 
 | Mode | gpui key context | Entered by | Left by |

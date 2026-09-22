@@ -14,6 +14,7 @@ use fleet_ui_kit::{
 use gpui::{AnyElement, App, Entity, FocusHandle, Window, div};
 
 use crate::{
+    action_catalogue::{self, ActionInfo, Place},
     actions::{board, card_detail, fleet, palette as palette_actions},
     bridge::Bridge,
     dialogs::{
@@ -380,76 +381,21 @@ impl Command {
         Self::QuitDaemon,
     ];
 
-    /// The row label.
+    /// What the catalogue says about this command's action: its label, place and risk.
+    ///
+    /// The palette keeps its own enum for the data only it needs (the glyph and the validity
+    /// rule), and reads every word a person sees from `action_catalogue`, so the two lists
+    /// cannot drift. A test holds every command to a catalogue entry flagged `palette`.
     #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::BoardGoBoard => "Board: Go to board",
-            Self::BoardPrevColumn => "Board: Previous column",
-            Self::BoardNextColumn => "Board: Next column",
-            Self::BoardNextCard => "Board: Next card",
-            Self::BoardPrevCard => "Board: Previous card",
-            Self::BoardOpenCard => "Board: Open card",
-            Self::BoardNewCard => "Board: New card",
-            Self::BoardPickStatus => "Board: Status picker",
-            Self::BoardPickPriority => "Board: Priority picker",
-            Self::BoardPickAssignee => "Board: Assignee picker",
-            Self::BoardPickLabels => "Board: Labels picker",
-            Self::BoardPickEstimate => "Board: Estimate picker",
-            Self::BoardMovePrevColumn => "Board: Move card to previous column",
-            Self::BoardMoveNextColumn => "Board: Move card to next column",
-            Self::BoardCreateWorktree => "Board: Create worktree from card",
-            Self::BoardOpenWorktree => "Board: Open linked worktree",
-            Self::BoardSync => "Board: Sync",
-            Self::BoardFullSync => "Board: Full sync",
-            Self::BoardOpenRemote => "Board: Open remote issue",
-            Self::BoardDeleteCard => "Board: Delete card",
-            Self::BoardSettings => "Board: Settings",
-            Self::BoardReload => "Board: Reload",
-            Self::BoardFilter => "Board: Filter cards",
-            Self::BoardAttachRun => "Board: Attach run",
-            Self::BoardCancelRun => "Board: Cancel run",
-            Self::BoardRunNow => "Board: Run now",
-            Self::BoardPickBlockedBy => "Board: Blocked by",
-            Self::BoardPickAgent => "Board: Agent",
-            Self::BoardColumns => "Board: Columns",
-            Self::CardDetailClose => "Card detail: Close",
-            Self::CardDetailEditTitle => "Card detail: Edit title",
-            Self::CardDetailEditDescription => "Card detail: Edit description",
-            Self::CardDetailAddComment => "Card detail: Add comment",
-            Self::CardDetailNextProperty => "Card detail: Next property",
-            Self::CardDetailPrevProperty => "Card detail: Previous property",
-            Self::CardDetailEditProperty => "Card detail: Edit selected property",
-            Self::CardDetailCreateWorktree => "Card detail: Create worktree",
-            Self::CardDetailOpenRemote => "Card detail: Open remote issue",
-            Self::CardDetailKeepLocal => "Card detail: Resolve conflict: keep local",
-            Self::CardDetailTakeRemote => "Card detail: Resolve conflict: take remote",
-            Self::CardDetailSave => "Card detail: Save text edit",
+    pub fn info(self) -> &'static ActionInfo {
+        action_catalogue::info(self.action())
+            .expect("every palette command is catalogued (checked by the palette's tests)")
+    }
 
-            Self::WorkspaceOpenBoard => "Workspace: Open board tab",
-            Self::NewWorktree => "New worktree",
-            Self::CloneRepo => "Clone repo",
-            Self::DeleteWorktree => "Delete worktree",
-            Self::PruneWorktrees => "Prune worktrees",
-            Self::SleepSession => "Sleep session",
-            Self::KillSession => "Kill session",
-            Self::InspectWorktree => "Inspect worktree",
-            Self::MoveRepo => "Move repo to context",
-            Self::NewContext => "New context",
-            Self::EditContext => "Edit context",
-            Self::DeleteContext => "Delete context",
-            Self::PullRequests => "Pull requests",
-            Self::Worktrees => "Worktrees",
-            Self::JobsPanel => "Jobs panel",
-            Self::Settings => "Settings",
-            Self::Help => "Keymap",
-            Self::Refresh => "Refresh",
-            Self::UpdateFleet => "Update Fleet",
-            Self::OpenClaude => "Open Claude agent",
-            Self::OpenCodex => "Open Codex agent",
-            Self::Quit => "Quit Fleet",
-            Self::QuitDaemon => "Quit and stop fleetd",
-        }
+    /// The row label, from the catalogue.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        self.info().label
     }
 
     /// The glyph, the same one the action wears elsewhere.
@@ -520,18 +466,11 @@ impl Command {
         }
     }
 
-    /// Whether the row wears `triangle-alert`. It still goes through its confirm.
+    /// Whether the row wears `triangle-alert`, from the catalogue. It still goes through its
+    /// confirm.
     #[must_use]
-    pub const fn destructive(self) -> bool {
-        matches!(
-            self,
-            Self::BoardDeleteCard
-                | Self::DeleteWorktree
-                | Self::DeleteContext
-                | Self::PruneWorktrees
-                | Self::KillSession
-                | Self::QuitDaemon
-        )
+    pub fn destructive(self) -> bool {
+        self.info().destructive
     }
 
     /// The action whose bound key this row shows.
@@ -1136,10 +1075,13 @@ fn do_rows(
         if !command.valid_with(state, card) || !matcher.matches(command.label()) {
             continue;
         }
+        let info = command.info();
         rows.push(Entry {
             section: PaletteSectionKind::Do,
-            label: command.label().to_owned(),
-            detail: None,
+            label: info.label.to_owned(),
+            // The place tells apart the rows a board and an open card both offer ("Open the
+            // card's issue in the browser"), which carry the same label on purpose.
+            detail: (info.place != Place::Everywhere).then(|| info.place.title().to_owned()),
             secondary: None,
             trailing: None,
             key: key_for(command.action()),
@@ -1882,6 +1824,26 @@ mod tests {
     }
 
     #[test]
+    fn the_palette_offers_exactly_the_catalogue_s_palette_entries() {
+        let commands: std::collections::HashSet<&str> = Command::ALL
+            .iter()
+            .map(|command| command.action())
+            .collect();
+        let flagged: std::collections::HashSet<&str> = crate::action_catalogue::entries()
+            .iter()
+            .filter(|entry| entry.info.palette)
+            .map(crate::action_catalogue::Entry::action)
+            .collect();
+        assert_eq!(commands, flagged);
+        for command in Command::ALL {
+            let info = crate::action_catalogue::info(command.action())
+                .unwrap_or_else(|| panic!("{command:?}"));
+            assert_eq!(command.label(), info.label);
+            assert_eq!(command.destructive(), info.destructive);
+        }
+    }
+
+    #[test]
     fn destructive_commands_are_marked_and_are_the_ones_with_confirms() {
         assert!(Command::DeleteWorktree.destructive());
         assert!(Command::PruneWorktrees.destructive());
@@ -2385,7 +2347,7 @@ mod tests {
         assert!(!Command::KillSession.valid(&app));
     }
 
-    /// `Workspace: Open board tab` dispatches a `Workspace > Prefix` action, and that handler
+    /// `Open the worktree's board` dispatches a `Workspace > Prefix` action, and that handler
     /// exists only while the Workspace is showing a worktree session. Listed anywhere else the
     /// row would be one `Enter` that does nothing at all (§3.9 lists no row that cannot run).
     #[test]

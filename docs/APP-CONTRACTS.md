@@ -892,7 +892,7 @@ the worktree scope and then selects the session's `fleet://board` terminal — o
 with `NewTerminal { name: "board", command: "fleet://board", cwd }` and selects the reply, the
 same path `ctrl-s c` takes. The tab is created on demand and never written to `windows[]`, so
 pressing the key twice is one tab, selected twice. Its listener is the shell root's, because the
-palette's `Workspace: Open board tab` row dispatches the same action from a sibling branch of
+palette's `Open the worktree's board` row dispatches the same action from a sibling branch of
 the element tree.
 Only one request is in flight per generation. Context switches
 (including A → B → A), scope switches and link changes reject old responses. Errors remain
@@ -931,9 +931,9 @@ rows and returns the flat cursor to the top. `dialogs::focused_input` reports it
 focus reconciliation treats the palette exactly like a migrated dialog.
 
 `DialogHost.behind_palette` names the dialog the open palette replaced — the palette does not
-stack on a dialog, and a `Card detail:` palette row reopens that dialog instead of reseeding it
+stack on a dialog, and a card-detail palette row reopens that dialog instead of reseeding it
 over the text the user already typed. `:` is therefore bound in `Dialog > CardDetail` as well as
-in `Hub`: without a way in from the detail, `Card detail: Close` and `Card detail: Save text edit`
+in `Hub`: without a way in from the detail, the `Close the card` and `Save the edit` rows
 are rows no state could ever list and the whole `behind_palette` path is unreachable. The added fields are all local editing state; the BOARD §8
 fields keep their names and meanings. `DialogHost.card_detail_input` is the **one** live editor
 used by the three text surfaces (title, description, comment), because at most one is open.
@@ -947,7 +947,8 @@ Opening a picker from detail carries its card ID, independently of the board cur
 Applying or cancelling returns to the existing detail draft without reseeding it.
 Other dialog openings seed fresh drafts.
 
-Every BOARD §8 command has a palette `Command` variant, label and action dispatch.
+Every BOARD §8 command has a palette `Command` variant and action dispatch; its label comes from
+the action catalogue (`KEYMAP.md` § *Action catalogue*).
 The exact action names are listed in `KEYMAP.md`; the namespaces are `board` and
 `card_detail`. `Shell::with_actions` registers every action. Board handlers call
 the corresponding snake_case free function in `screens::board`; detail handlers

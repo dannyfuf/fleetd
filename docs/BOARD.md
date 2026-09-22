@@ -1264,7 +1264,8 @@ Property rows in the card detail reuse `KeyValueList`/`FactRow`; pickers reuse
 | `K` / `R` | Dialog > CardDetail | resolve conflict keep-local / take-remote |
 | `ctrl-s` | Dialog > CardDetail | save current text edit |
 
-Palette commands mirror every row above (`Board: New card`, `Board: Sync`, …).
+Palette commands mirror every row above, under their action-catalogue labels (`New card`,
+`Sync with the tracker`, …; `KEYMAP.md` § *Action catalogue*).
 
 ### Integrated implementation decisions
 

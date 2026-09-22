@@ -365,7 +365,7 @@ App (generic, no Jira strings in `fleet-app`):
 - Header shows backend label (from descriptors) instead of the raw kind. Descriptors are fetched
   once per connection on **board render** (the header needs the label too), not on dialog open; a
   dialog already seeded adopts a late schema.
-- Full sync: the palette gets "Board: Full sync" issuing `SyncBoard { full: true }`. The palette's
+- Full sync: the palette gets "Sync everything again" issuing `SyncBoard { full: true }`. The palette's
   `every_command_has_a_label_and_a_bound_key` invariant refuses a keyless command, so it is backed
   by a real action `board::FullSync` bound to `F` in `Hub > Board` (in `docs/KEYMAP.md`) rather
   than being CLI-only.

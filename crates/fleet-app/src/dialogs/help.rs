@@ -9,10 +9,11 @@ use gpui::{
 };
 
 use crate::{
+    action_catalogue,
     actions::dialog,
     dialogs::{notify, root},
     keymap,
-    presentation::{age_secs, humanize, now_unix, pretty_keys},
+    presentation::{age_secs, now_unix, pretty_keys},
     state::{AppState, Screen},
 };
 
@@ -153,13 +154,13 @@ impl Group {
     }
 }
 
-/// The sub-head a key context gets: its own name, without the parent the group already says.
+/// The sub-head a key context gets: the surface's own name, from the action catalogue.
 ///
-/// `Dialog > Confirm` is `confirm`, `Hub > Worktrees` is `worktrees`, `Workspace > Prefix` is
-/// `prefix` — which is also the word that tells the reader those keys follow `^s`.
+/// `Hub > Worktrees` is "Worktrees", `Dialog > Confirm` is "Confirm", and `Workspace > Prefix`
+/// is "After ^s" — which is also what tells the reader those keys follow the prefix.
 #[must_use]
-fn context_label(context: &str) -> String {
-    humanize(context.rsplit(" > ").next().unwrap_or(context))
+fn context_label(context: &'static str) -> &'static str {
+    action_catalogue::context_title(context).unwrap_or(context)
 }
 
 /// Which key contexts feed each group.
@@ -246,30 +247,64 @@ const GROUPS: &[(&str, &[&str])] = &[
 
 /// Builds every column from the binding table.
 ///
-/// Two bindings share a row only when they share **both** the action label and the key context:
-/// merging on the label alone produced rows like `⏎ / y / Y accept` out of four different
-/// dialogs' `Accept` actions, and such a row is accurate in none of them.
+/// Two bindings share a row only when they share **both** the catalogue entry and the key
+/// context: merging on a label alone produced rows like `⏎ / y / Y accept` out of four
+/// different dialogs' `Accept` actions, and such a row is accurate in none of them. The label is
+/// the entry's hand-written one, and a numbered range (`^s 1` … `^s 9`) is one row whose keys
+/// read `^s 1–9`.
 #[must_use]
 fn merge_rows<'a>(
     specs: impl Iterator<Item = &'a keymap::BindingSpec>,
 ) -> Vec<(gpui::SharedString, gpui::SharedString)> {
-    let mut rows: Vec<(String, String)> = Vec::new();
+    struct Row {
+        /// The entry's first action, which identifies it.
+        id: &'static str,
+        label: &'static str,
+        range: bool,
+        keys: Vec<String>,
+    }
+    let mut rows: Vec<Row> = Vec::new();
     for spec in specs {
-        let label = humanize(spec.action);
+        // An action the catalogue does not know shows its raw name; the catalogue's tests keep
+        // every bound action known, so this is never what a person reads.
+        let (id, label, range) = action_catalogue::entry(spec.action)
+            .map_or((spec.action, spec.action, false), |entry| {
+                (entry.action(), entry.info.label, entry.is_range())
+            });
         let keys = pretty_keys(spec.keys);
-        match rows.iter_mut().find(|(_, existing)| existing == &label) {
-            Some((existing_keys, _)) => {
-                if !existing_keys.split(" / ").any(|key| key == keys) {
-                    existing_keys.push_str(" / ");
-                    existing_keys.push_str(&keys);
+        match rows.iter_mut().find(|row| row.id == id) {
+            Some(row) => {
+                if !row.keys.contains(&keys) {
+                    row.keys.push(keys);
                 }
             }
-            None => rows.push((keys, label)),
+            None => rows.push(Row {
+                id,
+                label,
+                range,
+                keys: vec![keys],
+            }),
         }
     }
     rows.into_iter()
-        .map(|(keys, label)| (keys.into(), label.into()))
+        .map(|row| {
+            let keys = match (row.range, row.keys.first(), row.keys.last()) {
+                (true, Some(first), Some(last)) if row.keys.len() > 1 => key_range(first, last),
+                _ => row.keys.join(" / "),
+            };
+            (keys.into(), row.label.into())
+        })
         .collect()
+}
+
+/// `^s 1` … `^s 9` as `^s 1–9`, and `1` … `9` as `1–9`.
+fn key_range(first: &str, last: &str) -> String {
+    match (first.rsplit_once(' '), last.rsplit_once(' ')) {
+        (Some((prefix, from)), Some((same, to))) if prefix == same => {
+            format!("{prefix} {from}\u{2013}{to}")
+        }
+        _ => format!("{first}\u{2013}{last}"),
+    }
 }
 
 #[must_use]
@@ -607,15 +642,15 @@ mod tests {
             prefix
                 .rows
                 .iter()
-                .any(|(key, action)| key == "v" && action == "toggle watch pane")
+                .any(|(key, action)| key == "v" && action == "Show or hide the watch pane")
         );
         assert!(
             prefix
                 .rows
                 .iter()
-                .any(|(key, action)| key == "V" && action == "dismiss watch")
+                .any(|(key, action)| key == "V" && action == "Dismiss the watch")
         );
-        for (key, action) in [("N", "next watch"), ("P", "prev watch")] {
+        for (key, action) in [("N", "Next watch"), ("P", "Previous watch")] {
             assert!(
                 prefix
                     .rows
@@ -736,7 +771,7 @@ mod tests {
             .sections
             .iter()
             .flat_map(|section| section.rows.iter())
-            .find(|(_, label)| label == "move down")
+            .find(|(_, label)| label == "Move down")
             .unwrap_or_else(|| panic!("no move-down row"));
         assert!(move_down.0.contains('/'), "j and down must share a row");
     }
@@ -749,11 +784,17 @@ mod tests {
         for group in groups() {
             for section in &group.sections {
                 for (keys, label) in &section.rows {
-                    for key in keys.split(" / ") {
+                    // A range row reads `^s 1–9`: its first key stands for the rest.
+                    let keys: Vec<&str> = match keys.split_once('\u{2013}') {
+                        Some((first, _)) => vec![first],
+                        None => keys.split(" / ").collect(),
+                    };
+                    for key in keys {
                         assert!(
                             table.iter().any(|spec| spec.context == section.context
                                 && pretty_keys(spec.keys) == key
-                                && humanize(spec.action).as_str() == label.as_ref()),
+                                && action_catalogue::info(spec.action)
+                                    .is_some_and(|info| info.label == label.as_ref())),
                             "`{key} {label}` is not bound in `{}`",
                             section.context
                         );
@@ -774,7 +815,7 @@ mod tests {
             .iter()
             .find(|section| section.context == "Palette")
             .unwrap_or_else(|| panic!("no palette section"));
-        assert_eq!(palette.title.as_deref(), Some("palette"));
+        assert_eq!(palette.title.as_deref(), Some("Palette"));
         for (keys, label) in &palette.rows {
             assert!(
                 !keys.split(" / ").any(|key| key == "q"),
@@ -809,15 +850,26 @@ mod tests {
             .unwrap_or_else(|| panic!("no scroll column"));
         assert_eq!(scroll.sections.len(), 1);
         assert_eq!(scroll.sections[0].title, None);
-        assert_eq!(context_label("Dialog > QuitDaemon"), "quit daemon");
-        assert_eq!(context_label("Fleet"), "fleet");
+        assert_eq!(context_label("Dialog > QuitDaemon"), "Quit and stop fleetd");
+        assert_eq!(context_label("Fleet"), "Everywhere");
     }
 
     #[test]
-    fn action_names_become_readable_labels() {
-        assert_eq!(humanize("hub::MoveDown"), "move down");
-        assert_eq!(humanize("fleet::QuitAndStopDaemon"), "quit and stop daemon");
-        assert_eq!(humanize("Bare"), "bare");
+    fn a_numbered_range_is_one_row() {
+        let terminal = groups()
+            .into_iter()
+            .find(|group| group.title == "Terminal (^s)")
+            .unwrap_or_else(|| panic!("no terminal column"));
+        let tabs: Vec<&(gpui::SharedString, gpui::SharedString)> = terminal
+            .sections
+            .iter()
+            .filter(|section| section.context == "Workspace > Prefix")
+            .flat_map(|section| section.rows.iter())
+            .filter(|(_, label)| label.as_ref() == "Go to tab 1\u{2013}9")
+            .collect();
+        assert_eq!(tabs.len(), 1, "nine bindings, one row");
+        assert_eq!(tabs[0].0.as_ref(), "1\u{2013}9");
+        assert_eq!(key_range("^s 1", "^s 9"), "^s 1\u{2013}9");
     }
 
     #[test]

@@ -1174,7 +1174,7 @@ impl WorkspaceScreen {
     /// `ctrl-s b`: this worktree's board tab, created the first time and selected every time.
     ///
     /// The listener for it is the shell's (`shell/root/routing.rs`) and not one of the
-    /// `Workspace > Prefix` listeners above, because the palette's `Workspace: Open board tab`
+    /// `Workspace > Prefix` listeners above, because the palette's `Open the worktree's board`
     /// row dispatches the same action while the palette owns the keyboard — and the palette is
     /// a *sibling* of this screen in the element tree, so only the root is on both dispatch
     /// paths. The work itself still belongs here: the tab, its selection and this screen's

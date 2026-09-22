@@ -1220,9 +1220,9 @@ fn real_shell_board_palette_row_reaches_the_same_handler(cx: &mut gpui::TestAppC
     dispatch_root_key(&mut fixture, "W");
     assert_dialog_input_focused(&mut fixture);
     dispatch_root_key(&mut fixture, "ctrl-u");
-    fixture.visual.simulate_input("Open board tab");
+    fixture.visual.simulate_input("Open the worktree's board");
     settle(&mut fixture);
-    assert_eq!(dialog_input_text(&mut fixture), "Open board tab");
+    assert_eq!(dialog_input_text(&mut fixture), "Open the worktree's board");
     dispatch_root_key(&mut fixture, "enter");
 
     assert_eq!(

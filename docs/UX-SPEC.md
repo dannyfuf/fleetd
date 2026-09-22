@@ -1399,7 +1399,10 @@ that editor owns the keyboard every printable key types, `Enter` saves, and `↓
 880 × 620, **three columns × ~14 rows**, grouped by *mode* because the app is modal:
 `Hub` · `Worktrees & PRs` · `Terminal (^s)` · `Scroll` · `Agent popup (^s)` ·
 `Agent thread (^s)` · `Board` · `Dialogs & filter`. Keys in a 68 px mono `fg` column, action in
-`fg.muted`. Context-sensitive: opening `?` from a Workspace terminal, the Agent popup or a native
+`fg.muted`. The action is its hand-written label from the action catalogue (`KEYMAP.md` § *Action
+catalogue*), never a spelling of its type name; a numbered range is one row whose keys read `1–9`,
+and a sub-head names the surface it covers ("Pull requests", "After ^s") rather than its context
+word. Context-sensitive: opening `?` from a Workspace terminal, the Agent popup or a native
 agent tab renders that surface's group **first and in accent** and dims the others to 55 %.
 
 A group whose sub-modes share a table lists it **once**, under a sub-head naming the family
@@ -1496,9 +1499,9 @@ up to **10** rows × 34 px, sections in the fixed order `GO` → `DO` → `CONTE
 │  ⇱ #412 Fix RUT validation…         PR · mine                │
 │  🗀 buk/payroll                      repo                     │
 │ DO                                                           │ 20
-│  ✂ Prune worktrees · buk/payroll                          x  │ 34
+│  ✂ Clean up finished worktrees          Worktrees         x  │ 34
 │  ⌫ Cancel job: clone nixos                                J  │
-│  ⤓ Clone repo                                             n  │
+│  ⤓ Clone a repository                   Hub               n  │
 │ CONTEXT                                                      │ 20
 │  ⬚ personal                                               2  │
 ├──────────────────────────────────────────────────────────────┤
@@ -1510,6 +1513,7 @@ up to **10** rows × 34 px, sections in the fixed order `GO` → `DO` → `CONTE
 | --- | --- | --- | --- | --- |
 | `GO` section, **first** | worktrees (with their §2.5 session glyph), open PRs, repos — objects, ranked above commands | section 1 | makes a session reachable from *inside another session*: `ctrl-s s` `:` `pay fix` `⏎` with no list scan | extends §5's "commands + contexts" palette |
 | `DO` section | only **valid** commands, with the bound key **right-aligned** on every row | section 2 | right-aligned keys teach the shortcut every time, so the palette trains itself out of the loop | §5 "label/keys" |
+| Command label and place | the command's catalogue label, and the catalogue place it acts in (`Board`, `Card`, `Worktrees`…) as the muted detail; `Everywhere` commands carry none | `DO` rows | one label per action across Help, the palette and every button; the place tells apart a board row and an open card's row that do the same thing | `KEYMAP.md` § *Action catalogue* |
 | Job entries | running/failed jobs as `Cancel job: <kind> <target>` | in `DO` | a background action is reachable without learning the panel | §6 |
 | `CONTEXT` section | `Switch to context: <name>` + its digit | section 3 | swarm mixes commands and contexts | §5 |
 | Icon | the same Lucide glyph the action or object uses elsewhere | col 1 | teaches the icon language; palette rows and list rows read identically | — |
