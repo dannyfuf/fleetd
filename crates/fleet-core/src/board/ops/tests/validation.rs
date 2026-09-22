@@ -251,7 +251,10 @@ fn a_column_may_only_route_a_card_to_a_column_this_board_has() {
         validate_board(&board),
         Err(BoardError::Invalid {
             field: "on_success".into(),
-            reason: "must name a status on this board".into(),
+            reason: format!(
+                "{} routes to shipped, which is not a column on this board",
+                board.statuses[1].name
+            ),
         })
     );
 }
@@ -268,7 +271,7 @@ fn a_column_may_not_route_a_card_back_into_itself() {
         validate_board(&board),
         Err(BoardError::Invalid {
             field: "advance_when_unblocked".into(),
-            reason: "may not name its own column".into(),
+            reason: format!("{} may not route to itself", board.statuses[1].name),
         })
     );
 }
@@ -285,7 +288,10 @@ fn a_column_may_not_route_a_card_backwards() {
         validate_board(&board),
         Err(BoardError::Invalid {
             field: "on_success".into(),
-            reason: "must name a later column".into(),
+            reason: format!(
+                "{} routes to todo, which is not a later column",
+                board.statuses[3].name
+            ),
         })
     );
 }

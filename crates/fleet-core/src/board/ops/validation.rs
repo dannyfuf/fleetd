@@ -77,14 +77,26 @@ pub fn validate_automation(board: &Board) -> Result<(), BoardError> {
             ),
         ] {
             let Some(target) = target else { continue };
+            // Every sentence names the column that carries the route. A routing column is
+            // written once and validated on every later board patch, so the refusal a person
+            // reads is usually raised by an edit somewhere else — removing the column this one
+            // routes to, or reordering the two — and a reason that named only the field would
+            // leave them looking for a mistake in what they just typed.
+            let name = status.name.as_str();
             let Some(position) = board.statuses.iter().position(|s| s.id == *target) else {
-                return Err(invalid(field, "must name a status on this board"));
+                return Err(invalid(
+                    field,
+                    &format!("{name} routes to {target}, which is not a column on this board"),
+                ));
             };
             if position == index {
-                return Err(invalid(field, "may not name its own column"));
+                return Err(invalid(field, &format!("{name} may not route to itself")));
             }
             if position < index {
-                return Err(invalid(field, "must name a later column"));
+                return Err(invalid(
+                    field,
+                    &format!("{name} routes to {target}, which is not a later column"),
+                ));
             }
         }
         if let Some(action) = automation.on_enter.as_ref() {

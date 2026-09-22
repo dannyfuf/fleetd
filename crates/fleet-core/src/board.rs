@@ -1,5 +1,6 @@
 //! Backend-independent kanban board contracts.
 
+pub mod automation;
 pub mod defaults;
 pub mod model;
 pub mod ops;
@@ -8,6 +9,10 @@ pub mod sync;
 #[cfg(test)]
 mod tests;
 
+pub use automation::{
+    LiveIndex, Plan, ResolvedPrefs, StartRun, brief, next_pending, re_evaluate,
+    re_evaluate_settled, resolve_prefs,
+};
 pub use defaults::{
     BOARD_ID_MAX_LEN, PRESET_EXPECT_IMPLEMENT, PRESET_EXPECT_REVIEW, PRESET_INSTRUCTIONS_IMPLEMENT,
     PRESET_REVIEW_SKILL, apply_workflow_preset, default_statuses, new_board, new_worktree_board,
