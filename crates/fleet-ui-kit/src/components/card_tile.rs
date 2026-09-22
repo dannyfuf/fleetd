@@ -10,10 +10,14 @@
 //! set, a card with no assignee and a clean worktree all cost zero pixels. A tile with only a
 //! key and a title is one line taller than the title itself.
 
-use gpui::{App, ElementId, MouseButton, MouseDownEvent, SharedString, Window, div, prelude::*};
+use std::sync::Arc;
+
+use gpui::{
+    AnyElement, App, ElementId, MouseButton, MouseDownEvent, SharedString, Window, div, prelude::*,
+};
 
 use crate::{
-    components::{Chip, PriorityGlyph, PriorityLevel, StatusDot},
+    components::{Chip, PriorityGlyph, PriorityLevel, Spinner, StatusDot},
     focus::FocusRing,
     icons::{Icon, IconSize},
     text::{Text, TextRole, styled_with},
@@ -26,6 +30,9 @@ pub const CARD_TITLE_LINES: usize = 2;
 
 /// How many characters an assignee chip shows.
 pub const ASSIGNEE_INITIALS: usize = 2;
+
+/// The glyph in front of the number of cards a tile is waiting on.
+const BLOCKED_GLYPH: &str = "⊘";
 
 /// The [`Tone`] a board color token names.
 ///
@@ -59,6 +66,61 @@ pub fn initials(name: &str) -> String {
         .collect()
 }
 
+/// What a card's run is doing, as the tile says it.
+///
+/// A kit vocabulary, not a domain type: the app folds a run's state, its child's state and how
+/// long it has waited into one of these five marks, and the tile only draws it. The two amber
+/// marks are deliberately the same glyph — [`RunMark::Stalled`] and [`RunMark::NeedsYou`] both
+/// mean "this card wants you", and a tile is not the surface that explains which.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunMark {
+    /// Queued behind the board's live-run limit.
+    Pending,
+    /// Queued long enough that the wait itself is worth noticing.
+    Stalled,
+    /// A child is working on the card right now.
+    Working,
+    /// The run stopped short of done and wants the user.
+    NeedsYou,
+    /// The run finished and the card is still here.
+    Succeeded,
+}
+
+impl RunMark {
+    /// Every mark, in the order a gallery shows them.
+    pub const ALL: [RunMark; 5] = [
+        RunMark::Pending,
+        RunMark::Stalled,
+        RunMark::Working,
+        RunMark::NeedsYou,
+        RunMark::Succeeded,
+    ];
+}
+
+/// How loudly a tile states the cards it is waiting on.
+///
+/// `Muted` is the ordinary case — the blockers are simply not done yet. `Warning` is a wait that
+/// will not end on its own, so the eye should stop on it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlockedTone {
+    /// Secondary contrast: an ordinary, still-moving wait.
+    Muted,
+    /// Amber: the wait needs a person.
+    Warning,
+}
+
+impl BlockedTone {
+    /// Both tones, in the order a gallery shows them.
+    pub const ALL: [BlockedTone; 2] = [BlockedTone::Muted, BlockedTone::Warning];
+}
+
+/// What the right end of the key line carries. A run mark wins over a blocked count.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeyMark {
+    Run(RunMark),
+    Blocked(u32, BlockedTone),
+}
+
 /// One kanban card.
 #[derive(IntoElement)]
 pub struct CardTile {
@@ -76,6 +138,8 @@ pub struct CardTile {
     selected: bool,
     focused: bool,
     extras: Vec<SharedString>,
+    run: Option<RunMark>,
+    blocked: Option<(u32, BlockedTone)>,
     #[allow(clippy::type_complexity)]
     on_click: Option<Box<dyn Fn(&MouseDownEvent, &mut Window, &mut App) + 'static>>,
 }
@@ -102,6 +166,8 @@ impl CardTile {
             selected: false,
             focused: false,
             extras: Vec::new(),
+            run: None,
+            blocked: None,
             on_click: None,
         }
     }
@@ -176,6 +242,23 @@ impl CardTile {
         self
     }
 
+    /// The state of the card's run, drawn at the right end of the key line.
+    ///
+    /// Wins over [`Self::blocked`]: a card that is already running has nothing left to wait for.
+    pub fn run(mut self, mark: RunMark) -> Self {
+        self.run = Some(mark);
+        self
+    }
+
+    /// How many unsatisfied cards this one waits on, and how loudly to say so.
+    ///
+    /// Drawn as `⊘ n` at the right end of the key line. A count of zero draws nothing, like
+    /// every other meta slot (§1.2).
+    pub fn blocked(mut self, count: u32, tone: BlockedTone) -> Self {
+        self.blocked = Some((count, tone));
+        self
+    }
+
     /// Mouse parity for `enter`: open the card.
     pub fn on_click(
         mut self,
@@ -183,6 +266,15 @@ impl CardTile {
     ) -> Self {
         self.on_click = Some(Box::new(on_click));
         self
+    }
+
+    /// What the right end of the key line shows, if anything.
+    fn key_mark(&self) -> Option<KeyMark> {
+        self.run.map(KeyMark::Run).or_else(|| {
+            self.blocked
+                .filter(|(count, _)| *count > 0)
+                .map(|(count, tone)| KeyMark::Blocked(count, tone))
+        })
     }
 
     /// Whether the meta row has anything in it. Zero-suppression, §1.2.
@@ -205,6 +297,30 @@ impl RenderOnce for CardTile {
         let selected = self.selected;
         let focused = self.focused;
         let has_meta = self.has_meta();
+        let mark: Option<AnyElement> = self.key_mark().map(|mark| match mark {
+            KeyMark::Run(RunMark::Pending | RunMark::Working) => Spinner::new(
+                ElementId::NamedChild(Arc::new(self.id.clone()), SharedString::new_static("run")),
+            )
+            .size(IconSize::Small)
+            .tone(Tone::Secondary)
+            .into_any_element(),
+            KeyMark::Run(RunMark::Stalled | RunMark::NeedsYou) => {
+                StatusDot::small(Tone::Warning).into_any_element()
+            }
+            KeyMark::Run(RunMark::Succeeded) => Icon::Check
+                .el()
+                .size(IconSize::Small)
+                .tone(Tone::Muted)
+                .into_any_element(),
+            KeyMark::Blocked(count, tone) => {
+                let text = Text::data_small(format!("{BLOCKED_GLYPH} {count}"));
+                match tone {
+                    BlockedTone::Muted => text.muted(),
+                    BlockedTone::Warning => text.tone(Tone::Warning),
+                }
+                .into_any_element()
+            }
+        });
         let hover_bg = theme.colors.row_hover;
         let on_click = self.on_click;
 
@@ -270,7 +386,24 @@ impl RenderOnce for CardTile {
             .min_w_0()
             .gap(theme.space.xxs)
             .p(theme.space.sm)
-            .child(Text::data_small(self.key).faint())
+            // The key line is a row so a run mark or a blocked count can sit at its right end
+            // without costing the tile a line: the key is short, the spacer is what pushes the
+            // mark over, and the mark is no taller than the key text.
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .w_full()
+                    .gap(theme.space.xs)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(Text::data_small(self.key).faint()),
+                    )
+                    .children(mark.map(|mark| div().flex_none().child(mark))),
+            )
             .child(
                 // The title is the only thing on a tile allowed two lines; anything longer is
                 // a description, and a board that grows its cards stops being scannable. The
@@ -337,6 +470,42 @@ mod tests {
         assert_eq!(label_tone(Some("accent")), Tone::Accent);
         assert_eq!(label_tone(Some("nonsense")), Tone::Secondary);
         assert_eq!(label_tone(None), Tone::Secondary);
+    }
+
+    #[test]
+    fn a_run_mark_wins_over_a_blocked_count() {
+        let tile = CardTile::new("card", "FLT-1", "t")
+            .blocked(2, BlockedTone::Muted)
+            .run(RunMark::Working);
+        assert_eq!(tile.key_mark(), Some(KeyMark::Run(RunMark::Working)));
+    }
+
+    #[test]
+    fn a_blocked_count_of_zero_draws_nothing() {
+        assert_eq!(CardTile::new("card", "FLT-1", "t").key_mark(), None);
+        assert_eq!(
+            CardTile::new("card", "FLT-1", "t")
+                .blocked(0, BlockedTone::Warning)
+                .key_mark(),
+            None
+        );
+        assert_eq!(
+            CardTile::new("card", "FLT-1", "t")
+                .blocked(2, BlockedTone::Warning)
+                .key_mark(),
+            Some(KeyMark::Blocked(2, BlockedTone::Warning))
+        );
+    }
+
+    #[test]
+    fn a_mark_is_not_a_meta_row() {
+        let tile = CardTile::new("card", "FLT-1", "t")
+            .run(RunMark::NeedsYou)
+            .blocked(3, BlockedTone::Warning);
+        assert!(
+            !tile.has_meta(),
+            "the key line carries the mark, not the meta row"
+        );
     }
 
     #[test]
