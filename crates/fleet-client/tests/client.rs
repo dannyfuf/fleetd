@@ -565,10 +565,22 @@ async fn board_api_round_trips() {
         RequestBody::MoveCard {
             card_id: card.id.clone(),
             status_id: card.status_id.clone(),
-            index: Some(2)
+            index: Some(2),
+            cancel_run: false
         },
         ResponseBody::Card(card.clone()),
-        client.move_card(card.id.clone(), card.status_id.clone(), Some(2)),
+        client.move_card(card.id.clone(), card.status_id.clone(), Some(2), false),
+        card
+    );
+    check!(
+        RequestBody::MoveCard {
+            card_id: card.id.clone(),
+            status_id: card.status_id.clone(),
+            index: None,
+            cancel_run: true
+        },
+        ResponseBody::Card(card.clone()),
+        client.move_card(card.id.clone(), card.status_id.clone(), None, true),
         card
     );
     check!(

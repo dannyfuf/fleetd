@@ -21,8 +21,8 @@ use fleet_proto::{
     event::{Event, EventKind, ToastLevel},
     request::{Request, RequestBody},
     response::{
-        BOARD_WORKTREE_CAPABILITY, DaemonIdentity, HelloResponse, PongResponse, Response,
-        ResponseBody, StampedResponse,
+        BOARD_AUTOMATION_CAPABILITY, BOARD_WORKTREE_CAPABILITY, DaemonIdentity, HelloResponse,
+        PongResponse, Response, ResponseBody, StampedResponse,
     },
 };
 use futures_util::{SinkExt, StreamExt, stream::SplitSink, stream::SplitStream};
@@ -464,10 +464,10 @@ where
     let Some(command) = command_for_dispatch(command) else {
         return DispatchOutcome::Sent;
     };
-    if required_capability(&command.request.body)
-        .is_some_and(|capability| !state.capabilities.contains(capability))
+    if let Some(capability) = required_capability(&command.request.body)
+        && !state.capabilities.contains(capability)
     {
-        fail_command_with(command, worktree_board_capability_error());
+        fail_command_with(command, capability_error(capability));
         return DispatchOutcome::Sent;
     }
     let id = command.request.id;
@@ -682,6 +682,15 @@ fn request_timeout(body: &RequestBody) -> Option<Duration> {
             Some(Duration::from_millis(*timeout_ms) + Duration::from_secs(15))
         }
         RequestBody::DelegationRun { .. } => Some(AGENT_HARNESS_TIMEOUT),
+        // Waiting on a card's run is the delegation wait with a board key in front of it: the
+        // caller names the deadline, and the transport allows the same 15 s of slack for the
+        // daemon to answer the card once that deadline expires.
+        RequestBody::CardRunWait { timeout_ms, .. } => {
+            Some(Duration::from_millis(*timeout_ms) + Duration::from_secs(15))
+        }
+        // Starting a card's run spawns a child through the same harness probe `DelegationRun`
+        // pays for.
+        RequestBody::CardRunStart { .. } => Some(AGENT_HARNESS_TIMEOUT),
         RequestBody::CreateWorktree { .. }
         | RequestBody::CreateWorktreeFromPr { .. }
         | RequestBody::CreateWorktreeFromCard { .. }
@@ -712,7 +721,11 @@ fn request_timeout(body: &RequestBody) -> Option<Duration> {
         // descendants deepest-first and each interrupt/stop pair owns its own harness deadline.
         // A client deadline cannot safely predict how many of those bounded children are below
         // this node, and timing out would report failure while the daemon keeps cancelling them.
-        | RequestBody::DelegationCancel { .. } => None,
+        | RequestBody::DelegationCancel { .. }
+        // Cancelling a card's run cancels the delegation under it, for exactly the reason
+        // `DelegationCancel` is exempt: the walk is bounded by the live ceiling, not by a
+        // deadline this side can predict.
+        | RequestBody::CardRunCancel { .. } => None,
         // The six agent mutations are serialized per thread by the daemon, and each of them can
         // legitimately outlast the default: a mode or model change costs a restart-with-resume
         // on a harness that cannot switch in place, a send to a stopped thread resumes one, and
@@ -901,9 +914,12 @@ async fn establish(
 fn hello_client(client_id: &str) -> fleet_proto::request::HelloClient {
     fleet_proto::request::HelloClient {
         client_id: Some(client_id.to_owned()),
+        // A client that never names `board.automation` is hidden from every card-called
+        // delegation: the daemon filters those events and listing rows per peer capability.
         capabilities: fleet_proto::AGENT_CAPABILITIES
             .iter()
             .map(|capability| (*capability).to_owned())
+            .chain(std::iter::once(BOARD_AUTOMATION_CAPABILITY.to_owned()))
             .collect(),
         ..fleet_proto::request::HelloClient::default()
     }
@@ -1159,7 +1175,22 @@ fn required_capability(body: &RequestBody) -> Option<&'static str> {
         RequestBody::EnsureWorktreeBoard { .. } | RequestBody::CreateWorktreeBoard { .. } => {
             Some(BOARD_WORKTREE_CAPABILITY)
         }
+        RequestBody::CardRunStart { .. }
+        | RequestBody::CardRunCancel { .. }
+        | RequestBody::CardRunWait { .. } => Some(BOARD_AUTOMATION_CAPABILITY),
         _ => None,
+    }
+}
+
+/// The sentence a peer that cannot serve `capability` is refused with, before the frame is sent.
+///
+/// Each capability owns its own sentence: "board automation" and "worktree boards" name different
+/// verbs, and a user reading either one should learn which of them this daemon is too old for.
+fn capability_error(capability: &str) -> ProtoError {
+    if capability == BOARD_AUTOMATION_CAPABILITY {
+        board_automation_capability_error()
+    } else {
+        worktree_board_capability_error()
     }
 }
 
@@ -1167,6 +1198,14 @@ pub(crate) fn worktree_board_capability_error() -> ProtoError {
     ProtoError {
         kind: ErrorKind::Validation,
         message: "this daemon does not support worktree boards; run `fleet daemon restart`"
+            .to_owned(),
+    }
+}
+
+pub(crate) fn board_automation_capability_error() -> ProtoError {
+    ProtoError {
+        kind: ErrorKind::Validation,
+        message: "this daemon does not support board automation; run `fleet daemon restart`"
             .to_owned(),
     }
 }
@@ -1283,6 +1322,26 @@ mod tests {
                 .expect("persisted client identity"),
             first
         );
+    }
+
+    /// Contracts §3.3: the daemon hides every card-called delegation from a peer that never
+    /// named `board.automation`, so a client that does not name it can never see a card run.
+    #[test]
+    fn hello_names_the_board_automation_capability() {
+        let hello = hello_client("client");
+        assert!(
+            hello
+                .capabilities
+                .iter()
+                .any(|capability| capability == BOARD_AUTOMATION_CAPABILITY),
+            "without it the daemon filters every card-called event and listing row away"
+        );
+        for capability in fleet_proto::AGENT_CAPABILITIES {
+            assert!(
+                hello.capabilities.iter().any(|named| named == capability),
+                "the agent capabilities are still all named: {capability}"
+            );
+        }
     }
 
     #[test]
@@ -1904,5 +1963,69 @@ mod tests {
             .expect("response succeeds");
         assert_eq!(stamped.body, ResponseBody::Ack);
         assert_eq!(stamped.snapshot_revision, Some(12));
+    }
+
+    fn card() -> fleet_core::ids::CardId {
+        "card-12"
+            .parse()
+            .unwrap_or_else(|error| panic!("a valid card id: {error}"))
+    }
+
+    #[test]
+    fn the_three_card_run_requests_need_the_board_automation_capability() {
+        for body in [
+            RequestBody::CardRunStart { card_id: card() },
+            RequestBody::CardRunCancel { card_id: card() },
+            RequestBody::CardRunWait {
+                card_id: card(),
+                timeout_ms: 1_000,
+            },
+        ] {
+            assert_eq!(
+                required_capability(&body),
+                Some(BOARD_AUTOMATION_CAPABILITY),
+                "{body:?}"
+            );
+        }
+        // Moving a card is not gated: `cancel_run` is an additive field an older daemon ignores,
+        // and refusing the move for it would take away a verb every daemon already serves.
+        assert_eq!(
+            required_capability(&RequestBody::MoveCard {
+                card_id: card(),
+                status_id: "todo"
+                    .parse()
+                    .unwrap_or_else(|error| panic!("a valid status id: {error}")),
+                index: None,
+                cancel_run: true,
+            }),
+            None
+        );
+        assert_eq!(
+            capability_error(BOARD_AUTOMATION_CAPABILITY).message,
+            "this daemon does not support board automation; run `fleet daemon restart`"
+        );
+        assert_eq!(
+            capability_error(BOARD_WORKTREE_CAPABILITY),
+            worktree_board_capability_error()
+        );
+    }
+
+    #[test]
+    fn the_card_run_requests_carry_their_own_deadlines() {
+        assert_eq!(
+            request_timeout(&RequestBody::CardRunStart { card_id: card() }),
+            Some(AGENT_HARNESS_TIMEOUT)
+        );
+        assert_eq!(
+            request_timeout(&RequestBody::CardRunCancel { card_id: card() }),
+            None
+        );
+        assert_eq!(
+            request_timeout(&RequestBody::CardRunWait {
+                card_id: card(),
+                timeout_ms: 30_000,
+            }),
+            Some(Duration::from_millis(30_000) + Duration::from_secs(15))
+        );
     }
 }
