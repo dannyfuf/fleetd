@@ -667,6 +667,23 @@ impl AppState {
             .find(|terminal| terminal.id == active)
     }
 
+    /// Hands a worktree's workspace back to its terminals: the tab *and* the mode it rests in.
+    ///
+    /// Deactivating alone is not enough. `terminal_mode` is what the mode word and the key
+    /// contexts are derived from, and while the agent tab was active any snapshot at all left
+    /// it at `Native` through [`Self::sync_terminal_mode`] — an agent tab is Fleet-drawn
+    /// ([`Self::active_tab_is_fleet_drawn`]). Nothing re-derives it until the *next* snapshot,
+    /// so a workspace whose agent tab has just gone would go on saying `NATIVE`, and go on
+    /// publishing `Workspace > Native`, until one happened to arrive. Returns whether a tab was
+    /// actually left.
+    pub fn leave_agent_tab(&mut self, worktree: &WorktreeId) -> bool {
+        if !self.agents.deactivate(worktree) {
+            return false;
+        }
+        self.sync_terminal_mode();
+        true
+    }
+
     /// Re-derives the resting mode after a snapshot moved, created or replaced the active tab.
     ///
     /// `Prefix` and `Scroll` are transient Fleet modes the user is standing in; a snapshot must

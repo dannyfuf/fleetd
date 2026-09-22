@@ -225,6 +225,18 @@ pub enum Command {
     BoardReload,
     /// Filter cards.
     BoardFilter,
+    /// Attach the focused card's run.
+    BoardAttachRun,
+    /// Cancel the focused card's run.
+    BoardCancelRun,
+    /// Run the column's action now.
+    BoardRunNow,
+    /// Pick the cards this one is blocked by.
+    BoardPickBlockedBy,
+    /// Pick the agent that runs this card.
+    BoardPickAgent,
+    /// Board settings, on its Columns section.
+    BoardColumns,
     /// Close.
     CardDetailClose,
     /// Edit title.
@@ -325,6 +337,12 @@ impl Command {
         Self::BoardSettings,
         Self::BoardReload,
         Self::BoardFilter,
+        Self::BoardAttachRun,
+        Self::BoardCancelRun,
+        Self::BoardRunNow,
+        Self::BoardPickBlockedBy,
+        Self::BoardPickAgent,
+        Self::BoardColumns,
         Self::CardDetailClose,
         Self::CardDetailEditTitle,
         Self::CardDetailEditDescription,
@@ -389,6 +407,12 @@ impl Command {
             Self::BoardSettings => "Board: Settings",
             Self::BoardReload => "Board: Reload",
             Self::BoardFilter => "Board: Filter cards",
+            Self::BoardAttachRun => "Board: Attach run",
+            Self::BoardCancelRun => "Board: Cancel run",
+            Self::BoardRunNow => "Board: Run now",
+            Self::BoardPickBlockedBy => "Board: Blocked by",
+            Self::BoardPickAgent => "Board: Agent",
+            Self::BoardColumns => "Board: Columns",
             Self::CardDetailClose => "Card detail: Close",
             Self::CardDetailEditTitle => "Card detail: Edit title",
             Self::CardDetailEditDescription => "Card detail: Edit description",
@@ -455,6 +479,12 @@ impl Command {
             Self::BoardSettings => Icon::Settings2,
             Self::BoardReload => Icon::RefreshCw,
             Self::BoardFilter => Icon::Search,
+            Self::BoardAttachRun => Icon::Paperclip,
+            Self::BoardCancelRun => Icon::CircleStop,
+            Self::BoardRunNow => Icon::Zap,
+            Self::BoardPickBlockedBy => Icon::CircleSlash,
+            Self::BoardPickAgent => Icon::Bot,
+            Self::BoardColumns => Icon::Boxes,
             Self::CardDetailClose => Icon::X,
             Self::CardDetailEditTitle => Icon::FilePen,
             Self::CardDetailEditDescription => Icon::FilePen,
@@ -531,6 +561,12 @@ impl Command {
             Self::BoardSettings => "board::Settings",
             Self::BoardReload => "board::Reload",
             Self::BoardFilter => "board::Filter",
+            Self::BoardAttachRun => "board::AttachRun",
+            Self::BoardCancelRun => "board::CancelRun",
+            Self::BoardRunNow => "board::RunNow",
+            Self::BoardPickBlockedBy => "board::PickBlockedBy",
+            Self::BoardPickAgent => "board::PickAgent",
+            Self::BoardColumns => "board::Columns",
             Self::CardDetailClose => "card_detail::Close",
             Self::CardDetailEditTitle => "card_detail::EditTitle",
             Self::CardDetailEditDescription => "card_detail::EditDescription",
@@ -617,6 +653,22 @@ impl Command {
             Self::BoardPickAssignee => has_card && !state.is_readonly_field("assignee"),
             Self::BoardPickLabels => has_card && !state.is_readonly_field("labels"),
             Self::BoardPickEstimate => has_card && !state.is_readonly_field("estimate"),
+            // Runs exist only on a worktree board: over the Hub's context board the three rows
+            // could only ever answer the daemon's capability refusal (contracts §5.5). The
+            // board pane is the second surface the keys are bound on, and the palette lists a
+            // row exactly where its key would fire.
+            Self::BoardAttachRun | Self::BoardCancelRun | Self::BoardRunNow => {
+                matches!(
+                    state.board.scope,
+                    Some(crate::state::BoardScope::Worktree(_))
+                ) && ((state.board_pane_is_active()
+                    && crate::screens::board::selected_card(state).is_some())
+                    || (card.detail && has_card))
+            }
+            // Both edit a field every board has, so they follow the pickers above; `blocked_by`
+            // is Fleet's own link and no backend owns it.
+            Self::BoardPickBlockedBy | Self::BoardPickAgent => has_card,
+            Self::BoardColumns => on_board,
             // A card the backend has not linked, or linked without publishing an address, has
             // no remote issue: the row would open a browser tab at nothing.
             Self::BoardOpenRemote | Self::CardDetailOpenRemote => has_card && card.remote,
@@ -1538,6 +1590,14 @@ fn run_command<T: SessionTransport>(
         Command::BoardSettings => window.dispatch_action(Box::new(board::Settings), cx),
         Command::BoardReload => window.dispatch_action(Box::new(board::Reload), cx),
         Command::BoardFilter => window.dispatch_action(Box::new(board::Filter), cx),
+        // The keys' own handlers, never a copy: every refusal sentence and every confirm the
+        // key raises is raised here too (P9-T04).
+        Command::BoardAttachRun => window.dispatch_action(Box::new(board::AttachRun), cx),
+        Command::BoardCancelRun => window.dispatch_action(Box::new(board::CancelRun), cx),
+        Command::BoardRunNow => window.dispatch_action(Box::new(board::RunNow), cx),
+        Command::BoardPickBlockedBy => window.dispatch_action(Box::new(board::PickBlockedBy), cx),
+        Command::BoardPickAgent => window.dispatch_action(Box::new(board::PickAgent), cx),
+        Command::BoardColumns => window.dispatch_action(Box::new(board::Columns), cx),
         Command::CardDetailClose => {
             // Like every other row here: the dialog comes back, and `Close` then does to it
             // exactly what `Esc` would — cancel the open edit, or close the dialog.
@@ -2458,6 +2518,75 @@ mod tests {
         });
         state.board.focus = crate::state::BoardFocus { column, row: 0 };
         state
+    }
+
+    /// Contracts §5.5: the three run rows belong to a worktree board, and the Hub's context
+    /// board is the surface they are never offered on — its cards can hold no run at all.
+    #[test]
+    fn the_run_rows_are_offered_over_a_worktree_board_only() {
+        let mut state = board_with_one_card();
+        assert!(!Command::BoardAttachRun.valid(&state));
+        assert!(!Command::BoardCancelRun.valid(&state));
+        assert!(!Command::BoardRunNow.valid(&state));
+
+        let over_context_board = card_context(&state, Some(Dialogs::CardDetail), None);
+        assert!(!Command::BoardAttachRun.valid_with(&state, over_context_board));
+
+        state.board.scope = Some(crate::state::BoardScope::Worktree(
+            "acme/api#agent"
+                .parse()
+                .unwrap_or_else(|error| panic!("{error}")),
+        ));
+        let over_worktree_board = card_context(&state, Some(Dialogs::CardDetail), None);
+        assert!(Command::BoardAttachRun.valid_with(&state, over_worktree_board));
+        assert!(Command::BoardCancelRun.valid_with(&state, over_worktree_board));
+        assert!(Command::BoardRunNow.valid_with(&state, over_worktree_board));
+        // The detail is what makes them valid here; the Hub's own board tab does not.
+        assert!(!Command::BoardRunNow.valid(&state));
+    }
+
+    /// The other three rows of §5.5 follow the pickers and the settings row beside them.
+    #[test]
+    fn the_link_agent_and_columns_rows_follow_the_board_they_edit() {
+        let state = board_with_one_card();
+        assert!(Command::BoardPickBlockedBy.valid(&state));
+        assert!(Command::BoardPickAgent.valid(&state));
+        assert!(Command::BoardColumns.valid(&state));
+
+        let elsewhere = AppState::new("/tmp/fleet-palette-no-board", Instant::now());
+        assert!(!Command::BoardPickBlockedBy.valid(&elsewhere));
+        assert!(!Command::BoardPickAgent.valid(&elsewhere));
+        assert!(!Command::BoardColumns.valid(&elsewhere));
+    }
+
+    /// P9-T04: every one of §5.5's rows runs its key's own code path.
+    ///
+    /// `run_command` dispatches the row's action rather than calling a handler of its own, so
+    /// what makes the two paths one is that the name the row advertises is a name the keymap
+    /// binds. A row naming an action no context binds would dispatch into nothing.
+    #[test]
+    fn every_run_row_dispatches_the_action_its_key_is_bound_to() {
+        let table = crate::keymap::table();
+        for command in [
+            Command::BoardAttachRun,
+            Command::BoardCancelRun,
+            Command::BoardRunNow,
+            Command::BoardPickBlockedBy,
+            Command::BoardPickAgent,
+            Command::BoardColumns,
+        ] {
+            let action = command.action();
+            let contexts: Vec<&str> = table
+                .iter()
+                .filter(|spec| spec.action == action)
+                .map(|spec| spec.context)
+                .collect();
+            assert!(
+                contexts.contains(&"Workspace > Native > Board"),
+                "`{}` is offered where its key is unbound: {action}",
+                command.label()
+            );
+        }
     }
 
     #[test]

@@ -1,6 +1,12 @@
 use super::*;
 
 /// The field edited by the reusable card picker.
+///
+/// The five workflow kinds answer here in full — their rows, their current value and the
+/// requests they apply — and the card detail's property rows (P7-T02) are what open them; the
+/// board's `b` and `m` (P9-T01) are the second door onto the same picker. The `dead_code`
+/// expectation that held the enum honest while nothing constructed the five went unfulfilled
+/// the moment those rows landed, which is exactly the signal its author asked for.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) enum PickerKind {
     /// Status column.
@@ -18,6 +24,16 @@ pub(crate) enum PickerKind {
     DueDate,
     /// Repository.
     Repo,
+    /// The cards this one waits for.
+    BlockedBy,
+    /// The cards that wait for this one.
+    Blocks,
+    /// Which agent runs this card, or the column's default.
+    Provider,
+    /// Which model runs this card, or the column's default.
+    Model,
+    /// Which reasoning effort runs this card, or the column's default.
+    Effort,
     /// Custom property schema key.
     Property(String),
 }
@@ -34,6 +50,11 @@ impl PickerKind {
             Self::Estimate => "Estimate".to_owned(),
             Self::DueDate => "Due date".to_owned(),
             Self::Repo => "Repository".to_owned(),
+            Self::BlockedBy => "Blocked by".to_owned(),
+            Self::Blocks => "Blocks".to_owned(),
+            Self::Provider => "Provider".to_owned(),
+            Self::Model => "Model".to_owned(),
+            Self::Effort => "Effort".to_owned(),
             Self::Property(key) => key.clone(),
         }
     }
@@ -41,7 +62,8 @@ impl PickerKind {
     /// Whether `space` toggles rows instead of typing.
     #[must_use]
     pub(super) fn is_multi_select(&self, schema: Option<PropertyKind>) -> bool {
-        matches!(self, Self::Labels) || schema == Some(PropertyKind::MultiSelect)
+        matches!(self, Self::Labels | Self::BlockedBy | Self::Blocks)
+            || schema == Some(PropertyKind::MultiSelect)
     }
 
     /// The standard card field this picker writes, in the vocabulary
@@ -59,6 +81,10 @@ impl PickerKind {
             Self::Labels => "labels",
             Self::Estimate => "estimate",
             Self::DueDate => "due_date",
+            // Both link pickers write the same field, on either end of the link: `Blocks`
+            // patches `blocked_by` on the dependants rather than on this card.
+            Self::BlockedBy | Self::Blocks => "blocked_by",
+            Self::Provider | Self::Model | Self::Effort => "agent",
             Self::Repo | Self::Property(_) => return None,
         })
     }
@@ -73,6 +99,11 @@ pub(super) struct PickerOption {
     pub(super) label: String,
     /// The right-hand hint, when the value needs one.
     pub(super) detail: Option<String>,
+    /// Whether the row is listed but cannot be taken.
+    ///
+    /// A cycle candidate is shown rather than hidden — a row that vanishes explains nothing —
+    /// and the reason rides in [`Self::detail`] (contracts §5.3).
+    pub(super) disabled: bool,
 }
 
 impl PickerOption {
@@ -81,11 +112,18 @@ impl PickerOption {
             value: value.into(),
             label: label.into(),
             detail: None,
+            disabled: false,
         }
     }
 
     pub(super) fn detail(mut self, detail: impl Into<String>) -> Self {
         self.detail = Some(detail.into());
+        self
+    }
+
+    /// Lists the row without letting it be taken.
+    pub(super) fn disabled(mut self) -> Self {
+        self.disabled = true;
         self
     }
 }
@@ -163,6 +201,12 @@ pub(super) fn toggle(state: &Entity<AppState>, cx: &mut App) {
     let Some(option) = prepared(state, cx).get(draft.cursor).cloned() else {
         return;
     };
+    // A listed row that cannot be taken still owns the key: consuming `space` without moving
+    // the set is what keeps the dialog open with its reason on the row (contracts §5.3).
+    if option.disabled {
+        cx.stop_propagation();
+        return;
+    }
     with_host(state, cx, |host| {
         host.card_picker.toggle_value(&option.value);
     });

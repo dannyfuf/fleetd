@@ -5,9 +5,12 @@
 //! deliberately **not** here: §6.2 has the status bar mirror the open decision, and the decision
 //! is the one that knows which scope `[a]` grants and how many options its question has.
 
-use fleet_core::agents::{
-    AccountStatus, AgentKind, AgentThreadSummary, Attention, ModelSelection, OpenGate,
-    PermissionMode, ThreadProjection,
+use fleet_core::{
+    agents::{
+        AccountStatus, AgentKind, AgentThreadSummary, Attention, ModelSelection, OpenGate,
+        PermissionMode, ThreadProjection,
+    },
+    ids::CardId,
 };
 use fleet_ui_kit::{KeyHintRow, MetadataSegment, format_cost, format_duration, format_token_count};
 use gpui::SharedString;
@@ -117,6 +120,49 @@ pub(crate) fn caller_metadata_segment(
     )))
     .target(caller.thread.to_string())
 }
+
+/// What a card-called run's thread works for, as the strip has it (contracts §5.5).
+///
+/// A card is a caller like a thread is: the run it started is an ordinary tab, and the one
+/// thing that tab has to say that no other one does is which card, in which column, on which
+/// board, is waiting for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CardCaller {
+    /// The card itself, which is what the segment's target names.
+    pub(crate) card: CardId,
+    /// The card's display key, e.g. `FLT-12`.
+    pub(crate) key: String,
+    /// The column whose action started the run.
+    pub(crate) column: String,
+    /// The board the card lives on.
+    pub(crate) board: String,
+}
+
+/// The card run's pinned `for FLT-12 · Ready · Fleet` segment (contracts §5.5).
+///
+/// Targeted like a thread caller's, under the [`CARD_TARGET_PREFIX`] scheme: clicking it makes
+/// the same jump `^s u` makes — this worktree's board tab, with the card selected.
+#[must_use]
+pub(crate) fn card_metadata_segment(caller: &CardCaller) -> MetadataSegment {
+    MetadataSegment::pinned(SharedString::from(format!(
+        "for {} \u{b7} {} \u{b7} {}",
+        caller.key, caller.column, caller.board
+    )))
+    .target(format!("{CARD_TARGET_PREFIX}{}", caller.card))
+}
+
+/// What marks a metadata target as a card rather than a thread id.
+///
+/// Thread targets are bare ids, so a prefix is what lets one `on_target` serve both without
+/// either being able to be mistaken for the other.
+pub(crate) const CARD_TARGET_PREFIX: &str = "card:";
+
+/// The composer prompt of a card run: steering it, not owning what it answers.
+///
+/// A card run reports to its card, and the card's column is what moves it — so the sentence
+/// says where the reply goes, exactly as a subagent's says it reports to its caller.
+pub(crate) const CARD_COMPOSER_PLACEHOLDER: &str =
+    "Steering a card run. Its report moves the card when it finishes.";
 
 /// The ordinary composer prompt of a delegated child.
 #[must_use]

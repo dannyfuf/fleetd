@@ -1,5 +1,45 @@
 use super::*;
 
+/// The sections of the dialog's rail, in order (contracts §5.4).
+///
+/// Shaped like `settings/schema.rs`'s `Section`: the rail is the list, `ALL` is its order and
+/// [`Self::title`] is what a row reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BoardSection {
+    /// Identity, the default repository and the board's own policies.
+    General,
+    /// Which backend the board mirrors, and that backend's settings.
+    Backend,
+    /// The status columns, their order and their automation.
+    Columns,
+}
+
+impl BoardSection {
+    /// Every section, in rail order.
+    pub(crate) const ALL: &'static [Self] = &[Self::General, Self::Backend, Self::Columns];
+
+    /// The rail label.
+    #[must_use]
+    pub(crate) const fn title(self) -> &'static str {
+        match self {
+            Self::General => "General",
+            Self::Backend => "Backend",
+            Self::Columns => "Columns",
+        }
+    }
+}
+
+impl Default for BoardSection {
+    /// The section this app session last used, which is what `,` opens on (contracts §5.4).
+    ///
+    /// The draft is rebuilt from scratch on every opening (`persistence::seed`), so the memory
+    /// cannot live in it; it lives beside it in [`super::keys`] and this is what reads it. A
+    /// session that has never opened the dialog gets `General`.
+    fn default() -> Self {
+        super::keys::remembered_section()
+    }
+}
+
 /// One backend settings row: a schema entry plus the value being edited.
 ///
 /// The value is always held as **text**, whatever the kind: that is what a caret, a partially
@@ -198,7 +238,10 @@ pub(super) fn rows_error(rows: &[BackendRow]) -> Option<String> {
     rows.iter().find_map(BackendRow::error)
 }
 
-/// The rows of the dialog, in order.
+/// The rows of the dialog, in order within their own section.
+///
+/// One enum spans all three panes because the cursor, the editor and the key handlers are
+/// shared: [`BoardSettingsState::rows`] decides which of them the open section actually draws.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SettingRow {
     /// Display name.
@@ -213,21 +256,30 @@ pub(super) enum SettingRow {
     PushNewCards,
     /// How sync conflicts are resolved.
     ConflictPolicy,
+    /// How many runs this board may have live at once.
+    MaxLiveRuns,
     /// Which backend mirrors this board.
     Backend,
     /// One entry of the selected backend's settings schema.
     BackendSetting(usize),
+    /// One column of the Columns list, by position in the draft.
+    Column(usize),
+    /// One row of the drilled-into column's form.
+    ColumnField(ColumnField),
 }
 
-/// The rows every board has, before the backend's own.
-pub(super) const FIXED_ROWS: [SettingRow; 7] = [
+/// The General pane's rows, in order.
+///
+/// `Max live runs` sits last because it is the only one of them that is about *runs* rather
+/// than about identity or sync, and the eye should reach it after the facts it depends on.
+pub(super) const GENERAL_ROWS: [SettingRow; 7] = [
     SettingRow::Name,
     SettingRow::Prefix,
     SettingRow::DefaultRepo,
     SettingRow::StartOnWorktree,
     SettingRow::PushNewCards,
     SettingRow::ConflictPolicy,
-    SettingRow::Backend,
+    SettingRow::MaxLiveRuns,
 ];
 
 impl SettingRow {
@@ -241,8 +293,11 @@ impl SettingRow {
             Self::StartOnWorktree => "Start card on worktree",
             Self::PushNewCards => "Push new cards",
             Self::ConflictPolicy => "Conflict policy",
+            Self::MaxLiveRuns => "Max live runs",
             Self::Backend => "Backend",
-            Self::BackendSetting(_) => "",
+            // A backend row is named by its own schema entry and a column row by its
+            // `ColumnField`; neither has a label this table could state.
+            Self::BackendSetting(_) | Self::Column(_) | Self::ColumnField(_) => "",
         }
     }
 }

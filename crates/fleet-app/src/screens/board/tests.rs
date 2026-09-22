@@ -314,6 +314,129 @@ fn the_board_model_is_derived_once_per_revision() {
     assert_eq!(projection::prepare(&state, &cache, 1_788_523_211).shown, 1);
 }
 
+/// A live run, on the board's first card, with the delegation record behind it.
+///
+/// The run is what the card knows; the delegation is what the mirror knows. A card-called
+/// `DelegationChanged` is the only notice the board gets between two board responses, which is
+/// what the test below is about.
+fn live_run(state: &mut AppState) -> fleet_core::agents::Delegation {
+    use fleet_core::agents::{AgentKind, Delegation, DelegationCaller, DelegationId, ThreadId};
+
+    let view = state
+        .board
+        .view
+        .as_mut()
+        .unwrap_or_else(|| panic!("no board"));
+    let (id, child) = (DelegationId::new(), ThreadId::new());
+    let card = &mut view.cards[0];
+    card.runs.push(fleet_core::board::CardRun {
+        id,
+        thread_id: Some(child),
+        status_id: card.status_id.clone(),
+        action: fleet_core::board::ActionKind::Prompt,
+        provider: AgentKind::Codex,
+        model: None,
+        effort: None,
+        started_at: "2026-09-20T11:00:00Z".to_owned(),
+        ended_at: None,
+        outcome: None,
+        detail: None,
+        report_comment_id: None,
+        files_changed: 0,
+        cost_usd: None,
+        tokens: None,
+    });
+    Delegation {
+        id,
+        caller: DelegationCaller::Card {
+            board: view.board.id.clone(),
+            card: view.cards[0].id.clone(),
+        },
+        caller_turn: None,
+        caller_item: None,
+        child,
+        provider: AgentKind::Codex,
+        depth: 1,
+        brief: "implement the card".to_owned(),
+        expectation: "the tests pass".to_owned(),
+        eager: false,
+        status: fleet_core::agents::DelegationStatus::Running,
+        status_payload: None,
+        result: None,
+        nudges: 0,
+        recoveries: 0,
+        delivery: fleet_core::agents::DeliveryState::Pending,
+        created: chrono::DateTime::UNIX_EPOCH,
+        finished: None,
+        headline: None,
+        usage: None,
+    }
+}
+
+/// The run mark the model carries for the card titled `title`.
+fn mark_of(model: &BoardModel, title: &str) -> Option<fleet_ui_kit::RunMark> {
+    model
+        .columns
+        .iter()
+        .flat_map(|column| column.rows.iter())
+        .find(|row| row.title == title)
+        .unwrap_or_else(|| panic!("no row titled {title}"))
+        .run
+}
+
+/// A child narrating itself is not a new board model.
+///
+/// `gpui-performance` rule 3, now for the marks: a live child emits `DelegationChanged` once
+/// per tool call, and the whole model — every column, every tile string — sits behind
+/// `CardMarks::revision` precisely so that a headline nobody draws rebuilds nothing. A status
+/// that *is* drawn must still rebuild, or the tile would keep the mark the card has left.
+#[test]
+fn the_board_model_is_not_rebuilt_when_a_live_childs_headline_changes() {
+    let mut state = state();
+    state.screen = Screen::Hub { tab: HubTab::Board };
+    let mut delegation = live_run(&mut state);
+    state.apply_daemon_event(
+        fleet_proto::event::Event::DelegationChanged(delegation.clone()),
+        Instant::now(),
+    );
+    let cache = RefCell::default();
+
+    let initial = projection::prepare(&state, &cache, 1_788_523_200);
+    assert_eq!(
+        mark_of(&initial, "Fix login"),
+        Some(fleet_ui_kit::RunMark::Working),
+        "the fold ran in the update path and the row carries its answer"
+    );
+
+    delegation.headline = Some("reading the reducer".to_owned());
+    state.apply_daemon_event(
+        fleet_proto::event::Event::DelegationChanged(delegation.clone()),
+        Instant::now(),
+    );
+    assert!(
+        Rc::ptr_eq(
+            &initial,
+            &projection::prepare(&state, &cache, 1_788_523_201)
+        ),
+        "a headline moves no mark, so the projection key is equal and the model is reused"
+    );
+
+    delegation.status = fleet_core::agents::DelegationStatus::Blocked;
+    state.apply_daemon_event(
+        fleet_proto::event::Event::DelegationChanged(delegation),
+        Instant::now(),
+    );
+    let updated = projection::prepare(&state, &cache, 1_788_523_202);
+    assert!(
+        !Rc::ptr_eq(&initial, &updated),
+        "a child that stopped for a person is a different board"
+    );
+    assert_eq!(
+        mark_of(&updated, "Fix login"),
+        Some(fleet_ui_kit::RunMark::NeedsYou)
+    );
+}
+
 /// A column's list is told what changed rather than rebuilt.
 ///
 /// `gpui-performance` rule 5: the `ListState` carries the measured height of every tile, so a

@@ -212,6 +212,16 @@ impl Shell {
                     if damage.state {
                         shell.reconcile_agent_session(cx);
                     }
+                    // A board the *daemon* changed — a card run recorded, an `on_success` move,
+                    // a released blocker — reaches the mirror as a `BoardChanged` that only
+                    // marks it stale. The Hub's tab reloads itself from its own observation of
+                    // `AppState`; the Workspace's pane has nothing that would, so the batch
+                    // that carried the event is what claims the load.
+                    crate::screens::board::refresh_after_daemon_change(
+                        &shell.state,
+                        &shell.bridge,
+                        cx,
+                    );
                     tracing::trace!(
                         events = count,
                         recovery = damage.recover.len(),

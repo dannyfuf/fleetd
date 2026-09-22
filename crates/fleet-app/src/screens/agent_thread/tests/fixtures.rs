@@ -8,8 +8,8 @@ use std::collections::{HashMap, HashSet};
 use chrono::{DateTime, TimeZone, Utc};
 use fleet_core::{
     agents::{
-        AgentKind, Delegation, DelegationId, DelegationResult, DelegationStatus, DeliveryState,
-        FileDelta, GateId, GateKind, Item, ItemId, ItemKind, ItemStatus, OpenGate,
+        AgentKind, Delegation, DelegationCaller, DelegationId, DelegationResult, DelegationStatus,
+        DeliveryState, FileDelta, GateId, GateKind, Item, ItemId, ItemKind, ItemStatus, OpenGate,
         PermissionChoice, PermissionOption, ProviderOptionId, Question, QuestionOption,
         ResultSource, Seq, ThreadId, ThreadProjection, ToolCall, ToolDiff, ToolKind, TurnEnd,
         TurnId, TurnOutcome, TurnRecord, Usage,
@@ -154,9 +154,9 @@ pub(super) fn subagent(turn: TurnId, status: ItemStatus) -> Item {
 pub(super) fn delegation_record(status: DelegationStatus) -> Delegation {
     Delegation {
         id: DelegationId::new(),
-        caller: ThreadId::new(),
-        caller_turn: TurnId::new(),
-        caller_item: ItemId::new(),
+        caller: DelegationCaller::Thread(ThreadId::new()),
+        caller_turn: Some(TurnId::new()),
+        caller_item: Some(ItemId::new()),
         child: ThreadId::new(),
         provider: AgentKind::Codex,
         depth: 1,

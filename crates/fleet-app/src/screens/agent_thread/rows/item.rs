@@ -26,7 +26,11 @@ const USER_COLLAPSE_CHARS: usize = 600;
 const USER_COLLAPSE_LINES: usize = 8;
 
 /// A delivered child result previews at most eight lines while collapsed.
-const DELEGATION_RESULT_COLLAPSE_LINES: usize = 8;
+///
+/// `pub(crate)` because the card detail folds a run's report comment at the same place
+/// (contracts §5.3): a report is this same text on another surface, and two literals that are
+/// meant to be one number are a drift waiting to happen.
+pub(crate) const DELEGATION_RESULT_COLLAPSE_LINES: usize = 8;
 
 /// A plan card fades out past this many characters.
 const PLAN_COLLAPSE_CHARS: usize = 900;

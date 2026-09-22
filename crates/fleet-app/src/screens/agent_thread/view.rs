@@ -43,6 +43,17 @@ impl Render for AgentThreadView {
             MetadataRow::new(self.metadata.clone(), fit)
                 .trailing(self.trailing.clone())
                 .on_target(move |target, _window, cx| {
+                    // Two kinds of jump ride one callback: a bare thread id, and a card under
+                    // `presentation::CARD_TARGET_PREFIX`.
+                    if let Some(card) = target.strip_prefix(presentation::CARD_TARGET_PREFIX) {
+                        let Ok(card) = card.parse() else {
+                            return;
+                        };
+                        entity.update(cx, |_view, cx| {
+                            cx.emit(super::AgentThreadEvent::SelectCard(card));
+                        });
+                        return;
+                    }
                     let Ok(thread) = target.parse() else {
                         return;
                     };
@@ -59,13 +70,19 @@ impl Render for AgentThreadView {
             .flex_none()
             .opacity(composer_opacity)
             .child(
+                // The name is on the editor's own row rather than on the stack below it: a
+                // target is a thing the pointer is aimed at, and `click agents.composer` has to
+                // land where a hand would put the caret. Named on the whole composer — editor,
+                // host badge and metadata strip — its centre falls in the strip, where the
+                // mouse down never reaches the editor and the keys that follow go nowhere.
                 div()
                     .flex()
                     .items_center()
                     .gap(theme.space.sm)
                     .min_h(theme.metrics.text_field_h)
                     .w_full()
-                    .child(div().flex_1().min_w_0().child(self.input.clone())),
+                    .child(div().flex_1().min_w_0().child(self.input.clone()))
+                    .harness_target("agents.composer"),
             )
             .children(self.host_badge(&theme))
             .children(metadata);
@@ -103,7 +120,7 @@ impl Render for AgentThreadView {
                             )
                             .children(self.picker_element(&theme))
                             .children(self.dock_element(cx))
-                            .child(composer.harness_target("agents.composer")),
+                            .child(composer),
                     ),
             )
     }

@@ -22,23 +22,7 @@ pub(super) fn board_id(state: &AppState) -> Option<BoardId> {
 /// still the card the user is working on, and a selection that stays behind is a selection that
 /// silently points at somebody else's card.
 pub(crate) fn focus_card(app: &mut AppState, card: &CardId) {
-    let found = app.board.view.as_ref().and_then(|view| {
-        view.board
-            .statuses
-            .iter()
-            .enumerate()
-            .find_map(|(column, status)| {
-                board_screen::visible_cards(view, &status.id, &app.board.filter)
-                    .iter()
-                    .position(|candidate| &candidate.id == card)
-                    .map(|row| (column, row))
-            })
-    });
-    if let Some((column, row)) = found {
-        app.board.focus.column = column;
-        app.board.focus.row = row;
-    }
-    app.clamp_board_focus();
+    app.select_card(card);
 }
 
 /// Moves the focus by whole columns and rows, clamped at both ends (§5.11: never wraps).

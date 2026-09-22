@@ -12,10 +12,11 @@
 //! one label makes tagging a card four keystrokes per label.
 
 use fleet_core::{
-    board::{CardPatch, Priority, PropertyKind, PropertyValue},
+    agents::AgentKind,
+    board::{CardAgentPrefs, CardPatch, Priority, PropertyKind, PropertyValue},
     ids::{CardId, LabelId, RepoId, StatusId},
 };
-use fleet_proto::request::RequestBody;
+use fleet_proto::{request::RequestBody, response::ResponseBody};
 use fleet_ui_kit::{Icon, prelude::*};
 use gpui::{AnyElement, App, Entity, FocusHandle, Window, div};
 

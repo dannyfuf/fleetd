@@ -394,3 +394,204 @@ fn confirmed_prune_stays_open_when_any_reviewed_item_was_skipped() {
 
     assert!(prune_requires_review(&result));
 }
+
+/// `]` on a card whose child is working asks one question, and `y` is what moves it.
+///
+/// Contracts §5.5: the sentence names the column and the age of the run, the primary verb is
+/// `Move`, and the request that leaves is the plain move with `cancel_run` set — the app never
+/// cancels the run separately, because two requests are two chances to half-succeed.
+#[gpui::test]
+fn a_confirmed_move_cancels_the_run_and_an_unstaged_column_moves_nothing(
+    cx: &mut gpui::TestAppContext,
+) {
+    let card = CardId::try_from("card-0").unwrap_or_else(|error| panic!("{error}"));
+    let status = StatusId::try_from("in-progress").unwrap_or_else(|error| panic!("{error}"));
+    let request = ConfirmRequest::MoveCancelsRun {
+        card: card.clone(),
+        key: "FLE-1".to_owned(),
+        target: "In Progress".to_owned(),
+        elapsed: "2m".to_owned(),
+    };
+    assert_eq!(request.title(true), "Move FLE-1?");
+    assert_eq!(
+        request.consequence(&Facts::default()),
+        "FLE-1 is working (2m). Move to In Progress and cancel the run?"
+    );
+    assert_eq!(request.action_label(0), "Move");
+    assert_eq!(request.target(), "FLE-1");
+    assert!(
+        !request.always_strong() && !request.rechecks(),
+        "a move is confirmed with `y` and has no facts to re-check"
+    );
+
+    let state = cx.new(|_| AppState::new("/tmp/fleet-move-cancels-run", Instant::now()));
+    let wire = RecordingTransport::default();
+    cx.update(|cx| {
+        crate::dialogs::with_host(&state, cx, |host| {
+            host.confirm = ConfirmState {
+                request: Some(request.clone()),
+                move_target: Some(status.clone()),
+                ..ConfirmState::default()
+            };
+        });
+        state.update(cx, |app, _| {
+            app.open_overlay(crate::state::Overlay::Dialog(
+                crate::dialogs::Dialogs::Confirm,
+            ));
+        });
+        commit(&state, &wire, ConfirmKey::Lower, cx);
+    });
+    assert_eq!(
+        wire.0.borrow().as_slice(),
+        [RequestBody::MoveCard {
+            card_id: card,
+            status_id: status,
+            index: None,
+            cancel_run: true,
+        }]
+    );
+    state.read_with(cx, |app, _| assert!(app.overlay.is_none()));
+
+    // A reconnect or a context switch drops the staged column with the board it belonged to.
+    // Confirming then does exactly what answering `n` does: nothing at all.
+    cx.update(|cx| {
+        crate::dialogs::with_host(&state, cx, |host| {
+            host.confirm = ConfirmState {
+                request: Some(request),
+                move_target: None,
+                ..ConfirmState::default()
+            };
+        });
+        commit(&state, &wire, ConfirmKey::Lower, cx);
+    });
+    assert_eq!(
+        wire.0.borrow().len(),
+        1,
+        "a move with no column to move into sends nothing"
+    );
+    cx.run_until_parked();
+}
+
+/// `X` on a board card stages the run, the dialog adopts it, and only `y` reaches the wire.
+///
+/// The delegation cancel's own pattern (`confirm.rs`), for the key that stops a card's child:
+/// staging is what lets the sentence be written where the card is — a live child and an owed
+/// slot are different facts — while the daemon hears nothing until the dialog is accepted.
+#[gpui::test]
+fn a_staged_card_run_cancel_reaches_the_dialog_and_only_then_the_wire(
+    cx: &mut gpui::TestAppContext,
+) {
+    let card = CardId::try_from("card-0").unwrap_or_else(|error| panic!("{error}"));
+    let state = cx.new(|_| AppState::new("/tmp/fleet-card-run-cancel", Instant::now()));
+    let wire = RecordingTransport::default();
+
+    cx.update(|cx| {
+        ConfirmRequest::stage_card_run_cancel(
+            &state,
+            card.clone(),
+            "FLE-1".to_owned(),
+            "child stops and reports no further work".to_owned(),
+            cx,
+        );
+        state.update(cx, |app, _| {
+            app.open_overlay(crate::state::Overlay::Dialog(
+                crate::dialogs::Dialogs::Confirm,
+            ));
+        });
+        adopt_staged_board_confirm(&state, cx);
+    });
+
+    assert!(
+        wire.0.borrow().is_empty(),
+        "staging the confirm must not reach the daemon"
+    );
+    let adopted = cx
+        .update(|cx| {
+            crate::dialogs::read_host(&state, cx, |host, _| host.confirm.card_run_cancel.clone())
+        })
+        .unwrap_or_else(|| panic!("the dialog adopts the staged run"));
+    assert_eq!(adopted.key, "FLE-1");
+
+    cx.update(|cx| commit_card_run_cancel(&state, &wire, card.clone(), cx));
+
+    assert_eq!(
+        wire.0.borrow().as_slice(),
+        [RequestBody::CardRunCancel { card_id: card }]
+    );
+    state.read_with(cx, |app, _| assert!(app.overlay.is_none()));
+    cx.run_until_parked();
+}
+
+/// Nothing a board key staged survives the dialog that adopted it.
+#[gpui::test]
+fn an_adopted_board_confirm_is_taken_out_of_the_staging_set(cx: &mut gpui::TestAppContext) {
+    let state = cx.new(|_| AppState::new("/tmp/fleet-board-confirm-staging", Instant::now()));
+    let status = StatusId::try_from("done").unwrap_or_else(|error| panic!("{error}"));
+    cx.update(|cx| {
+        ConfirmRequest::stage_move_target(&state, status.clone(), cx);
+        adopt_staged_board_confirm(&state, cx);
+        crate::dialogs::with_host(&state, cx, |host| {
+            assert_eq!(host.confirm.move_target, Some(status));
+            host.confirm = ConfirmState::default();
+        });
+        // The next confirm — a delete, say — must not inherit the column `[` staged.
+        adopt_staged_board_confirm(&state, cx);
+        crate::dialogs::with_host(&state, cx, |host| {
+            assert_eq!(host.confirm.move_target, None);
+        });
+    });
+}
+
+/// What `dialog.message` reports is the sentence the card on screen actually asks.
+///
+/// One test over all three shapes, because the ordering is the claim: the two staged cancels
+/// draw their own card and never reach `ConfirmRequest::consequence`, so a reader that asked
+/// the request first would report the *move*'s sentence over a cancel's dialog
+/// (`docs/TESTING-HARNESS.md` §3).
+#[test]
+fn the_reported_consequence_is_the_sentence_the_open_card_draws() {
+    assert_eq!(
+        consequence(&ConfirmState::default()),
+        None,
+        "a confirm opened with no target asks nothing"
+    );
+
+    let card = CardId::try_from("card-0").unwrap_or_else(|error| panic!("{error}"));
+    let mut draft = ConfirmState {
+        request: Some(ConfirmRequest::MoveCancelsRun {
+            card: card.clone(),
+            key: "FLE-1".to_owned(),
+            target: "Done".to_owned(),
+            elapsed: "2m".to_owned(),
+        }),
+        ..ConfirmState::default()
+    };
+    assert_eq!(
+        consequence(&draft).as_deref(),
+        Some("FLE-1 is working (2m). Move to Done and cancel the run?"),
+        "contracts §5.5 fixes the move confirm's sentence word for word"
+    );
+
+    draft.card_run_cancel = Some(CardRunCancelDraft {
+        card,
+        key: "FLE-1".to_owned(),
+        fact: "child stops and reports no further work".to_owned(),
+    });
+    assert_eq!(
+        consequence(&draft).as_deref(),
+        Some(CARD_RUN_CANCEL_CONSEQUENCE),
+        "the board's `X` draws its own card, whatever request was published"
+    );
+
+    draft.delegation_cancel = Some(DelegationCancelDraft {
+        id: DelegationId::new(),
+        child: ThreadId::new(),
+        provider: AgentKind::Codex,
+        title: "verify the payroll reducer".to_owned(),
+    });
+    assert_eq!(
+        consequence(&draft).as_deref(),
+        Some(DELEGATION_CANCEL_CONSEQUENCE),
+        "a transcript's `x` is chosen first, exactly as `render` chooses it"
+    );
+}

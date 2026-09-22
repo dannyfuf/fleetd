@@ -56,6 +56,21 @@ pub enum ConfirmRequest {
         /// Its title, which is what the consequence sentence names.
         title: String,
     },
+    /// `[` / `]` on a board card whose run is live (contracts §5.5).
+    ///
+    /// The app asks only when its delegation mirror holds a live card-called delegation for
+    /// the card's newest run; otherwise it sends the plain move and the daemon's own refusal
+    /// is what the user reads.
+    MoveCancelsRun {
+        /// The card being moved.
+        card: CardId,
+        /// Its display key, e.g. `FLT-12`.
+        key: String,
+        /// The column it would land in.
+        target: String,
+        /// How long the run has been going, already formatted.
+        elapsed: String,
+    },
     /// `ctrl-s x` in the Workspace.
     CloseTerminal {
         /// The terminal to close.
@@ -84,6 +99,7 @@ impl ConfirmRequest {
             Self::DeleteRepo { repo, .. } => format!("Delete repository {}?", repo.as_str()),
             Self::DeleteContext { name, .. } => format!("Delete context \"{name}\"?"),
             Self::DeleteCard { key, .. } => format!("Delete {key}?"),
+            Self::MoveCancelsRun { key, .. } => format!("Move {key}?"),
             Self::Prune { repo } => format!("Prune {}", repo.as_str()),
             Self::KillSession { session, .. } => format!("Kill session {}?", session.as_str()),
             Self::CloseTerminal { index, name, .. } => {
@@ -122,6 +138,12 @@ impl ConfirmRequest {
                 "Removes \"{title}\" with its comments and activity. A worktree created from it \
                  is kept."
             ),
+            Self::MoveCancelsRun {
+                key,
+                target,
+                elapsed,
+                ..
+            } => format!("{key} is working ({elapsed}). Move to {target} and cancel the run?"),
             Self::Prune { .. } => {
                 "Deletes the ones listed below. The skipped ones are kept, with the reason shown."
                     .to_owned()
@@ -160,6 +182,7 @@ impl ConfirmRequest {
             | Self::DeleteRepo { .. }
             | Self::DeleteContext { .. }
             | Self::DeleteCard { .. } => Icon::Trash,
+            Self::MoveCancelsRun { .. } => Icon::ArrowRightLeft,
             Self::Prune { .. } => Icon::Scissors,
             Self::KillSession { .. } => Icon::Power,
             Self::CloseTerminal { .. } => Icon::X,
@@ -174,6 +197,7 @@ impl ConfirmRequest {
             | Self::DeleteRepo { .. }
             | Self::DeleteContext { .. }
             | Self::DeleteCard { .. } => "Delete".to_owned(),
+            Self::MoveCancelsRun { .. } => "Move".to_owned(),
             Self::Prune { .. } => format!("Prune {prune_count}"),
             Self::KillSession { .. } => "Kill".to_owned(),
             Self::CloseTerminal { .. } => "Close".to_owned(),
@@ -202,7 +226,7 @@ impl ConfirmRequest {
             Self::DeleteWorktree { id } => id.as_str().to_owned(),
             Self::DeleteRepo { repo, .. } | Self::Prune { repo } => repo.as_str().to_owned(),
             Self::DeleteContext { context, .. } => context.as_str().to_owned(),
-            Self::DeleteCard { key, .. } => key.clone(),
+            Self::DeleteCard { key, .. } | Self::MoveCancelsRun { key, .. } => key.clone(),
             Self::KillSession { session, .. } => session.as_str().to_owned(),
             Self::CloseTerminal { name, .. } => name.clone(),
         }

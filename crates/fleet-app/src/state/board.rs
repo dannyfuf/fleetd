@@ -1,9 +1,16 @@
 use super::*;
+use chrono::{DateTime, Utc};
 use fleet_core::{
-    board::{BoardView, Card},
+    agents::{DelegationId, DelegationStatus},
+    board::{
+        BlockedTone as CoreBlockedTone, Board, BoardView, Card, CardRun, PENDING_AMBER_AFTER_SECS,
+        PendingRun, RunOutcome, attention, blocked,
+    },
     config::NATIVE_BOARD,
+    ids::CardId,
 };
 use fleet_proto::response::BOARD_WORKTREE_CAPABILITY;
+use fleet_ui_kit::{BlockedTone, RunMark};
 
 /// What the app says when the connected daemon serves no worktree boards.
 ///
@@ -47,6 +54,39 @@ pub enum GroupBy {
     Labels,
 }
 
+/// What one tile says about its card's run and its blockers.
+///
+/// Kit vocabulary, not domain types: [`RunMark`] and [`BlockedTone`] are what `CardTile` draws,
+/// so the fold from `CardRun`, `PendingRun` and the delegation mirror happens once, in
+/// [`AppState::refresh_card_marks`], instead of once per tile per frame.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TileMarks {
+    /// The run mark this card's tile draws, when it has one.
+    pub run: Option<RunMark>,
+    /// How many cards still block it, and how loudly to say so.
+    pub blocked: Option<(u32, BlockedTone)>,
+}
+
+/// Every tile mark of the shown board, derived once per change (contracts §5.2).
+///
+/// The two counters are the pane header's trailing slot — `{working}/{max} working` and
+/// `{needs_you} needs you` — and are folded here rather than in the header, because the same
+/// walk over the cards already answers both.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CardMarks {
+    /// The marks of every card that has one; a card with neither mark is absent.
+    pub by_card: HashMap<CardId, TileMarks>,
+    /// Cards with a live or pending run, which is the header's numerator.
+    pub working: u32,
+    /// Cards waiting on a person (`ops::query::attention`).
+    pub needs_you: u32,
+    /// Bumped only when the map or a counter actually differs.
+    ///
+    /// The board projection is keyed on it, so a tick that changes no mark must not rebuild a
+    /// whole board's model.
+    pub revision: u64,
+}
+
 /// The shown board's data and local presentation state (BOARD §8).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct BoardState {
@@ -74,6 +114,14 @@ pub struct BoardState {
     pub filter_editing: bool,
     /// Optional secondary grouping.
     pub group_secondary: Option<GroupBy>,
+    /// The tile marks derived from [`Self::view`] and the delegation mirror.
+    pub marks: CardMarks,
+    /// A card to select as soon as a view arrives that holds it.
+    ///
+    /// `^s u` from a card run's thread names a card on a board this mirror has not loaded yet:
+    /// the tab is asked for first and the view lands frames later, so the selection waits here
+    /// rather than being dropped on the floor by a `focus_card` over an empty mirror.
+    pub pending_focus: Option<CardId>,
     /// Bumped by every mutation of [`Self::view`].
     ///
     /// The board screen memoises its whole derived model behind this counter, so it has to move
@@ -134,12 +182,65 @@ impl AppState {
         if !self.board_scope_admits(&view) {
             return;
         }
+        // Read before the swap: a run whose start failed is only news against the board this
+        // mirror already held, and after the assignment there is nothing left to compare to.
+        let previous = self.newest_run_ids();
         self.board_stale = false;
         self.board.view = Some(view);
         self.board.loading = false;
         self.board.error = None;
         self.board.touch();
         self.clamp_board_focus();
+        if let Some(card) = self.board.pending_focus.take() {
+            self.select_card(&card);
+        }
+        if let Some(previous) = previous {
+            self.report_failed_start(&previous);
+        }
+        self.refresh_card_marks(Utc::now());
+    }
+
+    /// The newest run of every card the mirror holds, or `None` when it holds no board.
+    ///
+    /// `None` is what makes a first load silent: with no board behind it every run id is new,
+    /// and a failure the user has already been told about — or one from another session
+    /// entirely — is not worth a sticky error the moment the board appears.
+    fn newest_run_ids(&self) -> Option<HashMap<CardId, DelegationId>> {
+        let view = self.board.view.as_ref()?;
+        Some(
+            view.cards
+                .iter()
+                .filter_map(|card| card.runs.last().map(|run| (card.id.clone(), run.id)))
+                .collect(),
+        )
+    }
+
+    /// Raises the sticky slot for a run that is new to this view and never reached a thread.
+    ///
+    /// A start that fails leaves no delegation and no child to attach to, so nothing else on
+    /// the board would ever say why the card stopped: the tile's mark goes straight back to
+    /// nothing (contracts §5.2). Comparing run ids is what makes it fire once — the next view
+    /// carries the same newest run and says nothing again.
+    fn report_failed_start(&mut self, previous: &HashMap<CardId, DelegationId>) {
+        let Some(view) = self.board.view.as_ref() else {
+            return;
+        };
+        let failure = view.cards.iter().find_map(|card| {
+            let run = card.runs.last()?;
+            if !run.failed_to_start() || previous.get(&card.id) == Some(&run.id) {
+                return None;
+            }
+            Some(run.detail.clone().unwrap_or_else(|| {
+                format!("{} could not start a run", card.display_key(&view.board))
+            }))
+        });
+        if let Some(text) = failure {
+            self.sticky_error = Some(StickyError {
+                text,
+                job: None,
+                retryable: false,
+            });
+        }
     }
 
     /// Upserts a card only into its currently loaded board.
@@ -174,6 +275,136 @@ impl AppState {
         });
         self.board.touch();
         self.clamp_board_focus();
+        self.refresh_card_marks(Utc::now());
+    }
+
+    /// Re-derives [`BoardState::marks`] from the shown board and the delegation mirror.
+    ///
+    /// Called after `apply_board_view`, after `apply_card`, after `apply_delegation` for a
+    /// card-called delegation on the shown board, and from the app's existing clock tick (the
+    /// one that runs `expire_toasts`), so `Stalled` appears without an event. `now` is
+    /// formatted to RFC 3339 once for `ops::query::attention`, and `revision` moves only when
+    /// the derived marks actually differ (contracts §5.2).
+    pub fn refresh_card_marks(&mut self, now: DateTime<Utc>) {
+        let next = self.derive_card_marks(now);
+        if next != self.board.marks {
+            let revision = self.board.marks.revision.wrapping_add(1);
+            self.board.marks = next;
+            self.board.marks.revision = revision;
+        }
+    }
+
+    /// Folds the shown board into the marks its tiles and header draw.
+    ///
+    /// Carries the current revision so the caller compares the derived facts alone: the
+    /// counter is the projection's rebuild key, and a tick that changes nothing must leave it
+    /// where it was.
+    fn derive_card_marks(&self, now: DateTime<Utc>) -> CardMarks {
+        let mut marks = CardMarks {
+            revision: self.board.marks.revision,
+            ..CardMarks::default()
+        };
+        let Some(view) = self.board.view.as_ref() else {
+            return marks;
+        };
+        // `attention` reads a stamp, not an instant, and every card compares against the same
+        // one: formatting it per card would be both slower and a clock that moves mid-fold.
+        let stamp = now.to_rfc3339();
+        // One walk of the delegation mirror for the whole board, not one per card: the mirror
+        // holds every session's delegations and the fold below already visits every card.
+        let live_children = self.agents.live_card_runs(&view.board.id);
+        for card in view.cards.iter().filter(|card| !card.archived) {
+            // The card stays the authority on a run it has already finished: a mirror row that
+            // has not caught up with its own terminal event says nothing about it.
+            let live_child = live_children.get(&card.id).copied().filter(|(id, _)| {
+                !card
+                    .runs
+                    .iter()
+                    .any(|run| run.id == *id && run.outcome.is_some())
+            });
+            let run = self.run_mark(view, card, now, live_child.map(|(_, status)| status));
+            let blocked = blocked(&view.board, &view.cards, card)
+                .map(|waiting| (waiting.unsatisfied, tone_of(waiting.tone)));
+            // The numerator is what occupies a run slot, which is the live and the owed runs —
+            // not the marks, because a `Blocked` child is still holding its checkout. A child
+            // the mirror has and the view has not is holding one too.
+            if card.pending_run.is_some()
+                || live_child.is_some()
+                || card.runs.last().is_some_and(CardRun::is_live)
+            {
+                marks.working = marks.working.saturating_add(1);
+            }
+            if attention(card, &stamp) {
+                marks.needs_you = marks.needs_you.saturating_add(1);
+            }
+            if run.is_some() || blocked.is_some() {
+                marks
+                    .by_card
+                    .insert(card.id.clone(), TileMarks { run, blocked });
+            }
+        }
+        marks
+    }
+
+    /// What one card's newest run says about it, or `None` when it says nothing.
+    ///
+    /// A live child the delegation mirror holds is read first, because it is the only fact that
+    /// does not wait for a board round trip: the daemon records the run on the card and emits a
+    /// `BoardChanged`, and the app answers that with a whole `EnsureWorktreeBoard`, so a run
+    /// that lives five seconds can otherwise be over before the tile ever says `working`. The
+    /// mirror's `DelegationChanged` lands in milliseconds and names the card that called it, so
+    /// the mark covers the whole live window. An owed run wins over a finished one: the card is
+    /// about to start again, and the mark that matters is the one that is still moving.
+    fn run_mark(
+        &self,
+        view: &BoardView,
+        card: &Card,
+        now: DateTime<Utc>,
+        live_child: Option<DelegationStatus>,
+    ) -> Option<RunMark> {
+        if let Some(status) = live_child {
+            return Some(live_status_mark(status));
+        }
+        if let Some(pending) = card.pending_run.as_ref() {
+            return Some(pending_mark(pending, now));
+        }
+        let run = card.runs.last()?;
+        let Some(outcome) = run.outcome else {
+            return Some(self.live_mark(view, run));
+        };
+        match outcome {
+            // Someone stopped this deliberately; a tile that kept saying so would be reporting
+            // a decision as an event.
+            RunOutcome::Cancelled => None,
+            // A column that advances on success says it by moving the card, so a check beside
+            // the key would mark every card the workflow already carried on from.
+            RunOutcome::Succeeded => {
+                (!auto_advances(&view.board, run)).then_some(RunMark::Succeeded)
+            }
+            RunOutcome::NeedsYou | RunOutcome::Failed | RunOutcome::Incomplete => {
+                Some(RunMark::NeedsYou)
+            }
+        }
+    }
+
+    /// The mark of a run the card still believes is live.
+    ///
+    /// The delegation mirror is asked first and the view's join second: `live_runs` is as old
+    /// as the last board response, while `DelegationChanged` keeps arriving between them. A run
+    /// neither of them knows is drawn as working — the card is the authority on whether it has
+    /// ended, and until it says otherwise a child is out there.
+    fn live_mark(&self, view: &BoardView, run: &CardRun) -> RunMark {
+        let status = self
+            .agents
+            .delegation(run.id)
+            .map(|delegation| delegation.status)
+            .or_else(|| {
+                view.live_runs
+                    .iter()
+                    .find(|live| live.run == run.id)
+                    .map(|live| live.status)
+            });
+        status.map_or(RunMark::Working, live_status_mark)
     }
 
     /// Clears board data and invalidates requests from the previous context or connection.
@@ -332,7 +563,7 @@ impl AppState {
     /// sets one, and it points the mirror back at the context when it goes away, so the scope
     /// itself says whether that pane is there to draw the answer.
     #[must_use]
-    fn board_is_shown(&self) -> bool {
+    pub(super) fn board_is_shown(&self) -> bool {
         matches!(self.screen, Screen::Hub { tab: HubTab::Board })
             || matches!(self.board.scope, Some(BoardScope::Worktree(_)))
     }
@@ -419,6 +650,31 @@ impl AppState {
         }
     }
 
+    /// Puts the board focus on `card`, wherever the current view puts it.
+    ///
+    /// The one implementation: `screens::board::focus_card` is this, and
+    /// [`AppState::apply_board_view`] applies a staged selection through it too. A card the view
+    /// does not hold leaves the focus where it was, clamped.
+    pub(crate) fn select_card(&mut self, card: &CardId) {
+        let found = self.board.view.as_ref().and_then(|view| {
+            view.board
+                .statuses
+                .iter()
+                .enumerate()
+                .find_map(|(column, status)| {
+                    crate::views::board_screen::visible_cards(view, &status.id, &self.board.filter)
+                        .iter()
+                        .position(|candidate| &candidate.id == card)
+                        .map(|row| (column, row))
+                })
+        });
+        if let Some((column, row)) = found {
+            self.board.focus.column = column;
+            self.board.focus.row = row;
+        }
+        self.clamp_board_focus();
+    }
+
     /// Keeps the board selection inside the columns and rows that are actually drawn.
     ///
     /// The filter is part of that: a selection that indexes a hidden card is a selection the
@@ -472,6 +728,52 @@ impl AppState {
             }
             FilterEscape::ClearFilter => false,
         }
+    }
+}
+
+/// How an owed run reads: amber once the wait itself is the story (contracts §5.1).
+///
+/// A `since` this build cannot parse is drawn as an ordinary wait rather than as trouble: the
+/// stamp comes from the daemon's clock, and a mark is not the place to report a malformed one.
+fn pending_mark(pending: &PendingRun, now: DateTime<Utc>) -> RunMark {
+    let stalled = DateTime::parse_from_rfc3339(&pending.since).is_ok_and(|since| {
+        u64::try_from((now - since.with_timezone(&Utc)).num_seconds())
+            .is_ok_and(|secs| secs >= PENDING_AMBER_AFTER_SECS)
+    });
+    if stalled {
+        RunMark::Stalled
+    } else {
+        RunMark::Pending
+    }
+}
+
+/// What a child that is still out says on its card's tile.
+///
+/// Only a child parked for a person changes the word. Every other status is drawn as work in
+/// progress, including one the mirror has not caught up on: the card is the authority on whether
+/// its run ended, and until it says otherwise a child is out there (BOARD.md §11.8).
+const fn live_status_mark(status: DelegationStatus) -> RunMark {
+    match status {
+        DelegationStatus::Blocked => RunMark::NeedsYou,
+        _ => RunMark::Working,
+    }
+}
+
+/// Whether the column that started this run carries the card on by itself when it succeeds.
+fn auto_advances(board: &Board, run: &CardRun) -> bool {
+    board
+        .statuses
+        .iter()
+        .find(|status| status.id == run.status_id)
+        .and_then(|status| status.automation.as_ref())
+        .is_some_and(|automation| automation.on_success.is_some())
+}
+
+/// The kit's tone for the domain's. Two enums on purpose: `fleet-ui-kit` takes no domain type.
+const fn tone_of(tone: CoreBlockedTone) -> BlockedTone {
+    match tone {
+        CoreBlockedTone::Muted => BlockedTone::Muted,
+        CoreBlockedTone::Warning => BlockedTone::Warning,
     }
 }
 

@@ -227,12 +227,21 @@ fn leaving_the_agent_tab_gives_the_pty_its_keys_back() {
         .parse()
         .unwrap_or_else(|error| panic!("{error}"));
 
-    assert!(app.agents.deactivate(&worktree));
+    // Any snapshot at all leaves the mode at `Native` while the agent tab is up, and one lands
+    // on every daemon event; this is that, not a mode the user chose.
     app.sync_terminal_mode();
+    assert_eq!(app.terminal_mode, TerminalMode::Native);
+
+    assert!(app.leave_agent_tab(&worktree));
 
     assert_eq!(terminal_input_target_of(&app), Some((TerminalId(1), false)));
     assert!(workspace_terminal_is_live_owner(&app, Some(TerminalId(1))));
     assert_eq!(app.resting_terminal_mode(), TerminalMode::Terminal);
+    // The regression `scenarios/agents/subagent-reopen-closed-caller.scenario` caught: the tab
+    // was gone, and the status bar still said `NATIVE` — with the `Workspace > Native` key
+    // table under it — until the next snapshot happened to re-derive the mode.
+    assert_eq!(app.terminal_mode, TerminalMode::Terminal);
+    assert_eq!(app.mode(), crate::state::Mode::Terminal);
 }
 
 /// S2: `^s x` acknowledged, deselected the tab — and the very next summary broadcast drew it
@@ -246,7 +255,7 @@ fn a_closed_agent_tab_leaves_the_strip_and_stays_gone() {
     assert_eq!(app.agents.of_worktree(&worktree).len(), 1);
 
     // What `close_agent_tab` does, minus the daemon round trip.
-    assert!(app.agents.deactivate(&worktree));
+    assert!(app.leave_agent_tab(&worktree));
     assert!(app.agents.close(thread));
 
     assert!(app.agents.of_worktree(&worktree).is_empty());
@@ -263,6 +272,55 @@ fn a_closed_agent_tab_leaves_the_strip_and_stays_gone() {
         "a redrawn summary must not resurrect a tab the user closed"
     );
     assert!(app.agents.is_closed(thread));
+}
+
+/// Contracts §5.5: a card is a caller too, so `^s u` has a second answer.
+///
+/// A card-called child has no caller *thread* at all — `caller_of` is `None` for it — and
+/// without this the key would toast `^s u is not bound here` on every column-started run.
+#[test]
+fn ctrl_s_u_from_a_card_run_answers_the_card_rather_than_a_caller_thread() {
+    let (mut app, _worktree, _caller, child) = app_showing_a_child_tab();
+    let board: fleet_core::ids::BoardId = "work".parse().unwrap_or_else(|error| panic!("{error}"));
+    let card: fleet_core::ids::CardId = "card-1".parse().unwrap_or_else(|error| panic!("{error}"));
+    let mut delegation = fleet_core::agents::Delegation {
+        id: fleet_core::agents::DelegationId::new(),
+        caller: fleet_core::agents::DelegationCaller::Card {
+            board,
+            card: card.clone(),
+        },
+        caller_turn: None,
+        caller_item: None,
+        child,
+        provider: fleet_core::agents::AgentKind::Codex,
+        depth: 1,
+        brief: "implement the card".to_owned(),
+        expectation: "the tests pass".to_owned(),
+        eager: false,
+        status: fleet_core::agents::DelegationStatus::Running,
+        status_payload: None,
+        result: None,
+        nudges: 0,
+        recoveries: 0,
+        delivery: fleet_core::agents::DeliveryState::Pending,
+        created: chrono::DateTime::UNIX_EPOCH,
+        finished: None,
+        headline: None,
+        usage: None,
+    };
+    // The child's summary still carries the thread parent this fixture gave it; a real card run
+    // has none, and the point of the assertion is that the *card* answers either way.
+    delegation.eager = false;
+    app.agents.apply_delegation(delegation);
+
+    assert_eq!(up_to_card_caller(&app), Some(card));
+
+    let (app, _, _, _) = app_showing_a_child_tab();
+    assert_eq!(
+        up_to_card_caller(&app),
+        None,
+        "an ordinary delegated child has no card to go back to"
+    );
 }
 
 #[gpui::test]
@@ -1411,6 +1469,58 @@ fn scripted(session: &Session) -> ScriptedRequester {
         created,
         refusal: None,
     }
+}
+
+/// The board tab is shown, not merely selected: the agent tab in front of it is left first.
+///
+/// The bug `scenarios/board/workflow-chain.scenario` found: a worktree's *active thread* wins
+/// over its selected terminal everywhere the workspace is drawn, so `ctrl-s b` — and `ctrl-s u`
+/// from a card run, which shares this path — sent `SelectTerminal`, the daemon obeyed, and the
+/// screen went on showing the agent composer. The strip's own selection has always left the tab
+/// (`agent::select_tab`); the keys that jump to the board did not.
+#[gpui::test]
+fn showing_the_board_tab_leaves_the_agent_tab_in_front_of_it(cx: &mut gpui::TestAppContext) {
+    let (mut app, record) = app_with_board_tab(true);
+    let projection = fleet_core::agents::ThreadProjection::new(
+        fleet_core::agents::ThreadId::new(),
+        worktree_id(),
+        fleet_core::agents::AgentKind::Claude,
+    );
+    let thread = projection.thread;
+    let mut snapshot = app
+        .snapshot
+        .clone()
+        .unwrap_or_else(|| panic!("app_with_session installs a snapshot"));
+    snapshot.agent_threads = vec![projection.summary(fleet_core::agents::Seq::default())];
+    app.apply_snapshot(snapshot, Instant::now());
+    app.agents.activate(worktree_id(), thread);
+    assert_eq!(app.active_agent_thread(), Some(thread));
+
+    let state = cx.new(|_| app);
+    let local = Rc::new(RefCell::new(local_with(|_| {})));
+    let requester = scripted(&record);
+
+    cx.update(|cx| show_board_tab(&local, &requester, &state, cx));
+    cx.run_until_parked();
+
+    state.read_with(cx, |app, _| {
+        assert_eq!(
+            app.active_agent_thread(),
+            None,
+            "the board tab cannot be seen while the worktree still has an active thread"
+        );
+    });
+    let requests = requester.requests.borrow().clone();
+    assert!(
+        matches!(
+            requests.as_slice(),
+            [RequestBody::SelectTerminal {
+                terminal: TerminalId(2),
+                ..
+            }]
+        ),
+        "{requests:?}"
+    );
 }
 
 /// `ctrl-s b` on a session that already has the tab is a selection, never a second tab.

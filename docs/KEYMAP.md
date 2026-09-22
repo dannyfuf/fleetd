@@ -173,7 +173,7 @@ alone preserves them.
 | `Tab` | last terminal tab (MRU within this session) [A2] |
 | `w` | last session (MRU alternate, vim `ctrl-^`) [A3] |
 | `W` | session switcher: the palette pre-filtered to `GO`/sessions [A4] |
-| `u` | select the caller of the current child thread, attaching it first if needed |
+| `u` | select the caller of the current child thread, attaching it first if needed; on a card run, the worktree's board tab with that card selected |
 | `d` | agent picker: the palette pre-filtered to `AGENTS` |
 | `c` | new terminal tab (shell in worktree path) |
 | `b` | this worktree's board tab: created the first time, selected every time; an agent session is told `boards belong to worktrees` |
@@ -695,6 +695,9 @@ that cannot contain a space, and `space` toggles the highlighted card.
 | `,` | `Hub > Board` | `board::Settings` — Settings |
 | `r` | `Hub > Board` | `board::Reload` — Reload |
 | `/` | `Hub > Board` | `board::Filter` — Filter cards |
+| `b` | `Hub > Board` | `board::PickBlockedBy` — Pick the cards this one is blocked by (shadows the Hub's `b` while the board owns the keys) |
+| `m` | `Hub > Board` | `board::PickAgent` — Pick the agent that runs this card |
+| `C` | `Hub > Board` | `board::Columns` — Board settings, on its Columns section |
 | `h` | `Workspace > Native > Board` | `board::PrevColumn` — Previous column |
 | `left` | `Workspace > Native > Board` | `board::PrevColumn` — Previous column |
 | `l` | `Workspace > Native > Board` | `board::NextColumn` — Next column |
@@ -721,18 +724,29 @@ that cannot contain a space, and `space` toggles the highlighted card.
 | `,` | `Workspace > Native > Board` | `board::Settings` — Settings |
 | `r` | `Workspace > Native > Board` | `board::Reload` — Reload |
 | `/` | `Workspace > Native > Board` | `board::Filter` — Filter cards |
+| `A` | `Workspace > Native > Board` | `board::AttachRun` — Attach the focused card's run as an agent tab |
+| `X` | `Workspace > Native > Board` | `board::CancelRun` — Cancel the focused card's live run |
+| `>` | `Workspace > Native > Board` | `board::RunNow` — Run the column's action on the focused card now |
+| `b` | `Workspace > Native > Board` | `board::PickBlockedBy` — Pick the cards this one is blocked by |
+| `m` | `Workspace > Native > Board` | `board::PickAgent` — Pick the agent that runs this card |
+| `C` | `Workspace > Native > Board` | `board::Columns` — Board settings, on its Columns section |
 | `escape` | `Dialog > CardDetail` | `card_detail::Close` — Close |
 | `i` | `Dialog > CardDetail` | `card_detail::EditTitle` — Edit title |
 | `d` | `Dialog > CardDetail` | `card_detail::EditDescription` — Edit description |
 | `c` | `Dialog > CardDetail` | `card_detail::AddComment` — Add comment |
 | `j` | `Dialog > CardDetail` | `card_detail::NextProperty` — Next property |
 | `k` | `Dialog > CardDetail` | `card_detail::PrevProperty` — Previous property |
-| `enter` | `Dialog > CardDetail` | `card_detail::EditProperty` — Edit selected property |
+| `enter` | `Dialog > CardDetail` | `card_detail::EditProperty` — Expand every folded run report, else edit the selected property |
 | `w` | `Dialog > CardDetail` | `card_detail::CreateWorktree` — Create worktree |
 | `x` | `Dialog > CardDetail` | `card_detail::OpenRemote` — Open the remote issue |
 | `K` | `Dialog > CardDetail` | `card_detail::KeepLocal` — Resolve conflict: keep local |
 | `R` | `Dialog > CardDetail` | `card_detail::TakeRemote` — Resolve conflict: take remote |
 | `ctrl-s` | `Dialog > CardDetail` | `card_detail::Save` — Save text edit |
+| `A` | `Dialog > CardDetail` | `board::AttachRun` — Attach this card's run as an agent tab |
+| `X` | `Dialog > CardDetail` | `board::CancelRun` — Cancel this card's live run |
+| `>` | `Dialog > CardDetail` | `board::RunNow` — Run the column's action on this card now |
+| `b` | `Dialog > CardDetail` | `board::PickBlockedBy` — Pick the cards this one is blocked by |
+| `m` | `Dialog > CardDetail` | `board::PickAgent` — Pick the agent that runs this card |
 | `:` | `Dialog > CardDetail` | `OpenPalette` — Command palette over the open card detail |
 | `escape` | `Dialog > CardDetailEditing` | `card_detail::Close` — Cancel text edit |
 | `enter` | `Dialog > CardDetailEditing` | `card_detail::EditProperty` — Submit title or insert a legacy multiline newline |
@@ -743,8 +757,24 @@ that cannot contain a space, and `space` toggles the highlighted card.
 | `k` | `Dialog > BoardSettings` | `settings::MoveUp` — Previous row |
 | `h` | `Dialog > BoardSettings` | `settings::CyclePrev` — Previous choice |
 | `l` | `Dialog > BoardSettings` | `settings::CycleNext` — Next choice |
+| `left` | `Dialog > BoardSettings` | `settings::CyclePrev` — Previous choice |
+| `right` | `Dialog > BoardSettings` | `settings::CycleNext` — Next choice |
 | `space` | `Dialog > BoardSettings` | `settings::Toggle` — Toggle the row |
-| `enter` | `Dialog > BoardSettingsEditing` | `dialog::Confirm` — Save settings |
+| `n` | `Dialog > BoardSettings` | `board_settings::NewColumn` — Add a column to the draft |
+| `d` | `Dialog > BoardSettings` | `board_settings::DeleteColumn` — Delete the focused column |
+| `J` | `Dialog > BoardSettings` | `board_settings::MoveColumnDown` — Move the column one place later |
+| `K` | `Dialog > BoardSettings` | `board_settings::MoveColumnUp` — Move the column one place earlier |
+| `P` | `Dialog > BoardSettings` | `board_settings::ApplyPreset` — Add the workflow preset's missing columns |
+| `ctrl-s` | `Dialog > BoardSettings` | `board_settings::Save` — Save the board's settings |
+| `ctrl-s` | `Dialog > BoardSettingsEditing` | `board_settings::Save` — Save the board's settings |
+| `enter` | `Dialog > BoardSettingsEditing` | `dialog::Confirm` — Open a column, commit an edit, or save |
+
+Three of the board's keys act on a card's **run** rather than its fields — `A` attach, `X` cancel,
+`>` run now — and they are bound on the worktree board and the card detail only: the Hub's context
+board has no worktree to run in, and a key that could only refuse is worse than no key. `b` and `m`
+are bound on all three surfaces, and on `Hub > Board` `b` **shadows** the Hub's own `b` (open in
+browser) for as long as the board owns the keys, which is what a board screen inside the Hub means
+(`APP-CONTRACTS.md` §3). `C` opens Board settings on its Columns section on both boards.
 
 Board filtering keeps horizontal navigation on keys the input does not own. `left` / `right` and
 `ctrl-b` / `ctrl-f` now move the caret through `FleetTextInput`; column navigation therefore uses

@@ -44,21 +44,26 @@ mod actions;
 mod lifecycle;
 mod navigation;
 mod projection;
+mod runs;
 #[cfg(test)]
 mod tests;
 
 pub(crate) use actions::{
     NO_REPO_IN_CONTEXT, create_worktree, delete_card, filter, go_board, has_repo_in_context,
     move_next_column, move_prev_column, new_card, no_remote_reason, open_card, open_dialog,
-    open_remote, open_worktree, pick_assignee, pick_estimate, pick_labels, pick_priority,
-    pick_status, readonly_message, refuses, reload, remote_url, settings, sync,
+    open_remote, open_worktree, pick_agent, pick_assignee, pick_blocked_by, pick_estimate,
+    pick_labels, pick_priority, pick_status, readonly_message, refuses, reload, remote_url,
+    settings, sync,
 };
+// The three keys that act on a card's run rather than its fields (contracts §5.5).
+pub(crate) use runs::{attach_run, cancel_run, run_now};
 // The refusal `o` answers in the Workspace's board pane, where the card can name the worktree
 // the user is already standing in. Only the shell's own test asserts on the sentence.
 #[cfg(test)]
 pub(crate) use actions::ALREADY_IN_WORKTREE;
 pub(crate) use lifecycle::{
-    Refusal, open_session, request_worktree_reporting, send_card_reporting,
+    Refusal, open_session, refresh_after_daemon_change, request_worktree_reporting,
+    send_card_reporting,
 };
 use lifecycle::{ensure_current, fail, request_worktree, send_card, syncing};
 // The two scope triggers. The Hub reaches `enter_context_scope` through its own observation;

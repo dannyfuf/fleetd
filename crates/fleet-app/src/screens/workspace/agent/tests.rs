@@ -205,13 +205,22 @@ fn a_created_thread_activates_its_owning_worktree_after_navigation(cx: &mut gpui
     });
 }
 
+/// The calling thread of a fixture these tests build thread-called.
+fn caller_thread(record: &fleet_core::agents::Delegation) -> ThreadId {
+    record
+        .caller
+        .thread()
+        .copied()
+        .expect("a thread-called delegation fixture")
+}
+
 /// One durable delegation of `caller` onto `child`, live and undelivered.
 fn delegation_fixture(caller: ThreadId, child: ThreadId) -> fleet_core::agents::Delegation {
     fleet_core::agents::Delegation {
         id: fleet_core::agents::DelegationId::new(),
-        caller,
-        caller_turn: fleet_core::agents::TurnId::new(),
-        caller_item: fleet_core::agents::ItemId::new(),
+        caller: fleet_core::agents::DelegationCaller::Thread(caller),
+        caller_turn: Some(fleet_core::agents::TurnId::new()),
+        caller_item: Some(fleet_core::agents::ItemId::new()),
         child,
         provider: AgentKind::Codex,
         depth: 1,
@@ -237,7 +246,7 @@ fn delegating_state(
     worktree: &WorktreeId,
     record: &fleet_core::agents::Delegation,
 ) -> Entity<AppState> {
-    let caller = record.caller;
+    let caller = caller_thread(record);
     let child = record.child;
     let record = record.clone();
     let worktree = worktree.clone();
@@ -262,11 +271,16 @@ fn focused_caller_view(
     worktree: &WorktreeId,
     record: &fleet_core::agents::Delegation,
 ) -> Entity<AgentThreadView> {
-    let mut projection = ThreadProjection::new(record.caller, worktree.clone(), AgentKind::Claude);
+    let mut projection =
+        ThreadProjection::new(caller_thread(record), worktree.clone(), AgentKind::Claude);
     projection.session = fleet_core::agents::SessionState::Ready;
     projection.items = vec![fleet_core::agents::Item {
-        id: record.caller_item,
-        turn: record.caller_turn,
+        id: record
+            .caller_item
+            .expect("a thread-called fixture has a transcript item"),
+        turn: record
+            .caller_turn
+            .expect("a thread-called fixture has a caller turn"),
         parent: None,
         kind: fleet_core::agents::ItemKind::Delegation {
             id: record.id,

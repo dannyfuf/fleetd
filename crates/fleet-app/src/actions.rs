@@ -652,6 +652,32 @@ pub mod settings {
     );
 }
 
+/// Actions the Board settings dialog adds to the shared settings vocabulary (contracts §5.4).
+///
+/// The rail, the cursor and the cyclers are `settings`'s — the two dialogs answer the same keys
+/// on purpose — and only the save and the four Columns-list verbs are this dialog's own.
+pub mod board_settings {
+    use gpui::actions;
+
+    actions!(
+        board_settings,
+        [
+            /// `ctrl-s` — save the board's settings.
+            Save,
+            /// `n` — add a column to the draft.
+            NewColumn,
+            /// `d` — delete the focused column.
+            DeleteColumn,
+            /// `J` — move the focused column one place later.
+            MoveColumnDown,
+            /// `K` — move the focused column one place earlier.
+            MoveColumnUp,
+            /// `P` — add the workflow preset's missing columns.
+            ApplyPreset,
+        ]
+    );
+}
+
 pub mod quit_dialog {
     use gpui::actions;
 
@@ -782,6 +808,18 @@ pub mod board {
             Reload,
             /// Filter cards.
             Filter,
+            /// `A` — attach the focused card's run as an agent tab.
+            AttachRun,
+            /// `X` — cancel the focused card's live run.
+            CancelRun,
+            /// `>` — run the column's action on the focused card now.
+            RunNow,
+            /// `b` — pick the cards this one is blocked by.
+            PickBlockedBy,
+            /// `m` — pick the agent that runs this card.
+            PickAgent,
+            /// `C` — open board settings on its Columns section.
+            Columns,
         ]
     );
 }

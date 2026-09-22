@@ -2,9 +2,9 @@ use super::*;
 
 use fleet_core::{
     agents::{
-        AgentEvent, AgentKind, Delegation, DelegationId, DelegationStatus, DeliveryState, GateId,
-        GateKind, ItemId, PermissionMode, SeqEvent, SessionState as AgentSessionState, ToolKind,
-        TurnId, TurnState,
+        AgentEvent, AgentKind, Delegation, DelegationCaller, DelegationId, DelegationStatus,
+        DeliveryState, GateId, GateKind, ItemId, PermissionMode, SeqEvent,
+        SessionState as AgentSessionState, ToolKind, TurnId, TurnState,
     },
     sessions::SessionKind,
 };
@@ -48,9 +48,9 @@ fn child_summary(
 fn delegation(caller: ThreadId, child: ThreadId, status: DelegationStatus) -> Delegation {
     Delegation {
         id: DelegationId::new(),
-        caller,
-        caller_turn: TurnId::new(),
-        caller_item: ItemId::new(),
+        caller: DelegationCaller::Thread(caller),
+        caller_turn: Some(TurnId::new()),
+        caller_item: Some(ItemId::new()),
         child,
         provider: AgentKind::Codex,
         depth: 1,

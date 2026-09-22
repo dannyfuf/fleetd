@@ -474,12 +474,26 @@ pub(crate) fn focused_input(state: &Entity<AppState>, cx: &mut App) -> Option<Fo
 /// `dialog.fields[N]` and the painted `targets["dialog.field[N]"]` always name the same field
 /// (`docs/TESTING-HARNESS.md` §3). Create-worktree's base list and host cycler and Settings'
 /// switch rows are not editors, so those dialogs report nothing rather than a partial numbering
-/// that would not line up with their targets.
+/// that would not line up with their targets. Board settings is the exception in the other
+/// direction: it paints no `dialog.field[N]` target at all, so it reports its open rail section
+/// and its one row-scoped editor without any numbering to keep in step.
 pub(crate) fn dialog_fields(state: &Entity<AppState>, cx: &mut App) -> Vec<FieldSnapshot> {
     let Some(Overlay::Dialog(dialog)) = state.read(cx).overlay.as_ref().cloned() else {
         return Vec::new();
     };
     let focused = focused_input_entity(state, cx).map(|input| input.entity_id());
+    // Board settings paints no `dialog.field[N]` target of its own, so a leading non-editor row
+    // here cannot put the documented field↔target numbering out of step.
+    let mut fields = Vec::new();
+    if dialog == Dialogs::BoardSettings {
+        fields.push(FieldSnapshot {
+            name: "section".to_owned(),
+            value: read_host(state, cx, |host, _| {
+                host.board_settings.section_title().to_owned()
+            }),
+            focused: false,
+        });
+    }
     let inputs: Vec<(String, Entity<TextInput>)> = read_host(state, cx, |host, _| match dialog {
         Dialogs::CardCreate => named(&[
             ("title", host.card_create_title.as_ref()),
@@ -490,7 +504,20 @@ pub(crate) fn dialog_fields(state: &Entity<AppState>, cx: &mut App) -> Vec<Field
             ("owners", host.context_owners.as_ref()),
         ]),
         Dialogs::RenameTerminal => named(&[("name", host.rename_input.as_ref())]),
+        // The picker's whole cycle is its query field, and that field is the only place a
+        // typed value — a model or an effort no catalogue offered — can be read back.
+        Dialogs::CardPicker => named(&[("query", host.card_picker_input.as_ref())]),
         Dialogs::CloneRepo => named(&[("search", host.clone_query.as_ref())]),
+        // The one row-scoped editor Board settings mounts, named after the row it belongs to.
+        // It is the only place a value typed into that dialog can be read back — every other
+        // row is a cycler the projection already carries — and it follows the `section` field
+        // rather than a `dialog.field[N]` target, because this dialog paints none.
+        Dialogs::BoardSettings => host
+            .board_settings
+            .editor_row_name()
+            .zip(host.board_settings_input.clone())
+            .into_iter()
+            .collect(),
         Dialogs::EditHooks => host
             .hook_inputs
             .iter()
@@ -506,14 +533,26 @@ pub(crate) fn dialog_fields(state: &Entity<AppState>, cx: &mut App) -> Vec<Field
             .collect(),
         _ => Vec::new(),
     });
-    inputs
-        .into_iter()
-        .map(|(name, input)| FieldSnapshot {
-            name,
-            value: input.read(cx).text().to_owned(),
-            focused: focused == Some(input.entity_id()),
-        })
-        .collect()
+    fields.extend(inputs.into_iter().map(|(name, input)| FieldSnapshot {
+        name,
+        value: input.read(cx).text().to_owned(),
+        focused: focused == Some(input.entity_id()),
+    }));
+    fields
+}
+
+/// The open dialog's message body, which today is the Confirm dialog's consequence sentence.
+///
+/// The same seam as [`dialog_fields`], and for the same reason: the draft lives on the
+/// `DialogHost` entity, so the command about to answer a `dump`, an `assert` or an `await` poll
+/// reads it across in an update path. Every other dialog reports `null` — its body is elements,
+/// not a sentence, and naming one of them "the message" would be a claim no reader could check
+/// (`docs/TESTING-HARNESS.md` §3).
+pub(crate) fn dialog_message(state: &Entity<AppState>, cx: &mut App) -> Option<String> {
+    if state.read(cx).overlay != Some(Overlay::Dialog(Dialogs::Confirm)) {
+        return None;
+    }
+    read_host(state, cx, |host, _| confirm::consequence(&host.confirm))
 }
 
 /// Pairs each present editor with its field name, dropping the ones this opening never made.

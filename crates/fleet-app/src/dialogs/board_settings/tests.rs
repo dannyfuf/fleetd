@@ -62,7 +62,7 @@ fn j_types_on_a_text_row_and_moves_on_a_non_text_row(cx: &mut gpui::TestAppConte
         });
     });
 
-    let non_text_row = FIXED_ROWS
+    let non_text_row = GENERAL_ROWS
         .iter()
         .position(|row| *row == SettingRow::DefaultRepo)
         .unwrap_or_else(|| panic!("default repository row"));
@@ -91,6 +91,10 @@ fn draft() -> BoardSettingsState {
         prefix: "FLT".to_owned(),
         backend_kind: "local".to_owned(),
         original_kind: "local".to_owned(),
+        // Never the remembered section: `BoardSection::default()` reads a value this same
+        // thread's other tests can have moved, and a draft that opened on Columns has a
+        // different row vector entirely.
+        section: BoardSection::General,
         ..BoardSettingsState::default()
     }
 }
@@ -245,10 +249,10 @@ fn hl_on_a_flag_row_sets_a_side_rather_than_flipping() {
 /// every `c` on a linked board made a card that never became an issue, silently.
 #[test]
 fn the_push_new_cards_row_is_drawn_and_carried_into_the_saved_settings() {
-    assert!(FIXED_ROWS.contains(&SettingRow::PushNewCards));
+    assert!(GENERAL_ROWS.contains(&SettingRow::PushNewCards));
     assert_eq!(SettingRow::PushNewCards.label(), "Push new cards");
     let mut state = draft();
-    state.row = FIXED_ROWS
+    state.row = GENERAL_ROWS
         .iter()
         .position(|row| *row == SettingRow::PushNewCards)
         .unwrap_or_else(|| panic!("the row is drawn"));
@@ -340,13 +344,15 @@ fn changing_the_kind_starts_from_empty_settings_and_coming_back_restores_them() 
     assert_eq!(state.settings_json(), serde_json::json!({"project": "SP"}));
 }
 
+/// The Backend pane is the kind cycler and, under it, whatever that kind's schema declares.
 #[test]
-fn the_backend_rows_follow_the_fixed_ones() {
+fn the_backend_rows_follow_the_kind_cycler() {
     let mut state = draft();
-    assert_eq!(state.rows().len(), FIXED_ROWS.len());
+    state.section = BoardSection::Backend;
+    assert_eq!(state.rows().len(), 1, "the kind cycler alone");
     state.select_backend("other", &schema());
-    assert_eq!(state.rows().len(), FIXED_ROWS.len() + 5);
-    state.row = FIXED_ROWS.len();
+    assert_eq!(state.rows().len(), 1 + 5);
+    state.row = 1;
     assert_eq!(state.focused(), SettingRow::BackendSetting(0));
     assert_eq!(
         state.focused_backend_row().map(|row| row.key.as_str()),
@@ -364,9 +370,10 @@ fn only_the_typing_rows_materialize_text() {
     assert!(state.focused_text().is_some(), "name");
     state.row = 2;
     assert!(state.focused_text().is_none(), "the repo cycler");
-    state.row = FIXED_ROWS.len();
+    state.section = BoardSection::Backend;
+    state.row = 1;
     assert!(state.focused_text().is_some(), "a text setting");
-    state.row = FIXED_ROWS.len() + 4;
+    state.row = 1 + 4;
     assert!(state.focused_text().is_none(), "a flag");
     assert!(state.rows[3].is_text(), "a number is typed into");
     assert!(!state.rows[4].is_text());
@@ -375,8 +382,9 @@ fn only_the_typing_rows_materialize_text() {
 #[test]
 fn a_backend_row_stores_what_is_typed_into_it() {
     let mut state = draft();
+    state.section = BoardSection::Backend;
     state.select_backend("other", &schema());
-    state.row = FIXED_ROWS.len();
+    state.row = 1;
     state.set_focused_text("SP");
     assert_eq!(state.rows[0].value, "SP");
     assert_eq!(state.settings_json(), serde_json::json!({"project": "SP"}));
@@ -487,4 +495,669 @@ fn stepping_down_an_unset_number_row_leaves_it_unset() {
     assert_eq!(draft.rows[0].value, "1");
     cycle_backend_row(&mut draft, 0, -1);
     assert_eq!(draft.rows[0].value, "0");
+}
+
+// ---------------------------------------------------------------------------------------
+// The rail, the throttle and the Columns pane (contracts §5.4).
+// ---------------------------------------------------------------------------------------
+
+/// The board the column rules are asked about.
+///
+/// `validate_automation` and `apply_workflow_preset` take a whole `Board`, and `Board` has no
+/// `Default` — every id on it is validated. The dialog keeps the board it was seeded from for
+/// exactly this reason, and so does every test here.
+#[track_caller]
+fn board() -> Board {
+    Board {
+        id: "work".parse().unwrap_or_else(|error| panic!("{error}")),
+        context_id: "work".parse().unwrap_or_else(|error| panic!("{error}")),
+        worktree_id: None,
+        name: "Fleet".to_owned(),
+        prefix: "FLT".to_owned(),
+        next_number: 1,
+        backend: BackendRef::default(),
+        statuses: Vec::new(),
+        labels: Vec::new(),
+        properties: Vec::new(),
+        default_repo_id: None,
+        // Exactly what a `BoardSettingsState::default()` carries, so a draft nobody has typed
+        // into is not "unsaved": `start_on_worktree` defaults to *true* on the model and to
+        // `false` on a bare draft, and the two have to agree for `dirty()` to mean anything.
+        settings: BoardSettings {
+            start_on_worktree: false,
+            push_new_cards: false,
+            conflict_policy: ConflictPolicy::default(),
+            max_live_runs: None,
+            ..BoardSettings::default()
+        },
+        sync: fleet_core::board::SyncState::default(),
+        created_at: String::new(),
+        updated_at: String::new(),
+    }
+}
+
+/// A column with nothing on it but a name.
+#[track_caller]
+fn column(id: &str, name: &str) -> ColumnDraft {
+    ColumnDraft::load(&Status {
+        id: StatusId::try_from(id.to_owned()).unwrap_or_else(|error| panic!("{error}")),
+        name: name.to_owned(),
+        category: StatusCategory::Unstarted,
+        color: None,
+        automation: None,
+    })
+}
+
+/// A three-column draft with the cursor in the Columns pane.
+fn columns_draft() -> BoardSettingsState {
+    let mut state = draft();
+    state.section = BoardSection::Columns;
+    state.columns = vec![
+        column("todo", "Todo"),
+        column("in-progress", "In Progress"),
+        column("done", "Done"),
+    ];
+    state.original_columns = state.columns.clone();
+    state.board = Some(std::rc::Rc::new(board()));
+    state.prepare();
+    state
+}
+
+/// The names the Columns list is showing, in order.
+fn listed(state: &BoardSettingsState) -> Vec<String> {
+    state.prepared.iter().map(|row| row.label.clone()).collect()
+}
+
+/// The fields the drilled-into column is showing, in order.
+fn fields(state: &BoardSettingsState) -> Vec<&'static str> {
+    state
+        .prepared
+        .iter()
+        .filter_map(|row| match row.row {
+            SettingRow::ColumnField(field) => Some(field.label()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn each_section_draws_its_own_rows_and_nothing_else() {
+    let mut state = columns_draft();
+    assert_eq!(listed(&state).len(), 3);
+    state.section = BoardSection::General;
+    assert_eq!(state.rows(), GENERAL_ROWS.to_vec());
+    state.section = BoardSection::Backend;
+    assert_eq!(state.rows(), vec![SettingRow::Backend]);
+}
+
+/// The throttle clamps: `h` on one run must not wrap round to eight.
+#[test]
+fn max_live_runs_clamps_at_both_ends() {
+    let mut state = draft();
+    assert_eq!(state.live_run_limit(), 1, "unset is one run");
+    state.step_live_runs(-1);
+    assert_eq!(state.live_run_limit(), 1);
+    for _ in 0..20 {
+        state.step_live_runs(1);
+    }
+    assert_eq!(state.live_run_limit(), MAX_LIVE_RUNS_PER_BOARD);
+}
+
+/// The sentence is `fleet-core`'s, so a value an older CLI wrote is refused in its words.
+#[test]
+fn a_throttle_outside_the_range_is_refused_in_the_contract_s_words() {
+    let mut state = columns_draft();
+    state.max_live_runs = Some(9);
+    assert_eq!(state.validate().as_deref(), Some("must be between 1 and 8"));
+}
+
+#[test]
+fn the_columns_list_is_the_board_order_and_marks_the_automated_ones() {
+    let mut state = columns_draft();
+    assert_eq!(listed(&state), ["Todo", "In Progress", "Done"]);
+    state.columns[1].on_enter = "prompt".to_owned();
+    state.prepare();
+    let marks: Vec<bool> = state
+        .prepared
+        .iter()
+        .map(|row| {
+            matches!(
+                row.value,
+                ColumnValue::Column {
+                    has_action: true,
+                    ..
+                }
+            )
+        })
+        .collect();
+    assert_eq!(marks, [false, true, false], "only the column that runs one");
+}
+
+/// `P` adds by id and never touches a column that is already there, so pressing it twice is
+/// the same board as pressing it once.
+#[test]
+fn the_preset_is_idempotent_and_keeps_the_columns_already_present() {
+    let mut columns = vec![column("todo", "My todo")];
+    assert!(
+        apply_preset(&board(), &mut columns),
+        "the missing preset columns"
+    );
+    let after_once: Vec<String> = columns
+        .iter()
+        .map(|column| column.status.id.to_string())
+        .collect();
+    assert!(after_once.len() > 1);
+    assert!(!apply_preset(&board(), &mut columns), "nothing left to add");
+    let after_twice: Vec<String> = columns
+        .iter()
+        .map(|column| column.status.id.to_string())
+        .collect();
+    assert_eq!(after_once, after_twice);
+    assert_eq!(
+        columns
+            .iter()
+            .find(|column| column.status.id.as_str() == "todo")
+            .map(|column| column.status.name.as_str()),
+        Some("My todo"),
+        "a column already on the board keeps its own name"
+    );
+}
+
+#[test]
+fn reordering_moves_the_column_and_nothing_else() {
+    let mut state = columns_draft();
+    let before = state.original_columns.clone();
+    assert_eq!(reorder(&mut state.columns, 0, 1), Some(1));
+    assert_eq!(
+        state
+            .columns
+            .iter()
+            .map(|column| column.status.name.as_str())
+            .collect::<Vec<_>>(),
+        ["In Progress", "Todo", "Done"]
+    );
+    assert_eq!(reorder(&mut state.columns, 2, 1), None, "past the end");
+    assert_eq!(state.original_columns, before, "the board is untouched");
+    assert!(state.dirty());
+}
+
+#[test]
+fn the_seven_action_rows_come_and_go_with_on_enter() {
+    let mut state = columns_draft();
+    state.opened_column = Some(0);
+    state.prepare();
+    assert_eq!(
+        fields(&state),
+        [
+            "Name",
+            "Category",
+            "On enter",
+            "On success",
+            "When unblocked"
+        ]
+    );
+    state.columns[0].on_enter = "prompt".to_owned();
+    state.prepare();
+    assert_eq!(
+        fields(&state),
+        [
+            "Name",
+            "Category",
+            "On enter",
+            "Provider",
+            "Model",
+            "Effort",
+            "Mode",
+            "Instructions",
+            "Expect",
+            "Env",
+            "On success",
+            "When unblocked"
+        ]
+    );
+    state.columns[0].on_enter = "none".to_owned();
+    state.prepare();
+    assert_eq!(fields(&state).len(), 5);
+}
+
+/// `h` / `l` step the three legal spellings, clamped like every other cycler here, and keep
+/// whatever skill name was typed, so cycling an action off and back on does not lose it.
+#[test]
+fn the_on_enter_row_cycles_the_three_spellings_and_keeps_the_name() {
+    let mut columns = vec![column("review", "In review")];
+    columns[0].on_enter = "skill:deep-review".to_owned();
+    // The stored action is what remembers the name while the row does not say it.
+    columns[0].status = columns[0]
+        .status()
+        .unwrap_or_else(|message| panic!("{message}"));
+    let mut step = |delta| {
+        assert!(cycle_field(
+            &mut columns,
+            0,
+            ColumnField::OnEnter,
+            delta,
+            false
+        ));
+        columns[0].on_enter.clone()
+    };
+    assert_eq!(step(-1), "prompt");
+    assert_eq!(step(-1), "none");
+    assert_eq!(step(-1), "none", "clamped, never wrapped");
+    assert_eq!(step(1), "prompt");
+    assert_eq!(step(1), "skill:deep-review", "the name survived");
+    assert_eq!(step(1), "skill:deep-review", "clamped at the far end too");
+}
+
+/// A context or Jira board keeps its order and its names; everything that describes a run is
+/// drawn disabled rather than hidden, under one trailer (§5.4).
+#[test]
+fn a_board_that_cannot_run_anything_disables_exactly_the_automation_rows() {
+    let mut columns = vec![column("review", "In review")];
+    columns[0].on_enter = "prompt".to_owned();
+    let rows = prepare(&columns, Some(0), true);
+    let disabled: Vec<(&str, bool)> = rows
+        .iter()
+        .map(|row| (row.label.as_str(), row.disabled))
+        .collect();
+    assert_eq!(
+        disabled,
+        [
+            ("Name", false),
+            ("Category", false),
+            ("On enter", true),
+            ("Provider", true),
+            ("Model", true),
+            ("Effort", true),
+            ("Mode", true),
+            ("Instructions", true),
+            ("Expect", true),
+            ("Env", true),
+            ("On success", true),
+            ("When unblocked", true),
+        ]
+    );
+    assert!(
+        prepare(&columns, Some(0), false)
+            .iter()
+            .all(|row| !row.disabled),
+        "a worktree board disables nothing"
+    );
+}
+
+/// A locked row refuses the arrows and the keyboard, not just the styling.
+#[test]
+fn a_locked_automation_row_cannot_be_cycled_or_typed_into() {
+    let mut columns = vec![column("review", "In review")];
+    columns[0].on_enter = "prompt".to_owned();
+    assert!(!cycle_field(
+        &mut columns,
+        0,
+        ColumnField::Provider,
+        1,
+        true
+    ));
+    set_field_text(&mut columns, 0, ColumnField::Expect, "anything", true);
+    assert_eq!(
+        columns[0].status().map(|status| status
+            .automation
+            .and_then(|automation| automation.on_enter)
+            .map(|action| action.expect)),
+        Ok(Some(String::new()))
+    );
+    set_field_text(&mut columns, 0, ColumnField::Name, "Review", true);
+    assert_eq!(columns[0].status.name, "Review", "the name stays editable");
+}
+
+#[test]
+fn every_routing_refusal_is_stated_in_the_contract_s_words() {
+    let route = |from: usize, to: Option<&str>| {
+        let mut columns = vec![
+            column("todo", "Todo"),
+            column("review", "In review"),
+            column("done", "Done"),
+        ];
+        columns[from].status.automation = Some(ColumnAutomation {
+            on_success: to.map(|id| {
+                StatusId::try_from(id.to_owned()).unwrap_or_else(|error| panic!("{error}"))
+            }),
+            ..ColumnAutomation::default()
+        });
+        validate(&board(), &columns, 1)
+    };
+    // Every sentence names the column the route is on: the refusal is usually raised by an edit
+    // to some *other* column — removing the target, or moving it — and the reader has to be told
+    // which column carries the rule (`fleet-core::board::ops::validation`).
+    assert_eq!(
+        route(1, Some("nowhere")).as_deref(),
+        Some("In review routes to nowhere, which is not a column on this board")
+    );
+    assert_eq!(
+        route(1, Some("review")).as_deref(),
+        Some("In review may not route to itself")
+    );
+    assert_eq!(
+        route(1, Some("todo")).as_deref(),
+        Some("In review routes to todo, which is not a later column")
+    );
+    assert_eq!(
+        route(1, Some("done")),
+        None,
+        "forward is the legal direction"
+    );
+}
+
+#[test]
+fn every_action_refusal_is_stated_in_the_contract_s_words() {
+    let mut columns = vec![column("review", "In review")];
+    columns[0].on_enter = "skill:".to_owned();
+    assert_eq!(
+        validate(&board(), &columns, 1).as_deref(),
+        Some("a skill action needs a name")
+    );
+
+    columns[0].on_enter = "skill:deep-review".to_owned();
+    set_field_text(&mut columns, 0, ColumnField::Expect, "reviewed", false);
+    cycle_field(&mut columns, 0, ColumnField::Provider, 2, false);
+    assert_eq!(
+        validate(&board(), &columns, 1).as_deref(),
+        Some(
+            "skill actions run on claude only; put the invocation in the column's instructions for codex"
+        )
+    );
+
+    let mut columns = vec![column("review", "In review")];
+    columns[0].on_enter = "prompt".to_owned();
+    columns[0].env = "PATH=/usr/bin".to_owned();
+    assert!(
+        validate(&board(), &columns, 1)
+            .is_some_and(|message| message.starts_with("PATH is refused")),
+        "the delegation's own env rule"
+    );
+
+    columns[0].env = "FLEET_CARD=x".to_owned();
+    assert!(
+        validate(&board(), &columns, 1).is_some_and(|message| message.contains("is refused")),
+        "a reserved name"
+    );
+
+    columns[0].env = "OK=1".to_owned();
+    assert_eq!(validate(&board(), &columns, 1), None);
+}
+
+/// The one refusal this pane owns: a spelling `--on-enter` would not take either.
+#[test]
+fn an_on_enter_spelling_that_is_none_of_the_three_is_refused() {
+    let mut columns = vec![column("review", "In review")];
+    columns[0].on_enter = "run the thing".to_owned();
+    assert_eq!(
+        validate(&board(), &columns, 1).as_deref(),
+        Some("on enter must be none, prompt, or skill:<name>[:<args>]")
+    );
+}
+
+#[test]
+fn a_column_without_a_name_stops_the_save() {
+    let mut columns = vec![column("todo", "Todo")];
+    columns[0].status.name = "   ".to_owned();
+    assert_eq!(
+        validate(&board(), &columns, 1).as_deref(),
+        Some("a column needs a name")
+    );
+}
+
+/// Everything the form typed into a column comes back out as the `Status` the patch carries.
+#[test]
+fn a_column_round_trips_through_the_status_the_patch_carries() {
+    let mut columns = vec![column("review", "In review")];
+    columns[0].on_enter = "skill:deep-review:--fast".to_owned();
+    set_field_text(
+        &mut columns,
+        0,
+        ColumnField::Instructions,
+        "Read it\nall",
+        false,
+    );
+    set_field_text(
+        &mut columns,
+        0,
+        ColumnField::Expect,
+        "no blocking issue",
+        false,
+    );
+    set_field_text(&mut columns, 0, ColumnField::Model, "opus", false);
+    columns[0].env = "A=1\n\nB=2\n".to_owned();
+    let status = columns[0]
+        .status()
+        .unwrap_or_else(|message| panic!("{message}"));
+    let action = status
+        .automation
+        .and_then(|automation| automation.on_enter)
+        .unwrap_or_else(|| panic!("the action"));
+    assert_eq!(
+        action.kind,
+        ActionKind::Skill {
+            name: "deep-review".to_owned(),
+            args: "--fast".to_owned()
+        }
+    );
+    assert_eq!(action.instructions, "Read it\nall");
+    assert_eq!(action.expect, "no blocking issue");
+    assert_eq!(action.agent.model.as_deref(), Some("opus"));
+    assert_eq!(action.env, ["A=1", "B=2"], "blank lines are not entries");
+
+    // A column the user emptied stops being automation at all, rather than holding the
+    // document at version 2 with a block that asks for nothing.
+    columns[0].on_enter = "none".to_owned();
+    columns[0].status.automation = Some(ColumnAutomation::default());
+    let status = columns[0]
+        .status()
+        .unwrap_or_else(|message| panic!("{message}"));
+    assert_eq!(status.automation, None);
+}
+
+/// `esc` climbs out one level at a time and asks exactly once on the way (§5.4).
+#[test]
+fn escape_leaves_the_editor_then_the_column_then_asks_once() {
+    let mut state = columns_draft();
+    state.opened_column = Some(1);
+    state.editing = true;
+    state.columns[1].status.name = "Doing".to_owned();
+    state.prepare();
+    assert_eq!(state.escape(), EscapeStep::Editor);
+    assert_eq!(state.escape(), EscapeStep::Column);
+    assert_eq!(state.row, 1, "the cursor lands back on the column it left");
+    assert_eq!(state.escape(), EscapeStep::Ask);
+    assert!(state.error.is_some(), "the question is on the error line");
+    assert_eq!(state.escape(), EscapeStep::Close, "asked once, not twice");
+}
+
+#[test]
+fn a_clean_draft_closes_without_a_question() {
+    let mut state = columns_draft();
+    assert!(!state.dirty());
+    assert_eq!(state.escape(), EscapeStep::Close);
+}
+
+#[gpui::test]
+fn the_rail_cycles_and_remembers_where_it_was_left(cx: &mut gpui::TestAppContext) {
+    let state = cx.new(|_| AppState::new("/tmp/board-settings-rail", std::time::Instant::now()));
+    cx.update(|cx| {
+        with_host(&state, cx, |host| host.board_settings = columns_draft());
+        open_on_section(&state, BoardSection::General, cx);
+        cycle_section(&state, 1, cx);
+        read_host(&state, cx, |host, _| {
+            assert_eq!(host.board_settings.section, BoardSection::Backend);
+        });
+        cycle_section(&state, 1, cx);
+        cycle_section(&state, 1, cx);
+        read_host(&state, cx, |host, _| {
+            assert_eq!(
+                host.board_settings.section,
+                BoardSection::Columns,
+                "the rail clamps at its last section, as the global dialog's does"
+            );
+        });
+        // A fresh draft opens where this session left the rail, which is what `,` does.
+        assert_eq!(BoardSection::default(), BoardSection::Columns);
+        // Left as it was found: the memory is this thread's, and every other test here pins
+        // its own section rather than inheriting one.
+        open_on_section(&state, BoardSection::General, cx);
+    });
+}
+
+/// `docs/TESTING-HARNESS.md` §3: Board settings reports one non-editor field, `section`.
+///
+/// It is the only way a scenario can read which rail section is open — the section lives in the
+/// dialog host's draft, which no `AppState` projection can reach.
+#[gpui::test]
+fn the_harness_reads_the_open_rail_section_as_a_dialog_field(cx: &mut gpui::TestAppContext) {
+    let state = cx.new(|_| AppState::new("/tmp/board-settings-section", std::time::Instant::now()));
+    cx.update(|cx| {
+        with_host(&state, cx, |host| host.board_settings = columns_draft());
+        state.update(cx, |app, _| {
+            app.overlay = Some(crate::state::Overlay::Dialog(Dialogs::BoardSettings));
+        });
+        for section in [
+            BoardSection::General,
+            BoardSection::Backend,
+            BoardSection::Columns,
+        ] {
+            open_on_section(&state, section, cx);
+            let fields = crate::dialogs::dialog_fields(&state, cx);
+            let first = fields.first().unwrap_or_else(|| panic!("a section field"));
+            assert_eq!(first.name, "section");
+            assert_eq!(first.value, section.title());
+            assert!(!first.focused, "a rail section is not an editor");
+        }
+        // Board settings paints no `dialog.field[N]` target, so the leading non-editor cannot
+        // put the documented field-to-target numbering out of step. With no row-scoped editor
+        // mounted, the section is the whole of what this dialog reports.
+        assert_eq!(crate::dialogs::dialog_fields(&state, cx).len(), 1);
+        open_on_section(&state, BoardSection::General, cx);
+    });
+}
+
+/// `docs/TESTING-HARNESS.md` §11: the one row-scoped editor rides beside `section`, named after
+/// the row it belongs to.
+///
+/// Every other row of this dialog is a cycler whose value some projection already carries, so
+/// the live editor is the only place a value typed into Board settings can be read back — which
+/// is what lets `scenarios/board/workflow-columns.scenario` prove an `Effort` survived a save.
+#[gpui::test]
+fn the_harness_reads_the_open_row_editor_as_a_dialog_field(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| cx.set_global(fleet_ui_kit::Theme::dark()));
+    let state = cx.new(|_| AppState::new("/tmp/board-settings-editor", std::time::Instant::now()));
+    cx.update(|cx| {
+        let mut draft = columns_draft();
+        draft.columns[1].on_enter = "prompt".to_owned();
+        set_field_text(
+            &mut draft.columns,
+            1,
+            ColumnField::Effort,
+            "blistering",
+            false,
+        );
+        draft.opened_column = Some(1);
+        draft.prepare();
+        draft.row = draft
+            .rows()
+            .iter()
+            .position(|row| *row == SettingRow::ColumnField(ColumnField::Effort))
+            .unwrap_or_else(|| panic!("an Effort row on a column that runs something"));
+        with_host(&state, cx, |host| host.board_settings = draft);
+        state.update(cx, |app, _| {
+            app.overlay = Some(crate::state::Overlay::Dialog(Dialogs::BoardSettings));
+        });
+
+        // A column row the cursor is merely *on* owns no editor: the Columns pane opens one on
+        // `\u{23ce}`, which is what leaves `n`, `d`, `J`/`K` and `P` meaning themselves.
+        materialize_input(&state, None, None, cx);
+        assert_eq!(crate::dialogs::dialog_fields(&state, cx).len(), 1);
+
+        with_host(&state, cx, |host| host.board_settings.editing = true);
+        materialize_input(&state, None, None, cx);
+        let fields = crate::dialogs::dialog_fields(&state, cx);
+        assert_eq!(fields.len(), 2, "the section, then the editor beside it");
+        assert_eq!(
+            fields[1].name, "effort",
+            "named after the row it belongs to"
+        );
+        assert_eq!(fields[1].value, "blistering");
+
+        // A board that may not carry automation opens no editor over an automation row, so the
+        // field goes away with it rather than reporting a value nobody can change.
+        with_host(&state, cx, |host| {
+            host.board_settings.automation_locked = true;
+        });
+        materialize_input(&state, None, None, cx);
+        assert_eq!(crate::dialogs::dialog_fields(&state, cx).len(), 1);
+    });
+}
+
+#[gpui::test]
+fn the_list_keys_act_on_the_draft_and_send_nothing(cx: &mut gpui::TestAppContext) {
+    let state = cx.new(|_| AppState::new("/tmp/board-settings-list", std::time::Instant::now()));
+    cx.update(|cx| {
+        with_host(&state, cx, |host| host.board_settings = columns_draft());
+        add_column(&state, cx);
+        read_host(&state, cx, |host, _| {
+            let draft = &host.board_settings;
+            assert_eq!(draft.columns.len(), 4);
+            assert_eq!(draft.row, 3, "the cursor follows the new column");
+            assert!(draft.dirty());
+        });
+        move_column(&state, -1, cx);
+        read_host(&state, cx, |host, _| {
+            assert_eq!(host.board_settings.row, 2);
+            assert_eq!(host.board_settings.columns[2].status.name, "New column");
+        });
+        preset(&state, cx);
+        read_host(&state, cx, |host, _| {
+            assert!(host.board_settings.notice.is_some(), "`P` says what it did");
+        });
+    });
+}
+
+/// A column nothing sits in leaves at once; one holding cards arms instead and names the
+/// count, because §5.4 will not delete a card by deleting its column.
+#[gpui::test]
+fn deleting_a_column_with_cards_asks_where_they_go_first(cx: &mut gpui::TestAppContext) {
+    let state = cx.new(|_| AppState::new("/tmp/board-settings-delete", std::time::Instant::now()));
+    cx.update(|cx| {
+        with_host(&state, cx, |host| {
+            let mut draft = columns_draft();
+            draft.cards_by_column = std::rc::Rc::new(vec![(
+                StatusId::try_from("in-progress".to_owned())
+                    .unwrap_or_else(|error| panic!("{error}")),
+                vec!["card-1".parse().unwrap_or_else(|error| panic!("{error}"))],
+            )]);
+            draft.row = 1;
+            host.board_settings = draft;
+        });
+        arm_delete(&state, cx);
+        read_host(&state, cx, |host, _| {
+            let draft = &host.board_settings;
+            assert_eq!(draft.pending_delete, Some(1), "armed, not deleted");
+            assert_eq!(draft.columns.len(), 3);
+            assert!(
+                draft
+                    .notice
+                    .as_ref()
+                    .is_some_and(|notice| notice.contains("1 card")),
+                "the count is named"
+            );
+        });
+        // `esc` cancels the arming without touching the draft.
+        with_host(&state, cx, |host| {
+            assert_eq!(host.board_settings.escape(), EscapeStep::Delete);
+        });
+        // An empty column needs no target at all.
+        with_host(&state, cx, |host| host.board_settings.row = 2);
+        arm_delete(&state, cx);
+        read_host(&state, cx, |host, _| {
+            let draft = &host.board_settings;
+            assert_eq!(draft.columns.len(), 2);
+            assert_eq!(draft.pending_delete, None);
+        });
+    });
 }

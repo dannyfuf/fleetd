@@ -17,6 +17,9 @@ struct ProjectionKey {
     board: Option<BoardId>,
     query: String,
     backend: Option<String>,
+    /// `CardMarks::revision`: a mark can move with no card and no view behind it — a pending
+    /// run going `Stalled` is a clock tick — and the model draws the marks.
+    marks: u64,
 }
 
 /// The board model for this frame, rebuilt only when one of its inputs changed.
@@ -39,12 +42,41 @@ pub(super) fn prepare(
         board: state.board().map(|view| view.board.id.clone()),
         query: state.board.filter.clone(),
         backend: backend.clone(),
+        marks: state.board.marks.revision,
     };
     if cache.key.as_ref() != Some(&key) {
+        let marks = marks(state);
         cache.model = Rc::new(state.board().map_or_else(BoardModel::default, |view| {
-            board_screen::build(view, &state.board.filter, backend.as_deref(), now)
+            board_screen::build(view, &state.board.filter, backend.as_deref(), now, &marks)
         }));
         cache.key = Some(key);
     }
     cache.model.clone()
+}
+
+/// The marks the model draws, in the view layer's own vocabulary.
+///
+/// `AppState::refresh_card_marks` did the folding; this only restates its answer in the types
+/// `views::board_screen` speaks, which are the kit's. It runs inside the rebuild branch alone,
+/// so a frame that reuses the cached model copies nothing — and a rebuild already allocates a
+/// title, a key and a chip list per card, beside which two `Copy` marks are noise.
+fn marks(state: &AppState) -> board_screen::BoardMarks {
+    let marks = &state.board.marks;
+    board_screen::BoardMarks {
+        by_card: marks
+            .by_card
+            .iter()
+            .map(|(card, tile)| {
+                (
+                    card.clone(),
+                    board_screen::TileMark {
+                        run: tile.run,
+                        blocked: tile.blocked,
+                    },
+                )
+            })
+            .collect(),
+        working: marks.working,
+        needs_you: marks.needs_you,
+    }
 }

@@ -206,6 +206,80 @@ impl Shell {
         self.board.focus_filter(window, cx);
     }
 
+    /// `A` — attach the focused card's run as an ordinary agent tab (contracts §5.5).
+    pub(super) fn board_attach_run(
+        &mut self,
+        _: &board::AttachRun,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        crate::screens::board::attach_run(&self.state, &self.bridge, cx);
+    }
+
+    /// `X` — cancel the focused card's live run, or drop the slot it waits for.
+    pub(super) fn board_cancel_run(
+        &mut self,
+        _: &board::CancelRun,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        crate::screens::board::cancel_run(&self.state, &self.bridge, cx);
+    }
+
+    /// `>` — ask the focused card's column to run its action now.
+    pub(super) fn board_run_now(
+        &mut self,
+        _: &board::RunNow,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        crate::screens::board::run_now(&self.state, &self.bridge, cx);
+    }
+
+    /// `b` — the cards the focused card waits for.
+    pub(super) fn board_pick_blocked_by(
+        &mut self,
+        _: &board::PickBlockedBy,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        crate::screens::board::pick_blocked_by(&self.state, &self.bridge, cx);
+    }
+
+    /// `m` — which agent runs the focused card.
+    pub(super) fn board_pick_agent(
+        &mut self,
+        _: &board::PickAgent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        crate::screens::board::pick_agent(&self.state, &self.bridge, cx);
+    }
+
+    /// `C` — board settings, opened on its Columns section (contracts §5.4).
+    pub(super) fn board_columns(
+        &mut self,
+        _: &board::Columns,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Through the same guards `,` uses: an unreachable daemon flashes the banner and a
+        // board that is not loaded says so, and neither remembers Columns as the section the
+        // next `,` should open on.
+        crate::screens::board::settings(&self.state, &self.bridge, cx);
+        if self.state.read(cx).overlay
+            == Some(crate::state::Overlay::Dialog(
+                crate::dialogs::Dialogs::BoardSettings,
+            ))
+        {
+            crate::dialogs::open_board_section(
+                &self.state,
+                crate::dialogs::BoardSection::Columns,
+                cx,
+            );
+        }
+    }
+
     pub(super) fn card_detail_close(
         &mut self,
         _: &card_detail::Close,

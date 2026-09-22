@@ -9,16 +9,16 @@
 //! `model`, so the screen never derives the same thing twice and every rule is unit tested
 //! without gpui.
 
-use std::rc::Rc;
+use std::{collections::HashMap, rc::Rc};
 
 use fleet_core::board::{
     Board, BoardView, Card, Priority, Status, StatusCategory, column_cards as ops_column_cards,
 };
-use fleet_core::ids::StatusId;
+use fleet_core::ids::{CardId, StatusId};
 use fleet_ui_kit::{
-    ActiveTheme, Badge, CardTile, Chip, EmptyState, HarnessTargetExt, Icon, IconSize, KanbanBoard,
-    KanbanColumn, Pane, PaneBorder, PaneHeader, PriorityLevel, SkeletonRows, SpinnerWithLabel,
-    Text, Theme, Tone,
+    ActiveTheme, Badge, BlockedTone, CardTile, Chip, EmptyState, HarnessTargetExt, Icon, IconSize,
+    KanbanBoard, KanbanColumn, Pane, PaneBorder, PaneHeader, PriorityLevel, RunMark, SkeletonRows,
+    SpinnerWithLabel, Text, Theme, Tone,
 };
 use gpui::{
     AnyElement, App, Entity, Hsla, ListState, MouseButton, ScrollHandle, SharedString, div,
@@ -31,7 +31,10 @@ mod tests;
 
 use model::category_accent;
 pub(crate) use model::priority_level;
-pub use model::{BoardModel, CardRow, ColumnRows, HeaderFacts, build, counts, visible_cards};
+pub use model::{
+    BoardMarks, BoardModel, CardRow, ColumnRows, HeaderFacts, TileMark, build, counts,
+    visible_cards,
+};
 
 /// How many skeleton columns a cold load shows.
 const SKELETON_COLUMNS: usize = 3;
@@ -202,6 +205,21 @@ fn header(props: &BoardProps<'_>, model: &BoardModel, cx: &App) -> AnyElement {
         .flex_none()
         .items_center()
         .gap(theme.space.sm)
+        // The run counts lead the cluster: how much of this board is moving, and how much of
+        // it is waiting on the reader, outrank which system it mirrors. Both were composed
+        // with the model and are absent — not zeroed — while there is nothing to say.
+        .children(
+            facts
+                .working_label
+                .clone()
+                .map(|label| Text::label(label).tone(Tone::Secondary)),
+        )
+        .children(
+            facts
+                .needs_you_label
+                .clone()
+                .map(|label| Text::label(label).tone(Tone::Warning)),
+        )
         .child(Badge::new(facts.prefix.clone()))
         .children((!facts.local).then(|| {
             Chip::labeled(Icon::Cloud, facts.backend.clone()).tone(if facts.error.is_some() {
@@ -280,6 +298,7 @@ fn columns(
             let mut kanban =
                 KanbanColumn::new(column.element_id.clone(), column.status.name.clone())
                     .count(column.rows.len())
+                    .action(column.has_action)
                     .accent(Some(category_accent(&column.status, &theme)))
                     .focused(focused)
                     .empty_hint(empty_hint);
@@ -340,6 +359,12 @@ fn tile(
     .worktree(card.worktree)
     .dirty(card.dirty)
     .conflict(card.conflict)
+    // The tile decides nothing: which of the two the key line carries is the kit's own
+    // precedence rule, and what each of them says was folded once, in the update path.
+    .when_some(card.run, CardTile::run)
+    .when_some(card.blocked, |tile, (count, tone)| {
+        tile.blocked(count, tone)
+    })
     .selected(selected)
     .focused(selected)
     .extras(card.extras.clone())

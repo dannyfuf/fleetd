@@ -307,6 +307,14 @@ terminal owner.
   in one context cannot dispatch twice; the jobs agent routes on whether a log is expanded.
 * **`q` closes the Jobs panel**, from the global "`q` closes the topmost overlay" row, even
   though the §Jobs table lists only `J` and `Esc`.
+* **`b` on the Hub's board shadows the Hub's open-in-browser.** `Hub` binds `b` to
+  `hub::OpenInBrowser`; `Hub > Board` binds it to `board::PickBlockedBy`, and the board context is
+  the inner one, so while the board screen owns the keys the browser key is unreachable there.
+  That is the same rule every board letter already follows (`c`, `d`, `s`, `w`), stated because
+  `b` is the one whose outer meaning is useful on the same screen. The run keys `A`, `X` and `>`
+  are bound on `Workspace > Native > Board` and `Dialog > CardDetail` only — never on the Hub's
+  context board, which has no worktree to run in; `keymap::tests` pins that
+  (`the_run_keys_are_absent_from_the_hubs_board`).
 
 ---
 
@@ -828,6 +836,25 @@ what the mirror holds and what it holds is never that tab's board: the failed sh
 where skeleton columns would promise a load that can never go out.
 `apply_daemon_event(Event, Instant)` handles
 `Event::BoardChanged` by setting `board_stale` only for the displayed board.
+
+**Automation is one-way.** The app never starts, advances or cancels a run itself: it asks the
+daemon to change a card — `CardRunStart`, `CardRunCancel`, or `MoveCard { cancel_run }` — and
+draws the `Card` that comes back. `>` does not check the board's live-run ceiling, `[` / `]` does
+not cancel before it moves, and no surface writes a `CardRun`, a `pending_run` or an activity
+entry locally. A move that must stop a run is **one** request with `cancel_run: true`, never a
+cancel followed by a move: two requests are two chances to half-succeed, and the half that landed
+would be the destructive one. The app's only local derivation is presentational —
+`AppState::refresh_card_marks(now)` folds the view, the delegation mirror and the clock into
+`BoardState.marks` (`CardMarks { by_card, working, needs_you, revision }`) after
+`apply_board_view`, after `apply_card`, after a card-called `DelegationChanged` on the shown
+board, on a re-seeded delegation census, and on the tick that expires toasts, so a `Stalled`
+appears without an event. A card's run mark is read from the mirror before the card's own `runs`
+row, because the mirror is the only one of the two that does not wait for an `EnsureWorktreeBoard`
+round trip: a card-called `DelegationChanged` names its board and its card, so a child that starts
+— or blocks — is on the tile before the `BoardChanged` reload lands (`BOARD.md` §11.8). A run the
+card's own row has already given an outcome outranks a mirror row that has not caught up.
+`revision` moves only when a mark changes and is an input to the board projection key: a projection
+keyed on the delegation revision instead would rebuild on every child tool call.
 
 There are **no new `BridgeEvent` variants**: like PR/worktree response consumers,
 `screens::board::ensure_current` awaits the receiver returned by

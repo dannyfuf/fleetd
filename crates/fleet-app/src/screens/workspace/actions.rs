@@ -480,14 +480,20 @@ impl WorkspaceScreen {
             })
         };
         let root = {
-            let (_, bridge, state) = self.handles(bridge, state);
+            let (local, bridge, state) = self.handles(bridge, state);
             let views = Rc::clone(&self.agent_views);
             root.on_action(move |_: &prefix::UpToCaller, window, cx| {
-                let caller = state.update(cx, |app, _| {
+                let (caller, card_caller) = state.update(cx, |app, _| {
                     app.leave_prefix();
-                    up_to_caller(app)
+                    (up_to_caller(app), up_to_card_caller(app))
                 });
                 let Some(caller) = caller else {
+                    // A card is a caller too: `^s u` from a column-started run goes back to the
+                    // board tab with that card selected, which is what its pinned segment says.
+                    if let Some(card) = card_caller {
+                        jump_to_card(&local, &bridge, &state, card, cx);
+                        return;
+                    }
                     state.update(cx, |app, cx| {
                         app.toast_short("^s u is not bound here", Icon::Info, Instant::now());
                         cx.notify();
@@ -779,6 +785,16 @@ impl WorkspaceScreen {
 pub(super) fn up_to_caller(app: &mut AppState) -> Option<ThreadId> {
     let child = app.active_agent_thread()?;
     app.agents.caller_of(child)
+}
+
+/// The card the active thread is a run for, when a column's automation started it.
+///
+/// A card-called delegation has no caller *thread* at all, so [`up_to_caller`] answers `None`
+/// for it; this is the other answer `^s u` has (contracts §5.5).
+pub(super) fn up_to_card_caller(app: &AppState) -> Option<fleet_core::ids::CardId> {
+    let child = app.active_agent_thread()?;
+    let (_, card) = app.agents.delegation_of_child(child)?.caller.card()?;
+    Some(card.clone())
 }
 
 /// Asks fleetd for one more tab in the session's worktree path and selects the answer.
@@ -1164,31 +1180,67 @@ impl WorkspaceScreen {
     /// paths. The work itself still belongs here: the tab, its selection and this screen's
     /// selection state are the Workspace's.
     pub(crate) fn open_board_tab(&self, bridge: &Bridge, state: &Entity<AppState>, cx: &mut App) {
-        open_board_tab(&self.local, bridge, state, cx);
+        // The refusal is `open_board_tab`'s own and has already reached the user.
+        let _opened = open_board_tab(&self.local, bridge, state, cx);
     }
 }
 
+/// Selects this worktree's board tab with `card` focused, creating the tab if it is not there.
+///
+/// Both ways back from a card run land here: `^s u`, and a click on the run tab's own pinned
+/// segment. The selection is staged rather than applied when the mirror does not hold the card
+/// yet, because the tab is asked for first and the board view lands frames later.
+pub(super) fn jump_to_card(
+    local: &Rc<RefCell<Local>>,
+    bridge: &Bridge,
+    state: &Entity<AppState>,
+    card: fleet_core::ids::CardId,
+    cx: &mut App,
+) {
+    // Nothing is staged until the tab has actually been asked for: `open_board_tab` refuses an
+    // Agent session and a daemon that serves no worktree boards, having said so itself, and a
+    // selection staged behind a refusal would move the focus on some unrelated later refresh.
+    if !open_board_tab(local, bridge, state, cx) {
+        return;
+    }
+    state.update(cx, |app, cx| {
+        if app
+            .board()
+            .is_some_and(|view| view.cards.iter().any(|candidate| candidate.id == card))
+        {
+            app.select_card(&card);
+        } else {
+            app.board.pending_focus = Some(card);
+        }
+        cx.notify();
+    });
+}
+
 /// See [`WorkspaceScreen::open_board_tab`].
+///
+/// `false` when the key could not act at all — an Agent session, or a daemon that serves no
+/// worktree boards — in which case it has already said so and nothing was claimed.
 fn open_board_tab(
     local: &Rc<RefCell<Local>>,
     bridge: &Bridge,
     state: &Entity<AppState>,
     cx: &mut App,
-) {
+) -> bool {
     let Some(worktree) = board_tab_worktree(state, cx) else {
-        return;
+        return false;
     };
     // The mirror is pointed at the worktree before the tab exists, so the pane has its load in
     // flight by the time it first paints — and a daemon that serves no worktree boards refuses
     // here, having said so itself, instead of leaving behind a tab nothing can ever fill.
     if !crate::screens::board::enter_worktree_scope(worktree.clone(), state, bridge, cx) {
-        return;
+        return false;
     }
     // The claim is what stops the very next `synchronize` — which runs on this notify, with
     // the snapshot that still shows the previous tab — from handing the scope straight back
     // and cancelling the load this keystroke started.
     local.borrow_mut().state.board_claim = Some(BoardClaim::Requested { worktree });
     show_board_tab(local, bridge, state, cx);
+    true
 }
 
 /// Ends a `ctrl-s b` whose tab is never going to arrive.
@@ -1235,6 +1287,12 @@ pub(super) fn board_tab_worktree(state: &Entity<AppState>, cx: &mut App) -> Opti
 /// Creation goes through the same path as `ctrl-s c`, so the reply's terminal is selected by
 /// [`request_shell_tab`] exactly as a new shell's is — which is what makes the key idempotent:
 /// the second press finds the tab and only selects it.
+///
+/// The active agent tab is left first, exactly as the strip's own selection leaves it
+/// ([`super::agent::select_tab`]). A worktree's active thread outranks its selected terminal in
+/// everything that draws the workspace, so a board tab selected while one is active is selected
+/// on the daemon and invisible here — which is what `ctrl-s b` and `ctrl-s u` from a card run's
+/// thread both did before this line existed.
 pub(super) fn show_board_tab<T: MutationRequester + Clone + 'static>(
     local: &Rc<RefCell<Local>>,
     requester: &T,
@@ -1244,6 +1302,7 @@ pub(super) fn show_board_tab<T: MutationRequester + Clone + 'static>(
     let Some(request) = state.read(cx).active_session().map(board_tab_request) else {
         return;
     };
+    super::agent::leave_agent_tab(state, cx);
     match request {
         BoardTab::Select(terminal) => {
             select_terminal(local, requester, state, Some(terminal), cx);

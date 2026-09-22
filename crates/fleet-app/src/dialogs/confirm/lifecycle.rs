@@ -163,7 +163,16 @@ pub(super) fn recheck(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
 }
 
 /// Confirms: send the mutation and close. Everything it starts lives in fleetd.
-pub(super) fn commit(state: &Entity<AppState>, bridge: &Bridge, pressed: ConfirmKey, cx: &mut App) {
+///
+/// Generic over the transport rather than tied to [`Bridge`] so the arms can be proven on the
+/// wire they write — a confirmed destructive action is exactly the thing that must not be
+/// asserted by reading the code.
+pub(super) fn commit<T: SessionTransport>(
+    state: &Entity<AppState>,
+    bridge: &T,
+    pressed: ConfirmKey,
+    cx: &mut App,
+) {
     let Some(request) = with_host(state, cx, |host| host.confirm.request.clone()) else {
         return;
     };
@@ -348,11 +357,46 @@ pub(super) fn commit(state: &Entity<AppState>, bridge: &Bridge, pressed: Confirm
         ConfirmRequest::CloseTerminal { terminal, .. } => {
             bridge.send(RequestBody::CloseTerminal { terminal });
         }
+        // The column is not in the request — contracts §5.5 fixes its four fields — so `[` / `]`
+        // staged it beside the sentence and the dialog adopted it with the request.
+        ConfirmRequest::MoveCancelsRun { card, .. } => {
+            let staged = with_host(state, cx, |host| host.confirm.move_target.clone());
+            if let Some(body) = move_cancels_run_request(card, staged) {
+                // Reported, not fired and forgotten: the daemon refuses a move it cannot make
+                // even with `cancel_run`, and §5.5 puts that sentence in the sticky slot.
+                crate::screens::board::send_card_reporting(
+                    state,
+                    bridge,
+                    body,
+                    crate::screens::board::Refusal::Sticky,
+                    cx,
+                );
+            }
+        }
     }
     state.update(cx, |app, cx| {
         app.close_overlay();
         cx.notify();
     });
+}
+
+/// The move a confirmed [`ConfirmRequest::MoveCancelsRun`] sends.
+///
+/// `None` when the column it was raised for is no longer staged — a reconnect or a context
+/// switch drops the staged target with the board it belonged to, and a move into a column this
+/// dialog can no longer name is a move the user never asked for. Answering `y` then does
+/// exactly what answering `n` does.
+#[must_use]
+pub(super) fn move_cancels_run_request(
+    card: CardId,
+    target: Option<StatusId>,
+) -> Option<RequestBody> {
+    Some(RequestBody::MoveCard {
+        card_id: card,
+        status_id: target?,
+        index: None,
+        cancel_run: true,
+    })
 }
 
 pub(super) fn prune_requires_review(result: &fleet_proto::response::PruneResult) -> bool {
