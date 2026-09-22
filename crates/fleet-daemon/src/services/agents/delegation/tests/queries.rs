@@ -3,8 +3,9 @@ use std::sync::Arc;
 use chrono::{DateTime, TimeZone, Utc};
 use fleet_core::{
     agents::{
-        AgentEvent, AgentKind, Delegation, DelegationId, DelegationStatus, DelegationUsage,
-        DeliveryState, ItemId, PermissionMode, Seq, SeqEvent, ThreadId, TurnId, TurnOutcome, Usage,
+        AgentEvent, AgentKind, Delegation, DelegationCaller, DelegationId, DelegationStatus,
+        DelegationUsage, DeliveryState, ItemId, PermissionMode, Seq, SeqEvent, ThreadId, TurnId,
+        TurnOutcome, Usage,
     },
     paths::FleetHome,
 };
@@ -171,9 +172,9 @@ fn stamp(offset: i64) -> DateTime<Utc> {
 fn delegation(caller: ThreadId, created_offset: i64) -> Delegation {
     Delegation {
         id: DelegationId::new(),
-        caller,
-        caller_turn: TurnId::new(),
-        caller_item: ItemId::new(),
+        caller: DelegationCaller::Thread(caller),
+        caller_turn: Some(TurnId::new()),
+        caller_item: Some(ItemId::new()),
         child: ThreadId::new(),
         provider: AgentKind::Codex,
         depth: 1,

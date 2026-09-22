@@ -3,9 +3,9 @@ use std::sync::Arc;
 use chrono::{DateTime, TimeZone, Utc};
 use fleet_core::{
     agents::{
-        AgentEvent, AgentKind, Delegation, DelegationId, DelegationStatus, DeliveryState, ItemId,
-        ItemKind, PermissionMode, ResultSource, Seq, SeqEvent, SessionState, ThreadId, TurnId,
-        TurnOutcome, Usage,
+        AgentEvent, AgentKind, Delegation, DelegationCaller, DelegationId, DelegationStatus,
+        DeliveryState, ItemId, ItemKind, PermissionMode, ResultSource, Seq, SeqEvent, SessionState,
+        ThreadId, TurnId, TurnOutcome, Usage,
     },
     ids::WorktreeId,
     paths::FleetHome,
@@ -242,9 +242,9 @@ fn stamp(offset: i64) -> DateTime<Utc> {
 fn delegation(status: DelegationStatus) -> Delegation {
     Delegation {
         id: DelegationId::new(),
-        caller: ThreadId::new(),
-        caller_turn: TurnId::new(),
-        caller_item: ItemId::new(),
+        caller: DelegationCaller::Thread(ThreadId::new()),
+        caller_turn: Some(TurnId::new()),
+        caller_item: Some(ItemId::new()),
         child: ThreadId::new(),
         provider: AgentKind::Codex,
         depth: 1,
@@ -267,7 +267,7 @@ fn delegation(status: DelegationStatus) -> Delegation {
 fn child_record(delegation: &Delegation) -> AgentThreadRecord {
     AgentThreadRecord {
         thread: delegation.child,
-        parent: Some(delegation.caller),
+        parent: delegation.caller.thread().copied(),
         delegation: Some(delegation.id),
         worktree: WorktreeId::try_from("owner/repo#complete-test").expect("test worktree id"),
         provider: delegation.provider,

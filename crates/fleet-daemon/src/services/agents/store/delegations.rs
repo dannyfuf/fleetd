@@ -8,15 +8,16 @@ use std::{collections::BTreeMap, fmt::Display, str::FromStr};
 use anyhow::{Context, anyhow, bail};
 use chrono::{DateTime, Utc};
 use fleet_core::agents::{
-    AgentEvent, Delegation, DelegationId, DelegationResult, DeliveryState, ItemId, ItemKind,
-    ItemStatus, MessageOrigin, Seq, SeqEvent, SessionState, ThreadId,
+    AgentEvent, Delegation, DelegationCaller, DelegationId, DelegationResult, DeliveryState,
+    ItemId, ItemKind, ItemStatus, MessageOrigin, Seq, SeqEvent, SessionState, ThreadId,
 };
+use fleet_core::ids::{BoardId, CardId};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::de::DeserializeOwned;
 
 use super::project::discriminant;
 use crate::services::agents::delegation::{
-    run::FLEET_OWNED_CHILD_ENV,
+    run::FLEET_ROTATED_CHILD_ENV,
     transition::{DelegationFacts, child_transition},
 };
 
@@ -147,7 +148,7 @@ pub(crate) fn transition(
         ..
     } = &event.event
         && let Some(mut delegation) = get(tx, *id)?
-        && delegation.caller == thread
+        && delegation.caller.thread() == Some(&thread)
     {
         let delivery = DeliveryState::Delivered {
             seq: event.seq,
@@ -242,9 +243,14 @@ pub(crate) fn caller_has_open_deliver(
 
 /// Inserts the immutable identity and the initial mutable state of a delegation.
 ///
+/// The caller is written as a kind plus the columns that kind uses ([`EncodedCaller`]); a
+/// delegation whose caller and caller turn or item disagree is refused here rather than stored.
+///
 /// `env` is the child's user environment, kept so a resume can replay it (`env_json`, slot 006).
-/// The two keys in [`FLEET_OWNED_CHILD_ENV`] are dropped rather than stored: they are minted per
-/// run and rotated on every resume, so a persisted copy could only ever be a stale secret.
+/// The keys in [`FLEET_ROTATED_CHILD_ENV`] are dropped rather than stored: they are minted per
+/// run and rotated on every resume, so a persisted copy could only ever be a stale secret. The
+/// caller's own `FLEET_CARD`/`FLEET_BOARD` *are* kept, so a resumed card child still knows which
+/// card it runs for.
 pub(crate) fn insert(
     tx: &Transaction<'_>,
     delegation: &Delegation,
@@ -253,18 +259,22 @@ pub(crate) fn insert(
 ) -> anyhow::Result<()> {
     let encoded = EncodedDelegation::from_delegation(delegation)?;
     tx.execute(
-        "INSERT INTO delegations (id, token_sha256, caller_thread, caller_turn, caller_item, \
+        "INSERT INTO delegations (id, token_sha256, caller_kind, caller_thread, caller_turn, \
+         caller_item, caller_board, caller_card, \
          child_thread, provider, depth, brief, expectation, eager, status, status_payload, \
          result, result_source, result_files, result_elided, nudges, recoveries, delivery, \
          delivered_seq, delivered_turn, delivery_reason, headline, created, finished, env_json) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, \
-                 ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)",
+                 ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30)",
         params![
             delegation.id.to_string(),
             token_sha256,
-            delegation.caller.to_string(),
-            delegation.caller_turn.to_string(),
-            delegation.caller_item.to_string(),
+            encoded.caller.kind,
+            encoded.caller.thread,
+            encoded.caller.turn,
+            encoded.caller.item,
+            encoded.caller.board,
+            encoded.caller.card,
             delegation.child.to_string(),
             encoded.provider,
             i64::from(delegation.depth),
@@ -301,7 +311,7 @@ pub(crate) fn insert(
 fn encode_env(env: &BTreeMap<String, String>) -> anyhow::Result<Option<String>> {
     let kept: BTreeMap<&str, &str> = env
         .iter()
-        .filter(|(key, _)| !FLEET_OWNED_CHILD_ENV.contains(&key.as_str()))
+        .filter(|(key, _)| !FLEET_ROTATED_CHILD_ENV.contains(&key.as_str()))
         .map(|(key, value)| (key.as_str(), value.as_str()))
         .collect();
     if kept.is_empty() {
@@ -346,17 +356,21 @@ pub(crate) fn reserve(
     max_children: usize,
     max_total: usize,
 ) -> anyhow::Result<Option<String>> {
-    let child_count: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM delegations WHERE caller_thread = ?1 \
-         AND status NOT IN ('succeeded', 'incomplete', 'failed', 'cancelled')",
-        [delegation.caller.to_string()],
-        |row| row.get(0),
-    )?;
-    if usize::try_from(child_count).unwrap_or(usize::MAX) >= max_children {
-        return Ok(Some(format!(
-            "live-child-limit rule: caller {} already has {child_count} live children (maximum {max_children})",
-            delegation.caller
-        )));
+    // The live-child ceiling counts one caller thread's children, so it applies to a thread
+    // caller only: a card caller has no thread to count under, and what bounds it is the board's
+    // own `max_live_runs` gate (contracts §3.3). The daemon-wide ceiling below applies to both.
+    if let Some(caller_thread) = delegation.caller.thread() {
+        let child_count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM delegations WHERE caller_thread = ?1 \
+             AND status NOT IN ('succeeded', 'incomplete', 'failed', 'cancelled')",
+            [caller_thread.to_string()],
+            |row| row.get(0),
+        )?;
+        if usize::try_from(child_count).unwrap_or(usize::MAX) >= max_children {
+            return Ok(Some(format!(
+                "live-child-limit rule: caller {caller_thread} already has {child_count} live children (maximum {max_children})"
+            )));
+        }
     }
     let total: i64 = tx.query_row(
         "SELECT COUNT(*) FROM delegations \
@@ -531,6 +545,59 @@ pub(crate) fn live(conn: &Connection, caller: Option<ThreadId>) -> anyhow::Resul
     read_many(conn, caller, true)
 }
 
+/// Every live delegation a card on `board` called, for the `live_runs` join a board read makes.
+///
+/// # Errors
+///
+/// Returns the SQLite error of the read.
+pub(crate) fn live_for_board(
+    conn: &Connection,
+    board: &BoardId,
+) -> anyhow::Result<Vec<Delegation>> {
+    let sql = format!(
+        "SELECT {DELEGATION_COLUMNS} FROM delegations WHERE caller_board = ?1 \
+         AND status NOT IN ('succeeded', 'incomplete', 'failed', 'cancelled') \
+         ORDER BY created DESC LIMIT ?2"
+    );
+    let mut statement = conn
+        .prepare(&sql)
+        .context("prepare the board live-run query")?;
+    let raw = statement
+        .query_map(params![board.as_str(), READ_LIMIT], RawDelegation::read)
+        .with_context(|| format!("query the live runs of board {board}"))?
+        .collect::<Result<Vec<_>, _>>()?;
+    raw.into_iter().map(RawDelegation::decode).collect()
+}
+
+/// The live delegation one card called, at most one by the card's own reservation.
+///
+/// # Errors
+///
+/// Returns the SQLite error of the read.
+pub(crate) fn live_for_card(
+    conn: &Connection,
+    board: &BoardId,
+    card: &CardId,
+) -> anyhow::Result<Option<Delegation>> {
+    let sql = format!(
+        "SELECT {DELEGATION_COLUMNS} FROM delegations \
+         WHERE caller_board = ?1 AND caller_card = ?2 \
+         AND status NOT IN ('succeeded', 'incomplete', 'failed', 'cancelled') \
+         ORDER BY created DESC LIMIT 1"
+    );
+    let row = conn
+        .query_row(
+            &sql,
+            params![board.as_str(), card.as_str()],
+            RawDelegation::read,
+        )
+        .optional()
+        .with_context(|| format!("read the live run of card {card} on board {board}"))?;
+    row.map(RawDelegation::decode)
+        .transpose()
+        .with_context(|| format!("decode the live run of card {card} on board {board}"))
+}
+
 /// Records one follow-up action for the worker to run after this transaction commits.
 pub(crate) fn enqueue(
     tx: &Transaction<'_>,
@@ -657,6 +724,10 @@ pub(crate) fn caller_exists(conn: &Connection, caller: ThreadId) -> anyhow::Resu
 
 /// Makes terminal results whose caller disappeared while the daemon was down durably
 /// undeliverable, and closes their delivery work in the same transaction.
+///
+/// Thread callers only. A card caller cannot disappear the way a deleted thread does — the board
+/// write that records the run is what ends its delivery — and its `caller_thread` is NULL, so
+/// without the kind predicate the `NOT EXISTS` below would sweep every pending card run.
 pub(crate) fn mark_missing_callers_undeliverable(
     tx: &Transaction<'_>,
     now: DateTime<Utc>,
@@ -665,6 +736,7 @@ pub(crate) fn mark_missing_callers_undeliverable(
         "SELECT {DELEGATION_COLUMNS} FROM delegations \
          WHERE status IN ('succeeded', 'incomplete', 'failed', 'cancelled') \
            AND delivery = 'pending' \
+           AND caller_kind = 'thread' \
            AND NOT EXISTS (\
              SELECT 1 FROM threads \
              WHERE threads.thread_id = delegations.caller_thread \
@@ -698,10 +770,10 @@ pub(crate) fn mark_missing_callers_undeliverable(
 ///
 /// One list rather than one per statement: a column added to the table without being added here
 /// is a silent drop, and a column added in a different order is a silent mistranslation.
-const DELEGATION_COLUMNS: &str = "id, caller_thread, caller_turn, caller_item, child_thread, \
-provider, depth, brief, expectation, eager, status, status_payload, result, result_source, \
-result_files, result_elided, nudges, recoveries, delivery, delivered_seq, delivered_turn, \
-delivery_reason, headline, created, finished";
+const DELEGATION_COLUMNS: &str = "id, caller_kind, caller_thread, caller_turn, caller_item, \
+caller_board, caller_card, child_thread, provider, depth, brief, expectation, eager, status, \
+status_payload, result, result_source, result_files, result_elided, nudges, recoveries, \
+delivery, delivered_seq, delivered_turn, delivery_reason, headline, created, finished";
 
 pub(crate) fn read_many(
     conn: &Connection,
@@ -794,7 +866,62 @@ pub(crate) fn read_outbox<P: rusqlite::Params>(
     Ok(decoded)
 }
 
+/// One delegation caller split into the columns slot 007 gave the table.
+///
+/// The invariant the schema cannot state — `'thread'` fills the three thread columns, `'card'`
+/// fills the two card columns — is checked here, once, on the way in. A row that broke it would
+/// decode into a different caller than it was written as, which no later read could detect.
+struct EncodedCaller {
+    kind: &'static str,
+    thread: Option<String>,
+    turn: Option<String>,
+    item: Option<String>,
+    board: Option<String>,
+    card: Option<String>,
+}
+
+impl EncodedCaller {
+    fn from_delegation(delegation: &Delegation) -> anyhow::Result<Self> {
+        match &delegation.caller {
+            DelegationCaller::Thread(thread) => {
+                let (Some(turn), Some(item)) = (delegation.caller_turn, delegation.caller_item)
+                else {
+                    bail!(
+                        "delegation {} has a thread caller without a caller turn and item",
+                        delegation.id
+                    );
+                };
+                Ok(Self {
+                    kind: "thread",
+                    thread: Some(thread.to_string()),
+                    turn: Some(turn.to_string()),
+                    item: Some(item.to_string()),
+                    board: None,
+                    card: None,
+                })
+            }
+            DelegationCaller::Card { board, card } => {
+                if delegation.caller_turn.is_some() || delegation.caller_item.is_some() {
+                    bail!(
+                        "delegation {} has a card caller with a caller turn or item",
+                        delegation.id
+                    );
+                }
+                Ok(Self {
+                    kind: "card",
+                    thread: None,
+                    turn: None,
+                    item: None,
+                    board: Some(board.to_string()),
+                    card: Some(card.to_string()),
+                })
+            }
+        }
+    }
+}
+
 struct EncodedDelegation {
+    caller: EncodedCaller,
     provider: String,
     status: String,
     result: Option<String>,
@@ -828,10 +955,11 @@ impl EncodedDelegation {
                 Some(turn.to_string()),
                 None,
             ),
-            DeliveryState::Consumed => (None, None, None),
+            DeliveryState::Consumed | DeliveryState::Recorded => (None, None, None),
             DeliveryState::Undeliverable { reason } => (None, None, Some(reason.clone())),
         };
         Ok(Self {
+            caller: EncodedCaller::from_delegation(delegation)?,
             provider: discriminant(&delegation.provider, "AgentKind")?,
             status: discriminant(&delegation.status, "DelegationStatus")?,
             result,
@@ -848,9 +976,12 @@ impl EncodedDelegation {
 
 struct RawDelegation {
     id: String,
-    caller: String,
-    caller_turn: String,
-    caller_item: String,
+    caller_kind: String,
+    caller_thread: Option<String>,
+    caller_turn: Option<String>,
+    caller_item: Option<String>,
+    caller_board: Option<String>,
+    caller_card: Option<String>,
     child: String,
     provider: String,
     depth: i64,
@@ -878,30 +1009,33 @@ impl RawDelegation {
     pub(crate) fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
         Ok(Self {
             id: row.get(0)?,
-            caller: row.get(1)?,
-            caller_turn: row.get(2)?,
-            caller_item: row.get(3)?,
-            child: row.get(4)?,
-            provider: row.get(5)?,
-            depth: row.get(6)?,
-            brief: row.get(7)?,
-            expectation: row.get(8)?,
-            eager: row.get(9)?,
-            status: row.get(10)?,
-            status_payload: row.get(11)?,
-            result: row.get(12)?,
-            result_source: row.get(13)?,
-            result_files: row.get(14)?,
-            result_elided: row.get(15)?,
-            nudges: row.get(16)?,
-            recoveries: row.get(17)?,
-            delivery: row.get(18)?,
-            delivered_seq: row.get(19)?,
-            delivered_turn: row.get(20)?,
-            delivery_reason: row.get(21)?,
-            headline: row.get(22)?,
-            created: row.get(23)?,
-            finished: row.get(24)?,
+            caller_kind: row.get(1)?,
+            caller_thread: row.get(2)?,
+            caller_turn: row.get(3)?,
+            caller_item: row.get(4)?,
+            caller_board: row.get(5)?,
+            caller_card: row.get(6)?,
+            child: row.get(7)?,
+            provider: row.get(8)?,
+            depth: row.get(9)?,
+            brief: row.get(10)?,
+            expectation: row.get(11)?,
+            eager: row.get(12)?,
+            status: row.get(13)?,
+            status_payload: row.get(14)?,
+            result: row.get(15)?,
+            result_source: row.get(16)?,
+            result_files: row.get(17)?,
+            result_elided: row.get(18)?,
+            nudges: row.get(19)?,
+            recoveries: row.get(20)?,
+            delivery: row.get(21)?,
+            delivered_seq: row.get(22)?,
+            delivered_turn: row.get(23)?,
+            delivery_reason: row.get(24)?,
+            headline: row.get(25)?,
+            created: row.get(26)?,
+            finished: row.get(27)?,
         })
     }
 
@@ -946,6 +1080,7 @@ impl RawDelegation {
                 }
             }
             "consumed" => DeliveryState::Consumed,
+            "recorded" => DeliveryState::Recorded,
             "undeliverable" => DeliveryState::Undeliverable {
                 reason: self
                     .delivery_reason
@@ -953,11 +1088,43 @@ impl RawDelegation {
             },
             other => bail!("delegation {id} has unknown delivery state `{other}`"),
         };
+        // `caller_kind` is read rather than inferred from which caller columns are null, so a row
+        // comes back as the caller it was written as even once a third kind exists.
+        let (caller, caller_turn, caller_item) = match self.caller_kind.as_str() {
+            "thread" => {
+                let (Some(thread), Some(turn), Some(item)) =
+                    (self.caller_thread, self.caller_turn, self.caller_item)
+                else {
+                    bail!(
+                        "delegation {id} is thread-called without a caller thread, turn and item"
+                    );
+                };
+                (
+                    DelegationCaller::Thread(parse_id(&thread, "caller thread")?),
+                    Some(parse_id(&turn, "caller turn")?),
+                    Some(parse_id(&item, "caller item")?),
+                )
+            }
+            "card" => {
+                let (Some(board), Some(card)) = (self.caller_board, self.caller_card) else {
+                    bail!("delegation {id} is card-called without a board and a card");
+                };
+                (
+                    DelegationCaller::Card {
+                        board: parse_id(&board, "caller board")?,
+                        card: parse_id(&card, "caller card")?,
+                    },
+                    None,
+                    None,
+                )
+            }
+            other => bail!("delegation {id} has unknown caller kind `{other}`"),
+        };
         Ok(Delegation {
             id,
-            caller: parse_id(&self.caller, "caller thread")?,
-            caller_turn: parse_id(&self.caller_turn, "caller turn")?,
-            caller_item: parse_id(&self.caller_item, "caller item")?,
+            caller,
+            caller_turn,
+            caller_item,
             child: parse_id(&self.child, "child thread")?,
             provider: parse_enum(&self.provider, "provider")?,
             depth: u8::try_from(self.depth)

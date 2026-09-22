@@ -449,8 +449,9 @@ impl AgentSessionManager {
             // precedence `delegation::run` applies to a first start, and for the same reason
             // (`docs/NATIVE-AGENTS.md` §15): a child that lost its `CARGO_TARGET_DIR` on resume
             // would start fighting its siblings over a build lock with nobody watching. The store
-            // never persists a `FLEET_OWNED_CHILD_ENV` key, and these two `insert`s would
-            // overwrite one anyway.
+            // never persists a `FLEET_ROTATED_CHILD_ENV` key, and these two `insert`s would
+            // overwrite one anyway; a card caller's `FLEET_CARD`/`FLEET_BOARD` *are* persisted and
+            // come back through the read above, so a resumed card child keeps its own identity.
             env.insert("FLEET_DELEGATION".to_owned(), delegation.to_string());
             env.insert("FLEET_DELEGATION_TOKEN".to_owned(), token);
             env

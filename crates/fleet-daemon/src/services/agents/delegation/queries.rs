@@ -142,7 +142,16 @@ impl DelegationService {
         current: Delegation,
         caller: Option<ThreadId>,
     ) -> Result<Delegation, ProtoError> {
-        if !current.status.is_terminal() || caller != Some(current.caller) {
+        // Only a `Thread(t)` caller can be the waiter — `caller` is a thread and
+        // `DelegationCaller::thread` answers `None` for a card — so a card run read through
+        // `wait` is answered with its delivery untouched. That is what the worker's card arm
+        // needs: the outcome is recorded on the board once, by the hook, and nothing a third
+        // party reads may close that row early.
+        let waited_on_own_child = matches!(
+            (caller, current.caller.thread()),
+            (Some(waiter), Some(owner)) if waiter == *owner
+        );
+        if !current.status.is_terminal() || !waited_on_own_child {
             return Ok(current);
         }
         let id = current.id;

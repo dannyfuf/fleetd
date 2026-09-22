@@ -310,8 +310,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use fleet_core::agents::{
-        AgentKind, DeliveryState, GateAnswer, GateId, GateKind, GateResolver, ItemId,
-        PermissionMode, ThreadId, ToolKind, TurnId, Usage,
+        AgentKind, DelegationCaller, DeliveryState, GateAnswer, GateId, GateKind, GateResolver,
+        ItemId, PermissionMode, ThreadId, ToolKind, TurnId, Usage,
     };
     use serde_json::json;
 
@@ -324,9 +324,9 @@ mod tests {
     fn delegation(status: DelegationStatus) -> Delegation {
         Delegation {
             id: fleet_core::agents::DelegationId::new(),
-            caller: ThreadId::new(),
-            caller_turn: TurnId::new(),
-            caller_item: ItemId::new(),
+            caller: DelegationCaller::Thread(ThreadId::new()),
+            caller_turn: Some(TurnId::new()),
+            caller_item: Some(ItemId::new()),
             child: ThreadId::new(),
             provider: AgentKind::Codex,
             depth: 1,

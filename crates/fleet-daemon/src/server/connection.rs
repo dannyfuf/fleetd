@@ -19,8 +19,9 @@ use fleet_proto::{
     event::{Event, EventKind},
     request::{HelloClient, Request, RequestBody, agent_request_is_serialized},
     response::{
-        BOARD_WORKTREE_CAPABILITY, DaemonIdentity, HelloResponse, PRUNE_REVIEWED_IDS_CAPABILITY,
-        PongResponse, Response, ResponseBody, SNAPSHOT_REVISION_CAPABILITY, StampedResponse,
+        BOARD_AUTOMATION_CAPABILITY, BOARD_WORKTREE_CAPABILITY, DaemonIdentity, HelloResponse,
+        PRUNE_REVIEWED_IDS_CAPABILITY, PongResponse, Response, ResponseBody,
+        SNAPSHOT_REVISION_CAPABILITY, StampedResponse,
     },
 };
 use futures_util::{SinkExt, StreamExt, stream::FuturesUnordered};
@@ -318,6 +319,7 @@ impl Connection {
                                 result.map_err(Into::into),
                                 assembled_snapshot_revision,
                             ),
+                            &client,
                         )
                         .await
                     {
@@ -347,6 +349,7 @@ impl Connection {
                             result.map_err(Into::into),
                             assembled_snapshot_revision,
                         ),
+                        &client,
                     )
                     .await
                     {
@@ -875,10 +878,32 @@ async fn run_writer(
     Ok(())
 }
 
+/// Hides card-called delegations from a peer that never named [`BOARD_AUTOMATION_CAPABILITY`].
+///
+/// A listing is a discovery surface; an explicit id is not. `DelegationList` is how a peer finds
+/// out which delegations exist, so a client that cannot name column automation is not handed
+/// records whose caller is a board and a card it has no vocabulary for — the same rule
+/// `event_visible` applies to `Event::DelegationChanged`. `DelegationGet` is deliberately not
+/// filtered: a peer that already holds the id learned it somewhere else, and answering it is what
+/// naming `agent.delegation` buys.
+fn hide_card_callers_from_peer(
+    result: &mut Result<ResponseBody, fleet_proto::error::ProtoError>,
+    client: &HelloClient,
+) {
+    if client.supports(BOARD_AUTOMATION_CAPABILITY) {
+        return;
+    }
+    if let Ok(ResponseBody::Delegations(delegations)) = result {
+        delegations.retain(|delegation| !delegation.caller.is_card());
+    }
+}
+
 async fn enqueue_response(
     outbound: &mpsc::Sender<Outbound>,
-    response: StampedResponse,
+    mut response: StampedResponse,
+    client: &HelloClient,
 ) -> DaemonResult<()> {
+    hide_card_callers_from_peer(&mut response.response.result, client);
     let message = if matches!(&response.response.result, Ok(ResponseBody::Pong)) {
         Outbound::Pong(PongResponse {
             response: response.response,
@@ -924,6 +949,7 @@ async fn write_response(
             capabilities: std::iter::once(PRUNE_REVIEWED_IDS_CAPABILITY.to_owned())
                 .chain(std::iter::once(SNAPSHOT_REVISION_CAPABILITY.to_owned()))
                 .chain(std::iter::once(BOARD_WORKTREE_CAPABILITY.to_owned()))
+                .chain(std::iter::once(BOARD_AUTOMATION_CAPABILITY.to_owned()))
                 .chain(std::iter::once(
                     fleet_proto::REMOTE_MACHINES_CAPABILITY.to_owned(),
                 ))
@@ -1029,6 +1055,7 @@ mod tests {
             capabilities: std::iter::once(PRUNE_REVIEWED_IDS_CAPABILITY.to_owned())
                 .chain(std::iter::once(SNAPSHOT_REVISION_CAPABILITY.to_owned()))
                 .chain(std::iter::once(BOARD_WORKTREE_CAPABILITY.to_owned()))
+                .chain(std::iter::once(BOARD_AUTOMATION_CAPABILITY.to_owned()))
                 .chain(std::iter::once(
                     fleet_proto::REMOTE_MACHINES_CAPABILITY.to_owned(),
                 ))
@@ -1050,6 +1077,7 @@ mod tests {
                 "prune.reviewed_ids",
                 "snapshot.revision",
                 "board.worktree",
+                "board.automation",
                 "remote-machines",
                 "agent.window",
                 "agent.sync_marker",
@@ -1076,6 +1104,86 @@ mod tests {
         let pong = serde_json::to_value(pong).expect("serialize Pong");
         assert_eq!(pong["daemon"]["pid"], identity.pid);
         assert_eq!(pong["daemon"]["bootId"], identity.boot_id);
+    }
+
+    fn delegation_with(
+        caller: fleet_core::agents::DelegationCaller,
+    ) -> fleet_core::agents::Delegation {
+        fleet_core::agents::Delegation {
+            id: fleet_core::agents::DelegationId::new(),
+            caller,
+            caller_turn: None,
+            caller_item: None,
+            child: fleet_core::agents::ThreadId::new(),
+            provider: fleet_core::agents::AgentKind::Codex,
+            depth: 1,
+            brief: "inspect the listing gate".to_owned(),
+            expectation: "only capable peers see a card caller".to_owned(),
+            eager: false,
+            status: fleet_core::agents::DelegationStatus::Running,
+            status_payload: None,
+            result: None,
+            nudges: 0,
+            recoveries: 0,
+            delivery: fleet_core::agents::DeliveryState::Pending,
+            created: chrono::DateTime::UNIX_EPOCH,
+            finished: None,
+            headline: None,
+            usage: None,
+        }
+    }
+
+    /// A `Delegations` listing is a discovery surface: a peer that never named `board.automation`
+    /// is handed the thread-called records it always had and never learns a card can call.
+    #[test]
+    fn a_peer_without_the_capability_never_sees_a_card_caller() {
+        let thread_called = delegation_with(fleet_core::agents::DelegationCaller::Thread(
+            fleet_core::agents::ThreadId::new(),
+        ));
+        let card_called = delegation_with(fleet_core::agents::DelegationCaller::Card {
+            board: fleet_core::ids::BoardId::try_from("engineering").expect("board id"),
+            card: fleet_core::ids::CardId::try_from("card-7").expect("card id"),
+        });
+        let delegations_only = HelloClient {
+            capabilities: vec![fleet_proto::AGENT_DELEGATION_CAPABILITY.to_owned()],
+            ..HelloClient::default()
+        };
+        let both = HelloClient {
+            capabilities: vec![
+                fleet_proto::AGENT_DELEGATION_CAPABILITY.to_owned(),
+                BOARD_AUTOMATION_CAPABILITY.to_owned(),
+            ],
+            ..HelloClient::default()
+        };
+
+        let mut listed = Ok(ResponseBody::Delegations(vec![
+            thread_called.clone(),
+            card_called.clone(),
+        ]));
+        hide_card_callers_from_peer(&mut listed, &delegations_only);
+        assert_eq!(
+            listed,
+            Ok(ResponseBody::Delegations(vec![thread_called.clone()]))
+        );
+
+        let mut listed = Ok(ResponseBody::Delegations(vec![
+            thread_called.clone(),
+            card_called.clone(),
+        ]));
+        hide_card_callers_from_peer(&mut listed, &both);
+        assert_eq!(
+            listed,
+            Ok(ResponseBody::Delegations(vec![
+                thread_called.clone(),
+                card_called.clone()
+            ]))
+        );
+
+        // An explicit id is not a listing: `DelegationGet` is answered to any peer that named
+        // `agent.delegation`, card caller or not.
+        let mut fetched = Ok(ResponseBody::Delegation(card_called.clone()));
+        hide_card_callers_from_peer(&mut fetched, &delegations_only);
+        assert_eq!(fetched, Ok(ResponseBody::Delegation(card_called)));
     }
 
     #[test]

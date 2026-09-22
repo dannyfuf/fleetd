@@ -3,9 +3,9 @@ use std::{os::unix::fs::PermissionsExt as _, sync::Arc};
 use chrono::Utc;
 use fleet_core::{
     agents::{
-        AgentKind, Delegation, DelegationId, DelegationResult, DelegationStatus, DeliveryState,
-        ItemId, ItemKind, MessageOrigin, PermissionMode, ResultSource, SessionState, StopCause,
-        ThreadId, ThreadProjection, TurnId, TurnState, UserInput,
+        AgentKind, Delegation, DelegationCaller, DelegationId, DelegationResult, DelegationStatus,
+        DeliveryState, ItemId, ItemKind, MessageOrigin, PermissionMode, ResultSource, SessionState,
+        StopCause, ThreadId, ThreadProjection, TurnId, TurnState, UserInput,
     },
     ids::{ContextId, RepoId, WorktreeId},
     model::{Context, Repo, RepoHooks, Worktree},
@@ -484,9 +484,9 @@ fn finished_delegation(
     let now = Utc::now();
     Delegation {
         id,
-        caller,
-        caller_turn,
-        caller_item,
+        caller: DelegationCaller::Thread(caller),
+        caller_turn: Some(caller_turn),
+        caller_item: Some(caller_item),
         child,
         provider: AgentKind::Claude,
         depth: 1,

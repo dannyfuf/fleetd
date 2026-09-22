@@ -61,6 +61,10 @@ The canvas fixes these decisions; do not relitigate them in code.
   is 760 px with a 16 px inset.
   A child thread is in the strip only when attached; detaching it changes this window's tab set,
   not the daemon-owned thread or its durable delegation.
+  A worktree's *active thread* outranks its selected terminal everywhere the workspace is drawn,
+  so a key that shows a terminal tab — `^s b`, and `^s u` back to a card run's board — leaves the
+  agent tab first. A selection sent to the daemon while a thread is still active is obeyed there
+  and invisible here.
 - **The pane is a transcript above a docked composer.** The transcript is bottom-anchored. The
   composer is a multi-line input (`❯` glyph, placeholder `Message claude… (@ file · / command ·
   $ skill)`), Enter sends, Shift+Enter inserts a newline, no send button, and a 22 px metadata row:
@@ -94,6 +98,11 @@ The canvas fixes these decisions; do not relitigate them in code.
   thread blocked on you is blocked whether or not you are reading it. Session header: `working` or
   `needs you`. Context bar: `3 needs you · 2 working · 1 failed`, which includes the current tab
   and omits every segment whose count is zero.
+  **The board reuses this vocabulary unchanged.** A card whose column runs an action wears the same
+  gray spinner for progress and the same amber dot for "wants you", on the tile and in the card
+  detail alike, and its pane header counts `1/1 working · 1 needs you` the way the context bar
+  counts threads — same words, same tones, zero-suppressed the same way. Nothing about a run
+  invents a colour or a glyph of its own (`DESIGN-SYSTEM.md` §5.2, `UX-SPEC.md` §Board).
 
 Exact copy, keys and dimensions are in the canvas; `UX-SPEC.md` §3.6.0 carries the agent tab
 section, and `DESIGN-SYSTEM.md` §2.8 carries the fixed dimensions as `components::agent::metrics`
@@ -868,6 +877,10 @@ Four decisions hold it together, and each one is a refusal of an easier design:
   it, and an hourly sweep catches what an interrupted deletion left behind. The sweep's live set
   comes from the fallible thread listing, never from the one that answers an empty vector when the
   database cannot be read: an empty live set means "every checkpoint is an orphan".
+
+The same refs are read forwards by a board card run: its changed-file list is the diff between its
+thread's *first* checkpoint and a snapshot of the worktree taken when the run ends, so it names
+what the run left behind rather than what any one turn produced (`BOARD.md` §11).
 
 ## 6. Decision surfaces
 
@@ -1722,6 +1735,18 @@ idempotent. The daemon logs which directory it injected and which rule chose it 
 warns when no rule matched. `fleet doctor` reports the same daemon-side directory (§"subagent
 fleet CLI").
 
+**A child never starts a daemon.** Every other `fleet` invocation autostarts a `fleetd` when the
+socket does not answer; one running with `FLEET_DELEGATION` set does not. A child reports to *the
+daemon that started it*, so when nothing is listening a new daemon is not a replacement — it is a
+long-lived process nobody asked for, holding a `FLEET_HOME` whose session has already finished.
+The CLI refuses with `no Fleet daemon is running at <home>; a delegated child reports to the
+daemon that started it and never starts one`, and nothing is lost by refusing: the delegation and
+its outbox row are durable, and the next daemon the user starts adopts what the child could not
+report. A daemon that merely restarted while the child worked is unaffected, because one is
+listening again. This is a rule of the CLI rather than of the child's `PATH`: the prepend above
+puts a real `fleet` ahead of anything a test harness substitutes, so a `PATH` trick could not
+carry the guarantee.
+
 **A resumed child keeps it.** Restarting a thread or resuming it lazily rebuilds its
 `StartRequest` from the durable record, and there is no caller request there to read a hint from,
 so rule 1 is unavailable — the hint describes a process that has already exited and is
@@ -1825,9 +1850,10 @@ together therefore become two caller turns rather than one combined turn. A row 
 its action actually happens, so a daemon restart or transient error costs a retry, not a lost
 result.
 
-Delivery first terminally patches the caller's delegation transcript item, completing it as
-`Completed` for `Succeeded` and `Failed` for every other terminal status. It then chooses by the
-caller's durable state:
+Delivery for a **thread** caller first terminally patches that caller's delegation transcript
+item, completing it as `Completed` for `Succeeded` and `Failed` for every other terminal status,
+and then chooses by the caller's durable state. A **card** caller has no transcript item to patch
+and takes the last row of the table alone (§15.7):
 
 | Caller state | Delivery rule |
 | --- | --- |
@@ -1839,6 +1865,7 @@ caller's durable state:
 | blocked on a gate | leave `Deliver` open until the gate resolves or withdraws |
 | starting, or parked in provider `Waiting` | leave `Deliver` open until the session can accept input |
 | stopped with no resume cursor, or record missing | set `Undeliverable { reason }` and close the row |
+| a **card** caller, in any state (§15.7) | none of the above: call the board's run-delivery hook, and on its `Ok` set `Recorded` and close the row |
 
 Both shipped adapters mint a cursor at start, so the cursorless stopped-caller case is a legacy-record path.
 
@@ -1906,6 +1933,31 @@ eight results a second time as user messages.
   the last N events; both imply `--replay`, because a tail that printed nothing is the bug they
   exist to fix. Neither adds paginated history to the protocol — the trim is client-side, over
   what the cursored open already returned.
+
+A **card is a caller like a thread is** (§15.7), and the limits above apply to it with two
+exceptions it is entitled to: a card run is minted at `depth = 1` directly, so the depth ladder
+never sees it, and the per-caller ceiling of 4 live children does not bind a card, which has no
+turn that could be waiting on them. What does bind is the daemon-wide ceiling of 8 live
+delegations, re-checked at reservation, and — above it, and usually first — the board's own
+`settings.max_live_runs`, because every run of one board edits one checkout (`BOARD.md` §11.7).
+The three rules that follow from a card caller, all of them the app's board keys (`KEYMAP.md`):
+
+- **Attach** (`A`). A card run's child is an ordinary thread: `A` opens it as an ordinary agent
+  tab, through the same path `^s u` and a delegation row take. There is no card-only transcript
+  and no read-only mode. A run whose start never reached a thread has nothing to attach: the card
+  answers `{KEY}'s runs never reached a thread`, in the app and in `fleet board card attach`
+  alike, and the run's own `detail` on the card detail is where the failure is read. The tab pins one segment no other tab has — `for {KEY} · {column} · {board}` — and its
+  composer reads `Steering a card run. Its report moves the card when it finishes.` The segment
+  is a jump, and `^s u` makes the same one: back to the worktree's board tab with that card
+  selected, which is the card caller's answer to a key that otherwise names a caller thread.
+- **Cancel** (`X`). A card run is cancelled through its **card** (`CardRunCancel`), not through
+  the delegation's own cancel, so the outcome lands on the card as `cancelled` and the tile's mark
+  drops with it; the child stops exactly as a thread-called one does. Moving a card out of a
+  column that is running it asks first, and confirming is one `MoveCard { cancel_run: true }`.
+- **Steering.** The composer is live, because the tab is an ordinary tab — but a card run reports
+  to its **card**: what the child answers reaches the board through `fleet subagent complete` and
+  the recorded outcome, and it is the card's column, not the reader of the tab, that moves it.
+  Typing into the tab steers the run; it does not take ownership of the result.
 
 The token is two concatenated `Uuid::new_v4().simple()` values: 64 lowercase hexadecimal
 characters, or 32 random bytes. Only its SHA-256 hex digest is stored. `complete` hashes the
@@ -1989,10 +2041,13 @@ can scan for it, but there is no `finished:` and no body, because there is nothi
 Its status word is the delegation-status name (`starting`, `running`, `blocked`, …) rather than
 the transcript row vocabulary, for the same reason the delivered line's is.
 
-`fleet subagent list` prints one fixed-field tab-separated line per delegation, now **eight** fields
-rather than six — id, status, provider, child, duration, total tokens, cost, delivery — with `-` in
-the tokens and cost fields when the child has reported no usage. Nothing else about the line moved;
-the two new fields sit after `duration` and before `delivery`.
+`fleet subagent list` prints one fixed-field tab-separated line per delegation, now **nine** fields
+rather than six — id, status, provider, child, duration, total tokens, cost, delivery, caller —
+with `-` in the tokens and cost fields when the child has reported no usage. Nothing else about the
+line moved; the spend fields sit after `duration` and before `delivery`, and `caller` is the last
+field: `thread <id>` for a child a thread delegated, `card <KEY>` for one a board column's
+automation started (`docs/BOARD.md` §11). A card caller the command could not resolve to a display
+key prints its card id, which every `fleet board card` verb still accepts as a selector.
 
 `fleet subagent status` is no longer that same row. It prints, in order: the fixed-field line, the
 brief, the child's usage, and — for a terminal delegation — the report, rendered through the exact
@@ -2087,3 +2142,73 @@ both delivery rows remain recorded. A Stop or other cancelling child event write
 `CancelChildren` beside its own `Deliver`, so a restart cannot lose propagation. A descendant's
 delivery may become `Undeliverable` if its caller is stopped before that caller drains it, but the
 state and result remain on the record.
+
+### 15.7 Card callers
+
+A delegation's caller is no longer always a thread. `DelegationCaller` is an **untagged** enum with
+two shapes — `Thread(ThreadId)` and `Card { board, card }` — so a thread caller still serialises as
+the bare id string it always was, and a record written by a build that had no card callers decodes
+here unchanged. `caller_turn` and `caller_item` became `Option`, `Some` **iff** the caller is a
+thread: a card has no turn that could have launched the run and no transcript item that could show
+it working, and the record says so rather than carrying a placeholder. A card-called record is
+otherwise an ordinary delegation — same child thread, same `fleet subagent complete` report, same
+nudges, same resume-once recovery, same cancel path.
+
+Storage is the agents ladder's **first table rebuild**, slot 007 `delegation_card_callers`. SQLite
+cannot drop `NOT NULL` from a column, and `caller_thread`, `caller_turn` and `caller_item` were all
+`NOT NULL` from slot 003, so the slot creates `delegations_v7` with those three nullable plus
+`caller_kind TEXT NOT NULL DEFAULT 'thread'`, `caller_board` and `caller_card`, copies every row
+naming all columns in both positions, drops the old table, renames, and re-creates both indexes —
+`idx_delegations_caller(caller_thread, created)` and the new `idx_delegations_card(caller_board,
+caller_card)`, which `live_for_board` and `live_for_card` seek. Like every slot it is guarded: a
+database whose `PRAGMA table_info(delegations)` already lists `caller_kind` is left alone, so a
+re-run changes nothing. The constraint the rebuilt schema cannot state — `'thread'` fills the three
+thread columns, `'card'` fills board and card — is checked once in Rust on the way in, because a row
+that broke it would decode as a different caller than it was written as. **A database at slot 007
+cannot be opened by an earlier `fleetd`.**
+
+Delivery is where the two callers part. A card has no transcript item to patch, no gate that could
+answer the wrong prompt, no session to resume and no user message to inject, so none of the table in
+§15.2 applies: the board write **is** the delivery. The worker upgrades the `Weak<dyn
+RunDeliveryHook>` composition installed on the delegation service — the boards service implements
+it, and the delegation service never names `Boards`, because it is the lower of the two — and calls
+`on_run_delivered(board, card, delegation)` once per terminal card-called delegation. Its `Ok` sets
+`delivery = Recorded` and marks that exact `Deliver` row done; its `Err` leaves the row open and
+logs, so the next drain asks again. `Recorded` serialises as `{"type":"recorded"}`, answers
+`"recorded"` from `word()`, is not pending, and is terminal for delivery. When the hook is unset, or
+its service has been dropped, the delivery becomes `Undeliverable { reason: "no board service" }`
+rather than being retried for the life of the process: neither can change while this daemon runs.
+
+The exactly-once boundary is stated the same way as the caller-item rule, with the board standing
+in for the transcript: the board write's own commit, not a successful function return, is what
+proves delivery, and the hook must therefore be **idempotent by delegation id** — a crash between
+the hook's `Ok` and the row being closed leaves the row open, and the next drain calls the hook
+again with the outcome it already recorded.
+
+Three rules elsewhere learned the kind:
+
+- **The repair sweep skips card callers.** `mark_missing_callers_undeliverable` selects
+  `delivery = 'pending' AND caller_kind = 'thread'`. Without that half, its `NOT EXISTS` over
+  `threads` would match every card run — whose `caller_thread` is NULL — and the first drain after a
+  restart would mark every pending card delivery `caller deleted` before the hook ever saw it.
+- **The drain throttle keys a card caller on its board, not its card.** The board document is the
+  one thing two cards' deliveries contend for, so two cards of one board record one after the other
+  while two boards record in the same pass.
+- **`wait` never consumes a card run.** A delivery is consumed only when the delegation's caller is
+  `Thread(t)` and the waiter *is* `t`; a card's caller answers `None` for a thread, so no waiter can
+  close the row early and take the outcome from the board.
+
+Per-peer visibility is filtered rather than versioned. A card-called `DelegationChanged` is sent
+only to a client that named **both** `agent.delegation` (which is what makes the event decodable at
+all) and `board.automation`, and a `Delegations` **listing** is filtered the same way, because a
+listing is a discovery surface. `DelegationGet` of an explicit id is not filtered: naming an id is
+not discovering one, and any peer that named `agent.delegation` is answered.
+
+This section is the delegation half only. `run_for_card` is the one entry point that mints a
+card-called record: it writes `depth = 1` directly and skips every rule that belongs to a thread
+caller — caller-exists, caller-locality, running-turn, the depth ladder, the per-caller live-child
+ceiling and the caller-transcript append — while keeping the provider-binary rule, worktree
+resolution, the daemon-wide ceiling re-checked in `reserve`, and adding one of its own: a worktree
+another host owns is refused, because a run edits a checkout this daemon must be able to reach. The
+board side — which column starts a run, what it puts in the brief, and how the recorded outcome
+moves the card — belongs to the boards service, not here.
