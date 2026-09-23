@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use super::*;
 
 #[test]
@@ -113,5 +115,95 @@ fn a_card_with_no_report_never_takes_the_unfold_branch() {
         enter_target(None, &CardDetailState::default()),
         Enter::Property,
         "the card went away while the dialog was open"
+    );
+}
+
+/// The property column is prepared outside `render`, once per board revision: a frame reads the
+/// same rows and chips until the mirror moves, and each chip comes from the key table.
+#[gpui::test]
+fn the_property_column_is_prepared_once_per_board_revision(cx: &mut gpui::TestAppContext) {
+    let context = fleet_core::model::Context {
+        id: fleet_core::ids::ContextId::try_from("work").unwrap_or_else(|error| panic!("{error}")),
+        name: "Fleet".into(),
+        owners: vec![],
+        created_at: "2026-09-06T12:00:00Z".into(),
+    };
+    let mut board = fleet_core::board::new_board(&context, "2026-09-06T12:00:00Z");
+    let card = fleet_core::board::create_card(
+        &mut board,
+        &[],
+        "card-1".parse().unwrap_or_else(|error| panic!("{error}")),
+        fleet_core::board::CardDraft {
+            title: "Fix login".into(),
+            ..fleet_core::board::CardDraft::default()
+        },
+        "2026-09-06T12:00:00Z",
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    let card_id = card.id.clone();
+    let state = cx.new(|_| {
+        let mut state = AppState::new("/tmp/fleet-card-detail-model", std::time::Instant::now());
+        state.board.view = Some(fleet_core::board::BoardView {
+            board,
+            cards: vec![card],
+            live_runs: Vec::new(),
+        });
+        state
+    });
+
+    let model = |cx: &mut App| {
+        read_host(&state, cx, |host, _| host.card_detail.properties.clone())
+            .unwrap_or_else(|| panic!("the detail prepared no property column"))
+    };
+    let first = cx.update(|cx| {
+        with_host(&state, cx, |host| {
+            host.card_detail.card_id = Some(card_id.clone());
+            host.card_detail.property_row = 99;
+        });
+        refresh(&state, cx);
+        model(cx)
+    });
+    assert_eq!(first.rows.len(), first.keys.len());
+    let status = first
+        .rows
+        .iter()
+        .position(|row| row.label.as_ref() == "Status")
+        .unwrap_or_else(|| panic!("no Status row"));
+    let chip = first.keys[status].as_ref().map(|kbd| {
+        kbd.strokes()
+            .iter()
+            .map(|stroke| stroke.unparse())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        chip,
+        Some(vec!["s".to_owned()]),
+        "Status teaches the board's `s`"
+    );
+    cx.update(|cx| {
+        assert_eq!(
+            read_host(&state, cx, |host, _| host.card_detail.property_row),
+            first.rows.len() - 1,
+            "the row cursor is kept inside the rows where they are prepared"
+        );
+    });
+
+    let again = cx.update(|cx| {
+        refresh(&state, cx);
+        model(cx)
+    });
+    assert!(
+        Rc::ptr_eq(&first, &again),
+        "nothing moved, nothing is rebuilt"
+    );
+
+    let moved = cx.update(|cx| {
+        state.update(cx, |state, _| state.board.revision += 1);
+        refresh(&state, cx);
+        model(cx)
+    });
+    assert!(
+        !Rc::ptr_eq(&first, &moved),
+        "a new board revision rebuilds the rows"
     );
 }

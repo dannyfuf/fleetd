@@ -437,6 +437,12 @@ fn watch(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
         ) {
             card_picker::refresh(&state, cx);
         }
+        if matches!(
+            state.read(cx).overlay,
+            Some(Overlay::Dialog(Dialogs::CardDetail))
+        ) {
+            card_detail::refresh(&state, cx);
+        }
         // The branch preview names the worktree the create would produce, and whether that
         // worktree already exists is a snapshot fact: a create that landed elsewhere has to
         // turn this dialog's `Create` into `Open` without a keystroke.

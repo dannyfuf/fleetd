@@ -16,10 +16,10 @@ pub(crate) fn render(
     bridge: &Bridge,
     focus: &FocusHandle,
     _host: &Entity<DialogHost>,
-    window: &mut Window,
+    _window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let (mut draft, edit_input) = read_host(state, cx, |host, _| {
+    let (draft, edit_input) = read_host(state, cx, |host, _| {
         (host.card_detail.clone(), host.card_detail_input.clone())
     });
     let Some((board, card)) = state.read(cx).board().and_then(|view| {
@@ -43,15 +43,12 @@ pub(crate) fn render(
         .and_then(|marks| marks.run);
     let menu = CardMenu::of(board, card, mark);
     let backend = state.read(cx).backend_label(&board.backend.kind);
-    // Borrowed, never cloned: this runs on every frame, and the card set of a real board
-    // carries every comment and activity entry on it.
-    let rows = state.read(cx).board().map_or_else(Vec::new, |view| {
-        detail::property_rows(&view.board, &view.cards, card, now)
-    });
-    draft.property_row = draft.property_row.min(rows.len().saturating_sub(1));
-    with_host(state, cx, |host| {
-        host.card_detail.property_row = draft.property_row
-    });
+    // Prepared in the update path (`model::refresh`), memoised per board revision and card.
+    let (rows, keys): (Rc<[detail::PropertyRow]>, Rc<[Option<Kbd>]>) =
+        draft.properties.as_ref().map_or_else(
+            || (Rc::from([]), Rc::from([])),
+            |model| (model.rows.clone(), model.keys.clone()),
+        );
     let editor = |surface: CardEdit| {
         (draft.edit == Some(surface))
             .then(|| edit_input.clone())
@@ -144,15 +141,7 @@ pub(crate) fn render(
         };
         detail::activity(card, now, draft.activity_open, toggle, cx)
     };
-    let properties = properties(
-        state,
-        bridge,
-        &rows,
-        &draft,
-        PropertyKeys::resolve(&rows, window, cx),
-        activity,
-        cx,
-    );
+    let properties = properties(state, bridge, &rows, &draft, &keys, activity, cx);
 
     let body = div()
         .flex()
@@ -172,7 +161,7 @@ pub(crate) fn render(
         .body(body);
 
     let rows_len = rows.len();
-    let targets: Rc<Vec<detail::PropertyRow>> = Rc::new(rows);
+    let targets = rows;
     let card_id = card.id.clone();
 
     root(focus)
@@ -355,7 +344,7 @@ pub(crate) fn render(
 fn pick_key<A: gpui::Action>(
     state: &Entity<AppState>,
     bridge: &Bridge,
-    targets: &Rc<Vec<detail::PropertyRow>>,
+    targets: &Rc<[detail::PropertyRow]>,
     target: detail::PropertyTarget,
 ) -> impl Fn(&A, &mut Window, &mut App) + 'static {
     let state = state.clone();
@@ -541,50 +530,13 @@ fn editing(input: Entity<TextInput>, surface: CardEdit, theme: &Theme) -> AnyEle
 /// The save key the edit's primary button teaches, among `Save`'s bindings.
 const SAVE_KEY: &str = "ctrl-enter";
 
-/// Each property row's key chip, read from the live keymap once per frame.
-struct PropertyKeys(Vec<Option<Kbd>>);
-
-impl PropertyKeys {
-    fn resolve(rows: &[detail::PropertyRow], window: &Window, cx: &App) -> Self {
-        Self(
-            rows.iter()
-                .map(|row| {
-                    row_action(row).and_then(|action| Kbd::for_action(action.as_ref(), window, cx))
-                })
-                .collect(),
-        )
-    }
-}
-
-/// The action whose key edits a row: the board's own field key where one exists, `⏎` otherwise.
-///
-/// Only the first row of a multi-row field names the key; the rows under it (`Blocked by`'s
-/// second link) are still selected and opened by `⏎` or a click.
-fn row_action(row: &detail::PropertyRow) -> Option<Box<dyn gpui::Action>> {
-    use detail::PropertyTarget as T;
-    Some(match &row.target {
-        T::ReadOnly => return None,
-        T::Worktree => Box::new(board_actions::OpenWorktree),
-        T::Remote => Box::new(card_actions::OpenRemote),
-        T::Pick(_) if row.label.is_empty() => Box::new(card_actions::EditProperty),
-        T::Pick(PickerKind::Status) => Box::new(board_actions::PickStatus),
-        T::Pick(PickerKind::Priority) => Box::new(board_actions::PickPriority),
-        T::Pick(PickerKind::Assignee) => Box::new(board_actions::PickAssignee),
-        T::Pick(PickerKind::Labels) => Box::new(board_actions::PickLabels),
-        T::Pick(PickerKind::Estimate) => Box::new(board_actions::PickEstimate),
-        T::Pick(PickerKind::BlockedBy) => Box::new(board_actions::PickBlockedBy),
-        T::Pick(PickerKind::Provider) => Box::new(board_actions::PickAgent),
-        T::Pick(_) => Box::new(card_actions::EditProperty),
-    })
-}
-
 /// The right-hand column: the clickable property rows, then the activity folded under them.
 fn properties(
     state: &Entity<AppState>,
     bridge: &Bridge,
     rows: &[detail::PropertyRow],
     draft: &CardDetailState,
-    keys: PropertyKeys,
+    keys: &[Option<Kbd>],
     activity: AnyElement,
     cx: &App,
 ) -> AnyElement {
@@ -618,27 +570,24 @@ fn properties(
                 .pb(theme.space.xs)
                 .child(Text::sentence_label("Properties")),
         )
-        .children(
-            rows.iter()
-                .zip(keys.0)
-                .enumerate()
-                .flat_map(|(index, (row, kbd))| {
-                    let divider = (Some(index) == repo_row)
-                        .then(|| Divider::horizontal().inset(true).into_any_element());
-                    let row = detail::property_row(
-                        row,
-                        detail::PropertyRowProps {
-                            index,
-                            selected: index == draft.property_row,
-                            focused: !draft.is_editing(),
-                            kbd,
-                            on_click: on_click.clone(),
-                        },
-                        theme,
-                    );
-                    divider.into_iter().chain(std::iter::once(row))
-                }),
-        );
+        .children(rows.iter().zip(keys.iter().cloned()).enumerate().flat_map(
+            |(index, (row, kbd))| {
+                let divider = (Some(index) == repo_row)
+                    .then(|| Divider::horizontal().inset(true).into_any_element());
+                let row = detail::property_row(
+                    row,
+                    detail::PropertyRowProps {
+                        index,
+                        selected: index == draft.property_row,
+                        focused: !draft.is_editing(),
+                        kbd,
+                        on_click: on_click.clone(),
+                    },
+                    theme,
+                );
+                divider.into_iter().chain(std::iter::once(row))
+            },
+        ));
     div()
         .flex()
         .flex_col()

@@ -33,6 +33,7 @@ use crate::{
 mod actions;
 mod draft;
 mod lifecycle;
+mod model;
 #[cfg(test)]
 mod tests;
 mod view;
@@ -46,4 +47,6 @@ pub(crate) use draft::CardDetailState;
 use draft::*;
 pub(crate) use lifecycle::seed;
 use lifecycle::*;
+use model::PropertyModel;
+pub(crate) use model::refresh;
 pub(crate) use view::render;

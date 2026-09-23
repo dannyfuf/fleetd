@@ -12,6 +12,7 @@ pub(crate) fn seed(state: &Entity<AppState>, cx: &mut App) {
         host.card_detail_input = None;
         host.card_detail_input_subscription = None;
     });
+    super::refresh(state, cx);
 }
 
 /// `ctrl-s`: send the open buffer and wait for the daemon's answer.

@@ -36,6 +36,8 @@ pub(crate) struct CardDetailState {
     pub(super) expanded_reports: std::collections::HashSet<String>,
     /// Whether the activity under the properties shows every entry rather than the last few.
     pub(super) activity_open: bool,
+    /// The property column, prepared by [`super::refresh`]; `None` until the card is found.
+    pub(super) properties: Option<std::rc::Rc<PropertyModel>>,
 }
 
 impl CardDetailState {
