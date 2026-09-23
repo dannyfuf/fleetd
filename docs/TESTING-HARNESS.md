@@ -296,7 +296,7 @@ The names Fleet paints today, by surface:
 | Hub lists | `worktrees.row[N]`, `prs.row[N]`, `jobs.row[N]`, `hub.tab[N]`, `prs.tab[N]` |
 | Board | `board.column[C]`, `board.column[C].card[R]`, `board.filter` |
 | Filter and palette | `filter.input`, `palette.input`, `palette.row[N]` (one flat numbering across the Go / Do / Context sections) |
-| Dialogs | `dialog.field[N]`, `dialog.row[N]`, `dialog.close`, `dialog.button[N]` |
+| Dialogs | `dialog.field[N]`, `dialog.row[N]`, `dialog.close`, `dialog.button[N]`, `dialog.checkbox`, `dialog.segment[N]` |
 | Help | `help.search` (also `dialog.field[0]`), `help.tab[N]` (0 Guides, 1 All shortcuts), `help.here[N]` (the *Here in …* rows), `help.guide[N]` (by the guide's position in the full list, searched or not), `help.step[N].action[M]` (the shown guide's step `N`, button `M`, both from 0), `help.shortcut[N]` (the table's rows, or the actions a Guides-tab search lists), `help.place[N]` (0 All places, then the catalogue places in order), `help.run`, `help.related` |
 | Sheets | `sheet.close` |
 | Jobs panel | `jobs.row[N].retry`, `jobs.row[N].cancel`, `jobs.row[N].log`, `jobs.filter[N]`, `jobs.clear`, `jobs.more`, `jobs.log.back`, `jobs.log.follow`, `jobs.log.end` |
@@ -320,8 +320,8 @@ result list — the assign-repo contexts, the clone-repo matches, the create-wor
 
 Two names in the table are real but conditional, and a scenario that assumes them unconditionally
 will fail on an unknown target rather than on the thing it meant to check. `dialog.row[N]` exists
-only in the dialogs that have a result list — no preset opens one today, so no dump captured so
-far contains it. `agents.approval.edit` is painted only where the provider accepts an amended
+only in the dialogs that have a result list; `scenarios/hub/create-worktree-clicks.scenario` opens
+the create-worktree base list, whose rows are there once the refs have arrived. `agents.approval.edit` is painted only where the provider accepts an amended
 invocation (the `DecisionDock` contract in `docs/DESIGN-SYSTEM.md`); the other four approval
 controls are always there.
 
@@ -361,7 +361,15 @@ open the header is the log's toolbar: `jobs.log.back`, `jobs.log.follow`, `jobs.
 `dialog.button[N]` is a button in a dialog's footer, `0`
 leftmost, painted by `Dialog::actions`: a dialog still on the legacy footer, whose `Dialog::primary`
 renders a label rather than a control, paints none, so a scenario may target `dialog.button[N]`
-only in a dialog that has been moved onto the button footer.
+only in a dialog that has been moved onto the button footer. Create worktree paints `0` Cancel and
+`1` Create (`Open` on a duplicate id). Every Confirm paints `0` Cancel and `1` its action — the
+primary `y` button, or the red `Y` one where `Y` is required; a click on it dispatches the same
+`Accept` / `AcceptStrong` its key does, so the escalation rule holds under the pointer. A Confirm
+is an alert with no ✕, so it paints no `dialog.close`; the prune confirm's `Show kept` toggle and
+every confirm's `Re-check` are footer and body buttons with no name of their own.
+`dialog.checkbox` is create-worktree's "Open after creating" box, and `dialog.segment[N]` its host
+choices while they sit side by side (`0` is `local`), absent on a local-only daemon or when the
+hosts draw as a dropdown, whose options are `menu.item[N]`.
 
 ## 4. Lanes and fixtures
 

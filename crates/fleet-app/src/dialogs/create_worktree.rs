@@ -37,8 +37,11 @@ mod view;
 pub(crate) use branch::refresh_status;
 pub(crate) use view::render;
 
-/// How many base rows the list shows (§3.8.1: "6 is swarm's number").
+/// How many base rows the list shows before it scrolls (§3.8.1: "6 is swarm's number").
 pub const BASE_ROWS: usize = 6;
+/// How many base rows the list holds at all. Past this the typed branch narrows the refs; a
+/// list of every `origin/*` of a large repository is not something anyone scrolls through.
+pub const BASE_LIMIT: usize = 50;
 /// Maximum time either base-ref request may leave the dialog's spinner active.
 const BASE_REF_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -167,17 +170,30 @@ pub struct CreateState {
     pub(crate) base_error: Option<String>,
     /// Bumps on every seed; a late answer to a superseded dialog is dropped.
     pub(crate) seq: u64,
+    /// The "Open after creating" box is unchecked: `Enter` creates without opening, as `⌥Enter`
+    /// always does. Unchecked is the exception, so the default (`false`) is the checked box.
+    pub(crate) stay_in_hub: bool,
+    /// The base list's scroll position, kept so a cursor move can reveal its row.
+    pub(crate) base_scroll: gpui::ScrollHandle,
 }
 
 impl CreateState {
-    /// The base rows, in the §3.8.1 order: default, previous base, then filtered `origin/*`.
+    /// The base rows, in the §3.8.1 order: default, previous base, then filtered `origin/*`, at
+    /// most [`BASE_LIMIT`] of them.
     ///
     /// The `origin/*` tail is filtered by the typed branch as a subsequence match, and the
     /// filter is abandoned when it would empty the list — a base list you cannot reach is
     /// worse than one that ignores your typing.
     #[must_use]
     pub fn base_candidates(&self) -> Vec<String> {
-        let mut rows: Vec<String> = Vec::with_capacity(BASE_ROWS);
+        self.base_rows().0
+    }
+
+    /// [`CreateState::base_candidates`], and whether the typed branch is narrowing them — it
+    /// is not while nothing is typed, or when it would have emptied the tail.
+    #[must_use]
+    pub fn base_rows(&self) -> (Vec<String>, bool) {
+        let mut rows: Vec<String> = Vec::with_capacity(BASE_LIMIT);
         if !self.default_base.is_empty() {
             rows.push(self.default_base.clone());
         }
@@ -189,7 +205,7 @@ impl CreateState {
             rows.push(previous.clone());
         }
         let query = FuzzyQuery::new(&self.branch);
-        let remaining = BASE_ROWS.saturating_sub(rows.len());
+        let remaining = BASE_LIMIT.saturating_sub(rows.len());
         let is_tail = |candidate: &&String| !rows.contains(candidate);
         let has_matches = self
             .base_refs
@@ -205,7 +221,7 @@ impl CreateState {
             .cloned()
             .collect();
         rows.extend(tail);
-        rows
+        (rows, has_matches && !self.branch.is_empty())
     }
 
     /// The base the cursor is on.
@@ -279,6 +295,13 @@ impl CreateState {
         }
     }
 
+    /// Whether `Enter` (or a click on Create) does anything now: create, or retry a failed
+    /// base-ref fetch.
+    #[must_use]
+    pub fn can_press_create(&self) -> bool {
+        self.can_submit() || self.should_retry_base_refs()
+    }
+
     /// Whether `Enter` may create.
     #[must_use]
     pub fn can_submit(&self) -> bool {
@@ -299,7 +322,7 @@ impl CreateState {
         self.base_error = Some(message);
     }
 
-    fn should_retry_base_refs(&self) -> bool {
+    pub(crate) fn should_retry_base_refs(&self) -> bool {
         self.base_error.is_some() && (self.field == Field::Base || !self.can_submit())
     }
 }
@@ -634,6 +657,7 @@ fn move_base(
         let len = host.create.base_candidates().len();
         host.create.base_cursor = step(host.create.base_cursor, delta, len);
         host.create.field = Field::Base;
+        FuzzyList::reveal(&host.create.base_scroll, host.create.base_cursor);
     });
     focus_field(state, focus, window, cx);
     notify(state, cx);
@@ -655,6 +679,47 @@ fn cycle_host(
         }
     });
     focus_field(state, focus, window, cx);
+    notify(state, cx);
+}
+
+/// A click on a base row: that ref becomes the base, and the list takes the keyboard, as if
+/// `↓` / `↑` had walked there.
+fn select_base(
+    state: &Entity<AppState>,
+    index: usize,
+    focus: &FocusHandle,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    with_host(state, cx, |host| {
+        let len = host.create.base_candidates().len();
+        host.create.base_cursor = index.min(len.saturating_sub(1));
+        host.create.field = Field::Base;
+    });
+    focus_field(state, focus, window, cx);
+    notify(state, cx);
+}
+
+/// A click on a host: that host is chosen, exactly as `←` / `→` would choose it, without
+/// moving the keyboard off the field that has it.
+fn select_host(state: &Entity<AppState>, index: usize, cx: &mut App) {
+    with_host(state, cx, |host| {
+        if host
+            .create
+            .hosts
+            .get(index)
+            .is_some_and(|choice| choice.blocked.is_none())
+        {
+            host.create.host_index = index;
+            host.create.host_touched = true;
+        }
+    });
+    notify(state, cx);
+}
+
+/// The "Open after creating" box.
+fn set_open_after(state: &Entity<AppState>, open: bool, cx: &mut App) {
+    with_host(state, cx, |host| host.create.stay_in_hub = !open);
     notify(state, cx);
 }
 

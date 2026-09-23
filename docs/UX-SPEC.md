@@ -1120,63 +1120,73 @@ and undo. Lists **under a text field** use `ctrl-n`/`ctrl-p` or `↓`/`↑` and 
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│ ⑂+ New worktree · buk/payroll                            │ 44
+│ ⑂+ New worktree  buk/payroll                          ✕  │ 44
 ├──────────────────────────────────────────────────────────┤
-│ Branch                                                   │
+│ BRANCH                                                   │
 │ ┌──────────────────────────────────────────────────────┐ │
 │ │ feat/rut-validator                                  ▏│ │ 36
 │ └──────────────────────────────────────────────────────┘ │
-│ → buk/payroll#feat-rut-validator                         │ 18  faint slug + id preview
+│ Creates buk/payroll#feat-rut-validator                   │ 18  faint sentence
 │                                                          │
-│ Base                                      ⟳ fetching     │
+│ START FROM                                               │
 │ ┌──────────────────────────────────────────────────────┐ │
-│ │▌origin/main                                  default │ │ 28 × 6
+│ │ ⌕ Matching "feat/rut-validator"      ⟳ fetching      │ │ 30
+│ ├──────────────────────────────────────────────────────┤ │
+│ │▌origin/main                          [default]    ✓  │ │ 30 × 6, then scrolls
 │ │ origin/release-2026                                  │ │
-│ │ origin/feat/payroll-import                           │ │
-│ │ pull/412/head                       (previous base)  │ │
+│ │ pull/412/head                   [previous base]      │ │
 │ └──────────────────────────────────────────────────────┘ │
 │                                                          │
-│ Host                           [ local │ devbox ]        │ 28  only if hosts configured
+│ Run on                              [ local │ devbox ]   │ 30  only if hosts configured
+│ devbox unavailable — ssh: connect timed out              │     only if a host is blocked
 │                                                          │
-│ ⚡ prepared copy ready — create takes ~2 s                │ 18
-│ hooks: pnpm install · pnpm build     (run in background) │ 18
+│ ┌ ⚡ Prepared copy ready — about 2 s ──────────────────┐ │
+│ │    Hooks: pnpm install · pnpm build (run in background)│ │
+│ └──────────────────────────────────────────────────────┘ │
 ├──────────────────────────────────────────────────────────┤
-│ ⇥ field · ⌃n/⌃p base · esc cancel          ⏎ Create      │ 44
+│ ☑ Open after creating           [Cancel esc] [Create ⏎]  │ 44
 └──────────────────────────────────────────────────────────┘
 ```
 
 | Element | Content | Position | Why here | Why needed |
 | --- | --- | --- | --- | --- |
-| Title | `New worktree · <repoId>` | header | the repo is already chosen; restating it prevents the #1 mistake | §3 create |
+| Title | `New worktree` + the repo id as the muted subtitle | header | the repo is already chosen; restating it prevents the #1 mistake | §3 create |
 | Branch input | free text, `validateBranch` live, auto-focused | field 1 | the only always-typed input | §1 branch rules |
-| Slug + id preview | `→ <repoId>#<slugify(branch)>` faint | under the input | shows the id **and** the directory you will get, without a second field | §1 slug rules |
-| Validation | red line replacing the preview with the exact failing rule, e.g. `branch cannot contain ".."` | same slot | zero layout shift; fail before a job starts | §1 `validateBranch` reject list |
-| Base list | up to **6** rows: `origin/<defaultBranch>` first and preselected, then the previous `baseRef`, then `origin/*` fuzzy-filtered by the typed text; free text accepted | field 2 | 6 is swarm's number and fits without scrolling | §5 Create dialog |
-| `default` tag | faint, right-aligned on the default row | — | one word instead of a "use default" control | — |
-| Fetch indicator | `loader-circle` + `fetching` at the section's right | — | the list may grow under you; say so, and never block `Enter` | §5 "fetching indicator" |
-| Host cycler | the hosts side by side with the chosen one raised (a dropdown field past four hosts, or names too long to sit side by side), `←`/`→` cycle it; hidden when `config.hosts` is empty | field 3 | zero-suppressed for the local-only majority | `defaultHost` |
-| Expectation line | `⚡ prepared copy ready — create takes ~2 s` **or** `⧗ no prepared copy — the first create copies the repo (~40 s) in the background` | above the footer | the pool's only user-visible consequence is latency; saying it decides whether the user waits or switches away | §1 prepared-copy slots; §6 |
-| **Hooks preview** | `hooks: <prepare · joined> · <postCreate · joined>` + `(run in background)`; `hooks: none` when both are empty | above the footer | post-create hooks run detached and can fail *after* the worktree looks ready; naming them here is what makes the later `⚠ hooks failed` chip intelligible | §3 create step 6; §9 |
+| Status sentence | `Creates <repoId>#<slugify(branch)>` faint | under the input | shows the id **and** the directory you will get, without a second field | §1 slug rules |
+| Validation | red line replacing the sentence with the exact failing rule, e.g. `branch cannot contain ".."` | same slot | zero layout shift; fail before a job starts | §1 `validateBranch` reject list |
+| Start from | one box: a top row saying what narrows the list (`Matching "…"`, `Type a branch name to narrow the list`, or `Nothing matches "…" — every ref is listed`) with the fetch state at its right, then the refs: `origin/<defaultBranch>` first and preselected, then the previous `baseRef`, then `origin/*` fuzzy-filtered by the typed branch, at most 50, 6 visible and the rest scrolling; free text accepted | field 2 | the branch is the filter, so the tab cycle stays branch, base, host | §5 Create dialog |
+| `default` / `previous base` | neutral badges on those rows; an accent `✓` ends the chosen row | — | one word instead of a "use default" control | — |
+| Row click | chooses that base and gives the list the keyboard, as `↓`/`↑` walking there would | — | the mouse is added, the keys stay | ADR 0023 |
+| Fetch state | `loader-circle` + `fetching`; the exact failure in red with a `Retry` button (whose chip is `⏎` while `⏎` retries); else `N refs` | the box's top row | the list may grow under you; say so, and never block `Enter` | §5 "fetching indicator" |
+| Run on | the hosts side by side with the chosen one raised (a dropdown past four hosts, or names too long to sit side by side), `←`/`→` cycle it, a click chooses; hidden when `config.hosts` is empty. A host that cannot take a create is dimmed and takes no click (the keys still reach it) | field 3 | zero-suppressed for the local-only majority | `defaultHost` |
+| Host note | `<host> unavailable — <daemon's reason>` for each blocked host, the chosen one first, in amber with `cloud-off`; else the chosen host's provider (`this machine` for local) | under the host row | says why `Enter` is refused on a blocked host, in the daemon's words | — |
+| Expectation callout | green `zap` `Prepared copy ready — about 2 s` **or** amber `hourglass` `No prepared copy — the first create copies the repo (~40 s) in the background` | above the footer | the pool's only user-visible consequence is latency; saying it decides whether the user waits or switches away | §1 prepared-copy slots; §6 |
+| **Hooks preview** | the callout's second line: `Hooks: <prepare · joined> · <postCreate · joined> (run in background)`; `Hooks: none` when both are empty | in the callout | post-create hooks run detached and can fail *after* the worktree looks ready; naming them here is what makes the later `⚠ hooks failed` chip intelligible | §3 create step 6; §9 |
+| Open after creating | checkbox, checked each time the dialog opens; unchecked, `Enter` and Create create **without** opening, as `⌥Enter` always does; its tooltip names `⌥⏎` | footer left | the hidden `⌥Enter` becomes visible where the choice is made | KEYMAP A8 |
+| Buttons | `Cancel esc`, then the primary `Create ⏎` (`Open ⏎` on a duplicate id), disabled while nothing could be created | footer right | ADR 0023 | — |
 
 **Intentionally omitted:** slug as an editable field (derived; the palette command
 `create with custom slug` covers the rare case), `--url` / `--default-branch` / `--hooks`
 (CLI-only), a "run post-create hooks" checkbox (always on), a "wait for hooks" checkbox, a
 "fetch base first" checkbox (the daemon's freshness rules decide), a progress bar (the dialog
 closes on `Enter`), a repo selector (the rail selection is the repo; from `All` it is the repo of
-the highlighted worktree, falling back to a repo picker only when the list is empty).
+the highlighted worktree, falling back to a repo picker only when the list is empty), a separate
+filter field for the base list (the branch already filters it, and a second editor would change
+the tab cycle), and a split Create button (the checkbox carries "create without opening").
 
 **States:** *submitting* → the dialog closes in < 16 ms, a pending `⟳` row appears in the list and
 a `create` job appears in the ticker and the Jobs panel. *duplicate id* →
-`buk/payroll#feat-rut-validator already exists — ⏎ opens it` (turning §3's idempotency rule into
-a shortcut). *conflict* (existing id with a different explicit `--branch`/`--host`) → the exact
-conflict message in red in the footer, dialog stays open. *closed while a base fetch is running*
-→ the fetch **keeps running** and a 3.2 s toast says `⟳ base fetch still running · J`
-(retires §9 "create-dialog close does not cancel forced fetch").
+`buk/payroll#feat-rut-validator already exists — Open it ⏎` and the primary reads `Open`
+(turning §3's idempotency rule into a shortcut). *conflict* (existing id with a different
+explicit `--branch`/`--host`) → the exact conflict message in red in the footer, dialog stays
+open. *closed while a base fetch is running* → the fetch **keeps running** and a 3.2 s toast says
+`⟳ base fetch still running · J` (retires §9 "create-dialog close does not cancel forced fetch").
 
-**Icons:** `git-branch-plus`, `loader-circle`, `zap`, `hourglass`, `server` (host), `terminal` (hooks).
+**Icons:** `git-branch-plus`, `search`, `loader-circle`, `check`, `zap`, `hourglass`, `cloud-off`.
 
 **Keyboard:** `Tab`/`S-Tab` fields · `ctrl-n`/`ctrl-p` or `↓`/`↑` base list · `←`/`→` host ·
-`Enter` create & open · `⌥Enter` create without opening (KEYMAP A8) · `Esc` cancel (jobs keep running).
+`Enter` create (and open, while the box is checked) · `⌥Enter` create without opening (KEYMAP A8)
+· `Esc` cancel (jobs keep running).
 
 ---
 

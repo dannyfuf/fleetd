@@ -63,9 +63,9 @@ pub(crate) fn refresh_status(state: &Entity<AppState>, cx: &mut App) {
             let preview = match (&invalid, duplicate, draft.preview_id()) {
                 (Some(_), _, _) => None,
                 (None, Some(id), _) => {
-                    Some(format!("{id} already exists \u{2014} \u{23ce} opens it"))
+                    Some(format!("{id} already exists \u{2014} Open it \u{23ce}"))
                 }
-                (None, None, Some(id)) => Some(format!("\u{2192} {id}")),
+                (None, None, Some(id)) => Some(format!("Creates {id}")),
                 (None, None, None) => None,
             };
             (invalid, preview)

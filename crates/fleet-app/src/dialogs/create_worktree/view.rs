@@ -1,132 +1,232 @@
 use super::*;
 
-/// The `Base` label with its fetch spinner, over the ref candidates.
-fn base_section(draft: &CreateState, tight: gpui::Pixels) -> Div {
-    let candidates = draft.base_candidates();
-    let base_header = div()
-        .flex()
-        .items_center()
-        .justify_between()
-        .child(Text::label("Base"))
-        .children(
-            draft
-                .fetching
-                .then(|| SpinnerWithLabel::new("create-base-fetch", "fetching")),
-        );
-    let previous_base = draft.previous_base.clone();
-    let base_list = FuzzyList::new(
-        "create-base-list",
-        candidates.iter().enumerate().map(|(index, candidate)| {
-            let mut item = FuzzyItem::new(candidate.clone());
-            if index == 0 {
-                item = item.trailing("default");
-            } else if previous_base.as_deref() == Some(candidate.as_str()) {
-                item = item.trailing("(previous base)");
-            }
-            item
-        }),
-    )
-    .cursor(draft.base_cursor)
-    .cap(BASE_ROWS)
-    .under_text_field(true)
-    .harness_rows("dialog.row", 0)
-    .empty(Text::ui("No base refs yet.").muted());
+/// "Start from": one box holding what narrows the list, the fetch state, and the refs.
+///
+/// The list is filtered by the branch being typed (§3.8.1), so the box's top row says what it is
+/// matching rather than offering a second field to type into: the tab cycle stays branch, base,
+/// host. A row click chooses that base; the check marks the chosen one.
+fn base_section(
+    draft: &CreateState,
+    state: &Entity<AppState>,
+    bridge: &Bridge,
+    focus: &FocusHandle,
+    cx: &App,
+) -> Div {
+    let theme = cx.theme();
+    let (candidates, filtered) = draft.base_rows();
+    let cursor = draft.base_cursor;
+    let previous_base = draft.previous_base.as_deref();
+    let has_default = !draft.default_base.is_empty();
+    let items = candidates.iter().enumerate().map(|(index, candidate)| {
+        let mut item = FuzzyItem::new(candidate.clone()).checked(index == cursor);
+        if index == 0 && has_default {
+            item = item.badge("default");
+        } else if previous_base == Some(candidate.as_str()) {
+            item = item.badge("previous base");
+        }
+        item
+    });
+    let click_state = state.clone();
+    let click_focus = focus.clone();
+    let base_list = FuzzyList::new("create-base-list", items)
+        .cursor(cursor)
+        .visible_rows(BASE_ROWS)
+        .track_scroll(&draft.base_scroll)
+        .under_text_field(true)
+        .harness_rows("dialog.row", 0)
+        .on_click(move |index, window, cx| {
+            select_base(&click_state, index, &click_focus, window, cx);
+        })
+        .empty(Text::ui("No base refs yet.").muted());
 
+    let matching = if filtered {
+        Text::ui(format!("Matching \u{201c}{}\u{201d}", draft.branch))
+            .muted()
+            .ellipsize()
+    } else if draft.branch.is_empty() {
+        Text::ui("Type a branch name to narrow the list")
+            .faint()
+            .ellipsize()
+    } else {
+        Text::ui(format!(
+            "Nothing matches \u{201c}{}\u{201d} \u{2014} every ref is listed",
+            draft.branch
+        ))
+        .faint()
+        .ellipsize()
+    };
+    let status = if draft.fetching {
+        SpinnerWithLabel::new("create-base-fetch", "fetching").into_any_element()
+    } else if let Some(error) = draft.base_error.as_ref() {
+        let retry = Button::new("create-base-retry", "Retry")
+            .style(ButtonStyle::Ghost)
+            .size(ButtonSize::Compact);
+        // `⏎` retries while the list has the keyboard (or nothing could be created anyway);
+        // the button shows that key then, and otherwise just retries.
+        let retry = if draft.should_retry_base_refs() {
+            retry.action(Box::new(dialog::Confirm))
+        } else {
+            let state = state.clone();
+            let bridge = bridge.clone();
+            retry.on_click(move |_, _, cx| retry_base_refs(&state, &bridge, cx))
+        };
+        div()
+            .flex()
+            .min_w_0()
+            .items_center()
+            .gap(theme.space.sm)
+            .child(Text::ui(error.clone()).tone(Tone::Danger).ellipsize())
+            .child(retry)
+            .into_any_element()
+    } else {
+        let count = draft.base_refs.len();
+        Text::hint(format!(
+            "{count} {}",
+            if count == 1 { "ref" } else { "refs" }
+        ))
+        .faint()
+        .into_any_element()
+    };
+    let filter_row = div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(theme.space.sm)
+        .h(theme.metrics.row_h)
+        .px(theme.space.md)
+        .border_b(theme.metrics.hairline)
+        .border_color(theme.colors.border)
+        .child(
+            Icon::Search
+                .el()
+                .size(IconSize::Small)
+                .color(theme.colors.text_muted),
+        )
+        .child(div().flex().flex_1().min_w_0().child(matching))
+        .child(div().flex().flex_none().child(status));
+
+    let focused = draft.field == Field::Base;
     div()
         .flex()
         .flex_col()
-        .gap(tight)
-        .child(base_header)
-        .children(draft.base_error.as_ref().map(|error| {
+        .gap(theme.space.xxs)
+        .child(Text::label("Start from"))
+        .child(
             div()
                 .flex()
-                .items_center()
-                .justify_between()
-                .child(Text::ui(error.clone()).tone(Tone::Danger).ellipsize())
-                .child(KeyHintRow::new().key("enter", "retry"))
-        }))
-        .child(base_list)
+                .flex_col()
+                .w_full()
+                .rounded(theme.radii.sm)
+                .bg(theme.colors.bg)
+                .border(theme.metrics.hairline)
+                .border_color(if focused {
+                    theme.colors.focus_ring
+                } else {
+                    theme.colors.border
+                })
+                .overflow_hidden()
+                .child(filter_row)
+                .child(div().p(theme.space.xxs).child(base_list)),
+        )
 }
 
-/// The `Host` cycler, plus the one line that says why the shown host cannot take a create.
+/// "Run on": the hosts side by side (a dropdown past four), or nothing on a local-only daemon,
+/// with a line under it naming every host that cannot take a create and why.
 ///
-/// The cycler itself stays live even on a blocked host: the way out of an unreachable choice is
-/// `\u{2190}` / `\u{2192}`, so locking the control would trap the user on it. What the blocked
-/// entry loses is `Enter` (`can_submit`), and the reason says so in the daemon's own words.
-pub(super) fn host_section(draft: &CreateState, tight: gpui::Pixels, cx: &App) -> Option<Div> {
+/// The keys stay the cycler's: `←` / `→` still reach a blocked host, because the way out of an
+/// unreachable choice is the next arrow and locking the control would trap the user on it. What
+/// a blocked host loses is `Enter` (`can_submit`) and the click, and the note says why in the
+/// daemon's own words.
+pub(super) fn host_section(draft: &CreateState, state: &Entity<AppState>, cx: &App) -> Option<Div> {
     let choice = draft.selected_choice()?;
-    let warning = Tone::Warning.color(cx.theme());
-    let cycler = Cycler::labeled("Host", choice.label.clone())
+    let theme = cx.theme();
+    let tight = theme.space.xs;
+    let warning = Tone::Warning.color(theme);
+    let blocked: Vec<usize> = draft
+        .hosts
+        .iter()
+        .enumerate()
+        .filter(|(_, host)| host.blocked.is_some())
+        .map(|(index, _)| index)
+        .collect();
+    let click_state = state.clone();
+    let cycler = Cycler::labeled("Run on", choice.label.clone())
+        .id("create-host")
         .options(draft.hosts.iter().map(|host| host.label.clone()))
+        .unavailable(blocked.iter().copied())
+        .harness_segments("dialog.segment")
+        .on_select(move |index, _, cx| select_host(&click_state, index, cx))
         .has_prev(draft.host_index > 0)
         .has_next(draft.host_index + 1 < draft.hosts.len())
         .focused(draft.field == Field::Host);
-    // The note is one line in every state, so cycling hosts never moves the rest of the dialog.
     let note = div().flex().items_center().gap(tight);
-    let note = match choice.blocked.as_deref() {
-        Some(reason) => note
-            .child(Icon::CloudOff.el().size(IconSize::Small).color(warning))
-            .child(
-                Text::ui(format!("{} \u{2014} {reason}", choice.label))
-                    .tone(Tone::Warning)
-                    .ellipsize(),
-            ),
-        None => note.child(Text::hint(
+    let reasons = unavailable_hosts(draft);
+    let note = match reasons.as_slice() {
+        [] => note.child(Text::hint(
             choice
                 .provider
                 .clone()
                 .unwrap_or_else(|| "this machine".to_owned()),
         )),
+        reasons => note
+            .child(Icon::CloudOff.el().size(IconSize::Small).color(warning))
+            .child(
+                Text::ui(reasons.join(" \u{00b7} "))
+                    .tone(Tone::Warning)
+                    .ellipsize(),
+            ),
     };
     Some(div().flex().flex_col().gap(tight).child(cycler).child(note))
 }
 
-/// The two lines under the fields: how long a create will take, and what runs after it.
-fn expectation(draft: &CreateState, cx: &App) -> Div {
-    let hair = cx.theme().space.xxs;
-    // §3.8.1 Icons: `zap` and `hourglass`, both 16 px Lucide strokes. A colour emoji here was
-    // the one glyph on the screen that was not part of the icon set (§0), and §1.4 keeps amber
-    // for "in flight / needs attention" rather than for decoration.
-    let (expectation_icon, expectation_tone, expectation) = if draft.prepared_ready {
-        (
+/// `devbox unavailable — unreachable` for every host that cannot take a create, the chosen one
+/// first, so the line the eye reads first explains why `Enter` is refused.
+pub(super) fn unavailable_hosts(draft: &CreateState) -> Vec<String> {
+    let chosen = draft.host_index;
+    let mut blocked: Vec<(usize, &HostChoice)> = draft
+        .hosts
+        .iter()
+        .enumerate()
+        .filter(|(_, host)| host.blocked.is_some())
+        .collect();
+    blocked.sort_by_key(|(index, _)| *index != chosen);
+    blocked
+        .into_iter()
+        .map(|(_, host)| {
+            format!(
+                "{} unavailable \u{2014} {}",
+                host.label,
+                host.blocked.as_deref().unwrap_or_default()
+            )
+        })
+        .collect()
+}
+
+/// How long a create will take, and what runs after it, before the user commits.
+fn expectation(draft: &CreateState) -> Callout {
+    // §3.8.1 Icons: `zap` and `hourglass`. Green is the fast path that is ready; amber says the
+    // first create will be slow, which is worth knowing before switching away.
+    let callout = if draft.prepared_ready {
+        Callout::new(
+            Tone::Success,
             Icon::Zap,
-            Tone::Warning,
-            "prepared copy ready \u{2014} create takes ~2 s",
+            "Prepared copy ready \u{2014} about 2 s",
         )
     } else {
-        (
+        Callout::new(
+            Tone::Warning,
             Icon::Hourglass,
-            Tone::Muted,
-            "no prepared copy \u{2014} the first create copies the repo (~40 s) in the background",
+            "No prepared copy \u{2014} the first create copies the repo (~40 s) in the background",
         )
     };
-    let hooks_line = if draft.hooks.is_empty() {
-        "hooks: none".to_owned()
+    callout.detail(if draft.hooks.is_empty() {
+        "Hooks: none".to_owned()
     } else {
         format!(
-            "hooks: {}  (run in background)",
+            "Hooks: {} (run in background)",
             draft.hooks.join(" \u{00b7} ")
         )
-    };
-
-    div()
-        .flex()
-        .flex_col()
-        .gap(hair)
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(hair)
-                .child(
-                    expectation_icon
-                        .el()
-                        .size(IconSize::Medium)
-                        .color(expectation_tone.color(cx.theme())),
-                )
-                .child(Text::ui(expectation).muted()),
-        )
-        .child(Text::hint(hooks_line))
+    })
 }
 
 /// Renders the dialog (§3.8.1).
@@ -135,13 +235,10 @@ pub(crate) fn render(
     bridge: &Bridge,
     focus: &FocusHandle,
     host: &Entity<DialogHost>,
-    _window: &mut Window,
+    window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let (gap, tight) = {
-        let theme = cx.theme();
-        (theme.space.md, theme.space.xs)
-    };
+    let gap = cx.theme().space.lg;
     let draft = &host.read(cx).create;
     let duplicate = draft
         .preview_id()
@@ -158,31 +255,60 @@ pub(crate) fn render(
         .flex_col()
         .gap(gap)
         .child(branch.harness_target_indexed("dialog.field", 0))
-        .child(base_section(draft, tight).harness_target_indexed("dialog.field", 1))
+        .child(
+            base_section(draft, state, bridge, focus, cx).harness_target_indexed("dialog.field", 1),
+        )
         .children(
-            host_section(draft, tight, cx)
+            host_section(draft, state, cx)
                 .map(|section| section.harness_target_indexed("dialog.field", 2)),
         )
-        .child(expectation(draft, cx));
+        .child(expectation(draft));
+
+    // The box decides what `Enter` does; `⌥Enter` always creates without opening, and the
+    // box's tooltip says so with that key from the live keymap.
+    let open_state = state.clone();
+    let open_after = Checkbox::new(
+        "create-open-after",
+        "Open after creating",
+        !draft.stay_in_hub,
+    )
+    .on_toggle(move |open, _, cx| set_open_after(&open_state, open, cx));
+    let open_after = div()
+        .id("create-open-after-tip")
+        .child(open_after)
+        .with_tooltip(
+            Tooltip::new("Create without opening").kbd(Kbd::for_action(
+                &create_actions::CreateWithoutOpening,
+                window,
+                cx,
+            )),
+            cx,
+        )
+        .harness_target("dialog.checkbox");
+    let create = Button::new(
+        "create-submit",
+        if duplicate.is_some() {
+            "Open"
+        } else {
+            "Create"
+        },
+    )
+    .style(ButtonStyle::Primary)
+    .action(Box::new(dialog::Confirm))
+    .disabled(!draft.can_press_create());
 
     let mut card = Dialog::new("New worktree")
         .dismiss_action(crate::dialogs::Dialogs::CreateWorktree.dismiss_action())
         .icon(Icon::GitBranchPlus)
         .width(crate::dialogs::Dialogs::CreateWorktree.width(cx))
         .body(body)
-        .hint_row(
-            KeyHintRow::new()
-                .key("\u{21e5}", "field")
-                .key("\u{2303}n/\u{2303}p", "base")
-                .key("esc", "cancel"),
-        )
-        .primary(if duplicate.is_some() {
-            "\u{23ce} Open"
-        } else {
-            "\u{23ce} Create"
-        });
+        .footer_start(open_after)
+        .actions(vec![
+            Button::new("create-cancel", "Cancel").action(Box::new(dialog::Cancel)),
+            create,
+        ]);
     if let Some(repo) = draft.repo.as_ref() {
-        card = card.subtitle(format!("\u{00b7} {}", repo.as_str()));
+        card = card.subtitle(repo.as_str().to_owned());
     }
     if let Some(message) = draft.error.clone() {
         card = card.error(message);
@@ -233,7 +359,8 @@ pub(crate) fn render(
             }
         })
         .on_action(move |_: &dialog::Confirm, _window, cx| {
-            submit(true, &create_state, &create_bridge, cx);
+            let open_after = !with_host(&create_state, cx, |host| host.create.stay_in_hub);
+            submit(open_after, &create_state, &create_bridge, cx);
         })
         .on_action(
             move |_: &create_actions::CreateWithoutOpening, _window, cx| {

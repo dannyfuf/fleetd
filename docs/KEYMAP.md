@@ -596,7 +596,7 @@ exception: its query is a filter that never contains a space, so it always publi
 
 | Dialog | Keys beyond the shared frame |
 | --- | --- |
-| Create worktree | under browsing `Dialog > Create`, `←` / `→` cycle the host; the branch editor publishes `Dialog > CreateEditing`, where the same arrows move its caret · `Tab` / `S-Tab` move between branch, base and host · `Enter` create & open · `⌥Enter` create **without** opening [A8] |
+| Create worktree | under browsing `Dialog > Create`, `←` / `→` cycle the host; the branch editor publishes `Dialog > CreateEditing`, where the same arrows move its caret · `Tab` / `S-Tab` move between branch, base and host · `Enter` create & open (create only, while the dialog's "Open after creating" box is unchecked) · `⌥Enter` create **without** opening [A8] |
 | Clone repo | type to search · `ctrl-n` / `ctrl-p` or `↓` / `↑` · `Enter` clone · `Esc` cancels only the search request, never a started clone |
 | Confirm (delete / prune / kill / close terminal) | `y` / `Enter` confirm · `Y` **required instead of `y`** when any decisive safety fact is unknown or the inspection errored, and for repo / context delete [A12] · `n` / `Esc` / `q` cancel · `I` re-check (delete) · `s` toggle the KEEP list (prune). Nothing else is bound. |
 | New / Edit context | `Tab` / `S-Tab` move between name and owners · `ctrl-shift-d` delete this context (routes to the expanded `Y` confirm); plain `ctrl-d` belongs to the focused editor |
