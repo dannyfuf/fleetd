@@ -76,8 +76,7 @@ impl Sidebar {
         self
     }
 
-    /// Append a section. The first section that [`SidebarSection::grow`]s takes the height the
-    /// others leave.
+    /// Append a section. Sections stack from the top; the footer stays at the bottom.
     pub fn section(mut self, section: SidebarSection) -> Self {
         self.sections.push(section);
         self
@@ -146,6 +145,7 @@ impl RenderOnce for Sidebar {
                     .into_iter()
                     .map(|section| section.collapsed(collapsed)),
             )
+            .child(div().flex_1())
             .children(self.footer.map(|footer| {
                 div()
                     .flex_none()
@@ -207,7 +207,7 @@ pub struct SidebarSection {
     action: Option<AnyElement>,
     header: Option<AnyElement>,
     body: Option<AnyElement>,
-    grow: bool,
+    body_height: Option<Pixels>,
     collapsed: bool,
 }
 
@@ -219,7 +219,7 @@ impl SidebarSection {
             action: None,
             header: None,
             body: None,
-            grow: false,
+            body_height: None,
             collapsed: false,
         }
     }
@@ -242,9 +242,11 @@ impl SidebarSection {
         self
     }
 
-    /// Take the height the other sections leave, so a long list scrolls inside it.
-    pub fn grow(mut self, grow: bool) -> Self {
-        self.grow = grow;
+    /// The natural height of a body that cannot measure itself — a virtualized list's rows
+    /// times their height. The section takes that much, and shrinks below it (its list then
+    /// scrolls) when the sidebar is shorter than its sections.
+    pub fn body_height(mut self, height: Pixels) -> Self {
+        self.body_height = Some(height);
         self
     }
 
@@ -275,19 +277,16 @@ impl RenderOnce for SidebarSection {
             .flex()
             .flex_col()
             .gap(theme.space.xxs)
-            .map(|el| {
-                if self.grow {
-                    el.flex_1().min_h_0()
-                } else {
-                    el.flex_none()
-                }
+            .map(|el| match self.body_height {
+                Some(_) => el.min_h_0(),
+                None => el.flex_none(),
             })
             .children(header.map(|header| div().flex_none().child(header)))
             .child(
                 div()
                     .flex()
                     .flex_col()
-                    .when(self.grow, |el| el.flex_1().min_h_0())
+                    .when_some(self.body_height, |el, height| el.h(height).min_h_0())
                     .children(self.body),
             )
     }

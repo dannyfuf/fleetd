@@ -401,7 +401,6 @@ fn sidebar_section(width: Option<Pixels>, cx: &mut Context<StructureGallery>) ->
                 IconButton::new("gallery-sidebar-clone", Icon::Plus, "Clone a repository")
                     .size(ButtonSize::Compact),
             )
-            .grow(true)
             .body(
                 div()
                     .flex()

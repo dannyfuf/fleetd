@@ -1516,7 +1516,6 @@ fn kit_sidebar(id: &'static str, collapsed: bool, t: &Theme) -> Sidebar {
                     IconButton::new((id, 0usize), Icon::Plus, "Clone a repository")
                         .size(ButtonSize::Compact),
                 )
-                .grow(true)
                 .body(
                     div()
                         .flex()
