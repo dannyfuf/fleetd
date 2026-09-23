@@ -1,0 +1,43 @@
+# UX-SPEC §3.7 · ADR 0023 — a failed job is found, retried and read by pointer alone.
+#
+# The status bar's sticky error is the whole of the way in: a click on it opens the Jobs sheet on
+# the failure, as `!` does. The failure's Retry submits the same clone again, which fails the same
+# way (its origin does not exist), so the list grows a second failure; Show log opens the log in
+# place and Back returns; the sheet's ✕ closes it, and the error's own ✕ clears the slot as `X`.
+#
+# Virtual-lane only: it takes shots.
+fixture: busy
+job failure
+await idle 30000
+await sticky_error exists 30000
+await targets["sticky_error.retry"] exists 10000
+assert targets["titlebar.jobs"] exists
+
+click sticky_error.retry
+await overlay == Jobs 10000
+assert mode == Jobs && focused == jobs.row[0]
+assert lists.jobs.rows[0].label == "Clone fixture/unreachable" && lists.jobs.rows[0].badges[0] == failed
+assert targets["jobs.row[0].retry"] exists && targets["jobs.row[0].log"] exists
+shot jobs
+
+click jobs.row[0].retry
+await lists.jobs.rows[2] exists 30000
+await lists.jobs.rows[1].badges[0] == failed 30000
+assert lists.jobs.rows[0].badges[0] == failed
+
+click jobs.row[0].log
+await targets["jobs.log.back"] exists 5000
+assert overlay == Jobs
+shot log
+click jobs.log.back
+await targets["jobs.log.back"] absent 5000
+assert overlay == Jobs && focused == jobs.row[0]
+
+click sheet.close
+await overlay absent 5000
+assert screen == Hub && mode == Normal && sticky_error exists
+click sticky_error.close
+await sticky_error absent 5000
+assert targets["sticky_error.retry"] absent
+dump cleared
+quit

@@ -711,7 +711,9 @@ A file counts as a scenario when its extension is `.scenario` or `.txt`, which i
 `.scenario`: the extension is what tells a reader which files run.
 
 Surface directories group scenarios by the part of Fleet they exercise — `hub/`, `workspace/`,
-`agents/`, `daemon/`, `board/` — and a scenario's corpus-relative path without its extension is
+`agents/`, `daemon/`, `board/` — plus `pointer/`, whose journeys cross surfaces: each completes a
+real task by pointer alone, with no `key` line, only `type` into the field a click focused
+(ADR 0023). A scenario's corpus-relative path without its extension is
 also its baseline key, so `hub/help.scenario` and `agents/help.scenario` never collide.
 The agent corpus includes a headless two-turn wheel regression and a structured Codex
 file-approval assertion; the latter reads `agents.threads[0].decision.paths` and `has_diff` to

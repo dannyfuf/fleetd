@@ -1,0 +1,74 @@
+# ADR 0023 · UX-SPEC §5.1 — a new user starts work on a task with the pointer alone: the only
+# keyboard input is the card's title, typed into the field the column's `+` focused.
+#
+# Board → Todo's `+` → New card → the card's ⋯ → Create worktree → pick the repository → the
+# card's ⋯ → Open worktree → the tab strip's `+` → Terminal → `← Worktrees`. The card menu's
+# items are numbered over what the card can do (TESTING-HARNESS §3): on a local board a fresh
+# card lists the seven pickers (0–6), then Create worktree (7); once it links a worktree, Open
+# worktree follows at 8. The workspace itself is not photographed: an empty terminal over the
+# session's translucent window rule does not clear the virtual lane's capture guard.
+#
+# Virtual-lane only: it takes shots.
+fixture: board
+await idle 20000
+assert screen == Hub && hub_tab == Worktrees && overlay absent
+
+# The title bar's section nav: Board.
+click hub.tab[2]
+await hub_tab == Board 10000
+assert lists.board.rows[1].label == "Todo" && lists.board.rows[1].badges[0] == "2"
+
+# Todo's `+` opens New card on Todo; its title takes the keyboard, and the footer's Create files it.
+click board.column[1].add
+await overlay == Dialog 10000
+await idle 10000
+assert dialog.name == CardCreate && dialog.fields[0].focused == true
+type Wire the pointer journeys
+assert dialog.fields[0].value == "Wire the pointer journeys"
+click dialog.button[2]
+await overlay absent 10000
+await lists.board.rows[1].badges[0] == "3" 10000
+await lists["board.cards"].selected.label == "Wire the pointer journeys" 10000
+assert focused == "board.column[1].card[2]"
+shot card-created
+
+# The card's ⋯ → Create worktree asks which repository; a click on acme/api creates it, and the
+# card moves to In Progress with it.
+move board.column[1].card[2]
+click board.column[1].card[2].menu
+await targets["menu.item[7]"] exists 5000
+shot card-menu
+click menu.item[7]
+await dialog.name == CardPicker 10000
+await targets["dialog.row[1]"] exists 10000
+click dialog.row[1]
+await overlay absent 10000
+await lists.board.selected.label == "In Progress" 30000
+await lists["board.cards"].selected.label == "Wire the pointer journeys" 10000
+await idle 30000
+assert lists.board.rows[1].badges[0] == "2" && lists.board.rows[2].badges[0] == "2"
+shot card-has-worktree
+
+# The same card's ⋯ now offers Open worktree (item 8), which opens its workspace.
+click board.column[2].card[1].menu
+await targets["menu.item[8]"] exists 5000
+click menu.item[8]
+await screen == Workspace 20000
+await lists.tabs.rows[2] exists 20000
+assert lists.tabs.rows[0].label ~= "flt-6-wire-the-pointer-journeys"
+assert targets["workspace.back"] exists && targets["tabs.new"] exists
+
+# The strip's `+` → Terminal opens a fourth tab and selects it.
+click tabs.new
+await targets["menu.item[0]"] exists 5000
+click menu.item[0]
+await lists.tabs.rows[3] exists 20000
+await focused == tabs.tab[3] 20000
+
+# `← Worktrees` returns to the Hub, where the new worktree is listed and still running.
+click workspace.back
+await screen == Hub 10000
+assert overlay absent
+await lists.worktrees.rows[0].id == "acme/api#flt-6-wire-the-pointer-journeys" 10000
+dump back-in-hub
+quit

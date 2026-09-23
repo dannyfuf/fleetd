@@ -1,0 +1,30 @@
+# UX-SPEC §3.3 / §3.8.3 · ADR 0023 — a worktree is deleted by pointer alone: a click selects the
+# row, its ⋯ lists the row's verbs, Delete asks first, and the confirm's action button sends it.
+#
+# The ⋯ menu's items are Open, Open keep awake, Sleep, Inspect, Copy path, Copy branch, Kill
+# session, Delete — so Delete is `menu.item[7]`. `busy`'s `hotfix` is clean, so its confirm is the
+# compact one: `dialog.button[1]` is the primary Delete, whose key is `y`.
+#
+# Virtual-lane only: it takes shots.
+fixture: busy
+await idle 30000
+assert screen == Hub && lists.worktrees.rows[2].label == hotfix && lists.worktrees.rows[3] exists
+
+click worktrees.row[2]
+await focused == worktrees.row[2]
+await targets["worktrees.row[2].menu"] exists
+click worktrees.row[2].menu
+await targets["menu.item[7]"] exists
+shot row-menu
+click menu.item[7]
+await dialog.name == Confirm 10000
+await dialog.message == "Moves the copy to trash, then removes it in the background." 20000
+assert targets["dialog.button[1]"] exists && targets["dialog.close"] absent
+shot confirm
+
+click dialog.button[1]
+await dialog absent 10000
+await lists.worktrees.rows[3] absent 60000
+assert screen == Hub && overlay absent && lists.worktrees.rows[2].label != hotfix
+dump deleted
+quit

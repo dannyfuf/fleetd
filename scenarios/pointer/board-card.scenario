@@ -1,0 +1,53 @@
+# UX-SPEC §Board · ADR 0023 — a card is worked by pointer alone: dragged to another column, opened
+# by double-click, a property changed from its row, a comment written and posted with the
+# composer's own Comment button, and the sheet closed by its ✕. The comment is the only typing.
+#
+# The drag is `press`, a short `move` onto the card's own ⋯ (gpui starts a drag on the first
+# motion and holds the preview by that offset), then `move`s into Done, which is empty, so the
+# slot opens at its top (see `board/drag-card.scenario`). `card.properties` row 1 is Priority on
+# a board nobody automated; the picker's `dialog.row[1]` is High.
+#
+# Virtual-lane only: it drags and takes shots.
+fixture: board
+await idle 20000
+click hub.tab[2]
+await hub_tab == Board 10000
+assert lists.board.rows[0].badges[0] == "2" && lists.board.rows[3].label == "Done" && lists.board.rows[3].badges[0] == "0"
+
+press board.column[0].card[0]
+move board.column[0].card[0].menu
+move board.column[3]
+move board.column[3]
+shot dragging
+release board.column[3]
+await lists.board.rows[3].badges[0] == "1" 10000
+assert lists.board.rows[0].badges[0] == "1"
+await focused == "board.column[3].card[0]" 5000
+assert lists["board.cards"].rows[0].badges[0] == "FLT-1"
+
+click left 2 board.column[3].card[0]
+await dialog.name == CardDetail 10000
+await idle 10000
+assert lists["card.properties"].rows[0].label == "Status" && lists["card.properties"].rows[0].badges[0] == "Done"
+assert lists["card.properties"].rows[1].label == "Priority" && lists["card.properties"].rows[1].badges[0] == "–"
+
+click card_detail.property[1]
+await dialog.name == CardPicker 10000
+await targets["dialog.row[1]"] exists 10000
+click dialog.row[1]
+await dialog.name == CardDetail 15000
+await lists["card.properties"].rows[1].badges[0] == "High" 15000
+
+click card_detail.comment
+await targets["card_detail.edit.save"] exists 5000
+type Dragged here by the pointer journey.
+click card_detail.edit.save
+await targets["card_detail.edit.save"] absent 10000
+await targets["card_detail.comment"] exists 10000
+await idle 10000
+shot detail
+
+click card_detail.close
+await overlay absent 10000
+assert hub_tab == Board && lists.board.rows[3].badges[0] == "1"
+quit
