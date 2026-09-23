@@ -351,7 +351,12 @@ impl AgentThreadView {
                 let ItemKind::Tool(call) = &source.kind else {
                     return;
                 };
-                *work = rows::item::projected_tool_row(source, call, work.expanded);
+                *work = rows::item::projected_tool_row(
+                    source,
+                    call,
+                    work.expanded,
+                    rows::item::awaits_gate(&self.projection, source.id),
+                );
             }
             // Output hidden by the fixed-height live row changes no painted payload.
             TranscriptRowKind::WorkLive(_) if matches!(&source.kind, ItemKind::Tool(_)) => return,
@@ -574,7 +579,8 @@ impl AgentThreadView {
             super::decisions::decisions(&self.projection, &self.wizard, self.answering);
     }
 
-    /// Rebuilds the metadata strip and bumps the fit memo's revision.
+    /// Rebuilds the link line and the composer's settings, and bumps the fit memo's revision
+    /// when the links change.
     fn refresh_metadata(&mut self) {
         let mut metadata = Vec::new();
         // The card segment leads: it is the one thing this tab says that no other tab does.
@@ -587,16 +593,18 @@ impl AgentThreadView {
                 self.caller_index,
             ));
         }
-        metadata.extend(presentation::metadata_segments(
+        // What the next send carries is not a metadata block any more: it is the composer's
+        // own chips, meter and facts, prepared here beside the links that stay a muted line.
+        self.composer_controls = presentation::composer_controls(
             &self.projection,
+            self.controls.model().or(self.projection.model.as_ref()),
+            self.controls.access(self.projection.mode),
             self.interaction_mode(),
-        ));
-        let trailing = presentation::trailing_segments(&self.projection);
-        if metadata == self.metadata && trailing == self.trailing {
+        );
+        if metadata == self.metadata {
             return;
         }
         self.metadata = metadata;
-        self.trailing = trailing;
         // The fit is memoised per `(width, revision)`; the segments changing is exactly the
         // revision bump that invalidates it, and the only one.
         self.metadata_rev = self.metadata_rev.wrapping_add(1);

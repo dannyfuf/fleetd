@@ -240,48 +240,60 @@ fn the_bubble_shows_what_the_user_typed() {
 }
 
 #[test]
-fn the_metadata_row_invents_no_segment() {
+fn the_composer_controls_invent_nothing() {
     let mut projection = projection();
-    // A fresh tab that has published no model at all has the mode and the interaction axis and
-    // nothing else — no placeholder where a number would be.
-    let segments = presentation::metadata_segments(&projection, InteractionMode::Build);
-    let texts: Vec<String> = segments
-        .iter()
-        .map(|segment| segment.text.to_string())
-        .collect();
-    assert_eq!(
-        texts,
-        [
-            mode_label(PermissionMode::Ask).to_owned(),
-            "build".to_owned()
-        ]
+    // A fresh tab that has published no model has no model text, and no context or facts
+    // either — no placeholder where a number would be.
+    let controls = presentation::composer_controls(
+        &projection,
+        None,
+        PermissionMode::Ask,
+        InteractionMode::Build,
     );
-    assert!(presentation::trailing_segments(&projection).is_empty());
+    assert_eq!(controls.model, None);
+    assert_eq!(controls.access.as_ref(), mode_label(PermissionMode::Ask));
+    assert_eq!(controls.interaction, InteractionMode::Build);
+    assert_eq!(controls.context, None);
+    assert_eq!(controls.facts, None);
 
-    projection.model = Some(ModelSelection {
+    // A model with no published effort reads as the model alone, not `model · ?`.
+    let model = ModelSelection {
         model: "claude-opus-5".to_owned(),
         effort: None,
         provider: None,
-    });
-    let segments = presentation::metadata_segments(&projection, InteractionMode::Plan);
-    let texts: Vec<String> = segments
-        .iter()
-        .map(|segment| segment.text.to_string())
-        .collect();
-    assert_eq!(
-        texts,
-        [
-            "claude-opus-5".to_owned(),
-            mode_label(PermissionMode::Ask).to_owned(),
-            "plan".to_owned()
-        ],
-        "a tab that has not published an effort has three segments, not four"
+    };
+    let controls = presentation::composer_controls(
+        &projection,
+        Some(&model),
+        PermissionMode::Ask,
+        InteractionMode::Plan,
     );
-    // Losing which model is answering is worse than losing its name's tail.
-    assert_eq!(
-        segments.first().map(|segment| segment.collapsible),
-        Some(false)
+    assert_eq!(controls.model.as_deref(), Some("claude-opus-5"));
+    assert_eq!(controls.interaction, InteractionMode::Plan);
+
+    let model = ModelSelection {
+        effort: Some("high".to_owned()),
+        ..model
+    };
+    projection.context_pct = 34.0;
+    projection.cumulative_cost_usd = Some(0.42);
+    let controls = presentation::composer_controls(
+        &projection,
+        Some(&model),
+        PermissionMode::AcceptEdits,
+        InteractionMode::Build,
     );
+    assert_eq!(controls.model.as_deref(), Some("claude-opus-5 \u{b7} high"));
+    assert_eq!(
+        controls.access.as_ref(),
+        mode_label(PermissionMode::AcceptEdits)
+    );
+    // The meter carries the percentage; the facts are what is left, never the meter twice.
+    assert_eq!(
+        controls.context,
+        Some((34, gpui::SharedString::new_static("34%")))
+    );
+    assert_eq!(controls.facts.as_deref(), Some("$0.42"));
 }
 
 #[test]
@@ -349,7 +361,7 @@ fn the_composer_placeholder_states_what_the_mode_is_for() {
     let gate = GateId::new();
     assert_eq!(
         presentation::composer_placeholder(ComposerMode::Normal, AgentKind::Claude, None, false),
-        "message claude\u{2026} (@ files \u{b7} $ skills \u{b7} / commands)"
+        "Message claude\u{2026} @ files \u{b7} $ skills \u{b7} / commands"
     );
     assert_eq!(
         presentation::composer_placeholder(

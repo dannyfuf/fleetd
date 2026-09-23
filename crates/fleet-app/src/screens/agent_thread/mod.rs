@@ -31,7 +31,7 @@ use fleet_core::agents::{
 use fleet_lazygit::diff_view::DiffView;
 use fleet_ui_kit::{
     Decision, DecisionKind, MetadataFit, MetadataSegment, MultilineInput, MultilineInputEvent,
-    TranscriptEvent, TranscriptList, TranscriptRow, TranscriptRowKind,
+    RowAction, TranscriptEvent, TranscriptList, TranscriptRow, TranscriptRowKind,
 };
 use gpui::{
     App, Context, Entity, EventEmitter, FocusHandle, Focusable, SharedString, Subscription, Task,
@@ -72,6 +72,9 @@ pub(crate) enum AgentThreadEvent {
     Copy(String),
     /// Attach and select another native thread named by prepared chrome.
     SelectThread(ThreadId),
+    /// Attach and select a delegation's child: a click on its row, which is what `⏎` on the
+    /// focused row does through `native_agent::AttachChild`.
+    AttachDelegation(DelegationId),
     /// Go back to the board tab with this card selected — the jump `^s u` makes from a card run.
     SelectCard(fleet_core::ids::CardId),
     /// Say something short to the user, as a transient toast.
@@ -168,9 +171,11 @@ pub struct AgentThreadView {
     delegation_clock_running: bool,
     /// The prepared decisions, in creation order; the kit applies the priority ladder.
     decisions: Vec<Decision>,
-    /// The prepared metadata strip and its per-width fit memo.
+    /// The prepared link line — the card or caller this thread works for — and its per-width
+    /// fit memo.
     metadata: Vec<MetadataSegment>,
-    trailing: Vec<MetadataSegment>,
+    /// The composer's prepared settings strip: model, access, Build/Plan, context and facts.
+    composer_controls: presentation::ComposerControls,
     metadata_fit: MetadataFit,
     metadata_rev: u32,
     /// This delegated thread's caller, prepared by the workspace from the app mirror.
@@ -262,7 +267,12 @@ impl AgentThreadView {
         let placeholder =
             composer_placeholder(ComposerMode::Normal, projection.provider, None, false);
         let transcript = cx.new(TranscriptList::new);
-        let input = cx.new(|cx| MultilineInput::new(cx, placeholder.into()));
+        let input = cx.new(|cx| {
+            let mut input = MultilineInput::new(cx, placeholder.into());
+            // The composer frames the editor together with its settings strip (view.rs).
+            input.set_framed(false, cx);
+            input
+        });
         let subscriptions = vec![
             cx.subscribe(&input, Self::on_input_event),
             cx.subscribe(&transcript, Self::on_transcript_event),
@@ -271,6 +281,20 @@ impl AgentThreadView {
             Rc::new(RefCell::new(HashMap::new()));
         let rendered = Rc::clone(&diffs);
         transcript.update(cx, |list, cx| {
+            // A row verb's control shows the key its action has while a row holds the focus,
+            // and none outside scroll mode, where the key would not do what the chip says.
+            list.set_row_action_kbd(
+                |action, window, cx| {
+                    let action: Box<dyn gpui::Action> = match action {
+                        RowAction::Copy => Box::new(crate::actions::native_agent::CopyRow),
+                        RowAction::Diff => Box::new(crate::actions::native_agent::DiffRow),
+                        RowAction::Open => Box::new(crate::actions::native_agent::OpenInEditor),
+                        RowAction::Revert => Box::new(crate::actions::native_agent::Revert),
+                    };
+                    fleet_ui_kit::Kbd::for_action(action.as_ref(), window, cx)
+                },
+                cx,
+            );
             list.set_row_body(
                 move |row, _cx| match &row.kind {
                     // ADR 0010 keeps `fleet_lazygit::DiffView` out of the kit, so the owner
@@ -302,7 +326,8 @@ impl AgentThreadView {
             delegation_clock_running: false,
             decisions: Vec::new(),
             metadata: Vec::new(),
-            trailing: Vec::new(),
+            // `prepare` below fills it from the projection before the first frame.
+            composer_controls: presentation::ComposerControls::default(),
             metadata_fit: MetadataFit::new(),
             metadata_rev: 0,
             caller: None,

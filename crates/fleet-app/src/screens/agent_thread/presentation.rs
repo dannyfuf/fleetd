@@ -171,33 +171,67 @@ pub(crate) fn child_composer_placeholder(caller_index: Option<usize>) -> String 
     format!("Steering a subagent of {caller}. It reports to its caller when it finishes.")
 }
 
-/// The left half of the 22 px composer metadata row (§2, `spec-B` §B5.1).
+/// What the composer's settings strip shows (§2, `spec-B` §B5.1): the model chip, the access
+/// chip, Build or Plan, the context meter and the remaining facts.
 ///
-/// **Every segment the harness reports is shown and no segment is invented**: a fresh Claude tab
-/// that has not published an effort has three segments, not four. The model segment is pinned,
-/// so a narrow pane truncates its name rather than losing which model is answering.
+/// **Every value the harness reports is shown and nothing is invented**: a tab that has
+/// published no model has no model chip text of its own, and a model with no effort reads as
+/// the model alone.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ComposerControls {
+    /// `gpt-5 · high`: the model the next send carries and its effort, when one is known.
+    pub(crate) model: Option<SharedString>,
+    /// The access ladder a Build send carries, spelled out (`asks before edits`).
+    pub(crate) access: SharedString,
+    /// Build or Plan, as the next send carries it.
+    pub(crate) interaction: InteractionMode,
+    /// How much of the window is used: the meter's fill and its `34%`.
+    pub(crate) context: Option<(u8, SharedString)>,
+    /// The rest of the right half: `$0.42 · 48m`, or nothing until a turn has run.
+    pub(crate) facts: Option<SharedString>,
+}
+
+/// The composer's settings, from the projection and the draft the next send will carry.
 #[must_use]
-pub(crate) fn metadata_segments(
+pub(crate) fn composer_controls(
     projection: &ThreadProjection,
+    model: Option<&ModelSelection>,
+    access: PermissionMode,
     interaction: InteractionMode,
-) -> Vec<MetadataSegment> {
-    let mut segments = Vec::new();
-    if let Some(ModelSelection { model, effort, .. }) = &projection.model {
-        segments.push(MetadataSegment::pinned(SharedString::new(model.as_str())));
-        if let Some(effort) = effort.as_deref().filter(|effort| !effort.is_empty()) {
-            segments.push(MetadataSegment::new(SharedString::new(effort)));
+) -> ComposerControls {
+    let model = model.map(|ModelSelection { model, effort, .. }| {
+        match effort.as_deref().filter(|effort| !effort.is_empty()) {
+            Some(effort) => SharedString::from(format!("{model} \u{b7} {effort}")),
+            None => SharedString::new(model.as_str()),
         }
+    });
+    let context =
+        context_percent(projection).map(|pct| (pct, SharedString::from(format!("{pct}%"))));
+    let facts = trailing_segments(projection)
+        .into_iter()
+        .skip(usize::from(context.is_some()))
+        .map(|segment| segment.text.to_string())
+        .collect::<Vec<_>>();
+    ComposerControls {
+        model,
+        access: SharedString::new_static(mode_label(access)),
+        interaction,
+        context,
+        facts: (!facts.is_empty()).then(|| SharedString::from(facts.join(" \u{b7} "))),
     }
-    segments.push(MetadataSegment::new(SharedString::new_static(mode_label(
-        projection.mode,
-    ))));
-    segments.push(MetadataSegment::new(SharedString::new_static(
-        match interaction {
-            InteractionMode::Build => "build",
-            InteractionMode::Plan => "plan",
-        },
-    )));
-    segments
+}
+
+/// The context window used, as a whole percentage, once the harness has reported one.
+fn context_percent(projection: &ThreadProjection) -> Option<u8> {
+    (projection.context_pct > 0.0).then(|| {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a context percentage is rendered as a whole number"
+        )]
+        let pct = projection.context_pct.round().clamp(0.0, 100.0) as u8;
+        pct
+    })
 }
 
 /// The right half: `34% · $0.42 · 48m` (§2), turn-derived and empty until a turn has run.
@@ -207,13 +241,7 @@ pub(crate) fn metadata_segments(
 #[must_use]
 pub(crate) fn trailing_segments(projection: &ThreadProjection) -> Vec<MetadataSegment> {
     let mut segments = Vec::new();
-    if projection.context_pct > 0.0 {
-        #[expect(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "a context percentage is rendered as a whole number"
-        )]
-        let pct = projection.context_pct.round().clamp(0.0, 100.0) as u32;
+    if let Some(pct) = context_percent(projection) {
         segments.push(MetadataSegment::new(SharedString::from(format!("{pct}%"))));
     }
     if let Some(cost) = projection.cumulative_cost_usd {
@@ -285,7 +313,7 @@ pub(crate) fn composer_placeholder(
             "add feedback to refine, or leave blank to implement".to_owned()
         }
         ComposerMode::Normal => format!(
-            "message {}\u{2026} (@ files \u{b7} $ skills \u{b7} / commands)",
+            "Message {}\u{2026} @ files \u{b7} $ skills \u{b7} / commands",
             provider.executable()
         ),
     }

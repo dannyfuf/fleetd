@@ -499,7 +499,7 @@ impl AgentThreadView {
     ///
     /// Fleet never hardcodes an effort ladder: the legal set is the harness's own, and until a
     /// probe publishes one the picker offers the model the session reports and nothing invented.
-    fn model_candidates(&self) -> Vec<PickerCandidate> {
+    pub(crate) fn model_candidates(&self) -> Vec<PickerCandidate> {
         if !self.projection.models.is_empty() {
             return self
                 .projection
@@ -516,7 +516,7 @@ impl AgentThreadView {
     }
 
     /// The traits `^s e` offers, which are the harness's declared options and no others.
-    fn trait_candidates(&self) -> Vec<PickerCandidate> {
+    pub(crate) fn trait_candidates(&self) -> Vec<PickerCandidate> {
         let selected = self
             .controls
             .model()
@@ -621,7 +621,7 @@ impl AgentThreadView {
     }
 
     /// Records a human's model pick, which no later seed may overwrite.
-    fn pick_model(&mut self, model: String, cx: &mut Context<Self>) {
+    pub(crate) fn pick_model(&mut self, model: String, cx: &mut Context<Self>) {
         let instance = SharedString::new_static(self.projection.provider.executable());
         let current = self.controls.model().or(self.projection.model.as_ref());
         let effort = current
@@ -647,7 +647,7 @@ impl AgentThreadView {
     }
 
     /// Records one provider-declared reasoning effort for the active model.
-    fn pick_trait(&mut self, effort: String, cx: &mut Context<Self>) {
+    pub(crate) fn pick_trait(&mut self, effort: String, cx: &mut Context<Self>) {
         let Some(current) = self
             .controls
             .model()
@@ -810,7 +810,11 @@ impl AgentThreadView {
                 }
                 self.expanded_rev = self.expanded_rev.wrapping_add(1);
             }
-            Some(RowTarget::Delegation(_)) => return,
+            // A delegation row never expands: a click on it attaches the child, as `⏎` does.
+            Some(RowTarget::Delegation(delegation)) => {
+                cx.emit(AgentThreadEvent::AttachDelegation(delegation));
+                return;
+            }
             None => return,
         }
         self.prepare(cx);
@@ -867,8 +871,8 @@ impl AgentThreadView {
                     cx.emit(AgentThreadEvent::Copy(text));
                 }
             }
-            RowAction::Diff => {
-                if let Some(RowTarget::Item(item)) = target {
+            RowAction::Diff => match target {
+                Some(RowTarget::Item(item)) => {
                     if !self.expanded.insert(item) {
                         self.expanded.remove(&item);
                     }
@@ -877,8 +881,40 @@ impl AgentThreadView {
                     self.install_rows_for_send(cx);
                     cx.notify();
                 }
+                Some(RowTarget::Turn(turn)) => self.toggle_turn_diffs(turn, cx),
+                _ => {}
+            },
+        }
+    }
+
+    /// A turn footer's `Diff`: open every file change the turn made, unfolding the turn so they
+    /// are on screen — or, when they are all open already, close them again.
+    fn toggle_turn_diffs(&mut self, turn: fleet_core::agents::TurnId, cx: &mut Context<Self>) {
+        let edits: Vec<ItemId> = self
+            .projection
+            .items
+            .iter()
+            .filter(|item| item.turn == turn)
+            .filter(|item| matches!(&item.kind, ItemKind::Tool(call) if call.diff.is_some()))
+            .map(|item| item.id)
+            .collect();
+        if edits.is_empty() {
+            return;
+        }
+        if edits.iter().all(|item| self.expanded.contains(item)) {
+            for item in &edits {
+                self.expanded.remove(item);
+            }
+        } else {
+            self.expanded.extend(edits);
+            if self.unfolded.insert(turn) {
+                self.unfolded_rev = self.unfolded_rev.wrapping_add(1);
             }
         }
+        self.expanded_rev = self.expanded_rev.wrapping_add(1);
+        self.prepare(cx);
+        self.install_rows_for_send(cx);
+        cx.notify();
     }
 
     /// One row-focus verb against the row the transcript's focus ring is on.
@@ -912,15 +948,7 @@ impl AgentThreadView {
         let ItemKind::Tool(call) = &item.kind else {
             return None;
         };
-        call.diff
-            .as_ref()
-            .map(|diff| diff.path.display().to_string())
-            .or_else(|| {
-                call.input
-                    .get("file_path")
-                    .and_then(|value| value.as_str())
-                    .map(str::to_owned)
-            })
+        super::rows::item::tool_path(call)
     }
 
     /// The text a row's `[y]` copies: what the row itself is showing.

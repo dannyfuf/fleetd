@@ -303,7 +303,7 @@ The names Fleet paints today, by surface:
 | Toasts and errors | `toasts.toast[N]` (0 is the oldest, matching the `toasts` array), `sticky_error.retry` |
 | Menus | `menu.item[N]`: the items of the one open kit `Menu` (a ⋯, `+`, right-click or dropdown menu), numbered over the visible items in order, separators and headers skipped |
 | ⌃S command menu | `prefix_menu`, `prefix_menu.item[N]`, `prefix_menu.close` |
-| Native agents | `agents.popup`, `agents.popup.agent[N]` (the header's provider switch: 0 Claude, 1 Codex), `agents.popup.restart`, `agents.popup.hide`, `agents.transcript`, `agents.composer`, `agents.decision`, `agents.approval.allow_once`, `agents.approval.allow_always`, `agents.approval.deny`, `agents.approval.deny_and_stop`, `agents.approval.edit` |
+| Native agents | `agents.popup`, `agents.popup.agent[N]` (the header's provider switch: 0 Claude, 1 Codex), `agents.popup.restart`, `agents.popup.hide`, `agents.transcript`, `agents.composer`, `agents.decision`, `agents.approval.allow_once`, `agents.approval.allow_always`, `agents.approval.deny`, `agents.approval.deny_and_stop`, `agents.approval.edit`, `agents.send`, `agents.tool[N]`, `agents.row[N]` |
 
 `prefix_menu` is the ⌃S command menu's panel, painted only once a held prefix has waited out
 `motion.prefix_hint_delay` — a scenario awaits it rather than assuming it. `prefix_menu.item[N]`
@@ -329,6 +329,14 @@ it sits on top of: a target is aimed at, and a `click` resolves to the centre of
 the rectangle has to be somewhere clicking does what the name says. Over the whole stack that
 centre falls in the metadata strip, where a mouse down reaches no editor and every keystroke after
 it is dropped in silence.
+
+`agents.send` is the composer's Send button, which reads Steer with a draft while the agent works
+and Stop without one — one control, one name. `agents.tool[N]` is a tool call's 30 px line, `N` the
+row's index in the transcript (so it counts every row above it, not only tool rows), and it is
+painted only while that row is on screen and is a row of its own: a settled turn folds its calls
+into a group, which a scenario opens first by clicking it: `agents.row[N]` is any transcript row,
+the whole of it, at the same index — collapsed, a group, fold or delegation row is its one line. The approval names now sit on the dock's buttons, and
+the question and plan controls carry no names.
 
 `menu.item[N]` exists only while a menu is open, so a scenario opens one first (by clicking its
 trigger or right-clicking its row) and awaits the target before clicking it. Only one menu is open

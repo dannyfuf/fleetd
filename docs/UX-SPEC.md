@@ -811,19 +811,21 @@ this section is what the screen shows.
 │        │ └───────────────────────────────────────────────────────┘ │        │
 │        │ thinking · 6s  [⏎] show                                   │        │  thinking line
 │        │ I'll start from the totals helper.                        │        │  assistant prose
-│        │ ⏺ read    src/payroll/rounding.rb          120 lines      │        │  30  tool row
-│        │ ⏺ edit    src/payroll/rounding.rb       +14 −3 [⏎] diff   │        │  30  tool row
-│        │ worked 12s · 3 tool calls  [⏎] show                       │        │  fold
-│        │              48s · 12.4k tokens · 2 files changed +36 −3  │        │  turn footer
-│        │              [⏎] diff · [u] revert turn                   │        │
-│        │ ┃ Bash · rm -rf tmp/cache                                 │        │  decision card
-│        │ ┃ [y] allow once · [a] allow for this session · [n] deny  │        │
-│        │ ┃ [e] edit the command · [esc] deny and stop              │        │
-│        │ ┌───────────────────────────────────────────────────────┐ │        │
-│        │ │ ❯ Message claude… (@ file · / command)                │ │        │  36  composer
-│        │ └───────────────────────────────────────────────────────┘ │        │
-│        │ agent mode · claude-sonnet-5 · high    context 34% · $0.42│        │  22  metadata
-│        │ asks before edits                                · 48m    │        │
+│        │ ◉ Read   src/payroll/rounding.rb             0.2s   ›     │        │  30  tool row
+│        │ ◉ Edit   src/payroll/rounding.rb   (+14 −3)  ⧉ ◫ ↗ ›     │        │  30  hovered row
+│        │ worked 12s · 3 tool calls  ›                              │        │  fold
+│        │   48s · 12.4k tokens · 2 files +36 −3  [Diff] [Revert turn]│        │  turn footer
+│        │ for FLT-5 · In review · Fleet                             │        │  link line
+│        │ ╭───────────────────────────────────────────────────────╮ │        │
+│        │ │ 🔒 claude wants to run a command               1 of 2 │ │        │  decision dock
+│        │ │ ┌ rm -rf tmp/cache ─────────────────────────────────┐ │ │        │
+│        │ │ [Allow once y] [Allow for this session a] [Deny n]    │ │        │
+│        │ │ [Edit e]                          Deny and stop esc   │ │        │
+│        │ ├───────────────────────────────────────────────────────┤ │        │
+│        │ │ Message claude… @ files · $ skills · / commands       │ │        │  composer
+│        │ │ opus-5 · high ⌄  asks before edits ⌄  [Build|Plan]    │ │        │
+│        │ │                       ▰▱ 34%  $0.42 · 48m  [Send ⏎]   │ │        │
+│        │ ╰───────────────────────────────────────────────────────╯ │        │
 │        └───────────────────────────────────────────────────────────┘        │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │ payroll/feat-payroll-fix   AGENT   y allow once · a allow for this session  │  28  status bar
@@ -849,33 +851,33 @@ toast; the URL is also a `Notice` row, so it stays reachable when the browser do
 | User turn | the message on `bg.panel`, radius 6, attachments as pills below | transcript | the **only** block with a background: it is the one thing the user wrote | `ItemKind::UserMessage` |
 | Assistant prose | Markdown on the ground — no bubble, no avatar, no header | transcript | the answer is the content; chrome around it is noise | `AssistantText` |
 | Thinking | one collapsed muted line, `thought 6s` + `[⏎] show`; while it streams it **is** the live row | transcript | reasoning is available, never dominant | `ItemKind::Reasoning` |
-| Tool row | 30 px: state glyph · 60 px kind column · one-line summary · right-aligned result | transcript | one shape for every tool means the eye scans a column, not sentences | `ItemKind::Tool` |
+| Tool row | 30 px pointer-first row: state glyph · 60 px verb column (`Read`, `Edit`, `Run`) · one-line summary · result chip (`+1 −1`, `exit 1` in danger, `waiting for you` in amber) · duration · chevron; a click toggles it as `⏎` does; under the pointer **Copy** (`y`), **Diff** (`d`) and **Open in editor** (`o`) icon buttons, and the same verbs on a right-click menu; `agents.tool[N]` | transcript | one shape for every tool means the eye scans a column, not sentences; the verbs are reachable without scroll mode | `ItemKind::Tool` |
 | Nested rows | children indented 16 px behind a 1 px divider | under an `Agent` row | a subagent's work belongs to the row that started it | `Item.children` |
 | Inline diff | `DiffView` under an `edit` / `write` row, red/green 14 % washes | expanded row | the review happens where the edit is announced | `ToolDiff` |
 | `worked …` fold | `worked 12s · 3 tool calls` + `[⏎] show` | end of a settled turn | finished successful work is history; a **failed** row stays exposed | `TurnRecord.ended` |
-| Turn footer | `48s · 12.4k tokens · 2 files changed +36 −3` + `[⏎] diff · [u] revert turn`, right-aligned | after the fold | one line of accounting per turn, withheld until the turn completes so it never moves under the reader | `TurnEnd` |
+| Turn footer | `48s · 12.4k tokens · 2 files +36 −3` + **Diff** (opens every file change of the turn) and **Revert turn** (only where a checkpoint exists) as compact ghost buttons reporting `d` and `u`, right-aligned | after the fold | one line of accounting per turn, withheld until the turn completes so it never moves under the reader | `TurnEnd` |
 | Checkpoint line | `context compacted · 84k → 12k tokens` · `session resumed · 2h ago` | transcript | the two moments that silently change what the agent remembers | `Checkpoint` |
 | Error card | the failure, or `rate limited · retrying in 12s` with a spinner while a backoff counts down | transcript | a backoff is progress, a failure is not; they must not look alike | `RuntimeError`, `Retrying` |
 | Notice | one muted line with an amber glyph — a config warning, a deprecation, `Stop hook error occurred`, or `Claude Code started this turn on its own` | transcript; a turn-scoped one leads the turn it explains and never folds | the provider is talking to the user, not failing; an unrecognised frame is a tracing diagnostic and never a notice | `Notice`, `ThreadProjection.notices`, `ItemKind::Notice` |
-| Decision drawer | 760 px, `bg.panel`, top corners only, **2 px amber bar** flush left, docked to the composer's top edge with the shared border masked | above the composer | a card in the transcript can be scrolled out of the viewport while it still owns the keyboard, which is a modal with the chrome removed; the drawer is always on screen by construction | `OpenGate` |
-| Plan card | the plan's promoted title, its body faded out past 900 chars or 20 lines, and no actions of its own | transcript | a plan is a durable artifact the user scrolls back to and quotes; its *verbs* live on the composer, because whether you implement or refine is decided by whether you typed anything | `ItemKind::Plan` |
+| Decision drawer | 760 px, `bg.panel`, top corners only, docked to the composer's top edge with the shared border masked; an amber glyph-led title naming the subject (`codex wants to edit README.md`) and `1 of N`; the payload well and the diff under a file header; a row of buttons with live key chips — **Allow once** (primary) · **Allow for this session** · **Deny** · **Edit** (Claude only) · **Deny and stop** (ghost danger, far right); a question's options are clickable rows with digit chips (checkboxes when multi-select) over **Answer** / **Next** and **Previous**; a plan's are **Implement** (primary) and **Refine** | above the composer | a card in the transcript can be scrolled out of the viewport while it still owns the keyboard, which is a modal with the chrome removed; the drawer is always on screen by construction; each button reports the action its key does | `OpenGate` |
+| Plan card | the plan's promoted title, its body faded out past 900 chars or 20 lines, and no actions of its own | transcript | a plan is a durable artifact the user scrolls back to and quotes; its *verbs* live in the decision dock, beside the composer, because whether you implement or refine is decided by whether you typed anything | `ItemKind::Plan` |
 | Settled gate row | one line — `allowed once · bash: git push --force`, `answered · which package manager? → pnpm`, `withdrawn · the agent stopped waiting` | transcript, where it was asked | docking the live drawer must not lose the narrative | resolved `OpenGate` |
 | Live activity row | one row, one id, present tense: `working 1m 12s` → `thought 6s` → `running cargo` | pinned in the running turn | thinking → tool A running → tool A done → tool B running is one row changing its label, not four mounts | `RowId::LiveActivity` |
 | Steered message | an ordinary user bubble with a leading `↳` | transcript, inside the running turn | a message sent while a turn runs is a steer, dispatched immediately — there is no queue and no queued row | `UserRow.steered` |
-| Delegation row | `↳` + provider glyph + title + `starting` / `working` / `blocked` / `done` / `incomplete` / `failed` / `cancelled`; one gray spinner, amber dot, `circle-check` or `circle-x`; optional headline on line two; elapsed time and `⏎ attach` trail | at the caller item that launched the child | the durable row keeps a hidden child reachable and changes in place as `DelegationChanged` arrives, without rewriting the caller projection | `ItemKind::Delegation` joined to `Delegation` |
+| Delegation row | `↳` + provider glyph + title + `starting` / `working` / `blocked` / `done` / `incomplete` / `failed` / `cancelled`; one gray spinner, amber dot, `circle-check` or `circle-x`; optional headline on line two; elapsed time and `⏎ attach` trail; the line is a click target that attaches the child, as `⏎` does | at the caller item that launched the child | the durable row keeps a hidden child reachable and changes in place as `DelegationChanged` arrives, without rewriting the caller projection | `ItemKind::Delegation` joined to `Delegation` |
 | Delegation result card | `↳ <provider> finished · <word> · <elapsed> · <n> files` above the delivered Markdown; collapsed to eight lines with the ordinary `⏎ show` / `⏎ hide` fold affordance | the caller's delivered user-message origin | the answer reads as a result of the child rather than as text typed by the user; `Enter` expands the body without attaching the still-hidden child | `UserMessage.origin = Delegation { id }` |
-| Composer | 36 px box, `❯` prompt glyph, placeholder `message claude… (@ files · $ skills · / commands)`; grows one line at a time to eight | docked, bottom | no send button: `⏎` sends, `⇧⏎` inserts a newline | `MultilineInput` |
-| Metadata row | 22 px: `claude-opus-5 · high · asks before edits · build` left, `34% · $0.42 · 48m · dev@example.com` right; **every segment the harness reports is shown and none is invented**, and it collapses from the right into an overflow count while the model segment truncates instead | under the composer | losing which model is answering is worse than losing its name's tail | `ThreadProjection`, `MetadataRow` |
-| Child caller segment | pinned first metadata segment `for [<n>] <provider> — <title>`; `[<n>]` is `·` while the caller is hidden; link tone and focus ring, target = caller thread | first and non-collapsible in a child metadata row | activating it or `^s u` attaches the caller when needed, selects it and focuses its composer | `AgentThreadSummary.parent`, `MetadataSegment.target` |
+| Composer | one framed panel: the editor (placeholder `Message claude… @ files · $ skills · / commands`, grows one line at a time to eight; `⏎` sends, `⇧⏎` inserts a newline; `agents.composer`) over a settings strip | docked, bottom | what the next send carries is visible and clickable, not hidden behind `^s m` and `^s t` | `MultilineInput` |
+| Settings strip | left: the model chip `claude-opus-5 · high ⌄` (its menu lists the harness's models, then its efforts — `^s m`, `^s e`), the access chip `asks before edits ⌄` (the declared ladder — `^s t`), a **Build \| Plan** control (`⇧⇥`); right: the context meter `34%`, `$0.42 · 48m · dev@example.com`, and **Send** (`⏎`; **Steer** with a draft while the agent works, **Stop** `esc` without one; `agents.send`); **nothing the harness does not report is shown** | the composer's last line | each control calls what its key calls; a chip's tooltip names its key | `ThreadProjection`, `ComposerChip`, `ContextMeter` |
+| Child caller segment | pinned first segment of the link line `for [<n>] <provider> — <title>`; `[<n>]` is `·` while the caller is hidden; link tone and focus ring, target = caller thread | the muted link line above the composer, unmounted under an approval | activating it or `^s u` attaches the caller when needed, selects it and focuses its composer | `AgentThreadSummary.parent`, `MetadataSegment.target` |
 | Child composer | `Steering a subagent of [<n>]. It reports to its caller when it finishes.` | composer placeholder on a child only | makes the reporting boundary explicit before a human steers the child | caller strip index |
-| Card caller segment | pinned **first** metadata segment `for <KEY> · <column> · <board>`, ahead of a child caller segment when a thread somehow has both; link tone and focus ring, target = the card | first and non-collapsible in a card run's metadata row | a column-started run is a caller like a thread is, and this is the only chrome its tab has that no other tab does | `Delegation.caller = Card { .. }`, the shown board |
+| Card caller segment | pinned **first** link-line segment `for <KEY> · <column> · <board>`, ahead of a child caller segment when a thread somehow has both; link tone and focus ring, target = the card | first and non-collapsible on a card run's link line | a column-started run is a caller like a thread is, and this is the only chrome its tab has that no other tab does | `Delegation.caller = Card { .. }`, the shown board |
 | Card composer | `Steering a card run. Its report moves the card when it finishes.` | composer placeholder on a card run only | the reply steers the run; the card's column, not the reader, moves the card | card caller |
-| Account segment | the **last** trailing segment: `signed out` when the harness reports no account, else its email — or its plan when there is no email — and **nothing at all** when the harness reports no account signal (Claude always, Codex until its first `account/read`) | end of the metadata row | the first thing a revoked token costs is a turn, and the row is where the user finds out why before the refusal; last so it collapses before the context meter | `ThreadProjection.account` |
+| Account segment | the **last** fact: `signed out` when the harness reports no account, else its email — or its plan when there is no email — and **nothing at all** when the harness reports no account signal (Claude always, Codex until its first `account/read`) | end of the settings strip's facts | the first thing a revoked token costs is a turn, and the composer is where the user finds out why before the refusal | `ThreadProjection.account` |
 | Empty state | `new claude thread · feat-x` over `ask anything · @ files · $ skills · / commands` | centered in an empty transcript | a new thread must say what to type | — |
 | Mode word | `AGENT` | status bar, center | §2.8; keys reach Fleet's composer, not a PTY | `Mode::Agent` |
 | Status-bar hints | the live key set of the current state (see **Keyboard**) | status bar, right | the card's keys are bare letters, so the bar is where they are legible | §9 of `NATIVE-AGENTS.md` |
 
-**Copy is fixed.** `allow once` · `allow for this session` — the effective scope is always spelled
+**Copy is fixed.** `Allow once` · `Allow for this session` — the effective scope is always spelled
 out and the word "always" is never used on a command or a file change, on either harness. The
 permission mode reads `asks before edits` · `accepts edits` · `plans before editing` ·
 `auto-approves safe actions` · `denies unlisted tools` · `full access`; each picker shows only
@@ -893,7 +895,7 @@ Only gray spinners and the text caret animate; attention is a static amber dot o
 | Empty thread | the empty-state line only; the composer is focused |
 | Working | tab spinner, header `working`; the composer stays live and `⏎` **steers** the running turn, dispatched immediately; `esc` interrupts the *active* turn and holds `stopping…` until the daemon reports liveness cleared |
 | Streaming | text grows in place with a caret after the last paragraph; tool rows keep their 30 px geometry so nothing jitters |
-| Decision open | the drawer is docked above the composer, a 2 px amber bar on its left, the composer dims to 60 % and bare keys route to the drawer; the status bar mirrors its keys from the same source. **`⏎` is not bound on a permission** |
+| Decision open | the drawer is docked above the composer, its title led by an amber glyph, the composer dims to 60 % and Send is disabled; bare keys and the drawer's buttons route to the same actions. **`⏎` is not bound on a permission** |
 | Turn settled | successful tool rows fold; a failed row stays; the footer appears once, complete |
 | Interrupted | footer reads `stopped · 12s · 3.1k tokens`; there is no error card — stopping is not failing |
 | Failed / exited | red `exited <code>` on the tab, header `failed`, an error card at the end of the transcript |
@@ -901,13 +903,15 @@ Only gray spinners and the text caret animate; attention is a static amber dot o
 | Unread | a neutral dot on the tab only; the header stays `idle`, because nothing is waiting on the user |
 | Provider unavailable | the create fails with the typed reason and names `^s F`, the terminal fallback — never a silent no-op. The reason is the daemon's, verbatim, and names the harness and the `agentBinaries` command that failed (`` `cc` is not Claude Code: `cc (GCC) 16.2.1`. ``) rather than a default executable name Fleet never ran |
 
-**Intentionally omitted:** a thread sidebar, an inspector, a detached diff pane, a send button,
+**Intentionally omitted:** a thread sidebar, an inspector, a detached diff pane,
 per-message timestamps, an avatar or role header on assistant text, a token counter that moves
 during a turn, and any modal for a permission.
 
 **Icons:** `loader-circle` (running, retrying), `circle-check` (done), `circle-x` (error,
 denied, exited), `triangle-alert` (error card), `circle-arrow-down` (jump to latest), `bot` /
-`sparkles` on the tab and the `needs you` chip. The composer's `❯` is a glyph, not an icon.
+`sparkles` on the tab and the `needs you` chip; `lock` / `message-square-warning` / `list-checks`
+lead the decision drawer; `copy`, `file-diff`, `external-link` and `undo-2` are the row verbs;
+`shield` leads the access chip, and `square` / `square-check` are a multi-select question's boxes.
 
 **Keyboard:** `docs/KEYMAP.md` § *Native agent thread* is authoritative. In short: `⏎` send ·
 `⇧⏎` newline · `⇧⇥` mode · `/` commands · `@` files · `$` skills · `↑` history · `^s m` model ·
@@ -1978,12 +1982,13 @@ each component's full API. `Modal` is an alias of `Dialog` and `TabBar` an alias
 | Component | Responsibility | Used by |
 | --- | --- | --- |
 | `TranscriptList` | Bottom-anchored variable-height rows over gpui `list`, keyed and spliced, jump-to-latest, scroll mode | §3.6.0 |
-| `ToolRow` | The 30 px `glyph · 60 px kind · summary · result` row, with nested children and a bounded expanded body | §3.6.0 |
+| `ToolRow` | The 30 px `glyph · 60 px verb · summary · result chip` pointer-first row, with hover verbs, a right-click menu, nested children and a bounded expanded body | §3.6.0 |
 | `DelegationRow` | Two-line live/terminal child summary with provider, status mark, headline, elapsed time and attach hint; never fold-grouped | §3.6.0 |
 | `DelegationResultCard` | Delivered child result in Markdown, collapsed to eight lines and expandable with the shared fold affordance | §3.6.0 |
-| `DecisionDock` | The docked permission / question drawer with the amber left bar; owns the decision and key-hint vocabulary, while plans remain transcript rows whose verbs ride on the composer | §3.6.0 |
+| `DecisionDock` | The docked permission / question / plan drawer: a glyph-led title, buttons with live key chips, clickable option rows; owns the decision and key vocabulary, while plans remain transcript rows whose verbs are the dock's buttons | §3.6.0 |
 | `MultilineInput` | The docked composer: wrapping, IME, paste, `↑` history, `⏎`/`⇧⏎`, `/`, `@` and `$` triggers | §3.6.0 |
-| `MetadataRow` / targeted `MetadataSegment` | Width-aware metadata whose opaque optional target renders in link tone, takes a focus ring and activates through click or `Enter`; used by a child's pinned caller segment | §3.6.0 |
+| `MetadataRow` / targeted `MetadataSegment` | Width-aware metadata whose opaque optional target renders in link tone, takes a focus ring and activates through click or `Enter`; the composer's link line above it (a child's caller, a card run's card) | §3.6.0 |
+| `ComposerChip` / `ContextMeter` | The composer's settings strip: a value-and-chevron menu trigger for the model and the access mode, and the context-window meter | §3.6.0 |
 | `Markdown` | Assistant prose parsed from a stream, stable under growth | §3.6.0 |
 | `DiffView` (`fleet-lazygit`) | Inline unified diff under an edit row, ADR 0005 rows with the semantic diff washes | §3.6.0 |
 

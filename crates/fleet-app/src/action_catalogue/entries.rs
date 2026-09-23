@@ -1274,7 +1274,8 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Allow it for the rest of the session",
         "Stop asking about requests like this one for now.",
     )
-    .short("Always allow"),
+    // Never "always" (NATIVE-AGENTS §6.2): the grant lasts for this session, and says so.
+    .short("Allow for this session"),
     e(
         &["native_agent::Deny"],
         P::AgentThread,

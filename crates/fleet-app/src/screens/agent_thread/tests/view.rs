@@ -1512,3 +1512,136 @@ fn accepting_logout_dispatches_the_mutation_and_clears_the_trigger(cx: &mut Test
         assert!(view.input().read(cx).text(cx).is_empty());
     });
 }
+
+/// Every non-command event a view emits, for the pointer paths that do not reach the wire.
+fn events(
+    view: &gpui::Entity<AgentThreadView>,
+    cx: &mut TestAppContext,
+) -> Rc<RefCell<Vec<AgentThreadEvent>>> {
+    let events: Rc<RefCell<Vec<AgentThreadEvent>>> = Rc::new(RefCell::new(Vec::new()));
+    let seen = Rc::clone(&events);
+    cx.update(|cx| {
+        cx.subscribe(view, move |_, event: &AgentThreadEvent, _| {
+            seen.borrow_mut().push(event.clone());
+        })
+        .detach();
+    });
+    events
+}
+
+/// A click on a delegation row reaches the view as the row's toggle, and a delegation never
+/// expands: the toggle attaches its child, which is what `⏎` on the focused row does.
+#[gpui::test]
+fn a_click_on_a_delegation_row_attaches_its_child(cx: &mut TestAppContext) {
+    let turn = TurnId::new();
+    let record = delegation_record(DelegationStatus::Running);
+    let mut base = projection();
+    base.items = vec![delegation_item(turn, &record)];
+    let view = cx.new(|cx| AgentThreadView::new(base, cx));
+    view.update(cx, |view, cx| {
+        view.sync_delegations(vec![record.clone()], HashMap::new(), 1, cx);
+    });
+    let seen = events(&view, cx);
+    let key = view.read_with(cx, |view, _| {
+        view.rows()
+            .iter()
+            .find(|row| matches!(row.kind, TranscriptRowKind::Delegation(_)))
+            .map(|row| row.id.key())
+            .unwrap_or_else(|| panic!("the delegation drew a row"))
+    });
+
+    view.update(cx, |view, cx| view.toggle_row(key, cx));
+    cx.run_until_parked();
+
+    assert!(
+        seen.borrow().iter().any(
+            |event| matches!(event, AgentThreadEvent::AttachDelegation(id) if *id == record.id)
+        ),
+        "the click attaches the row's child"
+    );
+}
+
+/// A turn footer's `Diff` — its button, or `d` on the focused footer — opens every file change
+/// the turn made, and a second press closes them again.
+#[gpui::test]
+fn a_turn_footer_diff_opens_every_edit_of_the_turn(cx: &mut TestAppContext) {
+    cx.update(|cx| cx.set_global(fleet_ui_kit::Theme::dark()));
+    let turn = TurnId::new();
+    let prompt = user(turn, "fix both files");
+    let first = edit(turn, ItemStatus::Completed, "src/a.rs");
+    let second = edit(turn, ItemStatus::Completed, "src/b.rs");
+    let mut base = projection();
+    base.items = vec![
+        prompt.clone(),
+        first.clone(),
+        second.clone(),
+        assistant(turn, "done", ItemStatus::Completed),
+    ];
+    base.turns = vec![settled_turn(turn, prompt.id, TurnOutcome::Completed)];
+    let view = cx.new(|cx| AgentThreadView::new(base, cx));
+    let footer = view.read_with(cx, |view, _| {
+        view.rows()
+            .iter()
+            .find(|row| matches!(row.kind, TranscriptRowKind::TurnFooter(_)))
+            .map(|row| row.id.key())
+            .unwrap_or_else(|| panic!("a settled turn has a footer"))
+    });
+
+    view.update(cx, |view, cx| {
+        view.row_action(footer.clone(), fleet_ui_kit::RowAction::Diff, cx);
+    });
+    view.read_with(cx, |view, _| {
+        assert!(view.expanded.contains(&first.id) && view.expanded.contains(&second.id));
+        assert!(
+            view.unfolded.contains(&turn),
+            "the turn unfolds so its diffs are on screen"
+        );
+    });
+
+    view.update(cx, |view, cx| {
+        view.row_action(footer, fleet_ui_kit::RowAction::Diff, cx);
+    });
+    view.read_with(cx, |view, _| {
+        assert!(!view.expanded.contains(&first.id) && !view.expanded.contains(&second.id));
+    });
+}
+
+/// An edit row states its change as a chip and offers the verbs it can honour; the file it is
+/// about finishes the approval's title.
+#[gpui::test]
+fn an_edit_row_offers_its_verbs_and_names_its_file(cx: &mut TestAppContext) {
+    cx.update(|cx| cx.set_global(fleet_ui_kit::Theme::dark()));
+    let turn = TurnId::new();
+    let prompt = user(turn, "fix the readme");
+    let change = edit(turn, ItemStatus::InProgress, "README.md");
+    let mut gate = permission_gate("apply the edit", &[PermissionChoice::AllowOnce]);
+    if let fleet_core::agents::GateKind::Permission { item, tool, .. } = &mut gate.kind {
+        *item = Some(change.id);
+        *tool = ToolKind::Edit;
+    }
+    let mut base = projection();
+    base.items = vec![prompt.clone(), change.clone()];
+    base.turns = vec![running_turn(turn, prompt.id)];
+    base.gates = vec![gate];
+    let view = cx.new(|cx| AgentThreadView::new(base, cx));
+
+    view.read_with(cx, |view, _| {
+        let row = view
+            .rows()
+            .iter()
+            .find_map(|row| match &row.kind {
+                TranscriptRowKind::Work(work) if work.summary.contains("README") => Some(work),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the edit drew a tool row"));
+        assert_eq!(row.kind.as_ref(), "Edit");
+        assert_eq!(row.result.as_deref(), Some("waiting for you"));
+        assert!(row.actions.copy && row.actions.diff && row.actions.open);
+        assert!(!row.actions.revert, "only a turn footer reverts");
+        let title = view
+            .decisions()
+            .first()
+            .map(|decision| decision.title.to_string());
+        assert_eq!(title.as_deref(), Some("claude wants to edit README.md"));
+    });
+}

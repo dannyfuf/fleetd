@@ -359,6 +359,9 @@ impl WorkspaceScreen {
                         cx,
                     );
                 }
+                AgentThreadEvent::AttachDelegation(delegation) => {
+                    attach_delegation_child(&relay_state, *delegation, cx);
+                }
                 AgentThreadEvent::SelectCard(card) => {
                     super::actions::jump_to_card(
                         &relay_local,
