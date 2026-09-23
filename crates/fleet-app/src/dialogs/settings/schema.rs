@@ -135,6 +135,9 @@ pub enum RowKind {
         has_next: bool,
         /// Whether the persisted value is outside the configured steps.
         off_grid: bool,
+        /// Every step in cycling order, worded as `value` is; the control draws them side by
+        /// side when they are few enough.
+        options: Vec<String>,
     },
     /// An integer: digits type into it.
     Number {
@@ -608,6 +611,7 @@ pub(super) fn choice(value: &str, options: &[&str], current: &str) -> RowKind {
         has_prev: index.is_some_and(|index| index > 0),
         has_next: index.is_some_and(|index| index + 1 < options.len()),
         off_grid: index.is_none(),
+        options: options.iter().map(|option| (*option).to_owned()).collect(),
     }
 }
 
@@ -618,6 +622,10 @@ pub(super) fn duration_choice(value: u64) -> RowKind {
         has_prev: index.is_some_and(|index| index > 0),
         has_next: index.is_some_and(|index| index + 1 < DURATIONS.len()),
         off_grid: index.is_none(),
+        options: DURATIONS
+            .iter()
+            .map(|step| format_cycler_duration(*step))
+            .collect(),
     }
 }
 
@@ -628,6 +636,7 @@ pub(super) fn pool_choice(value: u64) -> RowKind {
         has_prev: index.is_some_and(|index| index > 0),
         has_next: index.is_some_and(|index| index + 1 < POOL_SIZES.len()),
         off_grid: index.is_none(),
+        options: POOL_SIZES.iter().map(u64::to_string).collect(),
     }
 }
 

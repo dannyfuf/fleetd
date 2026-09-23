@@ -143,7 +143,9 @@ pub(super) fn row_element(
             has_prev,
             has_next,
             off_grid,
+            options,
         } => Cycler::labeled(row.label.clone(), value.clone())
+            .options(options.iter().cloned())
             .has_prev(*has_prev)
             .has_next(*has_next)
             .off_grid(*off_grid)
@@ -180,7 +182,7 @@ pub(super) fn row_element(
             if let Some(invalid) = row.invalid.clone() {
                 column = column.child(FactRow::warning(invalid));
             } else if let Some(detail) = row.detail.clone() {
-                column = column.child(Text::ui(detail).faint().ellipsize());
+                column = column.child(Text::caption(detail).faint().ellipsize());
             }
             column.into_any_element()
         }

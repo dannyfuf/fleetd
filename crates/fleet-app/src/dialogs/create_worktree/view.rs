@@ -57,6 +57,7 @@ pub(super) fn host_section(draft: &CreateState, tight: gpui::Pixels, cx: &App) -
     let choice = draft.selected_choice()?;
     let warning = Tone::Warning.color(cx.theme());
     let cycler = Cycler::labeled("Host", choice.label.clone())
+        .options(draft.hosts.iter().map(|host| host.label.clone()))
         .has_prev(draft.host_index > 0)
         .has_next(draft.host_index + 1 < draft.hosts.len())
         .focused(draft.field == Field::Host);

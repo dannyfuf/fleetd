@@ -1109,7 +1109,7 @@ and undo. Lists **under a text field** use `ctrl-n`/`ctrl-p` or `↓`/`↑` and 
 │ │ pull/412/head                       (previous base)  │ │
 │ └──────────────────────────────────────────────────────┘ │
 │                                                          │
-│ Host   ◂ local ▸                                         │ 28  only if hosts configured
+│ Host                           [ local │ devbox ]        │ 28  only if hosts configured
 │                                                          │
 │ ⚡ prepared copy ready — create takes ~2 s                │ 18
 │ hooks: pnpm install · pnpm build     (run in background) │ 18
@@ -1127,7 +1127,7 @@ and undo. Lists **under a text field** use `ctrl-n`/`ctrl-p` or `↓`/`↑` and 
 | Base list | up to **6** rows: `origin/<defaultBranch>` first and preselected, then the previous `baseRef`, then `origin/*` fuzzy-filtered by the typed text; free text accepted | field 2 | 6 is swarm's number and fits without scrolling | §5 Create dialog |
 | `default` tag | faint, right-aligned on the default row | — | one word instead of a "use default" control | — |
 | Fetch indicator | `loader-circle` + `fetching` at the section's right | — | the list may grow under you; say so, and never block `Enter` | §5 "fetching indicator" |
-| Host cycler | `◂ local ▸`, hidden when `config.hosts` is empty | field 3 | zero-suppressed for the local-only majority | `defaultHost` |
+| Host cycler | the hosts side by side with the chosen one raised (a dropdown field past four hosts), `←`/`→` cycle it; hidden when `config.hosts` is empty | field 3 | zero-suppressed for the local-only majority | `defaultHost` |
 | Expectation line | `⚡ prepared copy ready — create takes ~2 s` **or** `⧗ no prepared copy — the first create copies the repo (~40 s) in the background` | above the footer | the pool's only user-visible consequence is latency; saying it decides whether the user waits or switches away | §1 prepared-copy slots; §6 |
 | **Hooks preview** | `hooks: <prepare · joined> · <postCreate · joined>` + `(run in background)`; `hooks: none` when both are empty | above the footer | post-create hooks run detached and can fail *after* the worktree looks ready; naming them here is what makes the later `⚠ hooks failed` chip intelligible | §3 create step 6; §9 |
 
@@ -1397,11 +1397,11 @@ trailing `edit in config.json` **once**, not per row.
 
 | Section | Rows |
 | --- | --- |
-| **General** | `Agent ◂ claude ▸` · `Claude command [claude]` · `Codex command [codex]` · `Claude binary [claude]` · `Codex binary [codex]` · per-harness `Default access`, `Default model`, and `Default effort`. Access cycles only that harness's supported modes; model/effort are optional text, effort applies with a configured model, and blank means harness default. The two *command* rows are the shell lines a terminal pane types; the two *binary* rows are what the daemon runs for a native thread, with no shell — each carries that as its sub-label. Both native access defaults start at `full access`; new-thread requests omit mode/model and the daemon resolves them. |
-| **Sleep** | `Sleep on switch [x]` · `Grace ms [2000]` (editable, clamped ≥ 0) · rule list, each `[x] <label>  <kind>  <pattern>` **plus a live match count** `claude — matching 2 processes now` · invalid regex → red `invalid pattern — rule is skipped` |
-| **Jobs & warnings** | `Warn before quitting with running jobs [x]` · `Keep finished jobs for ◂ 10 min ▸` · `Trash retention ◂ 10 min ▸` |
-| **Pool** | `Hot pool size ◂ 1 ▸` · `Freshness ms [60000]` · `Refresh interval ms [300000]` · read-only `prepared copies: 1/1 ready` |
-| **GitHub** | `Clone protocol ◂ ssh ▸` · `Repo cache s [3600]` · `PR cache s [90]` |
+| **General** | `Agent [ claude │ codex ]` · `Claude command [claude]` · `Codex command [codex]` · `Claude binary [claude]` · `Codex binary [codex]` · per-harness `Default access`, `Default model`, and `Default effort`. Access cycles only that harness's supported modes; model/effort are optional text, effort applies with a configured model, and blank means harness default. The two *command* rows are the shell lines a terminal pane types; the two *binary* rows are what the daemon runs for a native thread, with no shell — each carries that as its sub-label. Both native access defaults start at `full access`; new-thread requests omit mode/model and the daemon resolves them. |
+| **Sleep** | `Sleep on switch (on)` · `Grace ms [2000]` (editable, clamped ≥ 0) · rule list, each `[x] <label>  <kind>  <pattern>` **plus a live match count** `claude — matching 2 processes now` · invalid regex → red `invalid pattern — rule is skipped` |
+| **Jobs & warnings** | `Warn before quitting with running jobs (on)` · `Keep finished jobs for [10 min ⌄]` · `Trash retention [10 min ⌄]` |
+| **Pool** | `Hot pool size [ 0 │ 1 │ 2 │ 3 ]` · `Freshness ms [60000]` · `Refresh interval ms [300000]` · read-only `prepared copies: 1/1 ready` |
+| **GitHub** | `Clone protocol [ ssh │ https ]` · `Repo cache s [3600]` · `PR cache s [90]` |
 | **Status** | `Local status refresh ms [2000]` (min 500) · `Remote status refresh ms [10000]` (min 500) |
 | **Windows** | read-only ordered list `1 nvim — nvim .` / `2 cc — {agent}` / `3 lg — lazygit` |
 | **Hosts** | read-only per host `devbox — ssh danny@devbox — fleet` |
