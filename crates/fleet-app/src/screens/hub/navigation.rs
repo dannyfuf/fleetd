@@ -457,13 +457,15 @@ impl HubCtx {
         }
     }
 
-    /// `View log`: the Jobs panel, on the failed hooks job of the selected worktree.
+    /// `View log`: the Jobs panel, on the failed hooks job of the selected worktree, with that
+    /// job's log already expanded.
     pub(super) fn view_hook_log(&self, cx: &mut App) {
         let job = self.selected_worktree(cx).and_then(|row| row.hook_job);
         self.state.update(cx, |state, cx| {
             state.open_overlay(Overlay::Jobs);
             if job.is_some() {
                 state.jobs_focus = job;
+                state.jobs_open_log = true;
             }
             cx.notify();
         });

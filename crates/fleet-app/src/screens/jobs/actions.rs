@@ -28,6 +28,41 @@ impl JobsRequests {
     }
 }
 
+/// Expands `record`'s log and starts following its tail: what `⏎` does on a row, and what
+/// `View log` asks for when it opens the panel on a job (`AppState::jobs_open_log`).
+pub(super) fn open_log(
+    panel: &Entity<PanelState>,
+    state: &Entity<AppState>,
+    opener: &LogOpener,
+    record: &JobRecord,
+    cx: &mut App,
+) {
+    let job = record.id.clone();
+    let (lead, subject) = crate::presentation::job_sentence(record);
+    let title = jobs_panel::LogTitle {
+        lead: lead.into(),
+        subject: subject.map(Into::into),
+        path: crate::presentation::tilde(&record.log_path, opener.home.as_deref())
+            .into_owned()
+            .into(),
+    };
+    panel.update(cx, |panel, _| {
+        panel.collapse();
+        panel.expanded = Some(job.clone());
+        panel.log_title = Some(title);
+        panel.following = true;
+    });
+    start_tail(
+        panel.clone(),
+        state.clone(),
+        opener.requests.clone(),
+        opener.log_scroll.clone(),
+        job,
+        cx,
+    );
+    notify(state, cx);
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum ExpectedMutation<'a> {
     Cancel(&'a JobId),
@@ -471,8 +506,8 @@ impl JobsPanel {
             let Some(record) = selected_job(&panel, &state, cx) else {
                 return;
             };
-            let job = record.id.clone();
-            let already = panel.read_with(cx, |panel, _| panel.expanded.as_ref() == Some(&job));
+            let already =
+                panel.read_with(cx, |panel, _| panel.expanded.as_ref() == Some(&record.id));
             if already {
                 panel.update(cx, |panel, _| {
                     panel.collapse();
@@ -480,29 +515,17 @@ impl JobsPanel {
                 notify(&state, cx);
                 return;
             }
-            let (lead, subject) = crate::presentation::job_sentence(&record);
-            let title = jobs_panel::LogTitle {
-                lead: lead.into(),
-                subject: subject.map(Into::into),
-                path: crate::presentation::tilde(&record.log_path, home.as_deref())
-                    .into_owned()
-                    .into(),
-            };
-            panel.update(cx, |panel, _| {
-                panel.collapse();
-                panel.expanded = Some(job.clone());
-                panel.log_title = Some(title);
-                panel.following = true;
-            });
-            start_tail(
-                panel.clone(),
-                state.clone(),
-                requests.clone(),
-                log_scroll.clone(),
-                job,
+            open_log(
+                &panel,
+                &state,
+                &LogOpener {
+                    requests: requests.clone(),
+                    log_scroll: log_scroll.clone(),
+                    home: home.clone(),
+                },
+                &record,
                 cx,
             );
-            notify(&state, cx);
         }
     }
 

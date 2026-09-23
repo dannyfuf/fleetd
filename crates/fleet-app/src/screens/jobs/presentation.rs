@@ -17,7 +17,7 @@ impl JobsPanel {
         _window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
-        self.bind(state, cx);
+        self.bind(state, bridge, cx);
         let daemon_lost = state.read(cx).daemon.is_lost();
         let stale_age = state.read(cx).snapshot_age(std::time::Instant::now());
         let (filter, cursor, expanded, log, following, log_offset, confirming, log_title) =
@@ -266,8 +266,13 @@ pub(super) fn synchronize(
     panel: &Entity<PanelState>,
     state: &Entity<AppState>,
     scroll: &ListState,
+    opener: &LogOpener,
     cx: &mut App,
 ) {
+    // Whether this opening consumed a `View log`, and the job whose log it asked for when the
+    // panel could focus it.
+    let mut log_asked = false;
+    let mut log_job = None;
     let changed = panel.update(cx, |panel, cx| {
         let app = state.read(cx);
         if !matches!(app.overlay, Some(Overlay::Jobs)) {
@@ -282,8 +287,15 @@ pub(super) fn synchronize(
         panel.clamp(panel.prepared.rows.len());
         if !panel.opened {
             panel.opened = true;
-            if let Some(job) = &app.jobs_focus {
-                panel.focus_job(jobs, job);
+            let focused = match &app.jobs_focus {
+                Some(job) if panel.focus_job(jobs, job) => Some(job),
+                _ => None,
+            };
+            if app.jobs_open_log {
+                log_asked = true;
+                log_job = focused
+                    .and_then(|job| jobs.iter().find(|record| &record.id == job))
+                    .cloned();
             }
         }
         // Publish even when opening did not focus a sticky-error job: the first harness
@@ -291,6 +303,12 @@ pub(super) fn synchronize(
         mirror_panel(panel, state, cx);
         changed
     });
+    if log_asked {
+        state.update(cx, |state, _| state.jobs_open_log = false);
+    }
+    if let Some(record) = log_job {
+        actions::open_log(panel, state, opener, &record, cx);
+    }
     if changed {
         notify(state, cx);
     }

@@ -490,7 +490,7 @@ The toolbar on the right: the **filter field** (`/`; a click opens the same filt
 | Ahead | mono `↑n`, only when ahead > 0 | after the branch | the one git fact that says "unpushed work" at a glance | `WorktreeInspection.ahead` |
 | Dirty | muted `uncommitted changes` | after the branch | dirty is a property of the branch, so it rides with it | `WorktreeInspection.dirty` |
 | Host chip | `cloud` + host id; `cloud-off` amber when unreachable | after the branch | absent for local (the 95 % case) | `Worktree.host` |
-| Hooks failed | amber `Setup hook failed` chip + `View log` ghost button, which opens Jobs on that hooks job | after the branch | a worktree that looks ready but whose post-create hooks failed is a trap | `Worktree.degraded` + the failed `PostCreateHooks` job |
+| Hooks failed | amber `Setup hook failed` chip + `View log` ghost button, which opens Jobs on that hooks job with its log already expanded, as `⏎` on the job would | after the branch | a worktree that looks ready but whose post-create hooks failed is a trap | `Worktree.degraded` + the failed `PostCreateHooks` job |
 | Repository | `owner/name` | col 2 | disambiguates in `All` scope | — |
 | Session | in words behind a dot: `claude working · 2 tabs`, `claude waiting · 1 tab`, `1 terminal`, `Sleeping`, `No session`, `Host offline` | col 3 | says what `s`/`K`/`d` would stop without decoding a glyph | `WorktreeStatus` (session, windows, agent activity) |
 | Job phase | `copying files…`, `running hooks…`, `deleting` | replaces the session words and the age | phases are more honest than percentages | create/delete jobs |

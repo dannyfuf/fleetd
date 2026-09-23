@@ -225,6 +225,9 @@ pub struct AppState {
     pub seen_failed: HashSet<JobId>,
     /// Failed job the next Jobs opening should focus, even after acknowledging its sticky slot.
     pub jobs_focus: Option<JobId>,
+    /// Whether the Jobs panel, when it next opens, expands the log of `jobs_focus` as `⏎`
+    /// would: `View log` asks for the log, not just the row. One-shot; the panel clears it.
+    pub jobs_open_log: bool,
     /// Initial palette query consumed when the palette next opens.
     pub palette_seed: Option<String>,
     /// The pull requests the PR screen had loaded when the palette was last opened from the
@@ -329,6 +332,7 @@ impl AppState {
             sticky_error: None,
             seen_failed: HashSet::new(),
             jobs_focus: None,
+            jobs_open_log: false,
             palette_seed: None,
             palette_prs: None,
             pending_pr_focus: None,

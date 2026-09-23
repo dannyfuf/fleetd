@@ -721,6 +721,7 @@ impl AppState {
     /// Opens an overlay, replacing whatever was open.
     pub fn open_overlay(&mut self, overlay: Overlay) {
         if matches!(overlay, Overlay::Jobs) {
+            self.jobs_open_log = false;
             self.jobs_focus = self
                 .sticky_error
                 .as_ref()

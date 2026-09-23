@@ -136,6 +136,15 @@ impl PanelState {
     }
 }
 
+/// What expanding a log needs besides the panel: the daemon to tail it from, the log view's
+/// scroll handle, and the home directory its title shortens the path against.
+#[derive(Clone)]
+struct LogOpener {
+    requests: actions::JobsRequests,
+    log_scroll: UniformListScrollHandle,
+    home: Option<std::path::PathBuf>,
+}
+
 /// The jobs panel.
 pub struct JobsPanel {
     state: Entity<PanelState>,
@@ -162,26 +171,36 @@ impl JobsPanel {
     }
 
     /// Observe visibility even when the Shell no longer renders this panel.
-    pub fn bind(&mut self, state: &Entity<AppState>, cx: &mut App) {
+    pub fn bind(&mut self, state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
         if self.observation.is_some() {
             return;
         }
+        let opener = self.log_opener(actions::JobsRequests::bridge(bridge.clone()));
         let panel = self.state.downgrade();
         let scroll = self.list_scroll.clone();
+        let observed = opener.clone();
         self.observation = Some(cx.observe(state, move |state, cx| {
             let Some(panel) = panel.upgrade() else {
                 return;
             };
-            presentation::synchronize(&panel, &state, &scroll, cx);
+            presentation::synchronize(&panel, &state, &scroll, &observed, cx);
         }));
         let panel = self.state.downgrade();
         let state = state.downgrade();
         let scroll = self.list_scroll.clone();
         cx.defer(move |cx| {
             if let (Some(panel), Some(state)) = (panel.upgrade(), state.upgrade()) {
-                presentation::synchronize(&panel, &state, &scroll, cx);
+                presentation::synchronize(&panel, &state, &scroll, &opener, cx);
             }
         });
+    }
+
+    fn log_opener(&self, requests: actions::JobsRequests) -> LogOpener {
+        LogOpener {
+            requests,
+            log_scroll: self.log_scroll.clone(),
+            home: self.home.clone(),
+        }
     }
 }
 

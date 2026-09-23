@@ -289,7 +289,8 @@ fn the_cursor_is_clamped_and_mirrored_when_the_filter_shrinks_the_list(
             panel.cursor = 2;
             panel.filter = JobFilter::Running;
         });
-        presentation::synchronize(&jobs.state, &state, &jobs.list_scroll, cx);
+        let opener = jobs.log_opener(RequestHarness::default().requests());
+        presentation::synchronize(&jobs.state, &state, &jobs.list_scroll, &opener, cx);
     });
 
     cx.read(|cx| {
@@ -301,6 +302,63 @@ fn the_cursor_is_clamped_and_mirrored_when_the_filter_shrinks_the_list(
                 filter: JobFilter::Running,
             }
         );
+    });
+}
+
+/// `View log` opens the panel with the job's log already expanded — the `⏎` path, tail request
+/// and all — and the ask is one-shot: the next opening is a plain one.
+#[gpui::test]
+fn view_log_opens_the_panel_with_the_focused_job_s_log_expanded(cx: &mut gpui::TestAppContext) {
+    let failed = JobStatus::Failed {
+        error: "hook exited 1".to_owned(),
+    };
+    let state = cx.new(|_| {
+        let mut state = app_with_jobs(
+            "/tmp/fleet-jobs-view-log",
+            vec![
+                job("job-a", JobStatus::Running, true, false),
+                job("job-b", failed, false, true),
+            ],
+        );
+        state.open_overlay(Overlay::Jobs);
+        state.jobs_focus = Some("job-b".parse().unwrap_or_else(|error| panic!("{error}")));
+        state.jobs_open_log = true;
+        state
+    });
+    let jobs = cx.update(JobsPanel::new);
+    let requests = RequestHarness::default();
+
+    cx.update(|cx| {
+        let opener = jobs.log_opener(requests.requests());
+        presentation::synchronize(&jobs.state, &state, &jobs.list_scroll, &opener, cx);
+    });
+    cx.run_until_parked();
+
+    cx.read(|cx| {
+        let panel = jobs.state.read(cx);
+        assert_eq!(panel.cursor, 1);
+        assert_eq!(
+            panel.expanded.as_ref().map(|job| job.as_str().to_owned()),
+            Some("job-b".to_owned())
+        );
+        assert!(panel.log_title.is_some(), "the log toolbar names the job");
+        assert!(!state.read(cx).jobs_open_log, "the ask is consumed");
+    });
+    assert!(
+        matches!(
+            requests.respond(Ok(ResponseBody::Ack)),
+            RequestBody::TailJob { job, .. } if job.as_str() == "job-b"
+        ),
+        "the log is tailed exactly as `⏎` tails it"
+    );
+
+    // Any other opening clears a stale ask rather than honouring it.
+    cx.update(|cx| {
+        state.update(cx, |state, _| {
+            state.jobs_open_log = true;
+            state.open_overlay(Overlay::Jobs);
+            assert!(!state.jobs_open_log);
+        });
     });
 }
 
@@ -687,7 +745,7 @@ fn closing_or_replacing_the_overlay_cancels_following(cx: &mut gpui::TestAppCont
         })
     });
     let mut jobs = cx.update(JobsPanel::new);
-    cx.update(|cx| jobs.bind(&state, cx));
+    cx.update(|cx| jobs.bind(&state, &Bridge::closed(), cx));
     cx.run_until_parked();
     let cancelled = Rc::new(Cell::new(false));
     let guard = OnDrop(cancelled.clone());

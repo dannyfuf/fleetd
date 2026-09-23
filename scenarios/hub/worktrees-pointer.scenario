@@ -37,7 +37,9 @@ shot context-menu
 key escape
 await targets["menu.item[0]"] absent
 
-# The failed-hooks row's `View log` opens Jobs.
+# The failed-hooks row's `View log` opens Jobs. It also expands that hooks job's log, but this
+# fixture's hooks job ran under the seeding daemon, so the run's own daemon has no job to expand:
+# the expansion is pinned by `screens::jobs` tests instead.
 click worktrees.row[1].log
 await overlay == Jobs 10000
 key escape

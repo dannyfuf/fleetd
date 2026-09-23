@@ -124,7 +124,7 @@ impl Shell {
         hub.bind(&state, &bridge, cx);
         let board = BoardScreen::new(cx);
         let mut jobs = JobsPanel::new(cx);
-        jobs.bind(&state, cx);
+        jobs.bind(&state, &bridge, cx);
         let overlay_focus = cx.focus_handle();
         let dialogs = cx.new(|cx| {
             crate::dialogs::ActiveDialog::new(
