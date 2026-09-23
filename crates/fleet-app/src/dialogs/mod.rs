@@ -56,8 +56,6 @@ const WIDE_W: Pixels = px(720.0);
 const SETTINGS_W: Pixels = px(760.0);
 /// §3.8.6 Settings' header search field.
 pub(crate) const SETTINGS_SEARCH_W: Pixels = px(240.0);
-/// §3.8 card width for the card detail.
-const CARD_DETAIL_W: Pixels = px(880.0);
 /// §3.8.7 Help: a large panel, `1040 × 720`, clamped to the window on a narrow one.
 const HELP_W: Pixels = px(1040.0);
 /// §3.8.7 Help's Guides sidebar: "Here in …" and the guide list.
@@ -157,7 +155,8 @@ impl Dialogs {
                 NARROW_W
             }
             Self::Settings => SETTINGS_W,
-            Self::CardDetail => CARD_DETAIL_W,
+            // A sheet, not a card: it docks to the right of the board (UX-SPEC § Card detail).
+            Self::CardDetail => cx.theme().metrics.sheet_w_detail,
             Self::Help => HELP_W,
             Self::Quit => PROMPT_W,
         }

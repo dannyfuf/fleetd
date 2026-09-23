@@ -539,6 +539,14 @@ key_table! {
     ">", "Dialog > CardDetail" => board::RunNow;
     "b", "Dialog > CardDetail" => board::PickBlockedBy;
     "m", "Dialog > CardDetail" => board::PickAgent;
+    // The board's field keys, answered on the card on show: each selects the property row it
+    // edits and opens it, exactly as a click on that row does (UX-SPEC § Card detail).
+    "s", "Dialog > CardDetail" => board::PickStatus;
+    "p", "Dialog > CardDetail" => board::PickPriority;
+    "a", "Dialog > CardDetail" => board::PickAssignee;
+    "t", "Dialog > CardDetail" => board::PickLabels;
+    "e", "Dialog > CardDetail" => board::PickEstimate;
+    "o", "Dialog > CardDetail" => board::OpenWorktree;
     // The palette replaces the dialog it is opened over and remembers which one it was, so the
     // `Card detail:` rows can save or cancel an edit already typed instead of reseeding one over
     // it. Without a way in from the detail those rows can never be listed and that path is dead.
@@ -546,6 +554,7 @@ key_table! {
     "escape", "Dialog > CardDetailEditing" => card_detail::Close;
     "enter", "Dialog > CardDetailEditing" => card_detail::EditProperty;
     "ctrl-s", "Dialog > CardDetailEditing" => card_detail::Save;
+    "ctrl-enter", "Dialog > CardDetailEditing" => card_detail::Save;
     "ctrl-enter", "Dialog > CardCreate" => board::CreateAndOpen;
     "space", "Dialog > CardPicker" => settings::Toggle;
     "j", "Dialog > BoardSettings" => settings::MoveDown;

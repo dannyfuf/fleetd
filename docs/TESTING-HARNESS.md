@@ -227,10 +227,11 @@ must not assume the viewport's last row exists in `terminal.rows`. `jobs[].statu
 `cancelling`, which is a real daemon job state.
 
 The list names are `repos`, `worktrees`, `prs`, `jobs`, `tabs`, `palette`, `board`,
-`board.cards`, `board.summary`, `card.runs` and `settings.columns`. The last three are
-additive version-1 lists and each is absent unless its surface has something to say:
+`board.cards`, `board.summary`, `card.runs`, `card.properties` and `settings.columns`. The last
+four are additive version-1 lists and each is absent unless its surface has something to say:
 `board.summary` while the board states a run count, `card.runs` while the card detail is open on
-a card that has run, `settings.columns` while Board settings is open. While the agent picker is
+a card that has run, `card.properties` while the card detail is open, `settings.columns` while
+Board settings is open. While the agent picker is
 open, `lists.palette` projects its native-thread rows:
 `id` is the thread id; `label` is the rendered picker label; `badges` are provider,
 `caller`/`child`, and worktree id; and `marks` are attention, `go`/`attach`, and
@@ -260,7 +261,10 @@ the board header's two counts as one row in their compact form — `1/1 working 
 each half omitted while its count is zero, where the header itself reads `1 of 1 run working` —
 and the list is absent when both are. `card.runs` is one row per run of the open
 card, oldest first: `label` is the run row the detail draws, `badges` is the provider, and
-`marks` is that run's mark word. `settings.columns` is one row per column of the board the
+`marks` is that run's mark word. `card.properties` is one row per row of the open card's
+property column, top to bottom — the index `card_detail.property[N]` paints — with `label` the
+field's name (empty on a second link row), the one badge its value as drawn (`–` when unset), and
+`locked` in `marks` on a row its backend owns. `settings.columns` is one row per column of the board the
 dialog is editing, `label` its name, marked `action` on the same rule as `board` and `disabled`
 on a board that may not carry automation at all — a context board, or a board whose columns
 answer to its backend. The elapsed time inside a `card.runs` label is as of the last projection:
@@ -306,6 +310,7 @@ The names Fleet paints today, by surface:
 | Help | `help.search` (also `dialog.field[0]`), `help.tab[N]` (0 Guides, 1 All shortcuts), `help.here[N]` (the *Here in …* rows), `help.guide[N]` (by the guide's position in the full list, searched or not), `help.step[N].action[M]` (the shown guide's step `N`, button `M`, both from 0), `help.shortcut[N]` (the table's rows, or the actions a Guides-tab search lists), `help.place[N]` (0 All places, then the catalogue places in order), `help.run`, `help.related` |
 | Settings | `settings.search`, `settings.section[N]` (the rail, `0` General, `1` Agents, `2` Sleep, `3` Jobs & warnings, `4` Pool, `5` GitHub, `6` Status, `7` Hosts, `8` About), `settings.row[N]` (the shown section's rows, `0` first), `settings.switch`, `settings.option[N]`, `settings.dropdown`, `settings.copy[N]`, `settings.hit[N]`, `settings.config`, `settings.doctor`; its footer is `dialog.button[0]` Cancel and `dialog.button[1]` Save |
 | Sheets | `sheet.close` |
+| Card detail | `card_detail.close` (the sheet's ✕, also `sheet.close`), `card_detail.title` (a click edits the title, as `i`), `card_detail.menu` (the header's ⋯), `card_detail.property[N]` (the property column's rows, `0` Status, numbered as `card.properties`), `card_detail.comment` (the composer's *Add a comment…*, as `c`), and on the run card `card_detail.run.attach`, `card_detail.run.rerun` and `card_detail.run.cancel`, each painted only while its action can work on the card |
 | Jobs panel | `jobs.row[N].retry`, `jobs.row[N].cancel`, `jobs.row[N].log`, `jobs.filter[N]`, `jobs.clear`, `jobs.more`, `jobs.log.back`, `jobs.log.follow`, `jobs.log.end` |
 | Tabs | `tabs.tab[N]` for a process tab, `agents.tabs.tab[N]` for a conversation, sharing one numbering; `tabs.tab[N].close` / `agents.tabs.tab[N].close` (the tab's `✕`), `tabs.new` (the `+`), `tabs.fallback`, `tabs.watch`, `tabs.zoom` |
 | Toasts and errors | `toasts.toast[N]` (0 is the oldest, matching the `toasts` array), `toasts.toast[N].action`, `toasts.toast[N].close`, `sticky_error.retry`, `sticky_error.close` |
@@ -414,7 +419,10 @@ nothing until a repository exists. `first_run.import` is the import card, painte
 
 `dialog.close` is the close ✕ in every dialog's header; clicking it runs the action `Esc` runs in
 that dialog, and so does a click on the scrim outside the card. `sheet.close` is the same ✕ on a
-dismissable sheet (the Jobs panel).
+dismissable sheet (the Jobs panel, the card detail). The card detail paints its ✕ under
+`card_detail.close` as well; a click on a `card_detail.property[N]` row selects it and runs what
+`⏎` runs there, so it opens the same picker, worktree or issue — a locked or read-only row takes
+no click.
 
 The Jobs panel's buttons are named by the row they act on, and each one first puts the cursor on
 that row: `jobs.row[N].retry` (a retryable failure), `jobs.row[N].log` (Show log, on a failure)

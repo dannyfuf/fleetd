@@ -2475,37 +2475,65 @@ is the pointer twin of its key (above).
 
 ### Card detail
 
-An 880 px dialog, two panes. It publishes browsing `Dialog > CardDetail`, then switches to
-`Dialog > CardDetailEditing` while the title, description or comment owns the keyboard; the
-migrated live editor adds `FleetTextInput` beneath that word.
+A **sheet** docked to the right of the board, `sheet_w_detail` (736 px) wide and full height
+between the title bar and the status bar, over the board dimmed by its scrim — so the board the
+card belongs to stays in view. `Enter` or a double-click on a tile opens it. `Esc`, the sheet's ✕
+and a click on the dimmed board beside it all close it through `card_detail::Close`, so a first
+`Esc` (or click) during an edit cancels the edit and a second one closes the card. It publishes
+browsing `Dialog > CardDetail`, then switches to `Dialog > CardDetailEditing` while the title,
+description or comment owns the keyboard; the migrated live editor adds `FleetTextInput` beneath
+that word. There is no footer legend: every key is on the control it runs (ADR 0023).
 
-*Left* — the card as prose: key, priority glyph and title; the conflict banner when the card has
-one (`K` keep local / `R` take remote); **the run row** and its hint line; the description as
-`MarkdownText`, or the shared multi-line `TextInput` while `d` is editing it; the comments, each
-with author and age; that same input for the comment `c` is writing; and the last ten activity
-entries, newest first. The left pane scrolls; the right does not.
+**Header** — the card's key in the data face; a **status button** (the column's dot and name, `s`)
+that opens the Status picker; on a linked card the backend line `Jira FLT-5 · synced 2m`; then
+`Open in <backend> x` on a card whose issue has an address, a `⋯` holding *New worktree* (`w`),
+*Keep your version* / *Take the tracker's version* (`K` / `R`, only while the card is
+conflicted) and *Delete* (a card Fleet owns; the confirm follows), and the sheet's ✕.
 
-**The run row** (`BOARD.md` §11.9) sits between the title and the description, and only when the
-card has a run or is owed one. It is the board's own mark — the identical glyph, read from the
-same fold, so tile and card can never disagree — then one line: `working 4m · codex · gpt-5 ·
-high`, with ` · 12.4k tok · $0.31` appended once the run is over and the numbers are known. A
-missing model or effort drops with its separator rather than printing a dash. The state word is
-the delegation's (`starting`, `working`, `blocked`, `settling`) while the run is live and the
-outcome's (`succeeded`, `needs you`, `failed`, `incomplete`, `cancelled`) once it is not; a card
-waiting for a slot reads `pending 2m · waiting for a slot`, which is a different fact from a slow
-run and the only one the reader can act on. An owed run wins over a finished one. Beneath it,
-`A attach · X cancel · > re-run` — drawn only beside a run, while the dialog's own footer names
-`A`/`X`/`>` on every card, because `>` starts a first run too.
+*Left column* — the card as prose, scrolling:
 
-**Report comments.** A comment a run wrote carries a `run {n}` badge instead of an author, and
-folds at eight lines — `REPORT_COLLAPSE_LINES`, the same fold the transcript gives a delivered
-child result — with `⏎ expand`. While any report is folded, `⏎` opens **all** of them before it
-goes back to meaning "edit the selected property"; the hint is drawn only while one is closed, so
-nothing on screen ever names a key that would do nothing. Expansion lasts as long as the dialog.
+- The **title** in the page-title face; a click edits it, exactly as `i` does.
+- The **conflict callout** when the card has one: amber, `Conflict — Status, Due differ from
+  FLT-5`, with `Keep local K` and `Take remote R`.
+- **The run card** (`BOARD.md` §11.9), only when the card has a run or is owed one: the board's
+  own mark — the identical glyph, read from the same fold, so tile and card can never disagree —
+  then `Working 4m` and `codex · gpt-5 · high`, and once the run is over and the numbers are known
+  `12.4k tok · $0.31` at the line's right end. A missing model or effort drops with its separator
+  rather than printing a dash. The state word is the delegation's (`starting`, `working`,
+  `blocked`, `settling`) while the run is live and the outcome's (`succeeded`, `needs you`,
+  `failed`, `incomplete`, `cancelled`) once it is not; a card waiting for a slot reads `Pending 2m
+  · waiting for a slot`, which is a different fact from a slow run and the only one the reader can
+  act on. An owed run wins over a finished one. Beneath the line, the buttons that act on it —
+  `Attach A` (primary, when the run has a thread), `Re-run >` (when the column runs an action) and
+  `Cancel run X` (red, while the run is live or owed) — each drawn only when its key would work.
+- The **description** as `MarkdownText` under a `Description` label with `Edit d`, or `No
+  description` and `Write one d`; while `d` edits it, the shared multi-line `TextInput` with
+  `Cancel esc` and `Save ⌃⏎` under it.
+- The **comments** under `Comments · n`: each an avatar, the author (`You` for a local comment),
+  its age and the Markdown body. Then the composer: `Add a comment… c`, which `c` or a click turns
+  into the same input with `Cancel esc` and `Comment ⌃⏎`; `⌃⏎` and `⌃S` both post.
 
-*Right* — the card as facts: `Status`, then the workflow rows below, then `Priority, Assignee,
-Labels, Estimate, Due, Parent, Repo, Worktree`, then `Remote` / `URL` / `Synced` when the card is
-linked, then the board's custom properties in schema order.
+**Report comments.** A comment a run wrote is authored by its provider in a secondary avatar with
+a `run {n}` badge, and folds at eight lines — `REPORT_COLLAPSE_LINES`, the same fold the transcript
+gives a delivered child result — ending in a `Show more ⏎` button. While any report is folded,
+`⏎` (and that button) opens **all** of them before it goes back to meaning "edit the selected
+property"; the button is drawn only while one is closed, so nothing on screen ever names a key
+that would do nothing. Expansion lasts as long as the sheet.
+
+*Right column* — the card as facts, under `Properties`: `Status`, then the workflow rows below,
+then `Priority, Assignee, Labels, Estimate, Due, Parent`, a hairline, `Repo, Worktree`, then
+`Remote` / `URL` / `Synced` when the card is linked, then the board's custom properties in schema
+order. Under them, **Activity**: the last three entries, newest first, `message · age`, with
+`Show all n` opening the last ten.
+
+Every row is **clickable**: a click selects it and runs what `⏎` runs on it — the same code path —
+so it opens that field's Card property picker, opens the worktree's session on the Worktree row
+(drawn as a link), or the issue on the Remote row. While the pointer is over a row (or the
+keyboard's `j` / `k` has selected it) its key shows at the right end, from the live keymap: `s`,
+`p`, `a`, `t`, `e`, `b` (the first *Blocked by* row), `m` (*Provider*), `o` (*Worktree*), `x`
+(*Remote*), and `⏎` for a row with no letter of its own. Those letters work on the sheet as they
+do on the board, aimed at the card on show: each selects its row and opens it. A row that states
+a fact (`URL`, `Synced`, `Parent`) takes no click.
 
 The **workflow rows** sit directly under Status, because they answer the question Status raises on
 an automated board — what runs this card next — and each is zero-suppressed, so a board nobody
@@ -2518,27 +2546,27 @@ shows `claude` however the card was set, because that is what the run will use. 
 card can have them — with one row per link, the label on the first only. A blocker already
 satisfied reads `✓ FLT-3 · Done` rather than vanishing; one that was canceled or archived is amber,
 because nothing will release the card on its own. `Blocks` is derived from everyone else's
-`blocked_by`, never stored. `j` / `k` select a row and `Enter` opens the picker that edits it; on
-the worktree row `Enter` opens that worktree's session instead. Unset values read as an en dash in
-the muted tone, never as an empty cell. `x` opens the card's remote issue in the browser and
-leaves the dialog open, because the browser is another window and closing the card the user is
-reading loses their place.
+`blocked_by`, never stored. Unset values read as an en dash in the muted tone, never as an empty
+cell. `x` opens the card's remote issue in the browser and leaves the sheet open, because the
+browser is another window and closing the card the user is reading loses their place.
 
 A field the board's backend declared it cannot write back (`board.sync.readonly_fields`) reads in
-the secondary tone with a trailing lock glyph, and keeps its picker target: `Enter` still answers,
-with the sentence `<field> is read-only on <backend label> boards` on the dialog's error line. A
-row that silently did nothing would be indistinguishable from a broken key.
+the secondary tone with a trailing lock glyph and no hover, and takes no click; it keeps its
+picker target for the keyboard: `⏎` or its letter still answers, with the sentence `<field> is
+read-only on <backend label> boards` on the sheet's error line. A row that silently did nothing
+would be indistinguishable from a broken key.
 
 The three text surfaces — title, description, comment — share **one live `TextInput` entity**,
-created when `i`, `d` or `c` starts an edit and dropped when `ctrl-s` saves or `Esc` cancels it.
-Selection, paste, word/line deletion and undo/redo are available uniformly; Tab inserts a hard
-tab in the multi-line description/comment editor. A second `Esc` closes the dialog. While an edit
-is open `CardDetail` is absent from the context chain, so its bare browsing letters cannot steal
-input; `CardDetailEditing` carries only the container commands.
+created when `i`, `d` or `c` starts an edit and dropped when `ctrl-s` / `ctrl-enter` saves or
+`Esc` cancels it. Selection, paste, word/line deletion and undo/redo are available uniformly; Tab
+inserts a hard tab in the multi-line description/comment editor. While an edit is open
+`CardDetail` is absent from the context chain, so its bare browsing letters cannot steal input;
+`CardDetailEditing` carries only the container commands, and the property rows take no click.
 
 Nothing on this surface is optimistic. Every save sends its request and waits; the reducer applies
-the `Card` that comes back, and a refusal becomes a sticky line inside the dialog rather than a
-change the user believes happened.
+the `Card` that comes back, and a refusal becomes a red callout at the top of the left column
+rather than a change the user believes happened. Opening a picker from the sheet swaps the sheet
+for the centred Card property dialog, which returns to the sheet when it closes.
 
 ### The other three dialogs
 
@@ -2647,7 +2675,7 @@ can never see the create before the repo it needs.
 
 The third is **who owns a field**. On a board whose backend cannot write `priority` back, `p`
 does not open a picker whose `Enter` could only fail: it says
-`Priority is read-only on Jira (acli) boards` — a toast on the board, the dialog's own error line
-in the card detail, where the scrim covers the toast stack. The wording is assembled from the
+`Priority is read-only on Jira (acli) boards` — a toast on the board, the sheet's own error line
+in the card detail, beside the row that refused. The wording is assembled from the
 backend's own two answers, the field list it declared and the label the registry gave it, so
 `fleet-app` neither knows nor spells any backend's name.

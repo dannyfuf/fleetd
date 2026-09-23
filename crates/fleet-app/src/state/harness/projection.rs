@@ -739,6 +739,10 @@ impl AppState {
                         if !runs.is_empty() {
                             lists.insert("card.runs".to_owned(), unselected(runs));
                         }
+                        lists.insert(
+                            "card.properties".to_owned(),
+                            unselected(card_property_rows(view, card)),
+                        );
                     }
                 }
                 Some(Overlay::Dialog(Dialogs::BoardSettings)) => {
@@ -1104,6 +1108,30 @@ fn card_row(prefix: &str, card: &Card, marks: Option<&TileMarks>) -> RowSnapshot
         badges: vec![format!("{prefix}-{}", card.number)],
         marks: row_marks,
     }
+}
+
+/// The open card's property column, one row per row the sheet draws: `label` is the field's
+/// name (empty on a second link row) and the one badge is its value as drawn.
+fn card_property_rows(view: &BoardView, card: &Card) -> Vec<RowSnapshot> {
+    detail::property_rows(
+        &view.board,
+        &view.cards,
+        card,
+        chrono::Utc::now().timestamp(),
+    )
+    .into_iter()
+    .enumerate()
+    .map(|(index, row)| RowSnapshot {
+        id: index.to_string(),
+        label: row.label.to_string(),
+        badges: vec![row.value.to_string()],
+        marks: if row.locked {
+            vec!["locked".to_owned()]
+        } else {
+            Vec::new()
+        },
+    })
+    .collect()
 }
 
 /// `action` for a column that starts a run on arrival, and nothing otherwise.

@@ -1217,14 +1217,17 @@ Property rows in the card detail reuse `KeyValueList`/`FactRow`; pickers reuse
   repo, start-on-worktree, push-new-cards, conflict policy, and the backend — a kind cycler over
   `ListBoardBackends` plus one generic row per `settings_schema` entry; see `docs/BOARD-JIRA.md`
   §6).
-- **Card detail layout** (UX-SPEC §board): two panes. Left: key + title (editable, `i`),
-  description (`MarkdownText`; `d` opens the shared multi-line `TextInput`;
-  `ctrl-s`/`esc` saves/cancels), comments (list + `c` to add through that input), activity
-  (last 10). Right: property list —
-  Status, Priority, Assignee, Labels, Estimate, Due, Parent, Repo, Worktree (enter = open its
-  session), Remote (key/url/synced/dirty), then custom properties from `board.properties`; `j/k`
-  select row, `enter` opens the matching picker. Conflict banner with `K` keep-local / `R`
-  take-remote when `card.conflict` is set.
+- **Card detail layout** (UX-SPEC § Card detail): a right-side `Sheet` `sheet_w_detail` wide in
+  the band between the two bars, over the board under its scrim. Header: key, status button
+  (`s`), backend line, `Open in <backend>` (`x`), a `⋯` (`w`, `K` / `R` while conflicted, Delete)
+  and the ✕. Left: title (a click or `i` edits it), conflict callout with `Keep local` / `Take
+  remote`, the run card and its buttons, description (`MarkdownText`; `d` opens the shared
+  multi-line `TextInput`; `ctrl-s` / `ctrl-enter` / `esc` save or cancel), comments with avatars
+  and the inline composer (`c`). Right: property list — Status, Priority, Assignee, Labels,
+  Estimate, Due, Parent, Repo, Worktree (opens its session), Remote (opens the issue), then custom
+  properties from `board.properties`; `j/k` select a row, and `enter`, a click on the row or the
+  board's own field key (`s p a t e b m o x`) opens what edits it — one path,
+  `card_detail::open_row`. Activity folds under the properties.
 - **Keymap** (`docs/KEYMAP.md` rows, contexts `Hub > Board` and `Dialog > CardDetail` etc., one
   action per row). Every `Hub > Board` row below is bound a second time, verbatim and against
   the same action, on `Workspace > Native > Board` — the board pane's key context — and
@@ -1259,10 +1262,12 @@ Property rows in the card detail reuse `KeyValueList`/`FactRow`; pickers reuse
 | `c` | Dialog > CardDetail | add comment |
 | `j` / `k` | Dialog > CardDetail | select property row |
 | `enter` | Dialog > CardDetail | edit selected property |
+| `s` / `p` / `a` / `t` / `e` | Dialog > CardDetail | the field's picker for the card on show |
+| `o` | Dialog > CardDetail | open the card's linked worktree session |
 | `w` | Dialog > CardDetail | create worktree from card |
 | `x` | Dialog > CardDetail | open the card's remote issue in the browser |
 | `K` / `R` | Dialog > CardDetail | resolve conflict keep-local / take-remote |
-| `ctrl-s` | Dialog > CardDetail | save current text edit |
+| `ctrl-s` / `ctrl-enter` | Dialog > CardDetail | save current text edit |
 
 Palette commands mirror every row above, under their action-catalogue labels (`New card`,
 `Sync with the tracker`, …; `KEYMAP.md` § *Action catalogue*).
@@ -1310,7 +1315,7 @@ card of the same board and may not close a cycle.
 The app refreshes through the request its scope names (`EnsureBoard(active_context)` on the Hub)
 after BoardChanged. `filter_editing`
 selects the Filter key context while typing, with two-stage Escape. `group_secondary` is reserved;
-Parent is read-only in this milestone. Card detail is an 880 px two-pane dialog. `ctrl-enter` in
+Parent is read-only in this milestone. Card detail is a 736 px right-side sheet with two columns. `ctrl-enter` in
 CardCreate creates and opens detail; label pickers use Space for multi-select; BoardSettings
 reuses the settings row keys. Delete uses `ConfirmRequest::DeleteCard`. These supplemental dialog
 keys are listed in KEYMAP; create-and-open exists only as that chord inside the dialog and has no
@@ -1754,8 +1759,9 @@ The card detail states a run rather than counting it. Between the title and the 
 card with a run — or owed one — carries a **run row**: the board's own mark, then `working 4m ·
 codex · gpt-5 · high`, with the token count and cost appended once the run is over. A missing
 model or effort drops with its separator. A card waiting for a slot reads `pending 2m · waiting
-for a slot`; an owed run wins over a finished one. `A attach · X cancel · > re-run` sits beneath
-it, drawn only beside a run.
+for a slot`; an owed run wins over a finished one. The sheet draws it as a card — the state
+sentence-cased (`Working 4m`), the usage at its right end — with `Attach A`, `Re-run >` and
+`Cancel run X` beneath, each drawn only when its key would work (`CardMenu::of`).
 
 Under `Status`, five zero-suppressed property rows: `Provider`, `Model` and `Effort` while the
 card's column runs an action — showing what `resolve_prefs` (§11.7) will actually use, with a
@@ -1765,8 +1771,8 @@ dropped, and `Blocks` is derived from everyone else's `blocked_by`, never stored
 the picker that edits it; a link that would close a cycle is offered disabled with `would cycle`,
 the same answer `validate_links` would give (§11.4).
 
-A run's report comment (§11.2) renders with a `run {n}` badge instead of an author and folds at
-eight lines, the fold a delivered child result gets in the transcript. `UX-SPEC.md` § Board,
+A run's report comment (§11.2) renders with its provider as the author and a `run {n}` badge, and
+folds at eight lines, the fold a delivered child result gets in the transcript. `UX-SPEC.md` § Board,
 "Card detail", states the rest.
 
 ### 11.10 Configuring columns in the app

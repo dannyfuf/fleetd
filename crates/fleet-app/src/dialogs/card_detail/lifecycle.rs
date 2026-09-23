@@ -132,7 +132,7 @@ pub(super) fn resolve(
         return;
     }
     let card_id = card.id.clone();
-    // The dialog's scrim covers the status bar: a refusal must land on this surface (§Board).
+    // A refusal lands on this surface, beside the card it refused (§Board).
     board::send_card_reporting(
         state,
         bridge,

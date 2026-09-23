@@ -956,8 +956,9 @@ in `Hub`: without a way in from the detail, the `Close the card` and `Save the e
 are rows no state could ever list and the whole `behind_palette` path is unreachable. The added fields are all local editing state; the BOARD §8
 fields keep their names and meanings. `DialogHost.card_detail_input` is the **one** live editor
 used by the three text surfaces (title, description, comment), because at most one is open.
-`Dialogs::CardDetail.width()` is 880 px — it is a two-pane surface, not a form — and
-the other three board dialogs are 560 px.
+`Dialogs::CardDetail.width()` is `sheet_w_detail` (736 px): the detail is a right-side `Sheet`
+the shell places in `AppFrame::body_overlay`, as it does the Jobs panel, so the board stays
+visible beside it. The other three board dialogs are 560 px.
 
 `card_picker::PickerKind` is `Status | Priority | Assignee | Labels | Estimate |
 DueDate | Repo | Property(String)`. Set `host.card_picker.kind` before opening
@@ -1033,8 +1034,8 @@ land on a different fleetd) but keeps the descriptors, so the header's label nev
   `fleet_core::board::ops` reads them. `PickerKind::card_field()` maps a picker to the field
   name that list uses. `screens::board::readonly_message(state, kind)` builds
   `"<field> is read-only on <backend label> boards"`; the board's pickers and `[` / `]` show it
-  as a toast (`Icon::Lock`), and the card detail writes it to its own error line, because the
-  dialog's scrim covers the toast stack. `views::board_card_detail::PropertyRow.locked` draws
+  as a toast (`Icon::Lock`), and the card detail writes it to its own error line, at the top of
+  the sheet the row is on. `views::board_card_detail::PropertyRow.locked` draws
   the row in `Tone::Secondary` with a trailing lock glyph while keeping its picker target — a
   row that silently did nothing would look like a broken key.
 * **`x`** — `board::OpenRemote` and `card_detail::OpenRemote` open `card.remote.url` with

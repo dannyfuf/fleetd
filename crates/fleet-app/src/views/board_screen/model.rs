@@ -110,7 +110,7 @@ pub(crate) const fn priority_level(priority: Priority) -> PriorityLevel {
 /// domain knowledge: `Started` is the amber "in flight" of §1.4, `Completed` the green, a
 /// `Canceled` column the muted grey that says "this is not a failure, it is a dead end".
 #[must_use]
-pub(super) fn category_accent(status: &Status, theme: &Theme) -> Hsla {
+pub(crate) fn category_accent(status: &Status, theme: &Theme) -> Hsla {
     if let Some(token) = status.color.as_deref()
         && let Some(color) = token_color(token, theme)
     {
@@ -366,6 +366,38 @@ pub struct CardMenu {
     pub run_now: bool,
 }
 
+impl CardMenu {
+    /// What a card's menu may offer, from the card and the run mark its tile draws.
+    ///
+    /// The board's tile menu and the card detail's controls both ask this, so a verb the one
+    /// hides the other hides too.
+    #[must_use]
+    pub fn of(board: &Board, card: &Card, run: Option<RunMark>) -> Self {
+        let has_action = |status: &StatusId| {
+            board
+                .statuses
+                .iter()
+                .find(|column| &column.id == status)
+                .and_then(|column| column.automation.as_ref())
+                .is_some_and(|automation| automation.on_enter.is_some())
+        };
+        let live = card.pending_run.is_some()
+            || card.runs.last().is_some_and(CardRun::is_live)
+            || matches!(
+                run,
+                Some(RunMark::Pending | RunMark::Stalled | RunMark::Working)
+            );
+        Self {
+            open_worktree: card.worktree_id.is_some(),
+            open_remote: crate::screens::board::remote_url(card).is_some(),
+            delete: card.remote.is_none(),
+            attach: run.is_some() || card.runs.iter().any(|run| run.thread_id.is_some()),
+            cancel: live,
+            run_now: has_action(&card.status_id),
+        }
+    }
+}
+
 /// The standard card fields a board's backend owns, for the pickers the menu leaves out.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ReadonlyFields {
@@ -416,28 +448,7 @@ impl CardRow {
             .as_ref()
             .and_then(|worktree| marks.links.get(worktree))
             .cloned();
-        let has_action = |status: &StatusId| {
-            board
-                .statuses
-                .iter()
-                .find(|column| &column.id == status)
-                .and_then(|column| column.automation.as_ref())
-                .is_some_and(|automation| automation.on_enter.is_some())
-        };
-        let live = card.pending_run.is_some()
-            || card.runs.last().is_some_and(CardRun::is_live)
-            || matches!(
-                mark.run,
-                Some(RunMark::Pending | RunMark::Stalled | RunMark::Working)
-            );
-        let menu = CardMenu {
-            open_worktree: card.worktree_id.is_some(),
-            open_remote: crate::screens::board::remote_url(card).is_some(),
-            delete: card.remote.is_none(),
-            attach: mark.run.is_some() || card.runs.iter().any(|run| run.thread_id.is_some()),
-            cancel: live,
-            run_now: has_action(&card.status_id),
-        };
+        let menu = CardMenu::of(board, card, mark.run);
         Self {
             element_id: SharedString::from(format!("board-card-{}", card.id.as_str())),
             key: SharedString::from(card.display_key(board)),

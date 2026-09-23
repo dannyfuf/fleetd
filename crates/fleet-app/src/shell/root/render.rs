@@ -200,7 +200,12 @@ impl Shell {
             frame = frame.overlay(agent);
         }
         if let Some(layer) = overlay_element {
-            frame = if matches!(overlay, Some(Overlay::Jobs)) {
+            // The Jobs panel and the card detail are sheets: they dock in the band between the
+            // two bars, which stay readable and reachable while they are open (UX-SPEC §3.7).
+            frame = if matches!(
+                overlay,
+                Some(Overlay::Jobs | Overlay::Dialog(crate::dialogs::Dialogs::CardDetail))
+            ) {
                 frame.body_overlay(layer)
             } else {
                 frame.overlay(layer)

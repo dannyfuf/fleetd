@@ -35,8 +35,9 @@ mod model;
 #[cfg(test)]
 mod tests;
 
-use model::category_accent;
-pub(crate) use model::priority_level;
+pub(crate) use model::category_accent;
+#[cfg(test)]
+use model::priority_level;
 pub use model::{
     BoardMarks, BoardModel, CardMenu, CardRow, ColumnRows, HeaderFacts, LinkedBranch,
     ReadonlyFields, TileMark, build, counts, visible_cards,

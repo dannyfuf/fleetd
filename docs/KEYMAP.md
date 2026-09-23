@@ -839,10 +839,17 @@ that cannot contain a space, and `space` toggles the highlighted card.
 | `>` | `Dialog > CardDetail` | `board::RunNow` — Run the column's action on this card now |
 | `b` | `Dialog > CardDetail` | `board::PickBlockedBy` — Pick the cards this one is blocked by |
 | `m` | `Dialog > CardDetail` | `board::PickAgent` — Pick the agent that runs this card |
+| `s` | `Dialog > CardDetail` | `board::PickStatus` — Status picker for the card on show (the Status row) |
+| `p` | `Dialog > CardDetail` | `board::PickPriority` — Priority picker for the card on show |
+| `a` | `Dialog > CardDetail` | `board::PickAssignee` — Assignee picker for the card on show |
+| `t` | `Dialog > CardDetail` | `board::PickLabels` — Labels picker for the card on show |
+| `e` | `Dialog > CardDetail` | `board::PickEstimate` — Estimate picker for the card on show |
+| `o` | `Dialog > CardDetail` | `board::OpenWorktree` — Open the card's linked worktree session |
 | `:` | `Dialog > CardDetail` | `OpenPalette` — Command palette over the open card detail (⌘K / `ctrl-k` too) |
 | `escape` | `Dialog > CardDetailEditing` | `card_detail::Close` — Cancel text edit |
 | `enter` | `Dialog > CardDetailEditing` | `card_detail::EditProperty` — Submit title or insert a legacy multiline newline |
 | `ctrl-s` | `Dialog > CardDetailEditing` | `card_detail::Save` — Save text edit |
+| `ctrl-enter` | `Dialog > CardDetailEditing` | `card_detail::Save` — Save text edit (post the comment) |
 | `ctrl-enter` | `Dialog > CardCreate` | `board::CreateAndOpen` — Create and open |
 | `space` | `Dialog > CardPicker` | `settings::Toggle` — Toggle the highlighted label |
 | `j` | `Dialog > BoardSettings` | `settings::MoveDown` — Next row |

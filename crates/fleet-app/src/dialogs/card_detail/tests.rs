@@ -30,13 +30,6 @@ fn one_buffer_serves_the_three_text_surfaces() {
     assert!(!draft.is_editing());
 }
 
-#[test]
-fn every_edit_surface_names_itself_for_the_footer() {
-    assert_eq!(CardEdit::Title.label(), "title");
-    assert_eq!(CardEdit::Description.label(), "description");
-    assert_eq!(CardEdit::Comment.label(), "comment");
-}
-
 /// A card carrying one long report and one ordinary comment.
 fn reported() -> Card {
     let context = fleet_core::model::Context {
