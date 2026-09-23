@@ -92,12 +92,13 @@ fn window_header(agent: Agent, model: Option<&Model>, cx: &App) -> AnyElement {
 fn provider_switch(agent: Agent, keys: &HeaderKeys) -> SegmentedControl {
     // ADR 0014: a config still naming OpenCode runs OpenCode in the second slot.
     let second = if agent == Agent::Opencode {
-        ("OpenCode", Icon::Bot)
+        ("OpenCode", Icon::Sparkles)
     } else {
-        ("Codex", Icon::SquareTerminal)
+        ("Codex", Icon::Sparkles)
     };
     let selected = usize::from(agent != Agent::Claude);
-    let claude = Segment::new("Claude").icon(Icon::Sparkles);
+    // UX-SPEC §3.6: `bot` is Claude and `sparkles` the second slot, as on the tab strip.
+    let claude = Segment::new("Claude").icon(Icon::Bot);
     let other = Segment::new(second.0).icon(second.1);
     // Only the provider a click would switch to shows its key.
     let (claude, other) = if selected == 0 {

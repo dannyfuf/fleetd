@@ -994,7 +994,7 @@ A `title_bar_h` (44 px) window header reads, left to right:
 [✦ Claude] [▣ Codex ⌃S A]   ● agent-claude · idle · runs in fleetd, hiding keeps it alive   [Restart ⌃S r] [Hide ⌃Q]
 ```
 
-- **Provider switch.** `Claude | Codex` as two segments; the showing provider is the selected
+- **Provider switch.** `Claude | Codex` as two segments, marked `bot` and `sparkles` as the tab strip marks them (§3.6); the showing provider is the selected
   one and has no action (its key would hide the popup). The other segment switches to it and
   carries `^s a` / `^s A` as its chip. A config still naming OpenCode labels the second segment
   `OpenCode`.
