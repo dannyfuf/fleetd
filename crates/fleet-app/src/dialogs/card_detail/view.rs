@@ -514,14 +514,16 @@ fn editing(input: Entity<TextInput>, surface: CardEdit, theme: &Theme) -> AnyEle
                     Button::new("card-detail-edit-cancel", "Cancel")
                         .style(ButtonStyle::Ghost)
                         .size(ButtonSize::Compact)
-                        .action(Box::new(card_actions::Close)),
+                        .action(Box::new(card_actions::Close))
+                        .harness_target("card_detail.edit.cancel"),
                 )
                 .child(
                     Button::new("card-detail-edit-save", save)
                         .style(ButtonStyle::Primary)
                         .size(ButtonSize::Compact)
                         .action(Box::new(card_actions::Save))
-                        .prefer_key(SAVE_KEY),
+                        .prefer_key(SAVE_KEY)
+                        .harness_target("card_detail.edit.save"),
                 ),
         )
         .into_any_element()
