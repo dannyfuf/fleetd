@@ -3,8 +3,8 @@
 # viewport snapped back to the bottom. §Modes and key contexts for `Workspace > Scroll`.
 #
 # `terminal.viewport.top` is the distance scrolled up from the live bottom, so bottom is 0
-# and the oldest line is `history`. The grid is 41 rows at the harness's pinned 1440x900, under
-# the 44 px title bar.
+# and the oldest line is `history`. The grid is 42 rows at the harness's pinned 1440x900, under
+# the 44 px title bar and the 40 px tab strip, so half a page is 21.
 fixture: one-repo
 await idle
 key o
@@ -45,11 +45,11 @@ dump scroll-top
 # `G` returns to the live bottom, where the last row is the prompt again.
 key G
 await terminal.viewport.top == 0 10000
-assert terminal.rows[40] ~= fleet-42-ready
+assert terminal.rows[41] ~= fleet-42-ready
 
 # `ctrl-u` moves half a page up, `ctrl-d` half a page back down.
 key ctrl-u
-await terminal.viewport.top == 20 10000
+await terminal.viewport.top == 21 10000
 key ctrl-d
 await terminal.viewport.top == 0 10000
 
@@ -66,7 +66,7 @@ await terminal.viewport.top == 0 10000
 
 # `Esc` leaves Scroll mode, and so does `q`.
 key ctrl-u
-await terminal.viewport.top == 20 10000
+await terminal.viewport.top == 21 10000
 key escape
 await mode == Terminal 10000
 await terminal.viewport.top == 0 10000

@@ -1,0 +1,49 @@
+# UX-SPEC.md §3.6 (tab strip, `+` menu, tab menu, close ✕) and §5.1 rule 6 — every tab verb has a
+# pointer twin of its `^s` key: the `+` opens a menu whose *Terminal* row is `^s c`, the ✕ is
+# `^s x`, and a right-click selects the tab before its menu opens. §3.1 for the breadcrumb.
+#
+# `one-repo` opens on the three default windows: two PTYs, then Fleet's own git pane.
+fixture: one-repo
+await idle
+key o
+await screen == Workspace 20000
+await lists.tabs.rows[2] exists 20000
+await lists.tabs.selected.id == 1 20000
+assert targets["workspace.back"] exists && targets["workspace.switcher"] exists
+assert targets["tabs.new"] exists && targets["tabs.zoom"] exists
+shot workspace-strip
+
+# The worktree switcher lists the sessions as `^s W` does, this one checked.
+click workspace.switcher
+await targets["menu.item[0]"] exists
+shot worktree-switcher
+key escape
+await targets["menu.item[0]"] absent
+
+# `+` → Terminal is `^s c`: a fourth tab, selected, like the key.
+click tabs.new
+await targets["menu.item[0]"] exists
+shot new-tab-menu
+click menu.item[0]
+await lists.tabs.rows[3] exists 20000
+await lists.tabs.selected.id == 4 20000
+assert focused == tabs.tab[3]
+
+# A right-click selects the tab under it and opens its menu: Rename, Close, Close others.
+click right tabs.tab[1]
+await lists.tabs.selected.id == 2 10000
+await targets["menu.item[2]"] exists
+shot tab-menu
+key escape
+await targets["menu.item[0]"] absent
+
+# The ✕ on the active tab is `^s x`: the plain shell has no keep-alive process, so it closes
+# at once, with no confirm.
+click tabs.tab[3]
+await lists.tabs.selected.id == 4 10000
+click tabs.tab[3].close
+await lists.tabs.rows[3] absent 10000
+assert screen == Workspace && overlay absent
+await idle
+dump tabs-by-pointer
+quit
