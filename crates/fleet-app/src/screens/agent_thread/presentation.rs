@@ -46,18 +46,6 @@ pub(crate) const fn tab_badge(attention: Attention, exit_code: Option<i32>) -> T
     }
 }
 
-/// The session header word: the same vocabulary the context bar counts (§3.3).
-#[must_use]
-pub(crate) const fn header_word(attention: Attention) -> &'static str {
-    match attention {
-        Attention::NeedsYou(_) => "needs you",
-        Attention::Failed => "failed",
-        Attention::Working => "working",
-        Attention::Waiting => "waiting",
-        Attention::Unread | Attention::Idle => "idle",
-    }
-}
-
 /// The provider-independent title a surface places after its own child/provider chrome.
 ///
 /// Delegation creation stores the contract's complete default (`↳ provider — brief`) as the

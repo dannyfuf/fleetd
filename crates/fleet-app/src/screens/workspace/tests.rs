@@ -7,14 +7,8 @@ use crate::{
 use gpui::{AppContext, Bounds, Keystroke};
 use std::{cell::RefCell, collections::BTreeMap};
 
-use fleet_core::{
-    ids::JobId,
-    sessions::{TerminalKind, TerminalStatus},
-};
-use fleet_proto::{
-    error::{ErrorKind, ProtoError},
-    job::JobKind,
-};
+use fleet_core::sessions::{TerminalKind, TerminalStatus};
+use fleet_proto::error::{ErrorKind, ProtoError};
 use gpui::Modifiers as GpuiModifiers;
 
 use super::*;
@@ -39,22 +33,6 @@ fn keystroke(key: &str, key_char: Option<&str>, mods: GpuiModifiers) -> Keystrok
         modifiers: mods,
         key: key.to_owned(),
         key_char: key_char.map(str::to_owned),
-    }
-}
-
-fn job(target: &str, status: JobStatus) -> JobRecord {
-    JobRecord {
-        id: JobId::try_from("job-1").unwrap_or_else(|error| panic!("{error}")),
-        kind: JobKind::Prune,
-        target: target.to_owned(),
-        title: "prune".to_owned(),
-        status,
-        progress: None,
-        log_path: "/tmp/job.log".to_owned(),
-        started_at: "2026-09-04T00:00:00Z".to_owned(),
-        finished_at: None,
-        cancellable: false,
-        retryable: false,
     }
 }
 
@@ -550,66 +528,6 @@ fn every_modifier_survives_the_translation() {
     assert!(event.mods.contains(Modifiers::ALT));
     assert!(event.mods.contains(Modifiers::SHIFT));
     assert!(event.mods.contains(Modifiers::SUPER));
-}
-
-#[test]
-fn only_this_sessions_jobs_reach_the_header_chip() {
-    let jobs = vec![
-        job("acme/api#feature", JobStatus::Running),
-        job(
-            "acme/api#feature",
-            JobStatus::Failed {
-                error: "boom".to_owned(),
-            },
-        ),
-        job("acme/api#other", JobStatus::Running),
-        job("acme/api#feature", JobStatus::Succeeded),
-    ];
-    let targets = vec!["acme/api#feature".to_owned()];
-    assert_eq!(job_counts(&jobs, &targets), (1, 1));
-    assert_eq!(job_counts(&jobs, &[]), (0, 0));
-}
-
-#[test]
-fn a_queued_job_already_counts_as_running() {
-    let jobs = vec![job("t", JobStatus::Queued)];
-    assert_eq!(job_counts(&jobs, &["t".to_owned()]), (1, 0));
-}
-
-#[test]
-fn uuid_target_and_cancelling_job_count_as_active() {
-    let jobs = vec![job(
-        "acme/api#feature:123e4567-e89b-12d3-a456-426614174000",
-        JobStatus::Cancelling,
-    )];
-    assert_eq!(job_counts(&jobs, &["acme/api#feature".to_owned()]), (1, 0));
-}
-
-#[test]
-fn missing_status_and_host_remain_unknown() {
-    assert_eq!(
-        workspace_status(None, false, false, None),
-        StatusKind::Unknown
-    );
-    assert_eq!(
-        workspace_status(
-            Some((SessionState::Attached, AgentActivity::Unknown)),
-            false,
-            false,
-            Some(HostReachability::Unknown),
-        ),
-        StatusKind::Unknown
-    );
-    assert!(!HostReachability::Unknown.is_reachable());
-    assert_eq!(
-        workspace_status(
-            Some((SessionState::Attached, AgentActivity::Unknown)),
-            false,
-            false,
-            Some(HostReachability::Unreachable),
-        ),
-        StatusKind::HostUnreachable
-    );
 }
 
 #[test]
@@ -1169,7 +1087,6 @@ fn the_daemon_link_decides_whether_a_remote_workspace_is_reachable() {
         ready.host.as_ref().map(|(_, reachability)| *reachability),
         Some(HostReachability::Reachable)
     );
-    assert_ne!(ready.status, StatusKind::HostUnreachable);
 
     let down = model_of(&app_with_worktree(Some(LinkState::Down)));
     assert_eq!(
@@ -1181,7 +1098,6 @@ fn the_daemon_link_decides_whether_a_remote_workspace_is_reachable() {
             .as_ref()
             .is_some_and(|(_, reachability)| reachability.is_unreachable())
     );
-    assert_eq!(down.status, StatusKind::HostUnreachable);
 
     // A connection attempt in flight has decided nothing yet, so it may not read as a failure.
     let connecting = model_of(&app_with_worktree(Some(LinkState::Connecting)));
@@ -1192,11 +1108,9 @@ fn the_daemon_link_decides_whether_a_remote_workspace_is_reachable() {
             .map(|(_, reachability)| *reachability),
         Some(HostReachability::Unknown)
     );
-    assert_eq!(connecting.status, StatusKind::Unknown);
 
     let local = model_of(&app_with_worktree(None));
     assert_eq!(local.host, None);
-    assert_ne!(local.status, StatusKind::HostUnreachable);
 }
 
 /// P3-T02: a remote thread is a tab like any other — same strip, same order, same position.

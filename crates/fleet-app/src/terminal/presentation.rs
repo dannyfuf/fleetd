@@ -3,11 +3,9 @@ use fleet_core::ids::TerminalId;
 use fleet_ui_kit::{TerminalGridCache, theme::TerminalPalette};
 use std::sync::Arc;
 
-/// The VT modes worth badging above the grid.
-///
-/// `TerminalModes` is zero-suppressed, so a plain shell produces an empty list and no badges.
-/// The Kitty keyboard flags and focus-event reporting have no badge: neither changes what a
-/// documented Fleet key does, which is the bar the badge row is drawn to.
+/// The VT modes the grid is told about; only `AltScreen` changes what it draws (it suppresses the
+/// scroll overlays). The Kitty keyboard flags and focus-event reporting are left out: neither
+/// changes what a documented Fleet key does.
 #[must_use]
 pub(crate) fn grid_modes(modes: &TerminalModes) -> Vec<KitTerminalMode> {
     let mut active = Vec::with_capacity(4);

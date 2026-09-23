@@ -539,8 +539,7 @@ is a pure function so no two surfaces can disagree about a thread:
 | --- | --- |
 | Which tabs does this worktree have? | `agents.of_worktree(&worktree)`, in daemon snapshot order, excluding top-level threads in the installation's closed set and child threads outside this window's attached set |
 | Which top-level tabs did this installation close? | `AgentClosedThreads` seeds `agents.closed` before the first snapshot; `^s x` adds locally and at the daemon, while picker or top-level navigation removes both |
-| What mark does a tab carry? | `agents.attention(thread)` → `tab_badge`: spinner (`Working`) · amber dot (`NeedsYou`) · gray dot (`Unread`) · `exited <code>` (`Failed`) · nothing |
-| What does the session header say? | the same attention → `header_word`: `working` · `needs you` · `failed` · `idle` |
+| What mark does a tab carry? | `agents.attention(thread)` → `tab_badge`: spinner (`Working`) · amber `needs you` chip (`NeedsYou`) · blue dot (`Unread`) · `exited <code>` (`Failed`) · nothing. The tab is the only place the Workspace states a thread's attention; there is no session header word |
 | What does the title bar's `needs you` count, and what does it open? | `agents.counts().needs_you`, including the thread on the current tab, zero-suppressed; a click opens `agents.waiting_thread()` when exactly one waits, else the agents picker |
 | When does a notification fire? | `agents.attention_edges()` — one toast per *edge* into `NeedsYou`/`Failed`, so a thread that stays blocked does not re-notify |
 | What has this installation shown? | `agents.seen(thread)`; selecting a tab sends monotonic `AgentMarkSeen`, which is what clears a `NeedsYou(Finished)`. Windows sharing one Fleet home share this cursor; a different installation does not |

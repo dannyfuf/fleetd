@@ -15,7 +15,7 @@ use crate::{
     screens::agent_thread::{
         AgentThreadEvent, AgentThreadView, ThreadHost,
         picker::PickerKind,
-        presentation::{self, header_word, title_subject},
+        presentation::{self, title_subject},
     },
     views::workspace_tabs::TabTarget,
 };
@@ -568,30 +568,6 @@ impl WorkspaceScreen {
             .bg(theme.colors.bg)
             .child(body)
             .into_any_element()
-    }
-
-    /// The session-header word for the active agent tab (§3.3).
-    pub(super) fn agent_header_word(
-        &self,
-        state: &AppState,
-        model: &Model,
-        cx: &App,
-    ) -> Option<SharedString> {
-        let thread = model.agent?;
-        // spec-B §B5.5 rule 4: `stopping…` is held until the daemon reports liveness
-        // cleared, not until the interrupt request returns, so it is the view — not the
-        // summary — that knows whether one is still in flight.
-        if self
-            .agent_view(thread)
-            .is_some_and(|view| view.read(cx).is_stopping())
-        {
-            return Some(SharedString::new_static("stopping\u{2026}"));
-        }
-        // The tab badge and the context-bar counters read this same value, which is what §3.3
-        // means by "the tab, the header and the context bar agree".
-        Some(SharedString::new_static(header_word(
-            state.agents.attention(thread),
-        )))
     }
 
     /// The native-agent action listeners, installed beside the terminal ones.

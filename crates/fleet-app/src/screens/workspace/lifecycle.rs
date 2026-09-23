@@ -1,6 +1,9 @@
 use super::*;
 use crate::screens::hub::PrFreshness;
 
+/// How often the Workspace re-reads its worktree's git state while it stays on screen.
+const GIT_REFRESH: std::time::Duration = std::time::Duration::from_secs(30);
+
 async fn receive_reply<T>(
     reply: async_channel::Receiver<T>,
 ) -> Result<T, async_channel::RecvError> {
@@ -284,6 +287,75 @@ impl WorkspaceScreen {
         self.local.borrow_mut().state.pr_tasks.insert(repo, task);
     }
 
+    /// Keeps the title bar's git chips current: inspects the shown worktree when the Workspace
+    /// starts showing it, then again every [`GIT_REFRESH`] while it stays on screen.
+    ///
+    /// No fetch: the chips say what this machine knows, and a `git fetch` every half minute
+    /// behind the reader's back is not this surface's to start.
+    pub(super) fn inspect_git(
+        &self,
+        model: &Model,
+        bridge: &Bridge,
+        state: &Entity<AppState>,
+        cx: &mut App,
+    ) {
+        let Some((worktree, _)) = model.worktree.as_ref() else {
+            return;
+        };
+        if self.local.borrow().state.git_inspected.as_ref() == Some(worktree) {
+            return;
+        }
+        self.local.borrow_mut().state.git_inspected = Some(worktree.clone());
+        let reply = bridge.request(RequestBody::InspectWorktrees {
+            ids: vec![worktree.clone()],
+            repo: None,
+            fetch: false,
+        });
+        let state = state.downgrade();
+        let local = Rc::clone(&self.local);
+        let worktree = worktree.clone();
+        let task = cx.spawn(async move |cx| {
+            let result = receive_reply(reply).await;
+            let facts = match result {
+                Ok(Ok(ResponseBody::Inspections(inspections))) => inspections
+                    .into_iter()
+                    .find(|inspection| inspection.worktree_id == worktree)
+                    .map(|inspection| crate::state::WorkspaceGit {
+                        worktree: inspection.worktree_id,
+                        ahead: inspection.ahead,
+                        behind: inspection.behind,
+                        dirty: inspection.dirty,
+                        dirty_files: inspection.dirty_files,
+                    }),
+                Ok(Ok(_)) => {
+                    tracing::warn!(%worktree, "inspection answered with an unexpected response");
+                    None
+                }
+                Ok(Err(error)) => {
+                    tracing::debug!(%worktree, error = %error.message, "worktree inspection failed");
+                    None
+                }
+                Err(_) => None,
+            };
+            // A failed inspection keeps the last facts: stale chips are better than chips that
+            // blink out every time `gh` is slow.
+            if let Some(facts) = facts {
+                state
+                    .update(cx, |app, cx| {
+                        if app.workspace_git.as_ref() != Some(&facts) {
+                            app.workspace_git = Some(facts);
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+            }
+            cx.background_executor().timer(GIT_REFRESH).await;
+            local.borrow_mut().state.git_inspected = None;
+            state.update(cx, |_, cx| cx.notify()).ok();
+        });
+        self.local.borrow_mut().state.git_task = Some(task);
+    }
+
     /// Reconcile state before rendering, including hidden-surface teardown.
     pub(crate) fn synchronize(
         &mut self,
@@ -316,6 +388,12 @@ impl WorkspaceScreen {
             // the scope. A `ctrl-s b` whose tab never arrived ends here too — there is no
             // Workspace left for its reply to select into.
             self.release_board_scope(true, bridge, state, cx);
+            // Leaving drops the refresh, so the next visit asks again instead of showing
+            // whatever the worktree looked like when the reader last left it.
+            let mut local = self.local.borrow_mut();
+            local.state.git_inspected = None;
+            local.state.git_task = None;
+            drop(local);
             self.model = None;
             return;
         }
@@ -355,6 +433,7 @@ impl WorkspaceScreen {
         self.track_selection(state, cx);
         self.arm_prefix_menu(&model, state, cx);
         self.lookup_pr(&model, bridge, state, cx);
+        self.inspect_git(&model, bridge, state, cx);
         self.sync_panes(&model, bridge, state, window, cx);
         self.sync_board_scope(&model, bridge, state, cx);
         self.sync_agent_views(&model, bridge, state, window, cx);

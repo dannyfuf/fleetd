@@ -296,7 +296,7 @@ The names Fleet paints today, by surface:
 | Hub lists | `worktrees.row[N]`, `prs.row[N]`, `jobs.row[N]`, `hub.tab[N]`, `prs.tab[N]` |
 | Worktrees page | `worktrees.new`, `worktrees.clone`, `worktrees.filter`, `worktrees.row[N].open`, `worktrees.row[N].menu`, `worktrees.row[N].log` |
 | Detail panel | `detail.open`, `detail.sleep`, `detail.menu`, `detail.copy_path`, `detail.inspect` |
-| Title bar | `titlebar.context`, `titlebar.command`, `titlebar.needs_you`, `titlebar.jobs`, `titlebar.update`, `titlebar.daemon`, `titlebar.help`, `titlebar.settings`, `titlebar.back` |
+| Title bar | `titlebar.context`, `titlebar.command`, `titlebar.needs_you`, `titlebar.jobs`, `titlebar.update`, `titlebar.daemon`, `titlebar.help`, `titlebar.settings`, `titlebar.back`, `workspace.back`, `workspace.switcher`, `workspace.pr` |
 | Status bar | `statusbar.shortcuts`, `statusbar.commands` |
 | Board | `board.column[C]`, `board.column[C].card[R]`, `board.filter` |
 | Filter and palette | `filter.input`, `filter.clear` (the query's clear ✕, only while it holds text), `palette.input`, `palette.row[N]` (one flat numbering down the ranked list, across its sections; `palette.row[0]` is the top match) |
@@ -305,7 +305,7 @@ The names Fleet paints today, by surface:
 | Settings | `settings.search`, `settings.section[N]` (the rail, `0` General, `1` Agents, `2` Sleep, `3` Jobs & warnings, `4` Pool, `5` GitHub, `6` Status, `7` Hosts, `8` About), `settings.row[N]` (the shown section's rows, `0` first), `settings.switch`, `settings.option[N]`, `settings.dropdown`, `settings.copy[N]`, `settings.hit[N]`, `settings.config`, `settings.doctor`; its footer is `dialog.button[0]` Cancel and `dialog.button[1]` Save |
 | Sheets | `sheet.close` |
 | Jobs panel | `jobs.row[N].retry`, `jobs.row[N].cancel`, `jobs.row[N].log`, `jobs.filter[N]`, `jobs.clear`, `jobs.more`, `jobs.log.back`, `jobs.log.follow`, `jobs.log.end` |
-| Tabs | `tabs.tab[N]` for a process tab, `agents.tabs.tab[N]` for a conversation, sharing one numbering |
+| Tabs | `tabs.tab[N]` for a process tab, `agents.tabs.tab[N]` for a conversation, sharing one numbering; `tabs.tab[N].close` / `agents.tabs.tab[N].close` (the tab's `✕`), `tabs.new` (the `+`), `tabs.fallback`, `tabs.watch`, `tabs.zoom` |
 | Toasts and errors | `toasts.toast[N]` (0 is the oldest, matching the `toasts` array), `sticky_error.retry` |
 | Menus | `menu.item[N]`: the items of the one open kit `Menu` (a ⋯, `+`, right-click or dropdown menu), numbered over the visible items in order, separators and headers skipped |
 | ⌃S command menu | `prefix_menu`, `prefix_menu.item[N]`, `prefix_menu.close` |
@@ -329,9 +329,21 @@ switcher; clicking it opens a kit menu whose `menu.item[N]` are the contexts in 
 agent thread needs you (one waiting opens that thread, two or more the agents picker),
 `titlebar.jobs` only while a job runs or has failed, `titlebar.update` only on the Hub with an
 update available, and `titlebar.daemon` only while the daemon is unhealthy. In the Workspace the
-switcher and the section nav give way to `titlebar.back` (`⌃S s`). The status bar paints
+switcher and the section nav give way to the breadcrumb: `titlebar.back` (`⌃S s`), also recorded as
+`workspace.back`; `workspace.switcher`, the worktree switcher, whose `menu.item[N]` are the
+sessions in `⌃S W` order, then *Last session* and *All sessions…*; and `workspace.pr`, the pull
+request button, painted only while the branch has one. The status bar paints
 `statusbar.shortcuts` (Help) everywhere and `statusbar.commands` (`⌃S`, entering the prefix) over
 a terminal or a Fleet-drawn pane, not over a native agent thread.
+
+The tab strip paints `tabs.tab[N].close` (or `agents.tabs.tab[N].close`) on every tab — hidden, but
+laid out, until the tab is hovered or active, so a scenario clicks it on the active tab or after a
+`move` onto the tab. `tabs.new` is the `+`; clicking it opens a kit menu whose `menu.item[N]` are
+*Terminal*, *Claude thread*, *Codex thread*, *Board*, then *Lazygit* on a worktree session and
+*Terminal fallback* on an agent tab. A right-click on a tab selects it and opens its menu:
+*Rename* and, on an exited PTY, *Restart command* for a terminal, then *Close* and, with more than
+one tab, *Close others*. `tabs.zoom` is always painted; `tabs.watch` only while the session has a
+subagent watch; `tabs.fallback` only on an agent tab.
 
 `prefix_menu` is the ⌃S command menu's panel, painted only once a held prefix has waited out
 `motion.prefix_hint_delay` — a scenario awaits it rather than assuming it. `prefix_menu.item[N]`

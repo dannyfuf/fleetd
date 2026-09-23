@@ -7,7 +7,6 @@
 //! a repaint. The model carries the input mode as well, because the key chips on the bars'
 //! buttons resolve against the focused context, which follows the mode.
 
-mod keys;
 mod status;
 mod title;
 

@@ -14,6 +14,5 @@ pub mod prs_screen;
 pub mod repos_rail;
 pub mod sticky_error;
 pub mod watch_pane;
-pub mod workspace_header;
 pub mod workspace_tabs;
 pub mod worktrees_list;

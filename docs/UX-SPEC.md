@@ -364,14 +364,14 @@ context · `E` edit · `D` delete · `g w` / `p` / `g b` sections · `:` palette
 its key.
 
 **Workspace:** the switcher and the section nav give way to the breadcrumb `← Worktrees / repo /
-worktree`. *Worktrees* is a button for `⌃S s` (back to the Hub; the session keeps running) and
-shows that chip; the repository and the worktree are text until the worktree switcher replaces the
-worktree in place (§3.6). The command field, the status cluster (without *sleeping* and *Update*,
-whose keys are Hub keys) and Help / Settings stay; Help and Jobs show their `⌃S` chords.
+⎇ worktree ⌄` and its chips (§3.6). *Worktrees* is a button for `⌃S s` (back to the Hub; the
+session keeps running) and shows that chip; the repository is text; the worktree is the **worktree
+switcher**. The command field, the status cluster (without *sleeping* and *Update*, whose keys are
+Hub keys) and Help / Settings stay; Help and Jobs show their `⌃S` chords.
 
 **Harness:** `titlebar.context`, `titlebar.command`, `titlebar.needs_you`, `titlebar.jobs`,
-`titlebar.update`, `titlebar.daemon`, `titlebar.help`, `titlebar.settings`, `titlebar.back`, the
-segments `hub.tab[N]`, and the status bar's `statusbar.shortcuts` and `statusbar.commands`
+`titlebar.update`, `titlebar.daemon`, `titlebar.help`, `titlebar.settings`, `titlebar.back` (also
+`workspace.back`), `workspace.switcher`, `workspace.pr`, the segments `hub.tab[N]`, and the status bar's `statusbar.shortcuts` and `statusbar.commands`
 (`TESTING-HARNESS.md` §3).
 
 ---
@@ -707,10 +707,11 @@ what is running elsewhere.*
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│ ⑂ feat/payroll-fix  buk/payroll  #412 CI fail       ◉  ⚡claude, :3000   ⟳1  │ 30  header
+│ ← Worktrees / buk/payroll / ⎇ feat-payroll-fix ⌄  ↑2 ↓0  3 files changed  ◷ #412 CI fail   [⌕ Search…]  ? ⚙ │ 44  title bar
 ├─────────────────────────────────────────────────────────────────────────────┤
-│  1 nvim ✎ │ 2 cc ⚡● │ 3 lg │ 4 test ✕1 │ +                                  │ 30  tab strip
-├─────────────────────────────────────────────────────────────────────────────┤
+│ ╭──────────╮                                                                │
+│ │>_ nvim  ✕│ >_ cc ● │ ⎇ lg │ >_ test exited 1 │ ✦ fix README needs you │ + Watch Zoom │ 40  tab strip
+├─╯          ╰────────────────────────────────────────────────────────────────┤
 │ ❯ claude                                                                    │
 │ ⏺ Reading src/payroll/rounding.rb…                       ┌────────────────┐ │
 │                                                          │ SCROLL 412/2000│ │ scroll pill
@@ -724,44 +725,54 @@ what is running elsewhere.*
 ├─────────────────────────────────────────────────────────────────────────────┤
 │ ⚠ process exited (1) · ^s r restart · ^s x close · ^s c new                 │ 22  only on exit
 ├─────────────────────────────────────────────────────────────────────────────┤
-│ ● fleetd  buk › feat-payroll-fix  ⟳ prune  Fleet commands ⌃S  Shortcuts ⌃S ? │ 28  status bar
+│ ● fleetd  nvim · 164×42 · kept alive by fleetd   Fleet commands ⌃S  Shortcuts ⌃S ? │ 28  status bar
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 | Element | Content | Position | Why here | Why needed |
 | --- | --- | --- | --- | --- |
-| Session header | `git-branch` + branch (`fg`) + `repoId` (muted) + `cloud host` if remote + PR badge if any | top-left | one line answering "am I in the right worktree?" — the #1 terminal error | `Session.kind = Worktree(id)` |
-| Session state + keep-alive | §2.5 glyph + `⚡` labels | header, right | mirrors the Hub row so both screens read identically; these are what `sleep` keeps and `K` kills | `WorktreeStatus`, §4 |
-| VT modes | `TerminalModes` glyphs for `alt` / `mouse` / `paste` / `appcur`, zero-suppressed | header, right, before the state glyph | the only explanation for the keymap appearing to lie; it sits in reserved chrome because a badge over the grid permanently hides output | `FrameUpdate.modes` |
-| Jobs chip | `⟳n` (`⚠n` red when a job failed) | header, far right | the Hub chrome is not visible here, so background work must still be | §6 |
-| Tab strip | `<index> <name>` per `Terminal`, min 84 / max 200 px, auto-sized | under the header | indexes are the argument to `ctrl-s 1`–`9`; the strip is the legend for that binding | `Session.terminals`, `active_terminal` |
-| Active tab | `fg` text + 2 px blue bottom border | — | blue = "where am I" | — |
-| Activity dot | 6 px amber `●` on an inactive tab with output since last visit | inside the tab | the only background-activity signal; prevents polling tabs by hand | `Terminal.status`, dirty-row events |
-| Keep-alive icon on a tab | `bot` / `server` / `file-pen` | inside the tab, after the name | marks the tabs `sleep` will preserve, before you press `^s x` | §4 keep-alive rules |
-| Exited tab | label at `fg.faint` + `circle-x` 12 px + exit code | — | a dead command must not look alive | `Terminal.status` |
-| `+` tab | `plus` glyph | end of the strip | mouse parity for `ctrl-s c` | — |
-| Native tab | `git-branch` glyph between the index and the name | inside the tab | the tab does not type what you press into a shell; the glyph is the only thing that says so before you try | `Terminal.kind = Native` |
+| Breadcrumb | `← Worktrees` (`⌃S s`) / `repoId` / the worktree switcher `⎇ <worktree> ⌄` | title bar, left (§3.1) | one line answering "am I in the right worktree?" — the #1 terminal error — in the row that is always there | `Session.kind = Worktree(id)` |
+| Worktree switcher | a menu of every session, most recently used first, each with the palette's GO state word (`session attached`, `sleeping`, …) and a `✓` on this one; then *Last session* `⌃S w` and *All sessions…* `⌃S W` | the breadcrumb's last segment | the same rows as `⌃S W`, one click away; choosing one opens it exactly as the palette row does | `session_mru`, the palette's GO rows |
+| Git chips | `↑a ↓b` while either is non-zero · `n files changed` while dirty | after the switcher | whether the work here is committed and pushed, without opening Lazygit. From an inspection (no fetch) when the Workspace shows the worktree and every 30 s while it stays; a failed inspection keeps the last chips | `InspectWorktrees` |
+| Host chip | `cloud <host>`, `cloud-off` amber while the link is down | after the git chips, remote worktrees only | a remote shell must not pass for a local one | `Worktree.host`, `HostStatus` |
+| PR button | `#412 CI fail` in the §3.5 badge's glyph and tone | after the chips | a click opens the pull request on GitHub | the shared PR badge cache |
+| Tab strip | 40 px, `chrome` ground: per tab a kind glyph and the name, min 84 / max 200 px; the index is in the tooltip (`Tab 2 ⌃S 2`) | under the title bar | the strip says what each tab is; its keys are in its tooltips and menus | `Session.terminals`, the worktree's agent threads |
+| Kind glyph | `terminal` (PTY) · `git-branch` (a Fleet-drawn tab: `lg`) · `square-kanban` (the board tab) · `bot` / `sparkles` (a Claude / Codex thread) | before the name | a tab that is not a shell says so before you type into it | `Terminal.kind`, `command`, `AgentThreadSummary.provider` |
+| Active tab | the content ground, a hairline on three sides and none underneath, `ui_strong` name | — | the active tab joins the content it shows | — |
+| State mark | at most one: a spinner while the tab starts or its agent works · an amber `needs you` chip (survives selection) · a 6 px blue dot for unseen output on another tab · `exited 1` in red (`killed` for a signal) | after the name | the only background-activity signal; prevents polling tabs by hand | `Terminal.status`, dirty-row events, `Attention` |
+| Keep-alive icon on a tab | `bot` / `server` / `file-pen` | after the name | marks the tabs `sleep` will preserve, before you press `^s x` | §4 keep-alive rules |
+| Close `✕` | on the active tab and on a hovered one; a middle-click does the same | tab, right end | the pointer twin of `^s x`, with its confirm when a keep-alive process runs | — |
+| Tab menu | right-click: *Rename* `⌃S ,` · *Restart command* `⌃S r` (an exited PTY) · *Close* `⌃S x` · *Close others*; the right-click selects the tab first | at the pointer | every tab verb in one place, each showing its key | — |
+| `+` | a menu: *Terminal* `⌃S c` · *Claude thread* `⌃S a` · *Codex thread* `⌃S A` · *Board* `⌃S b`; then *Lazygit* (selects the git tab, or opens one) and, on an agent tab, *Terminal fallback* `⌃S F` | after the last tab | what can be opened here, with its key | — |
+| Strip toggles | *Open as terminal* `⌃S F` on an agent tab · *Watch* `⌃S v`, pressed while the watch split shows, only while the session has a subagent watch · *Zoom* `⌃S z` | strip, right | the pointer twins of the Workspace's panel keys | — |
 | Native child tab | `↳ <provider> — <title>` | in the same numbered strip, immediately after its caller and older attached siblings | the arrow is the sole child-specific tab chrome; no provider or `child` badge is added | `AgentThreadSummary.parent`, the window-local attached set |
-| Terminal area | painted cell grid, 8 px padding, no border | fills | maximum rows; chrome is ≤ 86 px total | — |
-| Native pane | the Fleet-drawn view for this tab, filling the terminal area exactly | replaces the grid | the tab is a tab: same header, same strip, same bars, same pixel positions | `Terminal.kind = Native`, `Worktree.path` |
+| Terminal area | painted cell grid, 8 px padding, no border | fills | maximum rows; chrome is the 40 px strip | — |
+| Native pane | the Fleet-drawn view for this tab, filling the terminal area exactly | replaces the grid | the tab is a tab: same strip, same bars, same pixel positions | `Terminal.kind = Native`, `Worktree.path` |
 | Scroll pill | `SCROLL <offset>/<scrollback_len>`, + a second line `v select · y yank · Esc exit` while selecting; 176 × 22 px, `bg.raised`, amber left bar | overlay, top-right **inside** the terminal area, 12 px inset | during scroll the eyes are on content; top-right never covers the prompt and never shifts the grid | `viewport{scrollback_len, offset}` |
 | ⌃S command menu | *Fleet commands*: the held prefix as an amber chip, "Press a key or click", "⌃S again sends it to the terminal" (only where a program is behind it), a Close `esc` button; then every command the prefix reaches here, in the catalogue's groups (Tabs, Session, Terminal, Agents, Panels), each a clickable row of second-key chip + short label | floating, bottom-centre just above the status bar, at most 900 px wide; **delayed 400 ms** after `ctrl-s` | the expert types the second key in < 200 ms and never sees it; the returning user gets the whole table exactly when they hesitate, and can click instead of reading — 0 px and 0 frames of permanent cost. A click runs the row as its key would; the menu never takes focus. The agent popup and a native agent tab show it too, with their own rows | KEYMAP one-shot Prefix mode; the action catalogue |
 | Exit strip | `⚠ process exited (<code>) · ^s r restart · ^s x close · ^s c new` | bottom, 22 px, only when the tab's command exited | tmux's `remain-on-exit` made this recoverable; Fleet must not silently swallow a crashed dev server | §4 `remain-on-exit on` |
-| Status-bar buttons | `Fleet commands ⌃S` (enters the prefix, as `ctrl-s` does) · `Shortcuts ⌃S ?` (Help) | status bar, right | the two keys every other Workspace key hangs off, taught where the eye rests; there is no mode word (§2.8) | KEYMAP one-shot Prefix mode |
+| Status bar | over a PTY: `<tab> · <cols>×<rows> · kept alive by fleetd` in the breadcrumb slot; then `Fleet commands ⌃S` (enters the prefix, as `ctrl-s` does) · `Shortcuts ⌃S ?` (Help) | status bar | which process the keys reach and that closing the window does not end it; the two keys every other Workspace key hangs off, taught where the eye rests; there is no mode word (§2.8) | `MirrorGrid`, KEYMAP one-shot Prefix mode |
+
+**Terminal modes are not drawn.** The frame's VT modes (`alt`, `mouse`, `paste`, `appcur`) used to
+be four unlabelled glyphs in the session header. Only one of them changes what a documented Fleet
+key does — the alternate screen has no scrollback — and that one already says so where it bites:
+`ctrl-s [` toasts `no scrollback in alt-screen`. The other three change no Fleet key, so nothing
+replaces them. The kit's `TerminalModes` stays for the gallery.
 
 **[D-8]** Every Workspace command drawn over the Workspace states its prefix. In Terminal mode
 keys go to the PTY except `ctrl-s` and the standard `cmd-c` / `cmd-v` clipboard actions, so
 bare-key hints (`r restart`, `l log`, `⏎ start now`) are forbidden anywhere in this screen; they
 are written `^s r`, `^s l`, `^s ⏎`.
 
-**Zoom (`ctrl-s z`)** hides the session header and the tab strip; a 2 px amber bar on the window's
-top edge remains as the only reminder that chrome is hidden. The title bar and the status bar
+**Zoom (`ctrl-s z`)** hides the tab strip; a 2 px amber bar on the window's top edge remains as
+the only reminder that chrome is hidden. The title bar, with its breadcrumb, and the status bar
 always stay, because they carry the way back, the daemon and the ⌃S buttons.
 
 **Intentionally omitted:** the PTY window title (`FrameUpdate.title` names the *tab* only when the
-terminal was never renamed), shell PID, `foreground_command`, cwd, cols × rows readout, latency
-readout, a permanent key cheat sheet, a scrollbar, per-tab byte counters, pane splitting, per-tab
-close buttons. The breadcrumb is the title bar's `← Worktrees / repo / worktree` (§3.1).
+terminal was never renamed), shell PID, `foreground_command`, cwd, latency readout, a permanent key
+cheat sheet, a scrollbar, per-tab byte counters, pane splitting, the tab index on the tab (it is in
+the tooltip), the session's status glyph and a Workspace jobs chip (the title bar's jobs button
+counts every job), and a *Changes* toggle until the Changes panel exists.
 
 **States**
 
@@ -769,23 +780,24 @@ close buttons. The breadcrumb is the title bar's `← Worktrees / repo / worktre
 | --- | --- |
 | Attaching | one dim centered line `attaching…`; key/paste input retains an ordered prefix capped at 1,024 events and 1 MiB, rejects newer overflow, and flushes only after the first valid frame. Attach has one absolute 5 s deadline; failure reports `could not attach terminal <id>: …` and stays sticky until that same terminal attaches, which retires it; already-expired work cannot resize, and no post-deadline result can claim the terminal. |
 | Attached | normal |
-| Waking a slept session | tabs rebuild with `loader-circle` per tab as each PTY spawns; the header reads `waking…` for ≤ 1.5 s |
+| Waking a slept session | tabs rebuild with `loader-circle` per tab as each PTY spawns; the breadcrumb adds `waking…` for ≤ 1.5 s |
 | Recognized terminal agent working / idle | the agent terminal shows an amber spinning `loader-circle` / green `circle-check`; this heuristic status is glyph-only and never toasts or plays a sound |
-| Terminal agent hook attention | the PTY tab keeps the same static amber `NeedsYou` dot used by native tabs, including while selected; each session edge into permission, question, plan, or finished uses the configured toast/sound channels once |
+| Terminal agent hook attention | the PTY tab keeps the same amber `needs you` chip native tabs use, including while selected; each session edge into permission, question, plan, or finished uses the configured toast/sound channels once |
 | Terminal exited | grid frozen at the last frame + the exit strip |
 | Alt-screen app running | the scroll pill is **suppressed**; `ctrl-s [` shows the 1.6 s toast `no scrollback in alt-screen` |
 | Non-agent native pane selected (`fleet://`: `lg`, or the `board` tab of `ctrl-s b`) | the grid, the scroll pill and the exit strip are all absent — there is no PTY. `ctrl-s [` toasts `no scrollback in this tab`; every key except `ctrl-s` belongs to the pane. The snapshot's `mode` is `Native` (§2.8): the Workspace still has the keyboard, and the pane says so itself. A native **agent thread** is the separate §3.6.0 surface and `ctrl-s [` enters its transcript scroll mode. |
-| Job running for this worktree | `⟳n` in the header and the status-bar ticker; **never** an overlay on the grid |
-| Daemon lost | grid dims to 55 %, keys are dropped (not buffered), and the §3.12 C banner replaces the header |
+| Job running for this worktree | the title bar's jobs button and the status-bar ticker; **never** an overlay on the grid |
+| Daemon lost | grid dims to 55 %, keys are dropped (not buffered), and the §3.12 C banner appears |
 
 Caller threads stay in daemon order. Each caller is followed by only its **attached** children,
 in child creation order; an unattached child remains daemon-owned and reachable through its
 delegation row or `^s d`, but consumes no strip slot. `^s x` closes a caller tab as usual and
 detaches a child tab without stopping or deleting that child.
 
-**Icons:** `git-branch`, `cloud`, `cloud-off`, `circle-dot`, `circle`, `moon`, `circle-help`, `circle-check`, `loader-circle`,
-`zap`, `bot` (Claude), `sparkles` (Codex), `server`, `file-pen`, `plus`, `circle-x`, `square-terminal`,
-`chevrons-up` (scroll pill), `command` (prefix pill), `maximize-2` (zoom hint), `unplug`.
+**Icons:** `git-branch`, `cloud`, `cloud-off`, `chevron-left`, `chevron-down`, `terminal`,
+`square-kanban`, `circle-check`, `loader-circle`, `zap`, `bot` (Claude), `sparkles` (Codex),
+`server`, `file-pen`, `plus`, `x`, `square-pen`, `refresh-cw`, `square-terminal`, `chevrons-up`
+(scroll pill), `unplug`.
 
 The default third tab (`lg`) is a native tab: Fleet's own git UI (`crates/fleet-lazygit`) drawn
 in the terminal area, created the first time the tab is selected and kept alive per worktree
@@ -2004,6 +2016,8 @@ Median for the four highest-frequency tasks (open, switch session, switch tab, c
 4. Buttons and menu triggers are not focusable. The keyboard reaches them by their key, and
    `Tab`, `j`/`k` and pane focus keep their KEYMAP meaning.
 5. A control runs the same action as its key, so pointer and keyboard can never diverge.
+6. A Workspace tab is selected by a click and closed by its `✕` or a middle-click; a right-click
+   selects it, then opens its menu, so the menu's verbs act on the tab that was clicked (§3.6).
 
 ---
 
@@ -2105,11 +2119,11 @@ each component's full API. `Modal` is an alias of `Dialog` and `TabBar` an alias
 | `ListView` | Virtualized 30 px rows, cursor, scrolloff 2, `gg`/`G`/`ctrl-d`/`ctrl-u`, cursor stability under background updates | repos rail, worktrees, PRs, palette, assign, base list, clone results |
 | `Row` | One row: leading glyph slot, flex content, trailing columns, selected/dimmed/disabled states | every list |
 | `ColumnLadder` | Resolves a ch-based responsive column set for the current pane width (§2.9) | worktrees list, PR list |
-| `StatusGlyph` | The §2.5 vocabulary — the single source of truth for session/job/clone state rendering | worktree rows, repo rows, PR presence, Workspace header, palette `GO`, confirms, quit dialogs |
+| `StatusGlyph` | The §2.5 vocabulary — the single source of truth for session/job/clone state rendering | worktree rows, repo rows, PR presence, palette `GO`, confirms, quit dialogs |
 | `Chip` | 22 px pill: icon + text + count, tinted, zero-suppressible | host chip, degraded chip |
-| `KeepAliveChips` | `⚡` labels with a max-3 + `+n` overflow and the width ladder 18/14/10/0 ch; outranked by `DegradedChip` in the same slot | worktree rows, Workspace header, detail panel, confirms |
+| `KeepAliveChips` | `⚡` labels with a max-3 + `+n` overflow and the width ladder 18/14/10/0 ch; outranked by `DegradedChip` in the same slot | worktree rows, detail panel, confirms |
 | `DegradedChip` | `⚠ hooks failed` with a link into the Jobs panel | worktree rows, detail panel |
-| `PrBadge` | `#n` + state icon + ≤8 ch word, from the `PrState` priority | worktree rows, PR rows, Workspace header, detail panels |
+| `PrBadge` | `#n` + state icon + ≤8 ch word, from the `PrState` priority | worktree rows, PR rows, detail panels |
 | `AgeLabel` | Single-unit relative time (`2m`, `3h`, `5d`, `2w`) | rows, stamps, jobs |
 | `FreshnessStamp` | `checked/fetched/inspected <age> · <key> re-check`, with the §2.6 amber/red ladder | detail panel, confirms, prune dialog, PR tabs, pane headers |
 | `FactRow` | `label  value` with the null rule (`—` + `fg.faint`) and a `⚠ warning` variant | detail panel SAFETY, confirms |
@@ -2149,7 +2163,7 @@ each component's full API. `Modal` is an alias of `Dialog` and `TabBar` an alias
 | `StickyErrorSlot` | Red, addressable (`!`), persists until dismissed; owns the last failed job | status bar |
 | `LogView` | Tail of `logs/jobs/<id>.log`, last 200 lines, 16 ms batching, follow toggle, `G` re-follow | Jobs panel |
 | `TerminalGrid` | Paints the mirror cell grid from `FrameUpdate`: the full VT attribute set (bold, dim, italic, single/double/curly underline with its own color, strikethrough, inverse, blink, invisible), narrow/wide/spacer cells, the four cursor shapes, the selection overlay and the scrollback badge | Workspace, Agent popup |
-| `TerminalModes` | Zero-suppressed badges for `alt` / `mouse` / `paste` / `appcur` — why the keymap appears to lie | Workspace header |
+| `TerminalModes` | Zero-suppressed badges for `alt` / `mouse` / `paste` / `appcur` | the gallery only: the Workspace draws no modes (§3.6) |
 | `ScrollbackBadge` | `↥ <offset>/<len>` in the grid corner whenever the viewport is scrolled back, in or out of Scroll mode | Workspace |
 | `TerminalTabStrip` | Numbered tabs 84–200 px with an activity dot, a per-tab waking spinner, keep-alive icon, exited mark (code or `—`) and a `+` tab | Workspace |
 | `ScrollPill` | `SCROLL <offset>/<len>` overlay with a selection hint line; **suppressed in alt-screen** | Workspace and Agent Scroll modes |
@@ -2182,8 +2196,8 @@ A new subagent watch for the current Workspace session opens a read-only split
 on the right and selects that watch. The terminal is the flexible leading region
 of `SplitLayout::horizontal()`; the trailing region is 40% of the current window
 width, clamped to 360–640 px and recomputed on resize. PTY dimensions follow the
-terminal's actual reduced painted bounds. Zoom (`^s z`) hides the session header
-and terminal tabs while leaving the watch pane, including its header, visible.
+terminal's actual reduced painted bounds. Zoom (`^s z`) hides the tab strip while
+leaving the watch pane, including its header, visible.
 
 The pane header shows the child label, prefixed with the quiet `◦ ` marker when the
 daemon discovered the process, a status dot and `running`, `exited <code>`,

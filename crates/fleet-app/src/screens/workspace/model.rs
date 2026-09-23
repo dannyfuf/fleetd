@@ -56,17 +56,9 @@ pub(super) struct Model {
     pub(super) scroll_offset: usize,
     pub(super) scrollback_len: usize,
     pub(super) exit_code: Option<Option<i32>>,
-    pub(super) title: SharedString,
     pub(super) branch_key: Option<String>,
     pub(super) repo: Option<RepoId>,
     pub(super) host: Option<(SharedString, HostReachability)>,
-    pub(super) status: StatusKind,
-    pub(super) keep_alive: Vec<SharedString>,
-    pub(super) running_jobs: usize,
-    pub(super) failed_jobs: usize,
-    pub(super) waking: bool,
-    /// The VT modes the active terminal's last frame reported (§3.6: badged in the header).
-    pub(super) modes: Vec<KitTerminalMode>,
     /// Which Fleet-drawn surface the active tab is, when it is one rather than a PTY.
     ///
     /// The reserved command decides it, not the tab's name: the daemon owns the tab list and
@@ -129,10 +121,6 @@ impl HostReachability {
     pub(super) const fn is_unreachable(self) -> bool {
         matches!(self, Self::Unreachable)
     }
-
-    pub(super) const fn is_reachable(self) -> bool {
-        matches!(self, Self::Reachable)
-    }
 }
 
 impl Model {
@@ -160,9 +148,8 @@ impl Model {
             let thread = app.agents.active(&worktree.id)?;
             app.agents.summary(thread).map(|summary| summary.thread)
         });
-        let (title, branch_key, repo, host) = match worktree {
+        let (branch_key, repo, host) = match worktree {
             Some(worktree) => (
-                SharedString::new(&worktree.branch),
                 Some(worktree.branch.clone()),
                 Some(worktree.repo_id.clone()),
                 worktree.host.as_ref().map(|host| {
@@ -178,46 +165,8 @@ impl Model {
                     )
                 }),
             ),
-            // An agent session has no worktree: its own name is the only identity it has.
-            None => (SharedString::from(session.id.to_string()), None, None, None),
+            None => (None, None, None),
         };
-
-        let status = worktree.map_or(StatusKind::Attached, |worktree| {
-            let runtime_status = app.snapshot.as_ref().and_then(|snapshot| {
-                snapshot
-                    .statuses
-                    .iter()
-                    .find(|status| status.worktree_id == worktree.id)
-            });
-            workspace_status(
-                runtime_status.map(|status| (status.session, status.agent_activity)),
-                session.slept_at.is_some(),
-                worktree.degraded.is_some(),
-                host.as_ref().map(|(_, reachability)| *reachability),
-            )
-        });
-
-        let mut keep_alive: Vec<SharedString> = Vec::new();
-        for terminal in &session.terminals {
-            for label in &terminal.keep_alive {
-                let label = SharedString::new(label);
-                if !keep_alive.contains(&label) {
-                    keep_alive.push(label);
-                }
-            }
-        }
-
-        let targets: Vec<String> = worktree.map_or_else(Vec::new, |worktree| {
-            vec![
-                worktree.id.to_string(),
-                worktree.repo_id.to_string(),
-                worktree.slug.clone(),
-            ]
-        });
-        let (running_jobs, failed_jobs) = app
-            .snapshot
-            .as_ref()
-            .map_or((0, 0), |snapshot| job_counts(&snapshot.jobs, &targets));
 
         let exit_code = session
             .terminals
@@ -241,14 +190,9 @@ impl Model {
             scroll_offset: grid.map_or(0, |grid| grid.viewport.offset),
             scrollback_len: grid.map_or(0, |grid| grid.viewport.scrollback_len),
             exit_code,
-            title,
             branch_key,
             repo,
             host,
-            status,
-            keep_alive,
-            running_jobs,
-            failed_jobs,
             native: agent
                 .is_none()
                 .then(|| {
@@ -273,14 +217,20 @@ impl Model {
             popup_owns_terminal,
             popup_terminal,
             reattach: terminal.is_some_and(|id| app.reattach_pending.contains(&id)),
-            waking: session.slept_at.is_some()
-                && session
-                    .terminals
-                    .iter()
-                    .any(|terminal| terminal.status == TerminalStatus::Starting),
-            modes: grid.map_or_else(Vec::new, |grid| grid_modes(&grid.modes)),
         }
     }
+}
+
+/// Whether the host a remote worktree lives on is known to be out of reach right now.
+#[must_use]
+pub(crate) fn host_unreachable(app: &AppState, host: &HostId) -> bool {
+    let status = app.snapshot.as_ref().and_then(|snapshot| {
+        snapshot
+            .hosts
+            .iter()
+            .find(|candidate| &candidate.id == host)
+    });
+    HostReachability::from_status(status).is_unreachable()
 }
 
 /// The badge a pull request's facts add up to (§3.5 priority order).
@@ -291,40 +241,6 @@ pub(super) fn badge_state(
     review: PrReviewDecision,
 ) -> PrBadgeState {
     crate::presentation::pr_badge_state(derive_pr_state(is_draft, checks, review))
-}
-
-/// How many of a snapshot's jobs belong to this session, running and failed (§3.6 `⟳n` / `⚠n`).
-#[must_use]
-pub(super) fn job_counts(jobs: &[JobRecord], targets: &[String]) -> (usize, usize) {
-    let mut running = 0;
-    let mut failed = 0;
-    for job in jobs.iter().filter(|job| {
-        let target = crate::presentation::job_target(&job.kind, &job.target);
-        targets.iter().any(|candidate| candidate == target)
-    }) {
-        match job.status {
-            JobStatus::Queued | JobStatus::Running | JobStatus::Cancelling => running += 1,
-            JobStatus::Failed { .. } => failed += 1,
-            JobStatus::Succeeded | JobStatus::Cancelled => {}
-        }
-    }
-    (running, failed)
-}
-
-#[must_use]
-pub(super) fn workspace_status(
-    runtime: Option<(SessionState, AgentActivity)>,
-    sleeping: bool,
-    degraded: bool,
-    host: Option<HostReachability>,
-) -> StatusKind {
-    match host {
-        Some(HostReachability::Unreachable) => return StatusKind::HostUnreachable,
-        Some(HostReachability::Unknown) => return StatusKind::Unknown,
-        Some(HostReachability::Reachable) | None => {}
-    }
-    let (session, activity) = runtime.unwrap_or((SessionState::Unknown, AgentActivity::Unknown));
-    status_kind(session, sleeping, activity, degraded)
 }
 
 /// The status glyph a session shows, identical to the Hub's for the same worktree (§2.5).

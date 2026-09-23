@@ -58,6 +58,13 @@ pub fn session_detail(session: SessionState, slept: bool) -> &'static str {
     }
 }
 
+/// The session switcher's rows (`^s W`), most recently used first. The title bar's worktree
+/// switcher lists the same rows, so the two can never disagree about order or state.
+#[must_use]
+pub(crate) fn session_rows(state: &AppState) -> Vec<Entry> {
+    candidates(state, "sessions", None, None, &[])
+}
+
 /// Every row the palette lists for `query`, already ranked, sectioned and capped.
 ///
 /// Runs in the update path (`refresh`), never in `render`, and only when an input of

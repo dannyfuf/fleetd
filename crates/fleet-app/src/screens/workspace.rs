@@ -24,7 +24,7 @@ use native::*;
 use terminal::*;
 
 pub use model::Location;
-pub(crate) use model::status_kind;
+pub(crate) use model::{host_unreachable, status_kind};
 
 use std::{cell::RefCell, collections::HashMap, path::PathBuf, rc::Rc, time::Instant};
 
@@ -38,7 +38,6 @@ use fleet_core::{
 };
 use fleet_lazygit::root::{Lazygit, LazygitEvent};
 use fleet_proto::{
-    job::{JobRecord, JobStatus},
     request::RequestBody,
     response::ResponseBody,
     snapshot::{HostStatus, LinkState},
@@ -46,7 +45,7 @@ use fleet_proto::{
 };
 use fleet_ui_kit::{
     ActiveTheme, CellMetrics, ExitStrip, Icon, PrBadgeState, ScrollPill, SplitLayout, StatusKind,
-    TerminalMode as KitTerminalMode, TerminalTabStrip, Text, Toast, ToastDuration,
+    TerminalTabStrip, Text, Toast, ToastDuration,
 };
 use gpui::{
     AnyElement, App, ClipboardItem, Div, Entity, FocusHandle, Focusable, KeyDownEvent, MouseButton,
@@ -62,10 +61,10 @@ use crate::{
     screens::board::BoardScreen,
     state::{AppState, BoardScope, Overlay, Screen, TerminalMode, dwell_for},
     terminal::{
-        MouseCell, SelectionGranularity, absolute_selection_at, cell_size, grid_modes, measure,
-        surface, try_selection_text, viewport_base, zoom_bar,
+        MouseCell, SelectionGranularity, absolute_selection_at, cell_size, measure, surface,
+        try_selection_text, viewport_base, zoom_bar,
     },
-    views::{prefix_menu::PrefixSurface, workspace_header::WorkspaceHeader, workspace_tabs},
+    views::{prefix_menu::PrefixSurface, workspace_tabs},
 };
 
 /// What `ctrl-s c` and the `+` tab ask fleetd to type into a fresh login shell.
@@ -137,17 +136,8 @@ impl WorkspaceScreen {
                 .into_any_element();
         };
         let focused = focus.is_focused(window);
-        let pr = model.repo.as_ref().and_then(|repo| {
-            model.branch_key.as_ref().and_then(|branch| {
-                state
-                    .read(cx)
-                    .pr_badges
-                    .get(&(repo.clone(), branch.clone()))
-                    .copied()
-            })
-        });
-        let agent_word = self.agent_header_word(state.read(cx), model, cx);
-        let header = (!model.zoomed).then(|| self.header(model, pr, agent_word));
+        // The session's identity, git state and pull request are the title bar's breadcrumb
+        // now (§3.6); the Workspace itself starts at its tab strip.
         let tabs = (!model.zoomed).then(|| self.tab_strip(model, bridge, state, cx));
         // The board pane brings its own focus-tracking root, exactly as the Hub's board tab
         // does: tracking the same handle twice would put two nodes in gpui's dispatch tree for
@@ -209,7 +199,6 @@ impl WorkspaceScreen {
         let prefix_menu = self.local.borrow().prefix_menu.render(state, cx);
         root = root
             .relative()
-            .children(header)
             .children(tabs)
             .child(body)
             .children(model.exit_code.map(ExitStrip::new))
@@ -235,6 +224,10 @@ struct WorkspaceState {
     popup_owned_size: bool,
     pr_requested: Vec<RepoId>,
     pr_tasks: HashMap<RepoId, gpui::Task<()>>,
+    /// The worktree whose git state was last asked for; cleared when the refresh is due.
+    git_inspected: Option<WorktreeId>,
+    /// The inspection in flight, then its refresh timer.
+    git_task: Option<gpui::Task<()>>,
     pane_focused: bool,
     pane_quit: Vec<WorktreeId>,
     board_claim: Option<BoardClaim>,

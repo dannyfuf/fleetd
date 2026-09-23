@@ -414,7 +414,7 @@ the former labels destructive dialogs while the latter distinguishes permanent j
 ### 5.2 Status glyph vocabulary (`StatusKind`)
 
 `StatusGlyph` is the single source of truth: the shape a user learns in the worktrees list is
-the same shape in the palette, in a confirm and in the Workspace header.
+the same shape in the palette and in a confirm.
 
 | `StatusKind` | Icon | Tone | Opacity | Detail word |
 | --- | --- | --- | --- | --- |
@@ -1357,7 +1357,7 @@ An unfocused terminal draws a hollow cursor. The selection is painted as a
 `terminal.selection` quad per row span, behind the text. `.scrollback(offset, len)` paints a
 `ScrollbackBadge` in the top-right corner when `offset > 0`. The only things ever drawn **over**
 the cells are the two scroll overlays and the ⌃S command menu (§3.6); `.modes(..)` feeds the
-alt-screen suppression and paints nothing — the badges belong to the Workspace header.
+alt-screen suppression and paints nothing — Fleet draws no mode badges (UX-SPEC §3.6).
 
 #### `TerminalModes`
 **Purpose.** Zero-suppressed badges for the VT modes a `FrameUpdate` reports.
@@ -1368,10 +1368,11 @@ alt-screen suppression and paints nothing — the badges belong to the Workspace
 alt-screen there is no scrollback (`ctrl-s [` refuses), with mouse reporting on the app owns
 drag-select, and paste (`cmd-v` or `ctrl-s ]`) follows the program's bracketed-paste mode. A plain shell shows
 no badge, so the row costs nothing in the common case. `alt` is the only amber one, because it
-is the only one that changes what a documented key does. The row lives in the Workspace
-**header**, in reserved chrome — never over the grid, whose cells are live output that a badge
-would hide (zsh with `zle` sets bracketed paste and application cursor keys, so those two badges
-are on in every plain shell).
+is the only one that changes what a documented key does. **The app no longer draws this row**
+(UX-SPEC §3.6: only the alternate screen changes a Fleet key, and `ctrl-s [` already says so);
+the component stays for the gallery. Never draw it over the grid, whose cells are live output that
+a badge would hide (zsh with `zle` sets bracketed paste and application cursor keys, so those two
+badges are on in every plain shell).
 
 #### `ScrollbackBadge`
 **Purpose.** `↥ <offset>/<len>` in the grid's top-right corner.

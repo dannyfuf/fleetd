@@ -371,6 +371,7 @@ mod tests;
 pub use command::Command;
 use command::{CardContext, card_context};
 use rows::candidates;
+pub(crate) use rows::session_rows;
 
 /// Renders the palette overlay (§3.9): the palette card inside the kit's top-anchored
 /// [`fleet_ui_kit::Overlay`].

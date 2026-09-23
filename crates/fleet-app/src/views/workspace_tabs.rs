@@ -5,11 +5,12 @@ use gpui::SharedString;
 use std::collections::{HashMap, HashSet};
 
 use fleet_core::{
-    agents::{AgentThreadSummary, Attention, ThreadId},
+    agents::{AgentKind, AgentThreadSummary, Attention, ThreadId},
+    config::NATIVE_BOARD,
     ids::TerminalId,
     sessions::{AgentActivity, Session, TerminalStatus, WorktreeStatus},
 };
-use fleet_ui_kit::{TerminalAgentState, TerminalTab, TerminalTabKind};
+use fleet_ui_kit::{Icon, TerminalAgentState, TerminalTab, TerminalTabKind};
 
 use crate::screens::agent_thread::presentation::{TabBadge, tab_badge, tab_title};
 
@@ -108,6 +109,11 @@ fn decorate_agent_tab(
     attention: Attention,
     active: bool,
 ) -> TerminalTab {
+    // The provider mark says whose conversation it is before the title does (§3.6 icons).
+    tab = tab.icon(match summary.provider {
+        AgentKind::Claude => Icon::Bot,
+        AgentKind::Codex => Icon::Sparkles,
+    });
     match tab_badge(attention, summary.exit_code) {
         TabBadge::Spinner => tab = tab.starting(true),
         // §2 draws the amber dot for as long as the thread needs you, on the selected tab too:
@@ -174,6 +180,10 @@ impl TabLabels {
                     } else {
                         TerminalTabKind::Pty
                     });
+                // The board is a Fleet-drawn tab like `lg`, and says which one it is.
+                if terminal.command == NATIVE_BOARD {
+                    tab = tab.icon(Icon::SquareKanban);
+                }
                 if let Some(label) = terminal.keep_alive.first() {
                     tab = tab.keep_alive(keep_alive_icon(label, KeepAliveStyle::Terminal));
                 }

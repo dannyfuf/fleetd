@@ -9,6 +9,7 @@ mod navigation;
 mod selection;
 mod snapshot;
 mod status;
+mod workspace_keys;
 
 pub use damage::{EventDamage, event_damage};
 pub use formatting::{
@@ -29,3 +30,4 @@ pub use status::{
     KeepAliveStyle, inspection_badge, keep_alive_icon, pr_badge_state, row_glyph, session_glyph,
     terminal_label,
 };
+pub(crate) use workspace_keys::workspace_keys;

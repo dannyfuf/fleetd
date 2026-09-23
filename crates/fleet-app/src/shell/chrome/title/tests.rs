@@ -186,3 +186,71 @@ fn only_the_hub_digits_select_a_context_by_key() {
         "a context past nine has no key and switches by request"
     );
 }
+
+/// The Workspace breadcrumb carries what git and GitHub know about the worktree, each chip only
+/// while it has something to say (UX-SPEC §3.6).
+#[test]
+fn the_workspace_breadcrumb_carries_the_worktrees_git_chips_and_pull_request() {
+    let mut state = two_context_state();
+    let worktree = state
+        .snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.worktrees.first().cloned())
+        .unwrap_or_else(|| panic!("the fixture has a worktree"));
+    let session = fleet_core::sessions::Session {
+        id: fleet_core::ids::SessionId::try_from(worktree.session.as_str())
+            .unwrap_or_else(|error| panic!("{error}")),
+        host: None,
+        kind: fleet_core::sessions::SessionKind::Worktree(worktree.id.clone()),
+        cwd: worktree.path.clone(),
+        terminals: Vec::new(),
+        active_terminal: None,
+        slept_at: None,
+        kept_terminals: Vec::new(),
+    };
+    if let Some(snapshot) = state.snapshot.as_mut() {
+        snapshot.sessions.push(session.clone());
+    }
+    state.screen = Screen::Workspace {
+        session: session.id.clone(),
+    };
+    let place = |state: &AppState| match TitleModel::build(state).place {
+        Place::Workspace(place) => place,
+        other => panic!("expected the Workspace breadcrumb, got {other:?}"),
+    };
+
+    // Nothing inspected yet, and no pull request: the switcher stands alone.
+    let bare = place(&state);
+    assert_eq!(bare.repo.as_ref(), "acme/api");
+    assert_eq!(bare.worktree.as_ref(), "one");
+    assert_eq!((bare.divergence, bare.changed, bare.pr), (None, None, None));
+
+    state.workspace_git = Some(crate::state::WorkspaceGit {
+        worktree: worktree.id.clone(),
+        ahead: Some(2),
+        behind: Some(0),
+        dirty: true,
+        dirty_files: Some(3),
+    });
+    state.pr_badges.insert(
+        (worktree.repo_id.clone(), worktree.branch.clone()),
+        (412, PrBadgeState::CiFail),
+    );
+    let full = place(&state);
+    assert_eq!(full.divergence.as_deref(), Some("\u{2191}2 \u{2193}0"));
+    assert_eq!(full.changed.as_deref(), Some("3 files changed"));
+    let pr = full
+        .pr
+        .unwrap_or_else(|| panic!("the branch has a pull request"));
+    assert_eq!(pr.label.as_ref(), "#412 CI fail");
+    assert_eq!(pr.url.as_ref(), "https://github.com/acme/api/pull/412");
+
+    // Facts about another worktree never leak into this one's chips.
+    if let Some(git) = state.workspace_git.as_mut() {
+        git.worktree = "acme/api#two"
+            .parse()
+            .unwrap_or_else(|error| panic!("{error}"));
+    }
+    let other = place(&state);
+    assert_eq!((other.divergence, other.changed), (None, None));
+}

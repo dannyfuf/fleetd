@@ -283,7 +283,7 @@ the conversation, and garbage collects per thread. The ref namespace is the whol
 
 **Attention** is derived by the reducer, not by any view: permission > question > plan >
 finished > failed > working > unread > idle, carried in `AgentThreadSummary` so the tab badge,
-the session header word and the title bar's `needs you` cannot disagree. `Finished` is amber and
+the agent tab's `needs you` chip and the title bar's `needs you` cannot disagree. `Finished` is amber and
 clears when the client reports `AgentMarkSeen { thread, seq }`; seen state is per client and
 lives in the app.
 
@@ -580,12 +580,12 @@ The separate swarm-compatible CLI JSON envelope remains version 1.
   after `ctrl-s` inside a terminal), `Scroll` (copy/scrollback mode), `Filter`, `Palette`,
   `Dialog`. Implemented as gpui key contexts + actions; see `docs/KEYMAP.md`.
 - **Screens**: `Hub` (contexts / repos / worktrees or PRs / detail / status bar), `Workspace`
-  (session terminals with a tab strip, a compact session header and the subagent watch pane),
+  (session terminals with a tab strip under the title bar's breadcrumb, and the subagent watch pane),
   the native agent tab, the floating agent popup, the `Jobs` panel, the dialogs, Palette and
   Filter. See `docs/UX-SPEC.md` for the per-view content and placement decisions.
 - **Agent threads**: `AppState::agents` mirrors the daemon's summaries, the projections of the
   threads this window opened, and the local-only cursors (which tab is selected per worktree,
-  which `seq` has been shown). The tab strip, the session header word, the title bar's `needs you`
+  which `seq` has been shown). The tab strip, the title bar's `needs you`
   and the attention notifications all read that one mirror; see `docs/APP-CONTRACTS.md`.
 - **Render discipline**: a screen prepares in `synchronize` — attachment, requests, focus and
   resource reconciliation — and `render_prepared` only composes what is already prepared. Render

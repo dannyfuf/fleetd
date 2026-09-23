@@ -7,27 +7,32 @@
 //! actions: the context switcher opens a menu whose rows are the context actions (each with its
 //! key), and `1 needs you` opens the waiting thread the way the palette's `AGENTS` row does.
 //!
-//! In the Workspace the leading region is a breadcrumb, `← Worktrees / repo / worktree`: the back
-//! button is `⌃S s`, and the worktree is static text until the worktree switcher replaces it
-//! (see [`workspace_breadcrumb`]).
+//! In the Workspace the leading region is a breadcrumb, `← Worktrees / repo / worktree ⌄`: the
+//! back button is `⌃S s`, the worktree is a switcher listing every session as `⌃S W` does, and
+//! the chips after it say what git knows about the worktree (`↑2 ↓0`, `3 files changed`) and
+//! which pull request it has, a click away on GitHub (see [`workspace_breadcrumb`]).
 
 use std::rc::Rc;
 
+use fleet_core::sessions::TerminalStatus;
 use fleet_core::{agents::ThreadId, ids::ContextId};
 use fleet_proto::request::RequestBody;
 use fleet_ui_kit::{
-    ActiveTheme, Button, ButtonSize, ButtonStyle, CommandField, DaemonState, HarnessTargetExt,
-    Icon, IconButton, IconSize, MenuItem, PopoverMenu, Segment, SegmentedControl, StatusButton,
-    StatusMark, SwitcherButton, Text, TitleBar, Tone,
+    ActiveTheme, Button, ButtonSize, ButtonStyle, Chip, CommandField, DaemonState,
+    HarnessTargetExt, Icon, IconButton, MenuItem, PopoverMenu, PrBadgeState, Segment,
+    SegmentedControl, StatusButton, StatusMark, SwitcherButton, Text, TitleBar, Tone,
 };
 use gpui::{Action, AnyElement, App, Entity, IntoElement, SharedString, div, prelude::*};
 
-use super::keys::workspace_keys;
 use crate::{
     actions::{board, daemon, fleet, hub, prefix},
     bridge::Bridge,
     dialogs,
-    screens::hub::{context_board_summary, effective_context},
+    presentation::workspace_keys,
+    screens::{
+        hub::{context_board_summary, effective_context},
+        workspace::host_unreachable,
+    },
     shell::daemon::dot_state,
     state::{AppState, ChipCounts, DaemonLink, DaemonLossReason, HubTab, Mode, Overlay, Screen},
 };
@@ -54,11 +59,28 @@ struct HubPlace {
     board_loading: bool,
 }
 
-/// The Workspace's leading region: the breadcrumb.
+/// The Workspace's leading region: the breadcrumb and its chips.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct WorkspacePlace {
     repo: SharedString,
     worktree: SharedString,
+    /// A slept session respawning its PTYs (§3.6 "Waking a slept session").
+    waking: bool,
+    /// The remote host, and whether it is known to be out of reach.
+    host: Option<(SharedString, bool)>,
+    /// `↑2 ↓0`, while either count is non-zero.
+    divergence: Option<SharedString>,
+    /// `3 files changed`, while the worktree is dirty.
+    changed: Option<SharedString>,
+    pr: Option<PrChip>,
+}
+
+/// The pull request the worktree's branch has: `#412 CI fail`, opening it on GitHub.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PrChip {
+    label: SharedString,
+    state: PrBadgeState,
+    url: SharedString,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -212,16 +234,65 @@ fn workspace_place(state: &AppState, session: &fleet_core::ids::SessionId) -> Wo
             .iter()
             .find(|worktree| &worktree.id == id)
     });
-    match worktree {
-        Some(worktree) => WorkspacePlace {
-            repo: SharedString::from(worktree.repo_id.to_string()),
-            worktree: SharedString::from(worktree.slug.clone()),
-        },
-        // A repository-level agent session has no worktree to name.
-        None => WorkspacePlace {
+    let waking = state.active_session().is_some_and(|session| {
+        session.slept_at.is_some()
+            && session
+                .terminals
+                .iter()
+                .any(|terminal| terminal.status == TerminalStatus::Starting)
+    });
+    let Some(worktree) = worktree else {
+        // A repository-level agent session has no worktree to name, and no git to report.
+        return WorkspacePlace {
             repo: SharedString::default(),
             worktree: SharedString::from(session.to_string()),
-        },
+            waking,
+            host: None,
+            divergence: None,
+            changed: None,
+            pr: None,
+        };
+    };
+    let git = state
+        .workspace_git
+        .as_ref()
+        .filter(|git| git.worktree == worktree.id);
+    let divergence = git.and_then(|git| {
+        let (ahead, behind) = (git.ahead.unwrap_or(0), git.behind.unwrap_or(0));
+        (ahead > 0 || behind > 0)
+            .then(|| SharedString::from(format!("\u{2191}{ahead} \u{2193}{behind}")))
+    });
+    let changed = git
+        .filter(|git| git.dirty)
+        .map(|git| match git.dirty_files {
+            Some(1) => SharedString::new_static("1 file changed"),
+            Some(count) if count > 1 => SharedString::from(format!("{count} files changed")),
+            _ => SharedString::new_static("uncommitted changes"),
+        });
+    let pr = state
+        .pr_badges
+        .get(&(worktree.repo_id.clone(), worktree.branch.clone()))
+        .map(|&(number, badge)| PrChip {
+            label: SharedString::from(format!("#{number} {}", badge.word())),
+            state: badge,
+            url: SharedString::from(format!(
+                "https://github.com/{}/pull/{number}",
+                worktree.repo_id
+            )),
+        });
+    WorkspacePlace {
+        repo: SharedString::from(worktree.repo_id.to_string()),
+        worktree: SharedString::from(worktree.slug.clone()),
+        waking,
+        host: worktree.host.as_ref().map(|host| {
+            (
+                SharedString::from(host.to_string()),
+                !host_unreachable(state, host),
+            )
+        }),
+        divergence,
+        changed,
+        pr,
     }
 }
 
@@ -273,7 +344,7 @@ pub(super) fn render(
         Place::Hub(place) => bar
             .leading(context_switcher(place, bridge))
             .leading(section_nav(place)),
-        Place::Workspace(place) => bar.leading(workspace_breadcrumb(place, cx)),
+        Place::Workspace(place) => bar.leading(workspace_breadcrumb(place, state, bridge, cx)),
     };
     let workspace = matches!(model.place, Place::Workspace(_));
     let bar = bar.center(
@@ -386,12 +457,13 @@ fn section_nav(place: &HubPlace) -> SegmentedControl {
     })
 }
 
-/// `← Worktrees / acme/api / agent`.
-///
-/// The worktree is static text here. The worktree switcher (a [`SwitcherButton`] opening the
-/// other worktrees of this repository) replaces it in place, which is why the breadcrumb is its
-/// own function rather than inline in [`render`].
-fn workspace_breadcrumb(place: &WorkspacePlace, cx: &App) -> AnyElement {
+/// `← Worktrees / acme/api / ⎇ agent ⌄  ↑2 ↓0  3 files changed  #412 CI fail`.
+fn workspace_breadcrumb(
+    place: &WorkspacePlace,
+    state: &Entity<AppState>,
+    bridge: &Bridge,
+    cx: &App,
+) -> AnyElement {
     let theme = cx.theme();
     let keys = workspace_keys();
     let mut back = Button::new("titlebar-back", "Worktrees")
@@ -404,32 +476,112 @@ fn workspace_breadcrumb(place: &WorkspacePlace, cx: &App) -> AnyElement {
         back = back.kbd(kbd);
     }
     let separator = || Text::ui("/").faint().flex_none();
+    let chip = |label: SharedString| Chip::new().text(label).filled(true);
     div()
         .flex()
         .min_w_0()
         .items_center()
         .gap(theme.space.sm)
         .overflow_hidden()
-        .child(back.harness_target("titlebar.back"))
+        .child(
+            back.harness_target("titlebar.back")
+                .harness_target("workspace.back"),
+        )
         .when(!place.repo.is_empty(), |el| {
             el.child(separator())
                 .child(Text::ui(place.repo.clone()).muted().flex_none())
         })
         .child(separator())
-        .child(
-            div()
-                .flex()
-                .min_w_0()
-                .items_center()
-                .gap(theme.space.xs)
-                .child(
-                    Icon::GitBranch
-                        .el()
-                        .size(IconSize::Small)
-                        .color(theme.colors.text_secondary),
-                )
-                .child(Text::ui_strong(place.worktree.clone()).ellipsize()),
+        .child(worktree_switcher(place.worktree.clone(), state, bridge))
+        .children(
+            place
+                .waking
+                .then(|| Text::ui("waking\u{2026}").muted().flex_none()),
         )
+        .children(place.divergence.clone().map(chip))
+        .children(place.changed.clone().map(chip))
+        .children(place.host.clone().map(|(host, reachable)| {
+            let (icon, tone) = if reachable {
+                (Icon::Cloud, Tone::Secondary)
+            } else {
+                (Icon::CloudOff, Tone::Warning)
+            };
+            Chip::labeled(icon, host).tone(tone).filled(true)
+        }))
+        .children(place.pr.clone().map(|pr| {
+            let url = pr.url.clone();
+            StatusButton::new("titlebar-pr", pr.label)
+                .mark(StatusMark::Icon(pr.state.icon()))
+                .tone(pr.state.tone())
+                .tooltip("Open the pull request on GitHub")
+                .on_click(move |_, _, cx| cx.open_url(&url))
+                .harness_target("workspace.pr")
+        }))
+        .into_any_element()
+}
+
+/// `⎇ agent ⌄`: every session, most recently used first with its state, as `⌃S W` lists them;
+/// then *Last session* (`⌃S w`) and *All sessions…* (`⌃S W`).
+fn worktree_switcher(label: SharedString, state: &Entity<AppState>, bridge: &Bridge) -> AnyElement {
+    let (state, bridge) = (state.clone(), bridge.clone());
+    PopoverMenu::new("titlebar-worktree")
+        .trigger_with(move |open, _, _| {
+            SwitcherButton::new("titlebar-worktree-trigger", label.clone())
+                .icon(Icon::GitBranch)
+                .tooltip("Switch worktree")
+                .selected(open)
+                .harness_target("workspace.switcher")
+        })
+        .menu(move |mut menu, _, cx| {
+            let keys = workspace_keys();
+            // Built when the menu opens, never per frame: the rows are the palette's own.
+            let app = state.read(cx);
+            let current_worktree = app.active_worktree().cloned();
+            let current_session = app.active_session().map(|session| session.id.clone());
+            let rows = dialogs::session_rows(app);
+            for row in rows {
+                let current = match &row.run {
+                    dialogs::PaletteRun::OpenWorktree(id) => current_worktree.as_ref() == Some(id),
+                    dialogs::PaletteRun::OpenSession { session, .. } => {
+                        current_session.as_ref() == Some(session)
+                    }
+                    _ => false,
+                };
+                let mut item = MenuItem::new(row.label.clone())
+                    .icon(Icon::GitBranch)
+                    .checked(current);
+                if let Some(detail) = row.detail.clone() {
+                    item = item.detail(detail);
+                }
+                let (state, bridge) = (state.clone(), bridge.clone());
+                let run = row.run.clone();
+                menu = menu.item(item.on_select(move |_, cx| {
+                    if current {
+                        return;
+                    }
+                    match &run {
+                        dialogs::PaletteRun::OpenWorktree(id) => {
+                            dialogs::open_worktree(id.clone(), &state, &bridge, cx);
+                        }
+                        dialogs::PaletteRun::OpenSession { agent, .. } => {
+                            dialogs::open_agent_session(*agent, &state, &bridge, cx);
+                        }
+                        _ => {}
+                    }
+                }));
+            }
+            let mut last = MenuItem::new("Last session").action(Box::new(prefix::LastSession));
+            if let Some(kbd) = keys.last_session.clone() {
+                last = last.kbd(kbd);
+            }
+            let mut all = MenuItem::new("All sessions\u{2026}")
+                .icon(Icon::Search)
+                .action(Box::new(prefix::SessionSwitcher));
+            if let Some(kbd) = keys.session_switcher.clone() {
+                all = all.kbd(kbd);
+            }
+            menu.separator().item(last).item(all)
+        })
         .into_any_element()
 }
 

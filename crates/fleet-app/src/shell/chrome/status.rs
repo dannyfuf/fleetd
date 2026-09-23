@@ -4,10 +4,10 @@
 use fleet_ui_kit::{Button, ButtonSize, ButtonStyle, DaemonState, HarnessTargetExt, StatusBar};
 use gpui::{AnyElement, App, IntoElement, SharedString};
 
-use super::keys::workspace_keys;
 use crate::{
     actions::{fleet, workspace},
     dialogs::Dialogs,
+    presentation::{terminal_label, workspace_keys},
     screens::hub::effective_context,
     shell::daemon::{dot_label, dot_state},
     state::{AppState, HubTab, Mode, Overlay, RepoScope, Screen, StickyError, breadcrumb},
@@ -53,10 +53,16 @@ impl StatusModel {
             Screen::Workspace { .. } if state.active_agent_thread().is_some() => Place::AgentThread,
             Screen::Workspace { .. } => Place::Terminal,
         };
+        // Over a terminal the bar says which process the keys go to, how big it is, and that
+        // closing the window does not end it (§3.6); everywhere else, where you are.
+        let breadcrumb = match place {
+            Place::Terminal => terminal_line(state).unwrap_or_else(|| breadcrumb_text(state)),
+            Place::Hub | Place::AgentThread => breadcrumb_text(state),
+        };
         Self {
             daemon: dot_state(&state.daemon),
             daemon_word: dot_label(&state.daemon),
-            breadcrumb: SharedString::from(breadcrumb_text(state)),
+            breadcrumb: SharedString::from(breadcrumb),
             slot: job_ticker::status_slot(jobs, state.sticky_error.as_ref()),
             screen: Some(state.screen.clone()),
             place,
@@ -114,6 +120,23 @@ pub(super) fn render(model: &StatusModel, _cx: &App) -> AnyElement {
 fn error_slot(error: &StickyError, screen: Option<&Screen>) -> AnyElement {
     let screen = screen.cloned().unwrap_or_else(Screen::hub);
     sticky_error::render(error, &screen)
+}
+
+/// `zsh · 164×42 · kept alive by fleetd`: the active PTY, its size, and who owns it. A
+/// Fleet-drawn tab has no process to describe, so it keeps the breadcrumb.
+fn terminal_line(state: &AppState) -> Option<String> {
+    let terminal = state.active_terminal_record()?;
+    if terminal.is_native() {
+        return None;
+    }
+    let name = terminal_label(terminal, state.renamed_terminals.contains(&terminal.id));
+    Some(match state.grids.get(&terminal.id) {
+        Some(grid) => format!(
+            "{name} \u{b7} {}\u{d7}{} \u{b7} kept alive by fleetd",
+            grid.cols, grid.rows
+        ),
+        None => format!("{name} \u{b7} kept alive by fleetd"),
+    })
 }
 
 /// The status-bar breadcrumb `context › repo › row` (§2.2).

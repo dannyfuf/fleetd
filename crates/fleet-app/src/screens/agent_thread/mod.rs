@@ -531,7 +531,9 @@ impl AgentThreadView {
         self.scrolling
     }
 
-    /// Whether an interrupt is in flight, which is what holds `stopping…` on the tab.
+    /// Whether an interrupt is in flight: the Stop control holds `stopping…` until the daemon
+    /// reports the turn over.
+    #[cfg(test)]
     #[must_use]
     pub(crate) const fn is_stopping(&self) -> bool {
         self.stopping

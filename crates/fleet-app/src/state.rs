@@ -94,6 +94,21 @@ pub struct JobsPanelMirror {
     pub filter: JobFilter,
 }
 
+/// What one inspection of the Workspace's worktree says about its git state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceGit {
+    /// The worktree inspected; the facts are dropped when the Workspace shows another.
+    pub worktree: WorktreeId,
+    /// Commits ahead of the upstream, when divergence could be computed.
+    pub ahead: Option<u64>,
+    /// Commits behind the upstream, when divergence could be computed.
+    pub behind: Option<u64>,
+    /// Whether tracked or untracked changes exist.
+    pub dirty: bool,
+    /// How many porcelain entries are dirty, when status collection succeeded.
+    pub dirty_files: Option<u64>,
+}
+
 /// The whole client-side state of the app.
 #[derive(Debug)]
 pub struct AppState {
@@ -223,6 +238,9 @@ pub struct AppState {
     pub last_trash_entry: Option<String>,
     /// Pull-request badges shared by Hub and Workspace, keyed by repository and head branch.
     pub pr_badges: HashMap<(RepoId, String), (u64, PrBadgeState)>,
+    /// The git facts of the worktree the Workspace shows, from its last inspection: the title
+    /// bar's `↑2 ↓0` and `3 files changed` chips (UX-SPEC §3.6).
+    pub workspace_git: Option<WorkspaceGit>,
     /// `config.jobs.warnBeforeQuit`, mirrored so `ctrl-q` can decide without a round trip.
     pub warn_before_quit: bool,
     /// How many PRs the `review` tab holds. The PR screen owns the fetch, the context bar
@@ -313,6 +331,7 @@ impl AppState {
             pending_action: None,
             last_trash_entry: None,
             pr_badges: HashMap::new(),
+            workspace_git: None,
             warn_before_quit: true,
             review_pr_count: 0,
             update_version: None,

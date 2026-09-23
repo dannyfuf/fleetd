@@ -220,7 +220,7 @@ alone preserves them.
 | `]` | paste clipboard (bracketed when the app requests it) |
 | `a` / `A` | new native Claude / Codex agent thread in this worktree |
 | `F` | the terminal fallback: the floating agent PTY popup (§10) |
-| `z` | zoom: hide the session header and terminal tab strip; watch pane stays visible (toggle) |
+| `z` | zoom: hide the terminal tab strip; watch pane stays visible (toggle) |
 | `v` | hide/show the cooperative/discovered subagent watch pane; no watches → `no subagent watches` |
 | `V` | dismiss the selected exited watch; if running, hide pane and show `watch still running; pane hidden` |
 | `N` | next watch in the visible session's start order, wrapping; show the pane if hidden |
