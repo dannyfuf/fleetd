@@ -82,7 +82,7 @@ enum Category {
 }
 
 impl Category {
-    /// The token this category's accent bar uses. The mapping is domain knowledge, which is
+    /// The token this category's dot uses. The mapping is domain knowledge, which is
     /// why `KanbanColumn::accent` takes a resolved color and not a name.
     fn accent(self, theme: &Theme) -> Hsla {
         match self {
@@ -177,7 +177,8 @@ struct DemoColumn {
 
 impl DemoColumn {
     fn new(title: &str, category: Category, cards: Vec<DemoCard>) -> Self {
-        let list = KanbanColumn::list_state();
+        // Every live column ends in its `Add card` row, the list's last item.
+        let list = KanbanColumn::list_state_with_footer();
         list.splice(0..0, cards.len());
         Self {
             title: title.to_string().into(),
@@ -536,12 +537,27 @@ fn live_board(gallery: &BoardGallery, t: &Theme, cx: &mut Context<BoardGallery>)
                 column.title.clone(),
             )
             .count(column.cards.len())
-            // One automated column, so the ⚡ can be read against its plain neighbours: a card
-            // moved into "In progress" starts a run.
-            .action(index == 1)
+            // One automated column, so its pill can be read against its plain neighbours: a
+            // card moved into "In progress" starts a run.
+            .when(index == 1, |column| {
+                column
+                    .automation("On enter: codex implements")
+                    .on_automation_click(|_, _, _| {})
+            })
             .accent(Some(column.category.accent(t)))
             .focused(focused)
-            .empty_hint("No cards here.")
+            .empty_hint("No cards")
+            .add_button(
+                IconButton::new(("column-add", index), Icon::Plus, "Add a card")
+                    .size(ButtonSize::Compact),
+            )
+            .footer(
+                Button::new(("column-add-row", index), "Add card")
+                    .icon(Icon::Plus)
+                    .style(ButtonStyle::Ghost)
+                    .size(ButtonSize::Compact)
+                    .full_width(),
+            )
             .rows(
                 column.list.clone(),
                 cards.len(),
@@ -566,6 +582,7 @@ fn live_board(gallery: &BoardGallery, t: &Theme, cx: &mut Context<BoardGallery>)
                     .conflict(card.conflict)
                     .selected(selected)
                     .focused(selected)
+                    .menu(demo_menu(("card-more", row), &card.key))
                     .on_click(move |_event: &MouseDownEvent, window, cx| {
                         weak.update(cx, |this, cx| {
                             this.column = index;
@@ -585,6 +602,29 @@ fn live_board(gallery: &BoardGallery, t: &Theme, cx: &mut Context<BoardGallery>)
     KanbanBoard::new("board")
         .scroll_handle(gallery.board_scroll.clone())
         .columns(columns)
+        .into_any_element()
+}
+
+/// A tile's `⋯`: the real board fills it with every card action, each with its key.
+fn demo_menu(id: (&'static str, usize), key: &SharedString) -> AnyElement {
+    let trigger = SharedString::from(format!("{key}-more"));
+    PopoverMenu::new(SharedString::from(format!("{}-{}-{key}", id.0, id.1)))
+        .anchor(MenuAnchor::BottomRight)
+        .trigger_with(move |open, _, _| {
+            IconButton::new(trigger, Icon::Ellipsis, "Card actions")
+                .size(ButtonSize::Compact)
+                .selected(open)
+        })
+        .menu(|menu, _, _| {
+            menu.item(MenuItem::new("Status").on_select(|_, _| {}))
+                .item(MenuItem::new("Priority").on_select(|_, _| {}))
+                .separator()
+                .item(
+                    MenuItem::new("Delete")
+                        .destructive(true)
+                        .on_select(|_, _| {}),
+                )
+        })
         .into_any_element()
 }
 
@@ -799,6 +839,68 @@ fn card_tile_section(cx: &mut App) -> AnyElement {
         })
         .collect();
 
+    let worded: Vec<AnyElement> = [
+        (RunMark::Working, "working 4m \u{b7} codex"),
+        (RunMark::NeedsYou, "needs you"),
+        (RunMark::Succeeded, "review passed"),
+        (RunMark::Stalled, "waiting 2m"),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, (mark, words))| {
+        panel(
+            TILE_W,
+            CardTile::new(
+                SharedString::from(format!("tile-worded-{index}")),
+                SharedString::from(format!("FLT-7{index}")),
+                "A run pill in words, with the linked branch",
+            )
+            .priority(PriorityLevel::Medium)
+            .run(mark)
+            .run_label(words)
+            .branch(Some("flt-7-git-origins".into()))
+            .when(mark == RunMark::Succeeded, |tile| {
+                tile.pr(Some((14, PrBadgeState::Review)))
+            })
+            .when(mark == RunMark::NeedsYou, |tile| {
+                tile.action(Button::new(("tile-answer", index), "Answer").size(ButtonSize::Compact))
+            })
+            .assignee(Some("Danny Fuentes".into())),
+        )
+    })
+    .collect();
+    let blocked_by = panel(
+        TILE_W,
+        CardTile::new("tile-blocked-by", "FLT-4", "Wire the fake acli")
+            .priority(PriorityLevel::High)
+            .blocked(1, BlockedTone::Muted)
+            .blocked_label("blocked by FLT-5")
+            .labels(vec![("board".into(), Some("info".into()))])
+            .estimate(Some(5)),
+    );
+    let with_menu = panel(
+        TILE_W,
+        CardTile::new(
+            "tile-menu",
+            "FLT-45",
+            "Selected: the ⋯ stays, beside the pill",
+        )
+        .selected(true)
+        .run(RunMark::Working)
+        .run_label("working 4m \u{b7} codex")
+        .menu(demo_menu(("tile-menu", 0), &"FLT-45".into())),
+    );
+    let hover_menu = panel(
+        TILE_W,
+        CardTile::new(
+            "tile-hover",
+            "FLT-46",
+            "Hover me: the tile lifts and its ⋯ appears",
+        )
+        .menu(demo_menu(("tile-hover", 0), &"FLT-46".into()))
+        .on_click(|_, _, _| {}),
+    );
+
     let run_wins = panel(
         TILE_W,
         CardTile::new(
@@ -813,6 +915,12 @@ fn card_tile_section(cx: &mut App) -> AnyElement {
     let children = vec![
         LAYOUT.labeled("bare · every slot", &t, row_of(&t, vec![bare, full])),
         LAYOUT.labeled("run marks", &t, row_of(&t, runs)),
+        LAYOUT.labeled("run pills in words", &t, row_of(&t, worded)),
+        LAYOUT.labeled(
+            "blocked by · ⋯ selected · hover",
+            &t,
+            row_of(&t, vec![blocked_by, with_menu, hover_menu]),
+        ),
         LAYOUT.labeled("blocked · run wins", &t, {
             let mut tiles = blocked;
             tiles.push(run_wins);

@@ -5,9 +5,10 @@
 //! One tone, one glyph, one line of text, and an optional muted detail line under it. It is
 //! information, not an alarm: a [`super::Banner`] spans a screen and says something is wrong
 //! now, and a [`super::Dialog`]'s footer error says the last action failed. A callout says
-//! what *will* happen.
+//! what *will* happen — or, on a page, what is wrong with it and the buttons that fix it
+//! ([`Callout::actions`]: a board's sync error with `Board settings`).
 
-use gpui::{App, SharedString, Window, div, prelude::*};
+use gpui::{AnyElement, App, SharedString, Window, div, prelude::*};
 
 use crate::{
     icons::{Icon, IconSize},
@@ -23,6 +24,7 @@ pub struct Callout {
     icon: Icon,
     text: SharedString,
     detail: Option<SharedString>,
+    actions: Option<AnyElement>,
 }
 
 impl Callout {
@@ -33,12 +35,19 @@ impl Callout {
             icon,
             text: text.into(),
             detail: None,
+            actions: None,
         }
     }
 
     /// A muted second line: what else happens (`Hooks: pnpm install (run in background)`).
     pub fn detail(mut self, detail: impl Into<SharedString>) -> Self {
         self.detail = Some(detail.into());
+        self
+    }
+
+    /// Buttons at the right end, vertically centred: what answers the callout (`Reload`).
+    pub fn actions(mut self, actions: impl IntoElement) -> Self {
+        self.actions = Some(actions.into_any_element());
         self
     }
 }
@@ -73,6 +82,10 @@ impl RenderOnce for Callout {
                     .min_w_0()
                     .child(Text::ui(self.text))
                     .children(self.detail.map(|detail| Text::ui(detail).muted())),
+            )
+            .children(
+                self.actions
+                    .map(|actions| div().flex().flex_none().items_center().child(actions)),
             )
     }
 }

@@ -177,7 +177,61 @@ pub(crate) fn new_card(state: &Entity<AppState>, _bridge: &Bridge, cx: &mut App)
         needs(state, "No board loaded yet", cx);
         return;
     }
+    // `c` lands the card in the board's default column; only a column's `+` names one.
+    dialogs::with_host(state, cx, |host| host.card_create_in = None);
     open_dialog(state, Dialogs::CardCreate, cx);
+}
+
+/// A column's `+` or `Add card` — New card with that column's status already chosen.
+///
+/// The same guards `c` has; the column is focused first, so the card the dialog makes lands
+/// where the pointer asked and the cursor is already there to meet it.
+pub(super) fn new_card_in(state: &Entity<AppState>, column: usize, cx: &mut App) {
+    if refuses(state, cx) {
+        return;
+    }
+    let Some(status) = state
+        .read(cx)
+        .board()
+        .and_then(|view| view.board.statuses.get(column))
+        .map(|status| status.id.clone())
+    else {
+        needs(state, "No board loaded yet", cx);
+        return;
+    };
+    state.update(cx, |app, cx| {
+        app.board.focus.column = column;
+        app.clamp_board_focus();
+        cx.notify();
+    });
+    dialogs::with_host(state, cx, |host| host.card_create_in = Some(status));
+    open_dialog(state, Dialogs::CardCreate, cx);
+}
+
+/// A column's automation pill — board settings, opened drilled into that column.
+///
+/// Through the same guards `,` has; the column is only handed to the seed once the dialog is
+/// actually opening, so a refused `,` leaves nothing behind for the next one.
+pub(super) fn column_settings(
+    state: &Entity<AppState>,
+    bridge: &Bridge,
+    column: usize,
+    cx: &mut App,
+) {
+    state.update(cx, |app, cx| {
+        app.board.focus.column = column;
+        app.clamp_board_focus();
+        cx.notify();
+    });
+    if refuses(state, cx) {
+        return;
+    }
+    if state.read(cx).board().is_none() {
+        needs(state, "No board loaded yet", cx);
+        return;
+    }
+    dialogs::with_host(state, cx, |host| host.board_settings_column = Some(column));
+    settings(state, bridge, cx);
 }
 
 /// `s` — status picker.

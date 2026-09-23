@@ -43,6 +43,8 @@ pub(crate) struct CardCreateState {
     pub(super) field: Field,
     /// The exact message from a refused create.
     pub(super) error: Option<String>,
+    /// The column the card lands in, when a column's `+` chose it; else the board's default.
+    pub(super) status_id: Option<fleet_core::ids::StatusId>,
 }
 
 impl CardCreateState {
@@ -132,6 +134,7 @@ pub(crate) fn seed(state: &Entity<AppState>, cx: &mut App) {
         host.card_create = CardCreateState {
             generation: host.card_create.generation.wrapping_add(1),
             board_id,
+            status_id: host.card_create_in.take(),
             ..Default::default()
         };
         host.card_create_title = Some(title);
@@ -163,7 +166,20 @@ pub(crate) fn render(
     // The marker mirrors focus (`claim_field`), so it is the one answer to "which field owns
     // the keyboard" — the footer and the shell's reconciliation read the same value.
     let field = draft.field;
-    let board_name = state.read(cx).board().map(|view| view.board.name.clone());
+    // The column a `+` chose is part of what the dialog is about to do, so it is named beside
+    // the board: `Fleet · In progress`.
+    let board_name = state.read(cx).board().map(|view| {
+        let column = draft.status_id.as_ref().and_then(|status| {
+            view.board
+                .statuses
+                .iter()
+                .find(|column| &column.id == status)
+        });
+        match column {
+            Some(column) => format!("{} \u{00b7} {}", view.board.name, column.name),
+            None => view.board.name.clone(),
+        }
+    });
 
     let body = div()
         .flex()
@@ -301,6 +317,7 @@ fn submit(open_after: bool, state: &Entity<AppState>, bridge: &Bridge, cx: &mut 
         let fields = CardDraft {
             title: title.trim().to_owned(),
             description,
+            status_id: draft.status_id.clone(),
             ..CardDraft::default()
         };
         Some((draft.board_id.clone()?, fields, draft.generation))

@@ -407,12 +407,12 @@ impl AppState {
         }
     }
 
-    /// The pane header's two composed counts, as one row, or `None` while it says neither.
+    /// The board header's two counts, as one row, or `None` while it says neither.
     ///
-    /// Word for word `views::board_screen::model::HeaderFacts`'s `working_label` and
-    /// `needs_you_label` — the harness reads the sentence the user reads — joined with the
-    /// separator the board's own chrome uses, because a snapshot row is one string where the
-    /// header is two labels in a gap. A board with nothing running and nobody waiting carries
+    /// The same two numbers `views::board_screen::model::HeaderFacts` states, in the compact
+    /// `1/1 working · 1 needs you` form the scenarios were written against: the header now
+    /// spells the first `1 of 1 run working`, and a scenario reads the counts, not the prose
+    /// (`docs/TESTING-HARNESS.md` §3). A board with nothing running and nobody waiting carries
     /// no counts at all, so the list is absent rather than a row saying `0/1 working`.
     fn board_summary_row(&self, view: &BoardView) -> Option<RowSnapshot> {
         let marks = &self.board.marks;

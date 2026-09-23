@@ -25,6 +25,8 @@ pub struct PageHeader {
     title: SharedString,
     subtitle: Option<SharedString>,
     stale: Option<SharedString>,
+    badge: Option<AnyElement>,
+    facts: Vec<AnyElement>,
     actions: Vec<AnyElement>,
 }
 
@@ -35,6 +37,8 @@ impl PageHeader {
             title: title.into(),
             subtitle: None,
             stale: None,
+            badge: None,
+            facts: Vec::new(),
             actions: Vec::new(),
         }
     }
@@ -51,6 +55,19 @@ impl PageHeader {
         self
     }
 
+    /// A small element after the title on its line: a board's prefix `Badge`.
+    pub fn badge(mut self, badge: impl IntoElement) -> Self {
+        self.badge = Some(badge.into_any_element());
+        self
+    }
+
+    /// Append an element to the summary line, after the subtitle: a clickable `1 needs you`,
+    /// a counter chip, a spinner. The words are still the caller's; this is where they sit.
+    pub fn fact(mut self, fact: impl IntoElement) -> Self {
+        self.facts.push(fact.into_any_element());
+        self
+    }
+
     /// Append a toolbar control, left to right; the toolbar is right-aligned.
     pub fn action(mut self, action: impl IntoElement) -> Self {
         self.actions.push(action.into_any_element());
@@ -61,22 +78,24 @@ impl PageHeader {
 impl RenderOnce for PageHeader {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
-        let summary = (self.subtitle.is_some() || self.stale.is_some()).then(|| {
-            div()
-                .flex()
-                .items_center()
-                .gap(theme.space.xs)
-                .min_w_0()
-                .children(
-                    self.subtitle
-                        .map(|subtitle| Text::caption(subtitle).muted().ellipsize()),
-                )
-                .children(self.stale.map(|age| {
-                    Text::caption(format!("\u{b7} stale \u{b7} {age}"))
-                        .tone(Tone::Warning)
-                        .flex_none()
-                }))
-        });
+        let summary = (self.subtitle.is_some() || self.stale.is_some() || !self.facts.is_empty())
+            .then(|| {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(theme.space.xs)
+                    .min_w_0()
+                    .children(
+                        self.subtitle
+                            .map(|subtitle| Text::caption(subtitle).muted().ellipsize()),
+                    )
+                    .children(self.stale.map(|age| {
+                        Text::caption(format!("\u{b7} stale \u{b7} {age}"))
+                            .tone(Tone::Warning)
+                            .flex_none()
+                    }))
+                    .children(self.facts)
+            });
         div()
             .flex()
             .items_end()
@@ -89,7 +108,15 @@ impl RenderOnce for PageHeader {
                     .flex_1()
                     .min_w_0()
                     .gap(theme.space.xxs)
-                    .child(Text::page_title(self.title).ellipsize())
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(theme.space.sm)
+                            .min_w_0()
+                            .child(Text::page_title(self.title).ellipsize())
+                            .children(self.badge.map(|badge| div().flex_none().child(badge))),
+                    )
                     .children(summary),
             )
             .child(

@@ -43,6 +43,15 @@ pub(crate) fn seed(state: &Entity<AppState>, cx: &mut App) {
             generation,
             ..draft
         };
+        // A column's automation pill opens the dialog on that column, drilled in.
+        if let Some(column) = host.board_settings_column.take()
+            && column < host.board_settings.columns.len()
+        {
+            host.board_settings.section = BoardSection::Columns;
+            host.board_settings.opened_column = Some(column);
+            host.board_settings.row = 0;
+            host.board_settings.prepare();
+        }
     });
     materialize_input(state, None, None, cx);
 }

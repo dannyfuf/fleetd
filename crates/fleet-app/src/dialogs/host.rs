@@ -32,6 +32,14 @@ pub(crate) struct DialogHost {
     pub card_picker: card_picker::CardPickerState,
     /// New card draft (BOARD §8).
     pub card_create: card_create::CardCreateState,
+    /// The column a column's `+` asked the next New card to land in, taken by its seed.
+    ///
+    /// Outside the draft on purpose: the dialog transition clears every draft before it seeds
+    /// the new one, and this is the one fact that has to survive that to reach the seed.
+    pub card_create_in: Option<fleet_core::ids::StatusId>,
+    /// The column the next Board settings opens drilled into, taken by its seed: a column's
+    /// automation pill. Outside the draft for the same reason as [`Self::card_create_in`].
+    pub board_settings_column: Option<usize>,
     /// Live title editor for the open new-card dialog.
     pub(super) card_create_title: Option<Entity<TextInput>>,
     /// Live description editor for the open new-card dialog.

@@ -461,6 +461,9 @@ pub struct Elevation {
     pub dialog: ShadowToken,
     /// Level 4: menus, popovers and tooltips, which float over everything including a dialog.
     pub popover: ShadowToken,
+    /// The hover lift of a level-1 tile a pointer can pick up (a board card): a short, soft
+    /// shadow under a `border_strong` hairline, never a surface of its own.
+    pub lift: ShadowToken,
 }
 
 impl Elevation {
@@ -485,6 +488,12 @@ impl Elevation {
                 spread: px(0.0),
                 color: ca(0x0000008C),
             },
+            lift: ShadowToken {
+                y: px(4.0),
+                blur: px(12.0),
+                spread: px(0.0),
+                color: ca(0x00000059),
+            },
         }
     }
 
@@ -508,6 +517,12 @@ impl Elevation {
                 blur: px(64.0),
                 spread: px(0.0),
                 color: ca(0x00000033),
+            },
+            lift: ShadowToken {
+                y: px(4.0),
+                blur: px(12.0),
+                spread: px(0.0),
+                color: ca(0x0000001F),
             },
         }
     }
@@ -654,6 +669,10 @@ pub struct Metrics {
     pub strip_h: Pixels,
     /// 22 px chip pill.
     pub chip_h: Pixels,
+    /// 18 px state pill on a board card tile (`working 4m`, `needs you`, `blocked by FLT-5`).
+    pub tile_chip_h: Pixels,
+    /// 20 px round initials avatar (a card's assignee).
+    pub avatar_size: Pixels,
     /// 240 px repos rail (drag range 200-320).
     pub rail_w: Pixels,
     /// 232 px sidebar (repos and agents).
@@ -781,6 +800,8 @@ impl Default for Metrics {
             banner_h: px(28.0),
             strip_h: px(22.0),
             chip_h: px(22.0),
+            tile_chip_h: px(18.0),
+            avatar_size: px(20.0),
             rail_w: px(240.0),
             sidebar_w: px(232.0),
             detail_w: px(344.0),

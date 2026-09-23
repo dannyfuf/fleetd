@@ -242,6 +242,11 @@ Five levels, and only three of them have a shadow.
 `theme.sheet_shadow()`, `theme.dialog_shadow()` and `theme.popover_shadow()` return the
 `Vec<BoxShadow>`.
 
+One more shadow is not a level: `lift`, `0 4px 12px rgba(0,0,0,.35)` dark / `.12` light, returned
+by `theme.lift_shadow()`. It is the **hover** state of a level-1 tile a pointer can pick up — a
+board `CardTile` — drawn together with a `border_strong` hairline, and it goes away with the
+pointer. Nothing rests at it.
+
 **The scrim does not blur.** The design blurs the window behind a dialog or sheet, but gpui 1.18.1
 has no in-window backdrop filter (its only blur is the OS window-background material). The
 `overlay` scrim is instead flat and darker than it would be with a blur: `rgba(5,6,8,.55)` in
@@ -277,7 +282,7 @@ list below is the complete inventory, in px unless marked `ch`; a unit test in
 | Window chrome | `title_bar_h 44` · `status_bar_h 28` · `traffic_light_inset 84` · `command_field_w 340` · `filter_field_w 220` · `monogram_size 18` · `mode_word_w 84` · `banner_h 28` · `strip_h 22` |
 | Layout columns | `sidebar_w 232` · `rail_w 240` · `detail_w 344` · `detail_overlay_w 320` · `sheet_w 440` · `sheet_expanded_w 640` · `sheet_w_detail 736` |
 | Rows and headers | `row_h 30` · `row_h_comfortable 44` · `pane_header_h 30` · `section_header_h 20` · `palette_row_h 34` · `palette_tile 22` · `job_row_h 44` · `progress_bar_h 4` |
-| Controls | `button_h 30` · `button_h_compact 26` · `kbd_h 18` · `kbd_h_small 16` · `chip_h 22` · `text_field_h 36` · `field_status_h 18` · `number_field_w 96` · `segment_h 24` · `switch_w 34` · `switch_h 20` · `checkbox_size 16` |
+| Controls | `button_h 30` · `button_h_compact 26` · `kbd_h 18` · `kbd_h_small 16` · `chip_h 22` · `tile_chip_h 18` · `avatar_size 20` · `text_field_h 36` · `field_status_h 18` · `number_field_w 96` · `segment_h 24` · `switch_w 34` · `switch_h 20` · `checkbox_size 16` |
 | Dialogs and floating layers | `dialog_w 560` · `confirm_compact_w 480` · `dialog_header_h 44` · `dialog_footer_h 44` · `palette_w 640` · `palette_top 120` · `prefix_menu_w 900` · `palette_input_h 44` · `overlay_help_w 640` · `toast_w 320` · `toast_inset 12` · `scroll_pill_w 176` · `menu_min_w 240` · `alert_tile 34` |
 | Lines and marks | `hairline 1` · `focus_ring_w 2` · `scroll_thumb_w 3` · `dot_size 8` · `dot_size_small 6` |
 | Terminal | `cell_w 7.5` · `cell_h 18` · `terminal_tab_min_w 84` · `terminal_tab_max_w 200` · `tab_strip_h 40` · `terminal_tab_h 34` · `tab_close_size 18` |
@@ -636,9 +641,12 @@ the header, or the row shifts by a pixel and the illusion of "the list did not m
 #### `PageHeader`
 **Purpose.** The top of a Hub page: an H1 in `page_title`, one summary line under it, and the
 page's toolbar right-aligned to the title's baseline.
-**API.** `PageHeader::new(title).subtitle(text).stale(age).action(impl IntoElement)`; `action`
-appends.
-**Variants.** normal · stale (`· stale · 2m`, amber, after the subtitle).
+**API.** `PageHeader::new(title).badge(impl IntoElement).subtitle(text).stale(age)
+.fact(impl IntoElement).action(impl IntoElement)`; `fact` and `action` append. The badge sits after
+the title on its line (a board's prefix); facts follow the subtitle on the summary line (the
+board's clickable `1 needs you`, its dirty and conflict counters, a spinner).
+**Variants.** normal · stale (`· stale · 2m`, amber, after the subtitle) · with badge and facts
+(the board header).
 **Usage rule.** The subtitle is a sentence the view model built in its update path
 (`4 across 2 repositories · 1 needs attention`); the header never counts anything. The toolbar
 holds the page's own controls — a `FilterField`, secondary `Button`s, at most one primary
@@ -1802,52 +1810,74 @@ information), so the ladder still reads in grayscale. `None` is dashed and hollo
 
 #### `CardTile`
 **Purpose.** One card on the board — the list row of the kanban world.
-**Anatomy.** a key **line** — key (muted data face), a flex spacer, and at its right end the run
-mark or the blocked count `⊘ n`, never both · title (`UiStrong`, wrapped to `CARD_TITLE_LINES` = 2
-with an ellipsis on the last line) ·
-a zero-suppressed meta row: priority glyph · label chips · assignee initials chip · estimate
-(`n pt`) · due date behind a `clock` glyph · `git-branch` glyph when a worktree is linked ·
-amber dirty dot · red conflict dot · `show_on_card` extras.
+**Anatomy.** A `surface_raised` card, `radii.card`, `border` hairline. Three lines:
+a **key line** — priority glyph · key (muted data face) · a flex spacer · at its right end one
+`tile_chip_h` **state pill**, the run (spinner, amber dot or check, then its words in `Caption`
+on the tone's fill) or else what blocks the card, never both · the **title** (`UiStrong`, wrapped
+to `CARD_TITLE_LINES` = 2 with an ellipsis on the last line) · a zero-suppressed **meta row**:
+label chips · estimate (`n pt`) · due date behind a `clock` glyph · the linked branch (`git-branch`
+glyph + mono name) or a bare `git-branch` glyph · its `PrBadge` · amber dirty dot · red conflict
+dot · `show_on_card` extras · then, at the right end, the state's **action** slot (`Answer`) and
+the assignee's round `avatar_size` initials. A **menu** slot (the `⋯` trigger) floats over the
+key line's right end.
 **API.** `CardTile::new(id, key, title).priority(PriorityLevel)
 .labels(Vec<(SharedString, Option<SharedString>)>).assignee(..).estimate(..).due(..)
-.worktree(bool).dirty(bool).conflict(bool).selected(bool).focused(bool).extras(..)
-.on_click(..).run(RunMark).blocked(u32, BlockedTone)`; helpers `label_tone(Option<&str>) -> Tone`
-and `initials(&str) -> String` (`ASSIGNEE_INITIALS` = 2); `RunMark::{Pending, Stalled, Working,
-NeedsYou, Succeeded}` and `BlockedTone::{Muted, Warning}`, both with `ALL` for the gallery.
-**States.** default · hover (`row_hover`) · selected (`row_selected`) · focused (2 px cursor
-bar) · selected + focused.
+.worktree(bool).branch(Option<SharedString>).pr(Option<(u64, PrBadgeState)>).dirty(bool)
+.conflict(bool).selected(bool).focused(bool).extras(..).run(RunMark).run_label(..)
+.blocked(u32, BlockedTone).blocked_label(..).action(impl IntoElement).menu(impl IntoElement)
+.on_click(..).on_double_click(..).on_secondary_click(..)`; helpers `label_tone(Option<&str>) ->
+Tone` and `initials(&str) -> String` (`ASSIGNEE_INITIALS` = 2); `RunMark::{Pending, Stalled,
+Working, NeedsYou, Succeeded}` and `BlockedTone::{Muted, Warning}`, both with `ALL` for the
+gallery.
+**States.** default · hover (a `border_strong` hairline and `theme.lift_shadow()`, and the `⋯`
+appears) · selected (`row_selected`; the `⋯` stays, and the key line makes room for it so it
+never covers the state pill) · focused (2 px cursor bar) · selected +
+focused.
+**Pointer** (UX-SPEC §5.1). A press selects, a double-click's second press opens, a right click
+calls `on_secondary_click` — the caller selects there and wraps the tile in a `ContextMenu`. The
+`⋯` is that same menu's visible twin, so no card action is right-click-only.
 **Usage rule.** Selection and focus are the **same two tokens `ListView`'s cursor row uses**, so
 a board and a list say "where am I" identically. A label's color arrives as a **token name**
 (`"accent"`, `"danger"`), never as a hex string: a remote backend cannot smuggle a color into a
-Fleet surface, and an unknown name falls back to the neutral chip. Everything below the title
-is zero-suppressed, so a bare card costs exactly a key and a title. `run` wins over `blocked` — a
-card that is already running has nothing left to wait for — and `blocked(0, _)` draws nothing, as
-every other zero does. Both are **kit vocabularies, not domain types** (§5.2): the app folds a
-run's state, its child's state and how long it has waited into one `RunMark` and passes that.
+Fleet surface, and an unknown name falls back to the neutral chip. Everything but the key line
+and the title is zero-suppressed, so a bare card costs exactly a key and a title. `run` wins over
+`blocked` — a card that is already running has nothing left to wait for — and `blocked(0, _)`
+draws nothing, as every other zero does. Both marks are **kit vocabularies, not domain types**
+(§5.2), and every word on the tile (`working 4m · codex`, `blocked by FLT-5`, the branch) arrives
+as a string: the app folds the run, the blockers and the worktree; the tile only draws them.
 
 #### `KanbanColumn` / `KanbanBoard`
 **Purpose.** The column and the horizontal scroller that holds the columns.
-**Anatomy.** optional 2 px category accent bar · 30 px header (status name in the `Label` role,
-count `Badge`) · gapped body of tiles, virtualized through `gpui::list` when the caller supplies
-a `ListState` · `EmptyState` hint when the column is empty · `Pane`'s 2 px focus ring.
-**API.** `KanbanColumn::new(id, title).count(usize).accent(Option<Hsla>).action(bool).focused(bool)
-.width(Pixels).empty_hint(..)` then either `.tiles(impl IntoIterator<Item = AnyElement>)
+**Anatomy.** A `surface` well, `radii.dialog`, `border` hairline, `sm` padding and gap. A header
+row: the category **dot** (`dot_size_small`) · the status name as written (`UiStrong`) · the count
+(`Caption`, faint) · the **add button** slot at the right end. Under it, when entering the column starts
+something, the **automation pill** (`tile_chip_h`, `control` fill, an amber `zap`, `Caption`
+words). Then the gapped body of tiles, virtualized through `gpui::list` when the caller supplies
+a `ListState`, ending in the **footer** slot · a faint `Caption` hint when the column is empty ·
+`Pane`'s 2 px focus ring.
+**API.** `KanbanColumn::new(id, title).count(usize).accent(Option<Hsla>).automation(label)
+.on_automation_click(..).focused(bool).width(Pixels).empty_hint(..).add_button(impl IntoElement)
+.footer(impl IntoElement)` then either `.tiles(impl IntoIterator<Item = AnyElement>)
 .scroll_handle(ScrollHandle)` or `.rows(ListState, usize, impl FnMut(usize, &mut Window,
 &mut App) -> AnyElement)`; `KanbanColumn::list_state() -> ListState` builds the state with the
-column's own overdraw. `COLUMN_WIDTH_CH` = 34.
-`KanbanBoard::new(id).columns(..).scroll_handle(ScrollHandle)`.
-**States.** default · focused (the 2 px pane ring) · empty (the `empty_hint` `EmptyState`).
+column's own overdraw, and `list_state_with_footer()` one already holding the footer's item.
+`COLUMN_WIDTH_CH` = 34. `KanbanBoard::new(id).columns(..).scroll_handle(ScrollHandle)`.
+**States.** default · focused (the 2 px pane ring) · empty (the hint, then the footer) · with and
+without the automation pill.
 **Variants.** column (vertical, `COLUMN_WIDTH_CH` wide) · board (the horizontal scroller).
 **Usage rule.** The count renders even at `0` — a column header is a ledger, and a missing
-count reads as "unknown", not as "empty". `action(true)` puts a muted `zap` after that count and
-is the whole of what the kit knows about automation — which columns deserve one is domain
-knowledge the app keeps (`BOARD.md` §11.8). `accent` takes a resolved `Hsla` because the status
-category → token mapping is domain knowledge that lives in the app; the call site passes a
-theme token and never a literal. `tiles(..)` is for a fixed handful of rows; anything bounded by
-data uses `rows(..)`, because a column handed finished elements builds and measures every one of
-them every frame. `gpui::list` and not `uniform_list`: a `CardTile` is not uniform-height, since
-its title wraps to one line or two and its meta row is zero-suppressed. Neither container binds a
-key: `h` / `l` / `j` / `k` move a cursor the screen owns, exactly as they do for `ListView`.
+count reads as "unknown", not as "empty". `automation(..)` takes the words, and which columns
+deserve them and what they say is domain knowledge the app keeps (`BOARD.md` §11.8). `accent`
+takes a resolved `Hsla` because the status category → token mapping lives in the app; the call
+site passes a theme token and never a literal. In the `rows(..)` form the footer is the list's
+**last item**, so it follows the cards rather than sinking to the column's floor, and the caller's
+`ListState` holds `count + 1` items with tiles spliced in before it. `tiles(..)` is for a fixed
+handful of rows; anything bounded by data uses `rows(..)`, because a column handed finished
+elements builds and measures every one of them every frame. `gpui::list` and not
+`uniform_list`: a `CardTile` is not uniform-height. Neither container binds a key: `h` / `l` /
+`j` / `k` move a cursor the screen owns, exactly as they do for `ListView`. Every pointer
+affordance is a slot, so a drop target or a drag handle can join a column without the kit
+learning what a card is.
 
 **Gallery.** The board group's bench is `examples/gallery_board.rs` (live cursor, live editor,
 `[` / `]` moving a card, `p` cycling the priority); `kit_gallery`'s `board` section shows the
@@ -2119,10 +2149,12 @@ about 2 s".
 **Anatomy.** A `radii.md` box filled with the tone's fill in a tone-coloured hairline at
 `banner_border_opacity`, `md`/`sm` padding: a 16 px icon in the tone, one line of `Ui`, and an
 optional muted detail line under it.
-**API.** `Callout::new(Tone, Icon, text).detail(..)`.
-**States.** success · warning (any `Tone`), with and without detail.
+**API.** `Callout::new(Tone, Icon, text).detail(..).actions(impl IntoElement)`.
+**States.** success · warning (any `Tone`), with and without detail, with and without actions.
 **Usage rule.** Information, not an alarm: a `Banner` spans a screen and says something is wrong
-now; a `Dialog`'s footer error says the last action failed.
+now; a `Dialog`'s footer error says the last action failed. On a page, a callout may state what
+is wrong with it and carry the compact buttons that answer it at its right end — the board's
+load error with `Reload`, its sync error with `Board settings`.
 
 **Gallery.** `examples/gallery_buttons.rs` binds a keymap and wires every button with
 `.action(..)`, so each chip there is resolved live and clicking or pressing the key reports the

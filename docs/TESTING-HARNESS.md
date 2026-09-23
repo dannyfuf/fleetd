@@ -256,8 +256,9 @@ the pane draws it — ordered by the card's position, archived cards left out, a
 board filter — so `rows[R]` and `focused == board.column[C].card[R]` always name the same card;
 a `board` row's badge counts that same population. A `board` row carries `action` when its
 column starts a run on arrival, which is the `on_enter` automation alone. `board.summary` holds
-the one row the pane header states — `1/1 working · 1 needs you`, each half omitted while its
-count is zero — and the list is absent when both are. `card.runs` is one row per run of the open
+the board header's two counts as one row in their compact form — `1/1 working · 1 needs you`,
+each half omitted while its count is zero, where the header itself reads `1 of 1 run working` —
+and the list is absent when both are. `card.runs` is one row per run of the open
 card, oldest first: `label` is the run row the detail draws, `badges` is the provider, and
 `marks` is that run's mark word. `settings.columns` is one row per column of the board the
 dialog is editing, `label` its name, marked `action` on the same rule as `board` and `disabled`
@@ -298,7 +299,7 @@ The names Fleet paints today, by surface:
 | Detail panel | `detail.open`, `detail.sleep`, `detail.menu`, `detail.copy_path`, `detail.inspect` |
 | Title bar | `titlebar.context`, `titlebar.command`, `titlebar.needs_you`, `titlebar.jobs`, `titlebar.update`, `titlebar.daemon`, `titlebar.help`, `titlebar.settings`, `titlebar.back`, `workspace.back`, `workspace.switcher`, `workspace.pr` |
 | Status bar | `statusbar.shortcuts`, `statusbar.commands` |
-| Board | `board.column[C]`, `board.column[C].card[R]`, `board.filter` |
+| Board | `board.column[C]`, `board.column[C].card[R]`, `board.filter`; the pointer controls `board.new` (New card), `board.sync` (the sync button; absent on a local board), `board.settings` (Board settings), `board.column[C].add` (a column's `+`) and `board.column[C].card[R].menu` (a card's `⋯`, painted while the card is hovered or selected). `board.filter` is the header's filter field, painted always. The card menu's entries are `menu.item[N]`. |
 | Filter and palette | `filter.input`, `filter.clear` (the query's clear ✕, only while it holds text), `palette.input`, `palette.row[N]` (one flat numbering down the ranked list, across its sections; `palette.row[0]` is the top match) |
 | Dialogs | `dialog.field[N]`, `dialog.row[N]`, `dialog.close`, `dialog.button[N]`, `dialog.checkbox`, `dialog.segment[N]` |
 | Help | `help.search` (also `dialog.field[0]`), `help.tab[N]` (0 Guides, 1 All shortcuts), `help.here[N]` (the *Here in …* rows), `help.guide[N]` (by the guide's position in the full list, searched or not), `help.step[N].action[M]` (the shown guide's step `N`, button `M`, both from 0), `help.shortcut[N]` (the table's rows, or the actions a Guides-tab search lists), `help.place[N]` (0 All places, then the catalogue places in order), `help.run`, `help.related` |

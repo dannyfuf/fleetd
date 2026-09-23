@@ -1267,6 +1267,19 @@ Property rows in the card detail reuse `KeyValueList`/`FactRow`; pickers reuse
 Palette commands mirror every row above, under their action-catalogue labels (`New card`,
 `Sync with the tracker`, …; `KEYMAP.md` § *Action catalogue*).
 
+- **Board surface** (`views/board_screen.rs`, `UX-SPEC.md` § Board): a page header (name, prefix,
+  the counts line; the sync button and its ⋯, the filter field, Board settings and its ⋯, the
+  primary New card), error callouts with the buttons that answer them, then the columns. Every
+  control dispatches the action its key runs, so the pointer adds no behaviour of its own; the
+  two that are not keys are a column's `+` / `Add card` — New card with `CardDraft.status_id` set
+  to that column, carried to the dialog's seed through `DialogHost.card_create_in` — and a
+  column's automation pill, which opens Board settings drilled into it through
+  `DialogHost.board_settings_column`. A card's `⋯` and right-click hold the card actions,
+  leaving out what could only refuse (`CardMenu`, `ReadonlyFields` in the board model). The model
+  — tile strings, run and blocked words, the linked branch and its PR badge, the menu facts — is
+  built by `screens/board/projection.rs`, keyed on the board revision, the marks revision, the
+  filter, the linked branches and, only while a run is live, the minute.
+
 ### Integrated implementation decisions
 
 Public function signatures above are preserved. Additive helpers/builders and app editing fields
@@ -1705,22 +1718,32 @@ card-called child **for this card**, and `X` finds a run to stop on the same evi
 waits for the card's own `runs` row, because a face that says `working` and a key that says
 `{KEY} has no live run` would be two answers about one card (`UX-SPEC.md` § Board).
 
-A card's key line is a row whose right end carries either its **run mark** or its blocked count
-`⊘ n` — the run mark wins, because a card that is running has nothing left to wait for. The five
-marks are `pending`, `stalled`, `working`, `needs you` and `done` (§11.5 is where the first four
-come from); a canceled run draws nothing, and a success draws nothing either when the column that
-ran it carries the card on by itself — a check beside the key would otherwise mark every card the
-workflow already advanced. The count is muted while a blocker can still finish and amber when one
-of them is canceled, archived or gone from the board, which is `blocked()`'s own tone.
+A card's key line is a row whose right end carries one **state pill**: either its **run mark**, in
+words, or what blocks it — the run mark wins, because a card that is running has nothing left to
+wait for. The five marks are `pending`, `stalled`, `working`, `needs you` and `done` (§11.5 is
+where the first four come from), and the pill says them as `waiting`, `waiting 2m`,
+`working 4m · codex` (the age from the live run's `started_at`, the provider from its row),
+`needs you`, and `review passed` (named after what the column that ran it does); a canceled run
+draws nothing, and a success draws nothing either when the column that ran it carries the card on
+by itself — a check beside the key would otherwise mark every card the workflow already advanced.
+The blocked pill names the one unsatisfied blocker by key (`blocked by FLT-5`) or counts them
+(`blocked by 2 cards`); it is neutral while a blocker can still finish and amber when one of them is
+canceled, archived or gone from the board, which is `blocked()`'s own tone. A card whose run needs
+you carries an **Answer** button in its meta row on the worktree board, which runs `A`.
 
-A column header carries a muted `⚡` after its count when entering it runs an action — `on_enter`
-alone, never `on_success` or `advance_when_unblocked`, which move a card the column has already
-finished with.
+A column whose entry runs an action wears a pill under its header naming it — `On enter: codex
+implements` — from `on_enter` alone, never `on_success` or `advance_when_unblocked`, which move a
+card the column has already finished with. The provider is the action's own (`agent` when it
+leaves the choice to the card); the verb is read from the skill's name or the first word of the
+prompt's instructions, and falls back to `runs the card` / `runs <skill>`. Clicking the pill opens
+Board settings drilled into that column (§11.10).
 
-The pane header carries two zero-suppressed counts left of the prefix badge: `1/1 working` over
-`settings.max_live_runs`, counting the cards that hold a run slot — live **or** owed — and
-`1 needs you` from `attention()`. They are the board-face version of `BoardSummary`'s two counts
-(§11.5), computed in the app from the same definitions so a pane and a board list agree.
+The board header's subtitle carries two zero-suppressed counts: `1 of 2 runs working` over
+`settings.max_live_runs`, counting the cards that hold a run slot — live **or** owed — and, in
+amber, `1 needs you` from `attention()`, which selects the first card whose mark waits on a person.
+They are the board-face version of `BoardSummary`'s two counts (§11.5), computed in the app from
+the same definitions so a pane and a board list agree. The harness's `board.summary` row keeps its
+compact `1/1 working · 1 needs you` form (`TESTING-HARNESS.md` §3).
 
 A run whose start never reached a thread has no mark to draw, so it raises the sticky error once
 instead, with the run's own `detail`. `UX-SPEC.md` § Board states the glyphs, tones and wording.
@@ -1749,7 +1772,8 @@ eight lines, the fold a delivered child result gets in the transcript. `UX-SPEC.
 ### 11.10 Configuring columns in the app
 
 Board settings gained a **Columns** section beside General and Backend (`,` opens the dialog where
-it was last left, `C` opens it on Columns). It is the same read-modify-write of the whole
+it was last left, `C` opens it on Columns, and a column's automation pill on the board opens it
+drilled into that column). It is the same read-modify-write of the whole
 `statuses` vector that `fleet board columns` performs, with the same rules: a column list showing
 `⚡` where a column runs something, `n` new, `d` delete, `J`/`K` reorder, `P` for the missing
 preset columns (§11.6, never rewriting one the board already has), and `⏎` to drill into a column

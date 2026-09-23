@@ -1402,6 +1402,17 @@ fn structure_section(cx: &mut App, filter_query: Entity<TextInput>) -> AnyElemen
                 .stale("2m"),
         ),
         LAYOUT.labeled(
+            "page header · badge + facts (the board)",
+            &t,
+            PageHeader::new("Fleet board")
+                .badge(Badge::new("FLT"))
+                .subtitle("8 cards \u{b7} 1 of 2 runs working")
+                .fact(Text::caption("\u{b7}").faint())
+                .fact(Text::caption("1 needs you").tone(Tone::Warning))
+                .fact(Chip::counter(Icon::CloudUpload, 2).tone(Tone::Warning))
+                .action(Button::new("kit-board-new", "New card").style(ButtonStyle::Primary)),
+        ),
+        LAYOUT.labeled(
             "filter field · retained / clearable, narrow / editing / no match",
             &t,
             strip(

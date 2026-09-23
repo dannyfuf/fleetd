@@ -621,6 +621,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Open the card's worktree",
         "Go to the worktree this card is being worked on in.",
     )
+    .short("Open worktree")
     .featured(27)
     .palette(),
     e(
@@ -662,6 +663,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Move the card right",
         "Move the selected card to the next column.",
     )
+    .short("Move to next column")
     .featured(35)
     .palette(),
     e(
@@ -671,6 +673,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Move the card left",
         "Move the selected card to the previous column.",
     )
+    .short("Move to previous column")
     .palette(),
     e(
         &["board::PickStatus"],
@@ -679,6 +682,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Change the status",
         "Pick the card's status, which is also its column.",
     )
+    .short("Status")
     .palette(),
     e(
         &["board::PickPriority"],
@@ -687,6 +691,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Change the priority",
         "Pick how urgent the card is.",
     )
+    .short("Priority")
     .palette(),
     e(
         &["board::PickAssignee"],
@@ -695,6 +700,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Assign the card",
         "Pick who the card is assigned to.",
     )
+    .short("Assignee")
     .palette(),
     e(
         &["board::PickLabels"],
@@ -703,6 +709,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Change the labels",
         "Pick the labels on the card.",
     )
+    .short("Labels")
     .palette(),
     e(
         &["board::PickEstimate"],
@@ -711,6 +718,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Change the estimate",
         "Pick how big the card's work is.",
     )
+    .short("Estimate")
     .palette(),
     e(
         &["board::PickBlockedBy"],
@@ -719,6 +727,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Mark what blocks the card",
         "Pick the cards that have to be finished before this one.",
     )
+    .short("Blocked by")
     .palette(),
     e(
         &["board::PickAgent"],
@@ -727,6 +736,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Choose the agent for a card",
         "Pick which agent works on this card when its column runs one.",
     )
+    .short("Agent")
     .palette(),
     e(
         &["board::AttachRun"],
@@ -735,6 +745,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Watch the card's agent run",
         "Open the agent working on this card in a tab.",
     )
+    .short("Attach run")
     .palette(),
     e(
         &["board::RunNow"],
@@ -743,6 +754,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Run the column's agent now",
         "Start the column's automation on this card without waiting.",
     )
+    .short("Run now")
     .palette(),
     e(
         &["board::CancelRun"],
@@ -751,6 +763,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Stop the card's agent run",
         "Cancel the agent working on this card.",
     )
+    .short("Cancel run")
     .palette(),
     e(
         &["board::OpenRemote"],
@@ -759,6 +772,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Open the card's issue in the browser",
         "Open the issue this card mirrors on its tracker's website.",
     )
+    .short("Open remote issue")
     .palette(),
     e(
         &["board::DeleteCard"],
@@ -767,6 +781,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Delete the card",
         "Remove the card from the board. Asks first.",
     )
+    .short("Delete")
     .destructive()
     .palette(),
     e(
@@ -776,6 +791,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Filter the cards",
         "Type to show only the cards that match.",
     )
+    .short("Filter")
     .featured(40)
     .palette(),
     e(
@@ -785,6 +801,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Sync with the tracker",
         "Bring the board up to date with the tracker it mirrors, such as Jira or GitHub.",
     )
+    .short("Sync")
     .palette(),
     e(
         &["board::FullSync"],
@@ -793,6 +810,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Sync everything again",
         "Read every card from the tracker again, not only what changed.",
     )
+    .short("Full sync")
     .palette(),
     e(
         &["board::Reload"],
@@ -801,6 +819,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Reload the board",
         "Read the board again from fleetd.",
     )
+    .short("Reload")
     .palette(),
     e(
         &["board::Settings"],
@@ -817,6 +836,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Edit the board's columns",
         "Open board settings on its list of columns.",
     )
+    .short("Columns")
     .palette(),
     // ── Card ──────────────────────────────────────────────────────────────────────────────
     e(

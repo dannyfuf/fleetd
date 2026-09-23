@@ -1120,7 +1120,7 @@ fn choice_section(
                     .child(Checkbox::new("checkbox-disabled", "Locked", true).disabled(true)),
             ),
             LAYOUT.labeled(
-                "callout: success, warning",
+                "callout: success, warning, with actions",
                 theme,
                 div()
                     .flex()
@@ -1142,6 +1142,14 @@ fn choice_section(
                             "No prepared copy \u{2014} the first create copies the repo (~40 s) in the background",
                         )
                         .detail("Hooks: none"),
+                    )
+                    .child(
+                        Callout::new(
+                            Tone::Danger,
+                            Icon::CloudOff,
+                            "Sync failed: acli is not signed in",
+                        )
+                        .actions(Button::new("callout-settings", "Board settings").size(ButtonSize::Compact)),
                     ),
             ),
             LAYOUT.labeled(

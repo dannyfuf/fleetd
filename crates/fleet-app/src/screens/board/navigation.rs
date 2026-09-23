@@ -59,6 +59,23 @@ pub(super) fn on_click(click: BoardClick, state: &Entity<AppState>, bridge: &Bri
         BoardClick::Column(column) => (column, None, false),
         BoardClick::Card(column, row) => (column, Some(row), false),
         BoardClick::OpenCard(column, row) => (column, Some(row), true),
+        BoardClick::AddCard(column) => {
+            super::actions::new_card_in(state, column, cx);
+            return;
+        }
+        BoardClick::ClearFilter => {
+            state.update(cx, |app, cx| {
+                app.board.filter.clear();
+                app.board.focus.row = 0;
+                app.clamp_board_focus();
+                cx.notify();
+            });
+            return;
+        }
+        BoardClick::ColumnSettings(column) => {
+            super::actions::column_settings(state, bridge, column, cx);
+            return;
+        }
     };
     state.update(cx, |app, cx| {
         app.board.focus.column = column;

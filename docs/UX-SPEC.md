@@ -2275,43 +2275,80 @@ one number in it that is not about a terminal.
 ### The pane
 
 ```text
- BOARD · Fleet                                       8/12   FLT  ☁ jira  synced 3m  ⬆2  ⚠1  ⟳ syncing
- ┌──────────── Backlog 4 ──┐ ┌──── In progress 2 ──┐ ┌──────── Done 6 ──┐
- │ FLT-12                  │ │ FLT-7               │ │ FLT-3            │
- │ Fix the login redirect  │ │ Ship the board      │ │ Adopt tokens     │
- │ !! bug  DF  3 pt  ⌥     │ │ ! DF  ⌥ ●           │ │                  │
+ Fleet board FLT                          ☁ Jira · synced 2m  S  ⋯  [⌕ Filter cards  /]  Board settings  ,  ⋯  [+ New card  c]
+ 8 cards · 1 of 2 runs working · ● 1 needs you
+ ┌ ● Backlog 2          + ┐ ┌ ● In progress 2          + ┐ ┌ ● In review 1           + ┐
+ │ ┌───────────────────┐  │ │ ⚡ On enter: codex implements│ │ ⚡ On enter: claude reviews │
+ │ │ ▂▅ FLT-1        ⋯ │  │ │ ┌────────────────────────┐ │ │ ┌───────────────────────┐ │
+ │ │ Photograph the    │  │ │ │ ▂▅█ FLT-5  ◌ working 4m │ │ │ │ ▂▅ FLT-7  ✓ review passed│ │
+ │ │ harness  2 pt  DF │  │ │ │ Build real git origins │ │ │ │ Make hub tabs clickable │ │
+ │ └───────────────────┘  │ │ │ git ⑂ flt-5-git-origins DF│ │ │ ui  #14 Review       JS │ │
+ │ + Add card             │ │ └────────────────────────┘ │ │ └───────────────────────┘ │
 ```
 
-Header (`PaneHeader`): label `BOARD`, scope = board name, `shown/total` cards, then — right
-aligned — the prefix badge, the backend chip (hidden for `local`, because "local" is the absence
-of a backend, not a fact worth a chip), the `synced <age>` stamp, a dirty counter, a conflict
-counter, and the sync or refresh spinner. The chip reads the backend's **label** from the
-daemon's registry (`Jira (acli)`), not its registry key: the key is what a config file writes,
-the label is what the product is called. Until the registry answers — the first frames of a
-connection, or an older daemon — the raw kind stands in, because an empty chip reads as a broken
-header. A `board.sync` job in `Snapshot.jobs` is what makes the
-spinner appear; the board's own `sync.last_error` is drawn as a sticky row under the header, next
-to the load error, and neither ever hides the columns.
+**Header.** A `PageHeader`, not a pane header. On the left the board's name as the page title and
+its prefix badge, and under them one muted line: `8 cards` (`3 of 8 cards` while the filter hides
+some), then `1 of 2 runs working` — the cards holding a run slot, live **or** owed, over
+`settings.max_live_runs` — and then, in amber, `1 needs you`, which is clickable and selects the
+first card waiting on a person. Both counts are zero-suppressed; the dirty (`⬆2`) and conflict
+(`⚠1`) counters and the `refreshing` spinner follow them on the same line. On the right, in order:
+the **sync button**, which reads the backend's registry label and its age (`Jira · synced 2m`,
+`… · never synced` before the first) and runs `S`, with a `⋯` beside it holding **Full sync** (`F`)
+and **Reload** (`r`) — a local board mirrors nothing, so it has only the `⋯`, holding Reload; the
+**filter field** (`Filter cards  /`, always on screen: a press on it is `/`; while typing it
+shows `shown/total`, it keeps the retained query after the first `Esc`, and its `✕` clears it); **Board settings** (`,`) with a `⋯` holding **Columns**
+(`C`); and the one primary button, **New card** (`c`). Every control dispatches its key's action
+and shows that key from the live keymap. The chip reads the backend's **label** from the
+daemon's registry (`Jira (acli)`), not its registry key; until the registry answers the raw kind
+stands in, because an empty label reads as a broken header. A `board.sync` job in
+`Snapshot.jobs` puts a `syncing` spinner before the sync button.
 
-Columns are `KanbanColumn`s in `board.statuses` order. The accent bar over each column is the
-status **category**, not its name: muted for `Backlog`, secondary for `Unstarted`, amber for
+**Error callouts.** Under the header, never over the columns: the load error verbatim with a
+**Reload** button, the board's own `sync.last_error` as `Sync failed: …` with **Board settings**,
+and the orphan sentence — cards whose status the board no longer has — with **Board settings** and
+(on a remote board) **Sync**, the two things that can place them.
+
+**Columns** are `KanbanColumn`s in `board.statuses` order. The header is a coloured **dot**, the
+name as the board writes it, the count, and a `+` that opens New card **in that column** — the
+only way to file a card somewhere other than the board's default column in one step. The dot is
+the status **category**, not its name: muted for `Backlog`, secondary for `Unstarted`, amber for
 `Started`, green for `Completed`, a strong border grey for `Canceled`; a status that carries an
-explicit token name in `color` overrides it. Cards are `CardTile`s from `ops::column_cards`, so
-the app never invents an order the daemon does not agree with.
+explicit token name in `color` overrides it. A column whose entry runs an action wears a pill
+under the header naming it in words — `On enter: codex implements`, `On enter: claude reviews`,
+built from the action's provider (`agent` when the column leaves it to the card) and a verb read
+from the skill's name or the first word of the prompt's instructions — and clicking the pill opens
+Board settings drilled into that column. Only `on_enter` earns a pill; `on success` and `when
+unblocked` move a card the column has already finished with. Every column ends in an `Add card`
+row, the `+`'s twin. Cards are `CardTile`s from `ops::column_cards`, so the app never invents an
+order the daemon does not agree with.
 
-**What automation adds to the face** (`BOARD.md` §11.8). A card's key line is a **row**: the key
-at its left, and at its right end either the card's run mark or its blocked count `⊘ n`, never
-both — a card that is running has nothing left to wait for, so the run mark wins. The count is
-`Text::data_small`, muted while a blocker can still finish and amber (`Tone::Warning`) when one of
-them is canceled, archived or gone from the board, because nothing will release the card on its
-own. A column header carries a muted `⚡` after its count when — and only when — entering it runs
-an action; `on success` and `when unblocked` move a card the column has already finished with, and
-a `⚡` promising a run for one of those would lie. The pane header's trailing cluster begins with
-two zero-suppressed counts, **left of the prefix badge**: `1/1 working` in the secondary tone,
-whose numerator is the cards holding a run slot (live **or** waiting for one) and whose
-denominator is `settings.max_live_runs`, then `1 needs you` in amber. Both are folded once per
-change in `AppState::refresh_card_marks` and read from that map in the projection — nothing about
-a run is derived in a `render` (§5, `APP-CONTRACTS.md`).
+**Tiles.** The first line is the priority bars, the key, and at its right end the one **state
+pill** the card has: its run, in words — `working 4m · codex` (the age from the run's start),
+`waiting`, `needs you`, `review passed` — or, when it is not running, what blocks it: `blocked by
+FLT-5`, or `blocked by 2 cards`. The run wins over the blockers, because a card that is running
+has nothing left to wait for. The blocked pill is neutral while a blocker can still finish and
+amber when one of them is canceled, archived or gone from the board, because nothing will release
+the card on its own. Then the title, two lines at most. Then the meta row: label chips, `n pt`,
+the due date, the linked worktree's **branch** and its PR badge (`#14 Review`), the dirty and
+conflict dots, `show_on_card` extras — and at its right end an **Answer** button on a card whose
+run needs you (the worktree board only; it runs `A`), and the assignee's avatar. Everything but
+the first line and the title is zero-suppressed. Hover lifts a tile (a stronger hairline and a
+short shadow) and reveals its `⋯`, which a selected tile keeps.
+
+**The card menu.** The `⋯` and a right-click open the same menu, which holds every card action
+with its key: **Status** `s`, **Priority** `p`, **Assignee** `a`, **Labels** `t`, **Estimate** `e`,
+**Blocked by** `b`, **Agent** `m`; then **New worktree** `w`, **Open worktree** `o`, **Open remote
+issue** `x`, **Move to previous / next column** `[` / `]`; on the worktree board **Attach run** `A`,
+**Run now** `>` and **Cancel run** `X`; and last **Delete** `d`, in red. An entry that could only
+refuse is left out rather than shown and refused: a picker for a field the backend owns, Open
+worktree on a card with none, Open remote issue without an address, `[` in the first column and
+`]` in the last, the run entries where the card has nothing for them, and Delete on a mirrored
+card (it is deleted in its backend). The key stays bound either way and still says why.
+
+Both counts, every mark and every pill string are folded once per change —
+`AppState::refresh_card_marks` for the marks, the board projection for the words, rebuilt once a
+minute while a run is live so its age moves — and nothing about a run is derived in a `render`
+(§5, `APP-CONTRACTS.md`).
 
 ### States
 
@@ -2324,7 +2361,7 @@ a run is derived in a `render` (§5, `APP-CONTRACTS.md`).
   — in a worktree's board tab on a daemon that serves no worktree boards — the same sentence the
   refusal toasts. Activating a context clears the board, which drops the message and asks again;
 * **empty board** — `No cards yet. · c new card`;
-* **empty column** — `No cards here.` inside the column;
+* **empty column** — `No cards` in muted text, then its `Add card` row;
 * **no match** — `Nothing matches "<query>". · esc clear`.
 
 **A card's run states**, one glyph each, identical on the tile and in the card detail. Each names
@@ -2400,8 +2437,12 @@ reader can see on the tile and type here.
 
 ### Mouse
 
-Clicking a tile focuses it; double-clicking opens its detail. Clicking a column focuses that
-column without moving the card selection.
+The board follows §5.1. A press on a tile selects it; a double-click, like `⏎`, opens its detail;
+a right-click selects it and opens the card menu, whose visible twin is the tile's `⋯`. Clicking a
+column focuses that column without moving the card selection. A column's `+` and `Add card` focus
+that column and open New card with its status chosen — the dialog's subtitle names it, `· Fleet ·
+In progress` — and its automation pill opens Board settings on that column. Every header control
+is the pointer twin of its key (above).
 
 ### Card detail
 
