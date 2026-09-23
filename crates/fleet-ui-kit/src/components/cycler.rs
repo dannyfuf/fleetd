@@ -18,7 +18,7 @@ use super::{
     menu::{Dropdown, MenuItem},
     segmented_control::{Segment, SegmentedControl},
 };
-use crate::{text::Text, theme::ActiveTheme, tone::Tone};
+use crate::{harness::HarnessTargetExt as _, text::Text, theme::ActiveTheme, tone::Tone};
 
 /// The most options a cycler draws side by side; a longer set draws as a dropdown.
 pub const SEGMENTED_MAX: usize = 4;
@@ -46,6 +46,7 @@ pub struct Cycler {
     on_select: Option<Rc<CyclerSelect>>,
     unavailable: Vec<usize>,
     harness_segments: Option<&'static str>,
+    harness_dropdown: Option<&'static str>,
 }
 
 /// How a cycler draws, decided from what its caller told it.
@@ -74,6 +75,7 @@ impl Cycler {
             on_select: None,
             unavailable: Vec::new(),
             harness_segments: None,
+            harness_dropdown: None,
         }
     }
 
@@ -120,6 +122,15 @@ impl Cycler {
     /// draws side by side (`dialog.segment`). A dropdown's options are `menu.item[N]` instead.
     pub fn harness_segments(mut self, part: &'static str) -> Self {
         self.harness_segments = Some(part);
+        self
+    }
+
+    /// Name the controls for the harness target recorder: each segment `<options>[N]` when the
+    /// cycler draws side by side, and the field `<dropdown>` when it draws as a dropdown (its
+    /// open list's items are the menu's own `menu.item[N]`).
+    pub fn harness(mut self, options: &'static str, dropdown: &'static str) -> Self {
+        self.harness_segments = Some(options);
+        self.harness_dropdown = Some(dropdown);
         self
     }
 
@@ -236,6 +247,7 @@ impl RenderOnce for Cycler {
             }
             CyclerForm::Dropdown(listed) => {
                 let dropdown = Dropdown::new(id, self.value.clone()).compact();
+                let harness = self.harness_dropdown;
                 match on_select.filter(|_| listed) {
                     Some(on_select) => {
                         let current = self.value.clone();
@@ -255,9 +267,10 @@ impl RenderOnce for Cycler {
                                     )
                                 })
                             })
+                            .harness_target_named(harness)
                             .into_any_element()
                     }
-                    None => dropdown.into_any_element(),
+                    None => dropdown.harness_target_named(harness).into_any_element(),
                 }
             }
         };

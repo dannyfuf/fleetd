@@ -1,6 +1,6 @@
 //! The visual and behavioural test bench for the **input** group of `fleet-ui-kit`.
 //!
-//! `TextInput` · `FuzzyList` · `FilterBar` · `Cycler` · `Toggle` · `NumberField` ·
+//! `TextInput` · `FuzzyList` · `FilterBar` · `Cycler` · `Toggle` · `NumberField` · `ValueField` ·
 //! `Switch` · `Checkbox` · `SegmentedControl` · `SegmentedTabs` · `Select` · `Callout` ·
 //! `ConfirmDialog` · `Palette`.
 //!
@@ -168,6 +168,8 @@ struct InputGallery {
     live_numeric: Entity<TextInput>,
     /// The editor a settings number row hands to `NumberField` while it is being typed into.
     number_row_editor: Entity<TextInput>,
+    /// The editor a settings text row hands to `ValueField` while it is being typed into.
+    value_row_editor: Entity<TextInput>,
     live_labeled: Entity<TextInput>,
     live_multiline_min: Entity<TextInput>,
     live_multiline_grown: Entity<TextInput>,
@@ -259,7 +261,17 @@ impl InputGallery {
             input.set_mono(true, cx);
             input.set_hide_status_line(true, cx);
             input.set_filter(Some(|character| character.is_ascii_digit()), cx);
+            // A settings row draws the box; the editor is only the line and its caret.
+            input.set_embedded(true, cx);
             input.set_text("2500", cx);
+            input
+        });
+        let value_row_editor = cx.new(|cx| {
+            let mut input = TextInput::new(InputMode::SingleLine, cx);
+            input.set_mono(true, cx);
+            input.set_hide_status_line(true, cx);
+            input.set_embedded(true, cx);
+            input.set_text("claude --resume", cx);
             input
         });
         let live_labeled = cx.new(|cx| {
@@ -357,6 +369,7 @@ impl InputGallery {
             live_multiline_min,
             live_multiline_grown,
             number_row_editor,
+            value_row_editor,
             filter,
             filter_no_match,
             palette_query,
@@ -1171,6 +1184,55 @@ fn choice_section(
                                 .unit("ms")
                                 .min(0)
                                 .editor(gallery.number_row_editor.clone()),
+                        )
+                        // End-aligned: the box sits where a cycler's or a switch's control does,
+                        // and the label reads at full contrast, as theirs do.
+                        .child(
+                            NumberField::labeled("Freshness", 60_000)
+                                .unit("ms")
+                                .min(0)
+                                .end_aligned(true),
+                        ),
+                ),
+            ),
+            LAYOUT.labeled(
+                "value fields (text settings)",
+                theme,
+                card(
+                    theme,
+                    px(460.0),
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            ValueField::new("value-default", "claude")
+                                .label("Terminal command")
+                                .label_width(px(150.0))
+                                .mono(true)
+                                .on_click(|_, _| {}),
+                        )
+                        .child(
+                            ValueField::new("value-focused", "claude")
+                                .label("Binary for threads")
+                                .label_width(px(150.0))
+                                .mono(true)
+                                .focused(true),
+                        )
+                        .child(
+                            ValueField::new("value-placeholder", "")
+                                .label("Default model")
+                                .label_width(px(150.0))
+                                .placeholder("Harness default"),
+                        )
+                        // Editing: the row hands the field its embedded editor, drawn inside the
+                        // same box with the focus-ring border.
+                        .child(
+                            ValueField::new("value-editing", "claude")
+                                .label("Terminal command")
+                                .label_width(px(150.0))
+                                .mono(true)
+                                .focused(true)
+                                .editor(gallery.value_row_editor.clone()),
                         ),
                 ),
             ),

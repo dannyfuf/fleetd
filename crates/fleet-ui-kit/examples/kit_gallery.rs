@@ -1687,6 +1687,11 @@ fn input_section(cx: &mut App, fields: &[(&'static str, Entity<TextInput>)]) -> 
                     NumberField::labeled("local status refresh", 200)
                         .unit("ms")
                         .min(500),
+                )
+                .child(
+                    ValueField::new("kit-value", "")
+                        .label("Default model")
+                        .placeholder("Harness default"),
                 ),
         ),
         LAYOUT.labeled(

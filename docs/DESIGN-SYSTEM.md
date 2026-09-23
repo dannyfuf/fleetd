@@ -1080,10 +1080,10 @@ the rest of the row, so a long value never pushes the setting's name out. A cycl
 caller lists no options, or whose value is off the configured steps (none of the segments), draws
 the compact dropdown field alone, stating the value.
 **API.** `Cycler::{new(value), labeled(label, value)}().options(iter).on_select(Fn(ix, window,
-app)).unavailable(indices).harness_segments(part).id(..).has_prev(bool).has_next(bool)
+app)).unavailable(indices).harness_segments(part).harness(options, dropdown).id(..).has_prev(bool).has_next(bool)
 .focused(bool).disabled(bool).label_width(Pixels).off_grid(bool)`; `unavailable` dims those
 options and refuses a click on them (a dropdown leaves them out of its list) while the keys still
-reach them, so the surface states why next to the control; `.is_visible()`, `.form() -> CyclerForm::{Segmented(ix), Dropdown(listed)}`.
+reach them, so the surface states why next to the control; `harness` names the segments `<options>[N]` and the dropdown field `<dropdown>` for the harness target recorder (Settings names its cursor row's control); `.is_visible()`, `.form() -> CyclerForm::{Segmented(ix), Dropdown(listed)}`.
 **Keyboard.** `←`/`→` (`h`/`l`), bound by the surface. **Pointer.** Only with `on_select`: a click
 on a segment, or on a dropdown option, calls it with the option's index; point it at the update the
 keys make. Without it the control is drawn only and takes no click.
@@ -1094,16 +1094,34 @@ hidden when no hosts are configured).
 **Purpose.** A boolean settings row: the label, an optional `Caption` detail, and a `Switch` at
 the row's end.
 **API.** `Toggle::{new(checked), labeled(label, checked)}().detail(..).focused(bool).disabled(bool)
-.label_width(Pixels).id(..).on_toggle(Fn(bool, window, app))`; `.is_checked()`.
+.label_width(Pixels).id(..).on_toggle(Fn(bool, window, app)).harness_switch(name)`; `.is_checked()`.
+`harness_switch` names the switch itself, so a scenario clicks the control and not the row.
 **Keyboard.** `Space`, bound by the surface; the row carries the cursor band. **Pointer.** Only
 with `on_toggle`: a click on the switch asks for the other value.
+
+#### `ValueField`
+**Purpose.** A text setting in a settings list: the label, then the value in a field box that takes
+the rest of the row. The box states the value; it is not an editor.
+**API.** `ValueField::new(id, value).label(..).placeholder(..).mono(bool).focused(bool)
+.label_width(Pixels).editor(Entity<TextInput>).on_click(Fn(window, app))`; `.shown()`,
+`.is_editing()`.
+**States.** default · focused (the cursor row, a stronger border) · placeholder (an empty value
+drawn faint as what empty means, `Harness default`) · editing (the embedded editor inside the same
+box, focus-ring border).
+**Keyboard.** None of its own: the surface opens the row's live `TextInput` on `Enter` and hands it
+back through `editor`. **Pointer.** With `on_click`, a click on the box does what `Enter` does.
+**Usage rule.** Hand it an **embedded** editor (`TextInput::set_embedded`): the box is the chrome,
+so opening and closing the row never moves it or changes its height. Use `NumberField` for an
+integer and a bare `TextInput` for a field that is always editable.
 
 #### `NumberField`
 **Purpose.** An integer with a unit suffix and a clamp.
 **API.** `NumberField::{new(value), labeled(label, value)}().unit(..).range(min, max).min(i64)
-.focused(bool).invalid(message).label_width(Pixels).editor(Entity<TextInput>)`; `.clamp(i64)`,
-`.is_in_range()`, `.range_message()`, `.message()`, `.is_editing()`.
-**States.** default · focused · invalid (out of range, red border) · editing.
+.focused(bool).invalid(message).label_width(Pixels).editor(Entity<TextInput>).end_aligned(bool)`;
+`.clamp(i64)`, `.is_in_range()`, `.range_message()`, `.message()`, `.is_editing()`.
+**States.** default · focused · invalid (out of range, red border) · editing · end-aligned (the box
+at the row's end, where a `Cycler`'s or a `Toggle`'s control sits, and the label at full contrast,
+for a list that mixes them — Settings).
 **Usage rule.** The clamp is part of the contract: §3.8.6 states minimums, and an out-of-range
 value must be refused at the field, not at save time. `editor` hands the field the live
 `TextInput` the row is being typed into: the field draws that editor where the number would be

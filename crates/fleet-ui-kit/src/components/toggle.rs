@@ -7,7 +7,7 @@
 use gpui::{App, ElementId, Pixels, SharedString, Window, div, prelude::*};
 
 use super::switch::Switch;
-use crate::{text::Text, theme::ActiveTheme, tone::Tone};
+use crate::{harness::HarnessTargetExt as _, text::Text, theme::ActiveTheme, tone::Tone};
 
 type ToggleHandler = dyn Fn(bool, &mut Window, &mut App);
 
@@ -22,6 +22,7 @@ pub struct Toggle {
     detail: Option<SharedString>,
     label_width: Option<Pixels>,
     on_toggle: Option<Box<ToggleHandler>>,
+    harness_switch: Option<&'static str>,
 }
 
 impl Toggle {
@@ -36,6 +37,7 @@ impl Toggle {
             detail: None,
             label_width: None,
             on_toggle: None,
+            harness_switch: None,
         }
     }
 
@@ -85,6 +87,13 @@ impl Toggle {
     /// keyboard's way; point this at the same update.
     pub fn on_toggle(mut self, on_toggle: impl Fn(bool, &mut Window, &mut App) + 'static) -> Self {
         self.on_toggle = Some(Box::new(on_toggle));
+        self
+    }
+
+    /// Name the switch itself for the harness target recorder (`settings.switch`), so a
+    /// scenario clicks the control rather than the middle of the row.
+    pub fn harness_switch(mut self, name: &'static str) -> Self {
+        self.harness_switch = Some(name);
         self
     }
 
@@ -147,7 +156,7 @@ impl RenderOnce for Toggle {
                             .map(|detail| Text::caption(detail).faint().ellipsize()),
                     ),
             )
-            .child(switch);
+            .child(switch.harness_target_named(self.harness_switch));
 
         super::control::cursor_row(theme, focused, disabled, body)
     }

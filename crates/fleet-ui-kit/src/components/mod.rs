@@ -82,6 +82,7 @@ mod title_bar;
 mod toast_stack;
 mod toggle;
 mod tooltip;
+mod value_field;
 mod veil;
 
 pub use crate::focus::{FocusRing, FocusRingKind};
@@ -187,4 +188,5 @@ pub use title_bar::{CommandField, TitleBar};
 pub use toast_stack::{COALESCE_WINDOW_MS, Toast, ToastDuration, ToastStack};
 pub use toggle::Toggle;
 pub use tooltip::{Tooltip, WithTooltip};
+pub use value_field::ValueField;
 pub use veil::Veil;

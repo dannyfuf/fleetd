@@ -29,6 +29,7 @@ pub struct NumberField {
     invalid: Option<SharedString>,
     label_width: Option<Pixels>,
     editor: Option<Entity<TextInput>>,
+    end_aligned: bool,
 }
 
 impl NumberField {
@@ -44,12 +45,21 @@ impl NumberField {
             invalid: None,
             label_width: None,
             editor: None,
+            end_aligned: false,
         }
     }
 
     /// A labelled field.
     pub fn labeled(label: impl Into<SharedString>, value: i64) -> Self {
         Self::new(value).label(label)
+    }
+
+    /// Put the value box at the row's end, where a `Cycler` or a `Toggle` puts its control, so a
+    /// mixed settings list reads down one right-hand column. The label then reads at full
+    /// contrast, as theirs do.
+    pub fn end_aligned(mut self, end_aligned: bool) -> Self {
+        self.end_aligned = end_aligned;
+        self
     }
 
     /// Set the label.
@@ -173,12 +183,19 @@ impl RenderOnce for NumberField {
             .w_full()
             .px(theme.space.md)
             .children(self.label.map(|label| {
-                let text = Text::ui(label).muted();
+                // In a list of end-aligned controls the label is the row's name, drawn as a
+                // `Cycler`'s or a `Toggle`'s is; beside a free-standing box it recedes.
+                let text = if self.end_aligned {
+                    Text::ui(label)
+                } else {
+                    Text::ui(label).muted()
+                };
                 match self.label_width {
                     Some(width) => text.w(width),
                     None => text,
                 }
             }))
+            .when(self.end_aligned, |el| el.child(div().flex_1()))
             .child(
                 div()
                     .flex()
