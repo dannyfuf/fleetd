@@ -237,7 +237,7 @@ Five levels, and only three of them have a shadow.
 | 1 | `surface`, `surface_raised` | 1 px `border` hairline, no shadow |
 | 2 | `elevated` | `sheet`: `0 8px 24px rgba(0,0,0,.35)` dark / `.12` light — sheets, toasts |
 | 3 | `elevated` | `dialog`: `0 16px 48px rgba(0,0,0,.45)` dark / `.16` light — dialogs, palette |
-| 4 | `elevated` | `popover`: `0 24px 64px rgba(0,0,0,.55)` dark / `.20` light — menus, popovers, tooltips |
+| 4 | `elevated` | `popover`: `0 24px 64px rgba(0,0,0,.55)` dark / `.20` light — menus, popovers, tooltips, the Agent popup window |
 
 `theme.sheet_shadow()`, `theme.dialog_shadow()` and `theme.popover_shadow()` return the
 `Vec<BoxShadow>`.
@@ -631,10 +631,14 @@ for anything destructive so the `y`/`Y` escalation is computed, not typed.
 
 #### `Overlay`
 **Purpose.** A centered floating layer used by the top-anchored palette and the Agent popup.
-**API.** `Overlay::new().top(Pixels).width(Pixels).scrim(bool).layer(OverlayLayer).content(..)`.
+**API.** `Overlay::new().top(Pixels).width(Pixels).scrim(bool).layer(OverlayLayer)
+.popover_elevation(bool).content(..)`.
+**Variants.** dialog elevation (default: `radii.lg`, level-3 shadow) · popover elevation
+(`radii.popover`, level-4 shadow).
 **Usage rule.** Default `top` is 120 px — the thinking position, not screen center. Leave
 `scrim` off and use `OverlayLayer::Anchored` for the palette: it is a jump, not a decision. The
-Agent popup is a modal floating surface, so it opts into the scrim and `OverlayLayer::Dialog`.
+Agent popup is a modal floating surface, so it opts into the scrim and `OverlayLayer::Dialog`,
+and into the popover elevation so the floating terminal reads as a window above the app.
 
 #### `Toast` / `ToastStack`
 **Purpose.** Bottom-right transient acknowledgements, max 3.

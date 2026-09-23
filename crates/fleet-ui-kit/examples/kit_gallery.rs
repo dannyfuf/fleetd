@@ -1895,11 +1895,37 @@ fn overlays_section(
         ]),
     );
 
+    // The Agent popup's frame: a scrimmed overlay lifted to the popover elevation.
+    let floating_window = box_of(
+        &t,
+        px(200.0),
+        Overlay::new()
+            .top(t.space.xl)
+            .width(px(560.0))
+            .scrim(true)
+            .layer(OverlayLayer::Dialog)
+            .popover_elevation(true)
+            .content(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(t.space.xs)
+                    .p(t.space.md)
+                    .child(Text::ui_strong("Agent window"))
+                    .child(Text::hint("popover elevation · scrim · dialog layer").muted()),
+            ),
+    );
+
     let children = vec![
         LAYOUT.labeled("dialog", &t, dialog),
         LAYOUT.labeled("confirm · compact", &t, confirm_compact),
         LAYOUT.labeled("confirm · expanded", &t, confirm_expanded),
         LAYOUT.labeled("palette (overlay)", &t, palette),
+        LAYOUT.labeled(
+            "floating window (overlay · popover elevation)",
+            &t,
+            floating_window,
+        ),
         LAYOUT.labeled("sheet (jobs)", &t, sheet),
         LAYOUT.labeled("toast stack", &t, toasts),
     ];

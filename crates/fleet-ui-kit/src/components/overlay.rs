@@ -56,6 +56,7 @@ pub struct Overlay {
     width: Option<Pixels>,
     scrim: bool,
     layer: OverlayLayer,
+    popover_elevation: bool,
     child: Option<AnyElement>,
 }
 
@@ -67,6 +68,7 @@ impl Overlay {
             width: None,
             scrim: false,
             layer: OverlayLayer::Anchored,
+            popover_elevation: false,
             child: None,
         }
     }
@@ -98,6 +100,13 @@ impl Overlay {
         self
     }
 
+    /// Lift the card to the popover elevation (the level-4 shadow) instead of the dialog one.
+    /// For a floating window that should read as the frontmost thing on screen: the Agent popup.
+    pub fn popover_elevation(mut self, popover: bool) -> Self {
+        self.popover_elevation = popover;
+        self
+    }
+
     /// The card.
     pub fn content(mut self, child: impl IntoElement) -> Self {
         self.child = Some(child.into_any_element());
@@ -117,6 +126,11 @@ impl RenderOnce for Overlay {
         let top = self.top.unwrap_or(theme.metrics.palette_top);
         let width = self.width.unwrap_or(theme.metrics.palette_w);
         let scrim = self.scrim;
+        let (radius, shadow) = if self.popover_elevation {
+            (theme.radii.popover, theme.popover_shadow())
+        } else {
+            (theme.radii.lg, theme.dialog_shadow())
+        };
         deferred(
             div()
                 .absolute()
@@ -133,11 +147,11 @@ impl RenderOnce for Overlay {
                         .mb(top)
                         .w(width)
                         .min_h_0()
-                        .rounded(theme.radii.lg)
+                        .rounded(radius)
                         .bg(theme.colors.elevated)
                         .border(theme.metrics.hairline)
                         .border_color(theme.colors.border_strong)
-                        .shadow(theme.dialog_shadow())
+                        .shadow(shadow)
                         .overflow_hidden()
                         .occlude()
                         .children(self.child),
