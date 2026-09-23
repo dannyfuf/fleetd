@@ -223,3 +223,24 @@ fn visit(dir: &Path, found: &mut impl FnMut(&Path, &str)) {
         }
     }
 }
+
+#[test]
+fn an_action_bound_in_one_place_is_catalogued_there() {
+    // Help lists a key under its entry's place: the Hub's `X` catalogued as `Everywhere` told a
+    // reader it dismisses the error from a terminal too, where it types an `X`.
+    let table = keymap::table();
+    for entry in entries() {
+        let places: HashSet<Place> = table
+            .iter()
+            .filter(|spec| entry.actions.contains(&spec.action))
+            .filter_map(|spec| Place::of_context(spec.context))
+            .collect();
+        if let [place] = places.into_iter().collect::<Vec<_>>()[..] {
+            assert_eq!(
+                entry.info.place, place,
+                "{:?} is bound only in {place:?}",
+                entry.actions
+            );
+        }
+    }
+}

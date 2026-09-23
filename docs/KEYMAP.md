@@ -103,7 +103,7 @@ behind it (`shell/root/focus.rs`, `focus_owner`).
 | `?` | help |
 | `J` | jobs panel |
 | `!` | focus the sticky error slot: the last failed job, offering `R retry` [A18] |
-| `X` | dismiss the sticky error slot (its ✕); the failed jobs stay in the Jobs panel |
+| `X` | dismiss the sticky error slot (its ✕); the failed jobs stay in the Jobs panel. Hub only — Help lists it under Hub, and the Jobs panel's and the card detail's own `X` (cancel all, cancel the run) shadow it there |
 | `i` | toggle the detail panel (never focusable; it mirrors the cursor row) |
 | `H` | collapse / expand the Hub sidebar (232 ↔ 44 px icon column; also its foot button) [A22] |
 | `a` / `A` | open the floating Claude / Codex agent popup [A21] |
