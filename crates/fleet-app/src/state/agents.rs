@@ -45,8 +45,8 @@ impl AgentCounts {
 
 /// The client's native-agent mirror: daemon summaries, opened projections and seen cursors.
 ///
-/// The daemon owns thread truth, so the summary list is replaced wholesale by every snapshot;
-/// the app only adds what is local to a client — which tab is selected per worktree, the
+/// The daemon owns thread truth, so the summary list is replaced by every snapshot — except for
+/// a thread no snapshot has listed yet ([`Self::sync_snapshot`]); the app only adds what is local to a client — which tab is selected per worktree, the
 /// installation's persisted seen cursor plus this process's newer override, and resync state.
 #[derive(Debug, Default)]
 pub struct AgentThreads {
@@ -116,6 +116,12 @@ pub struct AgentThreads {
     last_applied: HashMap<ThreadId, Applied>,
     /// Threads whose authoritative projection was replaced outside the live event stream.
     projection_replaced: HashSet<ThreadId>,
+    /// Threads a summary introduced that no snapshot has listed yet (see [`Self::sync_snapshot`]).
+    unconfirmed: HashSet<ThreadId>,
+    /// `^s a` / `^s A` presses still waiting for their thread (`pending`).
+    pending_creates: Vec<pending::PendingCreate>,
+    /// The last [`CreateToken`] handed out.
+    next_create: u64,
     /// Prepared foreground data. Render getters only read this cache.
     derived: AgentDerived,
 }
@@ -1026,6 +1032,7 @@ impl AgentThreads {
                 true
             }
             None => {
+                self.unconfirmed.insert(summary.thread);
                 self.summaries.push(summary);
                 true
             }
@@ -1081,6 +1088,13 @@ impl AgentThreads {
         self.reported.insert(thread, seq);
     }
 
+    /// Makes the next snapshot authoritative about every thread, as a fresh link's first one is.
+    ///
+    /// Nothing from the previous link can be newer than the snapshot a new link opens with.
+    pub fn forget_unconfirmed(&mut self) {
+        self.unconfirmed.clear();
+    }
+
     /// Records current attentions without presenting them, the way a fresh link is adopted.
     ///
     /// A thread that was already blocked before this window connected is not news, so the first
@@ -1094,8 +1108,29 @@ impl AgentThreads {
     }
 
     /// Replaces the summary list from an authoritative snapshot and forgets vanished threads.
-    pub fn sync_snapshot(&mut self, threads: Vec<AgentThreadSummary>) {
-        let live: HashSet<ThreadId> = threads.iter().map(|summary| summary.thread).collect();
+    ///
+    /// A snapshot is authoritative about every thread it has *ever* listed, but not about one a
+    /// summary introduced since. The daemon assembles a snapshot asynchronously and creating a
+    /// thread does not stamp it, so a snapshot assembled a moment before a thread existed can be
+    /// applied after that thread's `AgentSummary` and its create reply. Its silence is not a
+    /// removal: forgetting the thread there would drop the tab `^s a` had just selected, and the
+    /// next summary would put it back unselected. Such a thread is kept, with its latest summary,
+    /// until a snapshot lists it — or until a snapshot no longer lists its worktree, which is
+    /// the one way a thread no snapshot ever listed can really be gone.
+    pub fn sync_snapshot(
+        &mut self,
+        mut threads: Vec<AgentThreadSummary>,
+        worktrees: &HashSet<&WorktreeId>,
+    ) {
+        let mut live: HashSet<ThreadId> = threads.iter().map(|summary| summary.thread).collect();
+        self.unconfirmed.retain(|thread| !live.contains(thread));
+        for summary in &self.summaries {
+            if self.unconfirmed.contains(&summary.thread) && worktrees.contains(&summary.worktree) {
+                live.insert(summary.thread);
+                threads.push(summary.clone());
+            }
+        }
+        self.unconfirmed.retain(|thread| live.contains(thread));
         if self.summaries != threads {
             self.summaries = threads;
             self.summaries_revision = self.summaries_revision.wrapping_add(1);
@@ -1270,6 +1305,7 @@ impl AppState {
     /// Applies one broadcast summary and presents whatever attention edge it created.
     pub fn apply_agent_summary(&mut self, summary: AgentThreadSummary, now: Instant) {
         self.agents.apply_summary(summary);
+        self.adopt_created_threads();
         self.notify_agent_attention(now);
     }
 
@@ -1311,6 +1347,8 @@ mod persisted_cursor_tests {
         );
     }
 }
+
+mod pending;
 
 #[cfg(test)]
 mod tests;

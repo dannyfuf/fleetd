@@ -230,6 +230,11 @@ fn create_thread(
         });
         return;
     }
+    // Recorded before the request leaves, so the summary the daemon broadcasts for the new
+    // thread can select it however it races the reply (`AgentThreads::begin_create`).
+    let token = state.update(cx, |app, _| {
+        app.agents.begin_create(worktree.clone(), provider)
+    });
     let reply = bridge.request_agent(BridgeCommand::AgentThreadCreate {
         worktree,
         provider,
@@ -244,25 +249,28 @@ fn create_thread(
         let Some(state) = state.upgrade() else {
             return;
         };
-        cx.update(|cx| match answer {
-            Ok(Ok(ResponseBody::AgentThreadCreated(summary))) => {
-                let thread = summary.thread;
-                state.update(cx, |app, cx| {
-                    app.agents.apply_summary(summary);
-                    if !app.select_agent_thread(thread) {
-                        app.agents.close(thread);
+        cx.update(|cx| {
+            state.update(cx, |app, cx| {
+                let selected_on_sight = app.agents.finish_create(token);
+                match answer {
+                    Ok(Ok(ResponseBody::AgentThreadCreated(summary))) => {
+                        let thread = summary.thread;
+                        app.agents.apply_summary(summary);
+                        // Selecting again would re-arm the composer focus the first selection
+                        // already delivered, and undo any tab the user has moved to since.
+                        if selected_on_sight != Some(thread) && !app.select_agent_thread(thread) {
+                            app.agents.close(thread);
+                        }
                     }
-                    cx.notify();
-                });
-            }
-            Ok(Err(error)) => state.update(cx, |app, cx| {
-                record_mutation_failure(app, create_failure(&error.message));
+                    Ok(Err(error)) => {
+                        record_mutation_failure(app, create_failure(&error.message));
+                    }
+                    Ok(Ok(_)) | Err(_) => {
+                        record_mutation_failure(app, create_failure("the daemon did not answer"));
+                    }
+                }
                 cx.notify();
-            }),
-            Ok(Ok(_)) | Err(_) => state.update(cx, |app, cx| {
-                record_mutation_failure(app, create_failure("the daemon did not answer"));
-                cx.notify();
-            }),
+            });
         });
     })
     .detach();

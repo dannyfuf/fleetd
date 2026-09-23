@@ -123,7 +123,7 @@ fn attention_counts_and_strip_offsets_are_prepared_before_render_reads() {
     let caller = summary("cache", Attention::Working, 4);
     let child = child_summary("cache", Attention::Idle, 1, caller.thread);
     let mut agents = AgentThreads::default();
-    agents.sync_snapshot(vec![caller.clone(), child.clone()]);
+    agents.sync_snapshot(vec![caller.clone(), child.clone()], &HashSet::new());
     agents.attach(child.thread);
 
     assert_eq!(agents.attention(caller.thread), Attention::Working);
@@ -244,6 +244,82 @@ fn children_join_the_strip_only_while_attached_and_follow_their_caller() {
             .collect::<Vec<_>>(),
         vec![caller.thread, second.thread]
     );
+}
+
+/// Regression: a snapshot assembled before `^s a`'s thread existed, applied after its summary
+/// and reply, forgot the thread and the tab it had just selected; the next summary put the tab
+/// back unselected, so the keyboard stayed on the terminal (`docs/NATIVE-AGENTS.md` §9.2).
+#[test]
+fn a_snapshot_older_than_a_new_thread_keeps_it_and_its_selected_tab() {
+    let now = Instant::now();
+    let mut state = state_with(Vec::new());
+    let created = summary("feat", Attention::Idle, 0);
+    state.apply_agent_summary(created.clone(), now);
+    assert!(state.select_agent_thread(created.thread));
+
+    state.apply_snapshot(populated(Vec::new()), now);
+    assert!(state.agents.summary(created.thread).is_some());
+    assert_eq!(state.active_agent_thread(), Some(created.thread));
+
+    // Once a snapshot has listed the thread, a later one that omits it is a removal again.
+    state.apply_snapshot(populated(vec![created.clone()]), now);
+    state.apply_snapshot(populated(Vec::new()), now);
+    assert!(state.agents.summary(created.thread).is_none());
+    assert_eq!(state.active_agent_thread(), None);
+}
+
+#[test]
+fn an_unlisted_thread_goes_with_its_worktree() {
+    let now = Instant::now();
+    let mut state = state_with(Vec::new());
+    let stray = summary("gone", Attention::Idle, 0);
+    state.apply_agent_summary(stray.clone(), now);
+
+    state.apply_snapshot(populated(Vec::new()), now);
+    assert!(
+        state.agents.summary(stray.thread).is_none(),
+        "no snapshot lists the thread's worktree, so nothing it could still be shown under exists"
+    );
+}
+
+/// Regression: the daemon broadcasts a new thread's summary before it replies to the create,
+/// and the summary used to show the tab without selecting it until the reply ran.
+#[test]
+fn a_pending_create_selects_its_thread_on_the_first_summary() {
+    let now = Instant::now();
+    let other = summary("feat", Attention::Idle, 1);
+    let mut state = state_with(vec![other.clone()]);
+    let token = state
+        .agents
+        .begin_create(worktree("feat"), AgentKind::Claude);
+
+    let mut child = child_summary("feat", Attention::Idle, 0, other.thread);
+    child.provider = AgentKind::Claude;
+    state.apply_agent_summary(child.clone(), now);
+    assert_eq!(
+        state.active_agent_thread(),
+        None,
+        "a delegated child never answers ^s a"
+    );
+
+    let created = summary("feat", Attention::Idle, 0);
+    state.apply_agent_summary(created.clone(), now);
+    assert_eq!(state.active_agent_thread(), Some(created.thread));
+    assert!(state.agents.take_composer_focus(created.thread));
+    assert_eq!(state.agents.finish_create(token), Some(created.thread));
+    assert_eq!(state.agents.finish_create(token), None);
+}
+
+#[test]
+fn a_pending_create_ignores_a_thread_of_another_provider() {
+    let now = Instant::now();
+    let mut state = state_with(Vec::new());
+    let token = state
+        .agents
+        .begin_create(worktree("feat"), AgentKind::Codex);
+    state.apply_agent_summary(summary("feat", Attention::Idle, 0), now);
+    assert_eq!(state.active_agent_thread(), None);
+    assert_eq!(state.agents.finish_create(token), None);
 }
 
 #[test]

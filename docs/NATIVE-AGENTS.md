@@ -1337,6 +1337,21 @@ once to a fresh bounded newest-window open. A replay answer — the ladder admit
 only a windowed answer replaces a projection, and a replay for a thread the client no longer
 holds is a gap that re-opens the newest window.
 
+The summary list has three writers with no order between them: the snapshot, the `AgentSummary`
+broadcast and the `AgentThreadCreated` reply. fleetd broadcasts a new thread's summary *before*
+it replies to the create, and assembles snapshots asynchronously without the create stamping
+one, so the client makes both rules explicit rather than trusting arrival order:
+
+- **A snapshot forgets only threads a snapshot has listed.** A thread a summary or reply
+  introduced is kept, with its latest summary, until a snapshot lists it; a snapshot assembled a
+  moment before the thread existed is otherwise a removal, and it took the tab `^s a` had just
+  selected with it. Such a thread still goes when no snapshot lists its worktree, and a new link's
+  first snapshot is authoritative about everything.
+- **`^s a` / `^s A` selects its thread on first sight.** The press is recorded before the create
+  is sent, and the first summary or snapshot that lists a new top-level thread of that provider in
+  that worktree selects it and asks for its composer's focus. The reply selects only when first
+  sight did not, so the focus it delivered is not re-armed.
+
 ### 9.3 Remote
 
 > **The remote daemon owns the transcript and the sequence. The local daemon is a re-framing proxy

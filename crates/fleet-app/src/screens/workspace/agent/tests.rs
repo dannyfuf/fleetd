@@ -45,16 +45,16 @@ fn an_in_flight_open_thread_does_not_retain_app_state(cx: &mut gpui::TestAppCont
     weak_state.assert_released();
 }
 
-#[gpui::test]
-fn create_thread_leaves_model_and_mode_for_the_daemon_defaults(cx: &mut gpui::TestAppContext) {
-    let requester = RecordingRequester::default();
-    let worktree: WorktreeId = "fleet/app#defaults"
-        .parse()
-        .unwrap_or_else(|error| panic!("invalid test worktree: {error}"));
-    let session_id = SessionId::try_from("fleet/app/defaults")
+/// A Workspace on `worktree`'s session, ready for `^s a`.
+fn workspace_on(
+    cx: &mut gpui::TestAppContext,
+    worktree: &WorktreeId,
+    home: &str,
+) -> Entity<AppState> {
+    let session_id = SessionId::try_from(worktree.to_string().replace('#', "/"))
         .unwrap_or_else(|error| panic!("invalid test session: {error}"));
-    let state = cx.new(|_| {
-        let mut app = AppState::new("/tmp/fleet-agent-defaults", Instant::now());
+    cx.new(|_| {
+        let mut app = AppState::new(home, Instant::now());
         app.screen = Screen::Workspace {
             session: session_id.clone(),
         };
@@ -86,11 +86,20 @@ fn create_thread_leaves_model_and_mode_for_the_daemon_defaults(cx: &mut gpui::Te
                 version: "test".to_owned(),
                 pid: 1,
                 started_at: String::new(),
-                home: "/tmp/fleet-agent-defaults".to_owned(),
+                home: home.to_owned(),
             },
         });
         app
-    });
+    })
+}
+
+#[gpui::test]
+fn create_thread_leaves_model_and_mode_for_the_daemon_defaults(cx: &mut gpui::TestAppContext) {
+    let requester = RecordingRequester::default();
+    let worktree: WorktreeId = "fleet/app#defaults"
+        .parse()
+        .unwrap_or_else(|error| panic!("invalid test worktree: {error}"));
+    let state = workspace_on(cx, &worktree, "/tmp/fleet-agent-defaults");
 
     cx.update(|cx| create_thread(&requester, &state, AgentKind::Claude, cx));
     assert!(matches!(
@@ -101,6 +110,61 @@ fn create_thread_leaves_model_and_mode_for_the_daemon_defaults(cx: &mut gpui::Te
             ..
         })
     ));
+}
+
+/// Regression: fleetd broadcasts a new thread's summary before it answers the create, and the
+/// two reach the foreground on different paths. `^s a`'s tab used to appear unselected until the
+/// reply ran — on a loaded machine long enough for keys to land on the tab the user had left.
+#[gpui::test]
+fn create_thread_selects_its_tab_on_the_first_summary_and_the_reply_keeps_it(
+    cx: &mut gpui::TestAppContext,
+) {
+    let requester = RecordingRequester::default();
+    let worktree: WorktreeId = "fleet/app#first-sight"
+        .parse()
+        .unwrap_or_else(|error| panic!("invalid test worktree: {error}"));
+    let state = workspace_on(cx, &worktree, "/tmp/fleet-agent-first-sight");
+    cx.update(|cx| create_thread(&requester, &state, AgentKind::Claude, cx));
+
+    let created = fleet_core::agents::ThreadProjection::new(
+        ThreadId::new(),
+        worktree.clone(),
+        AgentKind::Claude,
+    )
+    .summary(fleet_core::agents::Seq::default());
+    cx.update(|cx| {
+        state.update(cx, |app, _| {
+            app.apply_agent_summary(created.clone(), Instant::now());
+        });
+    });
+    assert_eq!(
+        cx.read(|cx| state.read(cx).active_agent_thread()),
+        Some(created.thread),
+        "the summary selects the tab before the create is answered"
+    );
+    assert!(
+        cx.update(|cx| state.update(cx, |app, _| app.agents.take_composer_focus(created.thread))),
+        "and asks for its composer to be focused"
+    );
+
+    let reply = requester
+        .pending_reply
+        .borrow_mut()
+        .take()
+        .unwrap_or_else(|| panic!("create_thread sent no request"));
+    reply
+        .try_send(Ok(ResponseBody::AgentThreadCreated(created.clone())))
+        .unwrap_or_else(|error| panic!("the reply channel closed: {error}"));
+    cx.run_until_parked();
+
+    assert_eq!(
+        cx.read(|cx| state.read(cx).active_agent_thread()),
+        Some(created.thread)
+    );
+    assert!(
+        !cx.update(|cx| state.update(cx, |app, _| app.agents.take_composer_focus(created.thread))),
+        "the reply must not re-arm a focus request the first selection already delivered"
+    );
 }
 
 #[gpui::test]
