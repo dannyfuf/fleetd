@@ -903,6 +903,17 @@ fn facts_section(cx: &mut App) -> AnyElement {
             ),
         ),
         LAYOUT.labeled(
+            "copy field",
+            &t,
+            div().w(px(304.0)).child(
+                CopyField::new("~/worktrees/acme/web/spike").button(
+                    IconButton::new("kit-copy-path", Icon::Copy, "Copy path")
+                        .size(ButtonSize::Compact)
+                        .kbd(gallery_kbd("y")),
+                ),
+            ),
+        ),
+        LAYOUT.labeled(
             "info card",
             &t,
             div().w(px(304.0)).child(

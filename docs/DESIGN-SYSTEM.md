@@ -926,6 +926,14 @@ reads in `text` beside an amber `triangle-alert`; a safe fact in `text_secondary
 any decisive fact is unknown or the facts are still loading, and `ConfirmKey::accepts_enter()`
 says whether `Enter` also confirms.
 
+#### `CopyField`
+**Purpose.** A read-only value in a field box with the button that copies it: the detail
+panel's worktree path.
+**API.** `CopyField::new(value).button(impl IntoElement)`.
+**Usage rule.** Mono, ellipsized, not focusable and not an input. The button is the caller's
+`IconButton` carrying the copy action, so its tooltip shows the key (`y`). A value that needs no
+action is a `FactRow`; one the user edits is a `TextInput`.
+
 #### `InfoCard`
 **Purpose.** A raised, rounded box grouping a few lines about one thing inside a detail panel:
 the worktree panel's *Session* card.

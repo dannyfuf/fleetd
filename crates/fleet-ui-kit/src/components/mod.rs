@@ -18,6 +18,7 @@ mod chip;
 mod column_ladder;
 mod confirm_dialog;
 mod control;
+mod copy_field;
 mod cycler;
 mod daemon_dot;
 mod daemon_splash;
@@ -89,6 +90,7 @@ mod value_field;
 mod veil;
 
 pub use crate::focus::{FocusRing, FocusRingKind};
+pub use copy_field::CopyField;
 
 pub use age_label::{AgeLabel, format_age};
 pub use agent::*;
