@@ -1014,19 +1014,18 @@ impl Render for BoardGallery {
         ];
 
         AppFrame::new()
-            .context_bar(
-                ContextBar::new([ContextTab::new("board", cards)])
-                    .active(0)
+            .title_bar(
+                TitleBar::new()
+                    .leading(Text::ui_strong(format!("board · {cards} cards")))
                     .leading_inset(px(84.0))
-                    .chip(Chip::labeled(
+                    .trailing(Chip::labeled(
                         if t.mode.is_dark() {
                             Icon::Moon
                         } else {
                             Icon::CircleArrowUp
                         },
                         if t.mode.is_dark() { "dark" } else { "light" },
-                    ))
-                    .daemon(DaemonState::Healthy),
+                    )),
             )
             .body(
                 div()
@@ -1056,18 +1055,15 @@ impl Render for BoardGallery {
                     .children(sections),
             )
             .status_bar(
-                StatusBar::new()
-                    .breadcrumb("fleet-ui-kit › board")
-                    .mode(if typing { Mode::Dialog } else { Mode::Normal })
-                    .ticker(
-                        KeyHintRow::new()
-                            .key("h l", "column")
-                            .key("j k", "card")
-                            .key("[ ]", "move")
-                            .key("p", "priority")
-                            .key("i m", "describe")
-                            .key("ctrl-t", "theme"),
-                    ),
+                StatusBar::new().breadcrumb("fleet-ui-kit › board").ticker(
+                    KeyHintRow::new()
+                        .key("h l", "column")
+                        .key("j k", "card")
+                        .key("[ ]", "move")
+                        .key("p", "priority")
+                        .key("i m", "describe")
+                        .key("ctrl-t", "theme"),
+                ),
             )
     }
 }

@@ -1,8 +1,9 @@
 //! Visual bench for the **structure** group of `fleet-ui-kit`.
 //!
 //! Every structural component, in every state it can be in, in both themes:
-//! `AppFrame`, `SplitLayout`, `ContextBar`, `StatusBar`, `Pane`, `PaneHeader`, `Sheet`,
-//! `Dialog`, `Overlay`, `ToastStack`, `Veil`, `Banner`, `ModeWord` and `DaemonDot`.
+//! `AppFrame`, `SplitLayout`, `TitleBar`, `CommandField`, `StatusButton`, `SwitcherButton`,
+//! `StatusBar`, `Pane`, `PaneHeader`, `Sheet`, `Dialog`, `Overlay`, `ToastStack`, `Veil`,
+//! `Banner`, `ModeWord` and `DaemonDot`.
 //!
 //! The floating layers are wired as **live layers of this window**, not as pictures of
 //! themselves, because their whole contract is where they sit relative to the chrome and to
@@ -253,23 +254,29 @@ fn app_frame_section(cx: &mut App) -> AnyElement {
     let t = cx.theme().clone();
     let mini = |banner: bool| {
         let frame = AppFrame::new()
-            .context_bar(
-                ContextBar::new([ContextTab::new("buk", 1), ContextTab::new("personal", 2)])
-                    .active(0)
-                    .leading_inset(t.space.md)
-                    .chip(Chip::counter(Icon::CircleDot, 3))
-                    .daemon(if banner {
-                        DaemonState::Lost
-                    } else {
-                        DaemonState::Healthy
-                    }),
-            )
+            .title_bar(support::chrome::title_bar(
+                "frame-title",
+                support::chrome::TitleSample::Hub,
+                support::chrome::TitleStatus {
+                    daemon_down: banner.then_some(true),
+                    ..support::chrome::TitleStatus::QUIET
+                },
+            ))
             .body(filler(&t, 6))
-            .status_bar(
+            .status_bar(support::chrome::status_buttons(
                 StatusBar::new()
-                    .breadcrumb("buk › payroll › feat/payroll-fix")
-                    .mode(Mode::Normal),
-            );
+                    .daemon(
+                        if banner {
+                            DaemonState::Lost
+                        } else {
+                            DaemonState::Healthy
+                        },
+                        banner.then(|| "stopped".into()),
+                    )
+                    .breadcrumb("buk › payroll › feat/payroll-fix"),
+                "frame-status",
+                false,
+            ));
         if banner {
             frame.banner(
                 Banner::warning("fleetd stopped")
@@ -287,11 +294,11 @@ fn app_frame_section(cx: &mut App) -> AnyElement {
     };
 
     LAYOUT.section(
-        "AppFrame — 36 context bar · 28 banner · flex body · 28 status bar",
+        "AppFrame — 44 title bar · 28 banner · flex body · 28 status bar",
         &t,
         vec![
             specimen(
-                "hub: context bar 36 + body + status bar 28",
+                "hub: title bar 44 + body + status bar 28",
                 &t,
                 stage(&t, px(220.0), mini(false)),
             ),
@@ -375,103 +382,151 @@ fn split_section(cx: &mut App) -> AnyElement {
     )
 }
 
-fn context_bar_section(cx: &mut App) -> AnyElement {
+fn title_bar_section(cx: &mut App) -> AnyElement {
+    use support::chrome::{TitleSample, TitleStatus, title_bar};
     let t = cx.theme().clone();
-    let bar_stage = |bar: ContextBar| stage(&t, t.metrics.context_bar_h, bar);
-    let tabs = || {
-        [
-            ContextTab::new("buk", 1),
-            ContextTab::new("personal", 2),
-            ContextTab::new("oss", 3),
-        ]
-    };
-    let chips = |bar: ContextBar| {
-        bar.chip(
-            Chip::counter(Icon::LoaderCircle, 2)
-                .tone(Tone::Warning)
-                .spinning(true)
-                .id("cb-jobs"),
-        )
-        .chip(Chip::counter(Icon::CircleDot, 3).tone(Tone::Success))
-        .chip(Chip::counter(Icon::Moon, 5))
-        // Zero-suppressed: passed on every frame, rendered only when it has something.
-        .chip(Chip::counter(Icon::Flag, 0))
-        .chip(Chip::counter(Icon::CircleQuestionMark, 1).tone(Tone::Warning))
-        .chip(Chip::labeled(Icon::CircleArrowUp, "0.2.0"))
+    let bar_stage = |bar: AnyElement| stage(&t, t.metrics.title_bar_h, bar);
+    let busy = TitleStatus {
+        needs_you: 1,
+        running: 2,
+        sleeping: 3,
+        update: true,
+        ..TitleStatus::QUIET
     };
     LAYOUT.section(
-        "ContextBar — 84 px inset · numbered tabs · 2 px accent underline · chips · daemon dot",
+        "TitleBar — switcher · section nav · command field · status buttons · Help · Settings",
         &t,
         vec![
             specimen(
-                "default · tab 1 active · every §2.3 chip passed, including the zero one",
+                "hub, quiet · only Help and Settings on the right",
                 &t,
-                bar_stage(chips(ContextBar::new(tabs()).active(0))),
+                bar_stage(title_bar("tb-quiet", TitleSample::Hub, TitleStatus::QUIET)),
             ),
             specimen(
-                "third tab active · +3 overflow for contexts past nine",
+                "hub, busy · 1 needs you (amber) · 2 jobs spinning · 3 sleeping (inert) · update",
                 &t,
-                bar_stage(ContextBar::new(tabs()).active(2).overflow(3)),
+                bar_stage(title_bar("tb-busy", TitleSample::Hub, busy)),
             ),
             specimen(
-                "daemon degraded · the dot grows a labelled amber pill",
+                "a failed job replaces the running count, in red",
                 &t,
-                bar_stage(
-                    ContextBar::new(tabs())
-                        .active(0)
-                        .daemon(DaemonState::Degraded)
-                        .daemon_label("fleetd slow"),
-                ),
+                bar_stage(title_bar(
+                    "tb-failed",
+                    TitleSample::Hub,
+                    TitleStatus {
+                        running: 2,
+                        failed: 1,
+                        ..TitleStatus::QUIET
+                    },
+                )),
             ),
             specimen(
-                "daemon lost · red pill, and the label is mandatory reading",
+                "daemon reconnecting (amber) · daemon down (red); nothing while healthy",
                 &t,
-                bar_stage(
-                    ContextBar::new(tabs())
-                        .active(0)
-                        .daemon(DaemonState::Lost)
-                        .daemon_label("fleetd stopped"),
-                ),
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(t.space.sm)
+                    .child(bar_stage(title_bar(
+                        "tb-reconnecting",
+                        TitleSample::Hub,
+                        TitleStatus {
+                            daemon_down: Some(false),
+                            ..TitleStatus::QUIET
+                        },
+                    )))
+                    .child(bar_stage(title_bar(
+                        "tb-down",
+                        TitleSample::Hub,
+                        TitleStatus {
+                            daemon_down: Some(true),
+                            ..TitleStatus::QUIET
+                        },
+                    ))),
             ),
             specimen(
-                "empty · the fact, then the key that fixes it (§3.13)",
+                "workspace · the breadcrumb replaces the switcher and the nav; ⌃S s goes back",
                 &t,
-                bar_stage(
-                    ContextBar::new([]).empty("No contexts yet.", "N  create your first context"),
-                ),
+                bar_stage(title_bar(
+                    "tb-workspace",
+                    TitleSample::Workspace,
+                    TitleStatus {
+                        needs_you: 2,
+                        ..TitleStatus::QUIET
+                    },
+                )),
             ),
             specimen(
-                "12 px inset · the platform with no traffic lights",
+                "first run · empty: there is nowhere to go yet",
                 &t,
-                bar_stage(ContextBar::new(tabs()).active(1).leading_inset(t.space.md)),
+                bar_stage(title_bar(
+                    "tb-empty",
+                    TitleSample::Empty,
+                    TitleStatus::QUIET,
+                )),
+            ),
+            specimen(
+                "SwitcherButton · monogram · glyph · open (pressed)",
+                &t,
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(t.space.md)
+                    .child(SwitcherButton::new("sw-monogram", "Acme").monogram())
+                    .child(SwitcherButton::new("sw-icon", "agent").icon(Icon::GitBranch))
+                    .child(
+                        SwitcherButton::new("sw-open", "personal")
+                            .monogram()
+                            .selected(true),
+                    ),
+            ),
+            specimen(
+                "StatusButton · dot · glyph · spinner · secondary",
+                &t,
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(t.space.md)
+                    .child(
+                        StatusButton::new("sb-dot", "1 needs you")
+                            .mark(StatusMark::Dot)
+                            .tone(Tone::Warning),
+                    )
+                    .child(
+                        StatusButton::new("sb-icon", "1 failed")
+                            .mark(StatusMark::Icon(Icon::TriangleAlert))
+                            .tone(Tone::Danger),
+                    )
+                    .child(StatusButton::new("sb-spin", "2 jobs").mark(StatusMark::Spinner))
+                    .child(StatusButton::new("sb-plain", "Update 0.2.0")),
             ),
         ],
     )
 }
 
 fn status_bar_section(cx: &mut App) -> AnyElement {
+    use support::chrome::status_buttons;
     let t = cx.theme().clone();
     let bar_stage = |bar: StatusBar| stage(&t, t.metrics.status_bar_h, bar);
+    let hub = |id: &'static str| {
+        status_buttons(
+            StatusBar::new()
+                .daemon(DaemonState::Healthy, None)
+                .breadcrumb("buk › payroll › feat/payroll-fix"),
+            id,
+            false,
+        )
+    };
     LAYOUT.section(
-        "StatusBar — breadcrumb · mode word (84 px, fixed) · ticker · sticky error",
+        "StatusBar — daemon · breadcrumb · ticker · sticky error · Shortcuts",
         &t,
         vec![
-            specimen(
-                "hub, idle",
-                &t,
-                bar_stage(
-                    StatusBar::new()
-                        .breadcrumb("buk › payroll › feat/payroll-fix")
-                        .mode(Mode::Normal),
-                ),
-            ),
+            specimen("hub, idle", &t, bar_stage(hub("sbar-idle"))),
             specimen(
                 "with the job ticker",
                 &t,
                 bar_stage(
-                    StatusBar::new()
-                        .breadcrumb("buk › payroll › feat/payroll-fix")
-                        .mode(Mode::Normal)
+                    hub("sbar-ticker")
                         .ticker(JobTicker::new("clone", "nixos").percent(40).extra(1)),
                 ),
             ),
@@ -479,34 +534,44 @@ fn status_bar_section(cx: &mut App) -> AnyElement {
                 "with a sticky error · the error replaces the ticker, it never joins it",
                 &t,
                 bar_stage(
-                    StatusBar::new()
-                        .breadcrumb("buk › payroll › feat/payroll-fix")
-                        .mode(Mode::Normal)
+                    hub("sbar-error")
                         .ticker(JobTicker::new("clone", "nixos").percent(40))
                         .error(StickyErrorSlot::new("prs failed: gh HTTP 502").key("!")),
                 ),
             ),
             specimen(
-                "workspace · breadcrumb is the session name, mode is TERMINAL, daemon dot trails",
+                "workspace · Fleet commands ⌃S and Shortcuts ⌃S ?",
                 &t,
-                bar_stage(
+                bar_stage(status_buttons(
                     StatusBar::new()
+                        .daemon(DaemonState::Healthy, None)
                         .breadcrumb("buk › payroll › feat/payroll-fix › nvim")
-                        .breadcrumb_ch(48)
-                        .mode(Mode::Terminal)
-                        .trailing(DaemonDot::new(DaemonState::Healthy)),
-                ),
+                        .breadcrumb_ch(48),
+                    "sbar-workspace",
+                    true,
+                )),
+            ),
+            specimen(
+                "daemon unreachable · the word joins fleetd in the daemon's tone",
+                &t,
+                bar_stage(status_buttons(
+                    StatusBar::new()
+                        .daemon(DaemonState::Lost, Some("unreachable".into()))
+                        .breadcrumb("buk › payroll"),
+                    "sbar-lost",
+                    false,
+                )),
             ),
             specimen(
                 "long breadcrumb, middle-truncated at a ch budget",
                 &t,
                 bar_stage(
                     StatusBar::new()
+                        .daemon(DaemonState::Healthy, None)
                         .breadcrumb(
                             "buk › dannyfuf/fleetd-experiments › spike/gpui-vt-mirror-grid › nvim",
                         )
-                        .breadcrumb_ch(40)
-                        .mode(Mode::Scroll),
+                        .breadcrumb_ch(40),
                 ),
             ),
         ],
@@ -672,9 +737,9 @@ fn pane_section(cx: &mut App, focused_pane: usize, filter_query: Entity<TextInpu
 
 fn mode_and_daemon_section(cx: &mut App) -> AnyElement {
     let t = cx.theme().clone();
-    let words = Mode::ALL
+    let words = ["NORMAL", "STAGING", "DIALOG", "REBASING"]
         .iter()
-        .map(|mode| {
+        .map(|word| {
             div()
                 .flex()
                 .flex_col()
@@ -688,7 +753,7 @@ fn mode_and_daemon_section(cx: &mut App) -> AnyElement {
                         .h(t.metrics.status_bar_h)
                         .rounded(t.radii.sm)
                         .bg(t.colors.surface)
-                        .child(ModeWord::new(*mode)),
+                        .child(ModeWord::word(*word)),
                 )
                 .into_any_element()
         })
@@ -727,7 +792,7 @@ fn mode_and_daemon_section(cx: &mut App) -> AnyElement {
         &t,
         vec![
             specimen(
-                "all eight modes at the fixed 84 px — only ^S is amber, because only it expires",
+                "the embedded Git UI status word at the fixed 84 px; Fleet chrome draws none",
                 &t,
                 div()
                     .flex()
@@ -1321,7 +1386,7 @@ impl Render for StructureGallery {
         let sections = vec![
             app_frame_section(cx),
             split_section(cx),
-            context_bar_section(cx),
+            title_bar_section(cx),
             status_bar_section(cx),
             pane_section(cx, focused_pane, filter_query),
             mode_and_daemon_section(cx),
@@ -1333,23 +1398,17 @@ impl Render for StructureGallery {
         ];
 
         let mut frame = AppFrame::new()
-            .context_bar(
-                ContextBar::new([ContextTab::new("structure", 1)])
-                    .active(0)
-                    .chip(Chip::labeled(
+            .title_bar(
+                TitleBar::new()
+                    .leading(Text::ui_strong("structure"))
+                    .trailing(Chip::labeled(
                         if t.mode.is_dark() {
                             Icon::Moon
                         } else {
                             Icon::CircleArrowUp
                         },
                         if t.mode.is_dark() { "dark" } else { "light" },
-                    ))
-                    .daemon(if self.banner {
-                        DaemonState::Lost
-                    } else {
-                        DaemonState::Healthy
-                    })
-                    .daemon_label("fleetd stopped"),
+                    )),
             )
             .body(
                 div()
@@ -1377,15 +1436,6 @@ impl Render for StructureGallery {
             .status_bar(
                 StatusBar::new()
                     .breadcrumb("fleet-ui-kit › structure")
-                    .mode(if self.dialog {
-                        Mode::Dialog
-                    } else if self.palette {
-                        Mode::Palette
-                    } else if self.sheet {
-                        Mode::Jobs
-                    } else {
-                        Mode::Normal
-                    })
                     .ticker(
                         KeyHintRow::new()
                             .key("t", "theme")

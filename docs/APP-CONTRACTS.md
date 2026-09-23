@@ -134,7 +134,7 @@ Rules that come with those signatures:
    `state.update(cx, |state, cx| { …; cx.notify(); })` for writes. The shell observes the
    entity, so a `cx.notify()` inside that closure repaints the whole frame.
 3. **The daemon is only reachable through `Bridge`** (§4). Clone it into your listeners.
-4. **Do not draw the context bar, the status bar, the banner or the toasts.** The shell owns all
+4. **Do not draw the title bar, the status bar, the banner or the toasts.** The shell owns all
    four, on every screen, at the same pixel positions (§2.1).
 5. The `Dialogs` variant **names** and the strings from `context_name()` are stable, because
    `keymap.rs` binds against them. A dialog's own data lives in its draft entity, not in the
@@ -144,7 +144,7 @@ Rules that come with those signatures:
 
 Do not re-implement these; they arrive as `AppState` changes:
 
-* opening and closing every overlay, and the mode word that follows it;
+* opening and closing every overlay, and the mode that follows it;
 * `Esc` (`fleet::Cancel`, `dialog::Cancel`, `filter::Escape`) including the two-stage filter
   escape, and `q` closing the Jobs panel;
 * the whole quit flow, `ctrl-q` and `ctrl-shift-q`, including `W` never-warn;
@@ -274,7 +274,7 @@ changes. `AppState::agent_context_chain()` derives it from daemon state, not fro
 the thread's newest open gate picks `AgentDecision > AgentPermission` \| `AgentQuestion` \|
 `AgentPlan`, and otherwise a running session, a running turn or live background work picks
 `AgentWorking` over `AgentIdle`; a frozen transcript tail (`ctrl-s [`) takes precedence over all
-of them and picks `AgentNativeScroll`, which is also what the status bar's `SCROLL` word is read
+of them and picks `AgentNativeScroll`, which is also what the snapshot's `Scroll` mode is read
 from. Deriving it from the projection is what makes the card own the
 keyboard in the *same frame* the gate appears, instead of one frame later. `Agent > AgentRow`
 is bound, listed in Help and handled by the workspace (`ExpandRow`, `Revert`, `OpenInEditor`
@@ -519,7 +519,7 @@ is the single source of truth on the client. The parts a screen touches:
 | `board_stale: bool` | authoritative refresh pending; lives outside the frozen `BoardState` fields |
 | `board_backends: Vec<BackendDescriptor>` | the daemon's backend registry, fetched once per connection; the header label and the settings dialog's rows are drawn from it |
 | `screen`, `hub_pane`, `pr_tab`, `scope`, `cursors` | where the cursor is, per list |
-| `terminal_mode`, `agent_popup`, `overlay`, `mode()` | the base Workspace mode, floating-agent mode, top overlay, and resulting mode word/key context |
+| `terminal_mode`, `agent_popup`, `overlay`, `mode()` | the base Workspace mode, floating-agent mode, top overlay, and resulting mode/key context |
 | `filter` | query + whether the input still owns the keyboard |
 | `session_mru`, `terminal_mru` | `ctrl-s w` and `ctrl-s Tab` are `Mru::alternate()` |
 | `toasts`, `sticky_error` | §2.7 and §1.8; errors are sticky, never toasts |
@@ -541,7 +541,7 @@ is a pure function so no two surfaces can disagree about a thread:
 | Which top-level tabs did this installation close? | `AgentClosedThreads` seeds `agents.closed` before the first snapshot; `^s x` adds locally and at the daemon, while picker or top-level navigation removes both |
 | What mark does a tab carry? | `agents.attention(thread)` → `tab_badge`: spinner (`Working`) · amber dot (`NeedsYou`) · gray dot (`Unread`) · `exited <code>` (`Failed`) · nothing |
 | What does the session header say? | the same attention → `header_word`: `working` · `needs you` · `failed` · `idle` |
-| What do the context-bar chips count? | `agents.counts()` → `AgentCounts { needs_you, working, failed }`, including the thread on the current tab, each chip zero-suppressed |
+| What does the title bar's `needs you` count, and what does it open? | `agents.counts().needs_you`, including the thread on the current tab, zero-suppressed; a click opens `agents.waiting_thread()` when exactly one waits, else the agents picker |
 | When does a notification fire? | `agents.attention_edges()` — one toast per *edge* into `NeedsYou`/`Failed`, so a thread that stays blocked does not re-notify |
 | What has this installation shown? | `agents.seen(thread)`; selecting a tab sends monotonic `AgentMarkSeen`, which is what clears a `NeedsYou(Finished)`. Windows sharing one Fleet home share this cursor; a different installation does not |
 

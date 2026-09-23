@@ -2,13 +2,13 @@
 #
 # Fleet's Hub rows carry no click handler (`views/worktrees_list.rs`, `views/repos_rail.rs`,
 # `views/prs_screen.rs` and `screens/jobs/presentation.rs` register none), so a row is *named*
-# for the pointer but only *opened* from the keyboard. The segmented tab strip is the one Hub
+# for the pointer but only *opened* from the keyboard. The title bar's section nav is the Hub
 # control with an `on_select`, so that is what the click half of this scenario drives.
 fixture: one-repo
 await idle
 assert screen == Hub && hub_tab == Worktrees
 
-# Click the segmented tab strip through all three Hub tabs and back.
+# Click the title bar's section nav through all three Hub sections and back.
 click hub.tab[1]
 await hub_tab == Prs && screen == Hub
 shot prs-tab

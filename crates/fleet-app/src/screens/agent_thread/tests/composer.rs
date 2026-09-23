@@ -13,7 +13,7 @@ use crate::screens::agent_thread::{
         restart_with_resume, strip_send_time_context, submit_gate, submit_intent,
     },
     decisions::PLAN_IMPLEMENTATION_PROMPT_PREFIX,
-    presentation::{self, TabBadge, key_hint_set, mode_label, tab_badge, tab_title},
+    presentation::{self, TabBadge, mode_label, tab_badge, tab_title},
 };
 
 #[test]
@@ -324,36 +324,6 @@ fn a_harness_that_reports_no_cost_contributes_no_segment() {
         texts,
         ["34%".to_owned(), "$0.42".to_owned(), "2m".to_owned()]
     );
-}
-
-#[test]
-fn the_status_key_set_follows_the_context_not_the_badge() {
-    let idle: Vec<&str> = key_hint_set(false, false)
-        .iter()
-        .map(|(key, _)| *key)
-        .collect();
-    assert!(
-        idle.contains(&"\u{21e7}\u{21e5}"),
-        "plan mode is bound on idle"
-    );
-    assert!(
-        idle.contains(&"^s s"),
-        "an agent tab repeats the Workspace session rows, and the bar says so: {idle:?}"
-    );
-    let working: Vec<&str> = key_hint_set(true, false)
-        .iter()
-        .map(|(_, label)| *label)
-        .collect();
-    assert!(
-        working.contains(&"steer") && working.contains(&"interrupt"),
-        "⏎ while working is a steer, and esc interrupts: {working:?}"
-    );
-    // §12: a frozen tail beats everything, including an open gate, so its keys win the bar.
-    let scrolling: Vec<&str> = key_hint_set(true, true)
-        .iter()
-        .map(|(_, label)| *label)
-        .collect();
-    assert!(scrolling.contains(&"row") && scrolling.contains(&"leave"));
 }
 
 #[test]

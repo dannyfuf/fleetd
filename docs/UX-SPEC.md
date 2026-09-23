@@ -88,7 +88,7 @@ Responsive ladders are expressed in **ch of the pane that owns the columns**, no
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────────┐
-│ ▍buk 1   personal 2   oss 3              ⟳2  ◉3  ☾5  ?1  ⚑4  ↑0.2.0          ◍  │ 36  context bar
+│ ●●● [A] Acme ⌄ [Worktrees 4│Pull requests 3│Board 5] [⌕ Search or run a command :] ● 1 needs you ⟳ 2 jobs ? ⚙ │ 44  title bar
 ├──────────────┬───────────────────────────────────────────────────────────────────┤
 │ REPOS      6 │ WORKTREES · payroll                          8/12      1–8/12     │ 30  pane headers
 │──────────────│───────────────────────────────────────────────────────────────────│
@@ -100,7 +100,7 @@ Responsive ladders are expressed in **ch of the pane that owns the columns**, no
 │              │                                                                   │
 │    240 px    │                     flex — 1039 px (138 ch)                       │
 ├──────────────┴───────────────────────────────────────────────────────────────────┤
-│ buk › payroll › feat/payroll-fix   NORMAL   ⟳ clone nixos 40%  +1        ⚠ !     │ 28  status bar
+│ ● fleetd  buk › payroll › feat/payroll-fix     ⟳ clone nixos 40%  +1   Shortcuts ? │ 28  status bar
 └──────────────────────────────────────────────────────────────────────────────────┘
                                             ┌──────────────────────────────┐
                                             │ ✓ Path copied                │  toasts, bottom-right
@@ -112,52 +112,63 @@ panel is inserted at the right; the repos rail never moves. Below **1120 px** to
 detail panel becomes a right-edge overlay (320 px) so the list never drops below **72 ch**.
 
 The Workspace replaces the rail + list + detail region entirely (full-bleed terminal) and keeps
-the context bar and the status bar at the same pixel positions — same chrome, same saccade. A
-**native tab** (§3.6) replaces the terminal grid with a Fleet-drawn pane in exactly that region
-and changes nothing above or below it: there is one context bar, one status bar and one mode
-word in the window, and they are the shell's. A pane that draws its own window chrome would put
-two status bars on screen, which is why `crates/fleet-lazygit` has an embedded render path with
-no `AppFrame`. The pane's own one-row key-hint bar is **not** window chrome — it is the pane's
-content, like a list header — and it stays.
+the title bar and the status bar at the same pixel positions — same chrome, same saccade. Only the
+title bar's leading region changes: the context switcher and the section nav give way to the
+breadcrumb `← Worktrees / repo / worktree` (§3.6). A **native tab** (§3.6) replaces the terminal
+grid with a Fleet-drawn pane in exactly that region and changes nothing above or below it: there is
+one title bar and one status bar in the window, and they are the shell's. A pane that draws its own
+window chrome would put two status bars on screen, which is why `crates/fleet-lazygit` has an
+embedded render path with no `AppFrame`. The pane's own one-row key-hint bar is **not** window
+chrome — it is the pane's content, like a list header — and it stays.
 
 ### 2.2 Persistent chrome
 
 | What | Where | Size | Why here |
 | --- | --- | --- | --- |
-| Context tabs, numbered 1–9 | Context bar, left, x = 84 (traffic lights occupy 12–72 of the unified titlebar) | 36 px tall, tab = text + 8 px pad, 16 px gap | Contexts are the outermost coordinate and `1`–`9` / `gt` are the cheapest jump in the app, so the digits must be visible while you press them. |
-| Active-tab marker | 2 px `blue` underline, full tab width | — | Blue always answers "where am I", never "how is it going". |
-| Overflow chip | `+3`, `fg.faint`, after tab 9 | 22 px | Contexts past 9 are reachable by `gt`/`gT` and the palette only. |
-| Status chips (§2.3) | Context bar, right, 12 px from the daemon dot, 8 px gaps | 22 px pills | The "is anything happening without me?" counters. Top-right is the OS status corner, far from the cursor. All zero-suppressed. |
-| Daemon dot `◍` | Context bar, far right, 12 px inset | 8 px dot | Liveness of the process that owns every job and PTY. Always present, dot-only when healthy; expands to a labelled amber/red pill when not (§3.12). |
+| Title bar | Top, full width; the unified macOS titlebar, so it starts at x = 84 after the traffic lights (12 px on other platforms) | 44 px, `chrome` ground, hairline below | One row does what three did: where you are, a way to search or run anything, and what needs you. |
+| Context switcher | Title bar, left: a monogram tile, the context name and a chevron | compact ghost button | Contexts are the outermost coordinate. It opens a menu of every context with its `1`–`9` key (a context past nine has none), then *New context* `N`, *Edit context* `E`, *Delete context* `D` (red). The keys keep working without it, and `gt` / `gT` still cycle. |
+| Section nav | Title bar, after the switcher | a segmented control | *Worktrees · Pull requests · Board*, each with its count (worktrees in the context, PRs waiting for your review, open board cards; zero-suppressed). The same actions as `g w` / `p` / `g b`; the segments are the harness's `hub.tab[N]`. Hub only. |
+| Command field | Title bar, centred in the window | 340 × 30 | Looks like a search input — magnifier, *Search or run a command*, the palette key — and is a button: a click opens the palette. Nobody has to know a key to find a command. |
+| Status cluster (§2.3) | Title bar, right | compact ghost buttons | What needs you and what is running, each shown only while non-zero, each opening what it counts. Top-right is the OS status corner, far from the cursor. |
+| Help, Settings | Title bar, far right | 26 px icon buttons | `?` and `,` as controls; the tooltip names the key. |
 | Repos rail | Left, fixed **240 px** (drag 200–320, remembered) | full height | Second coordinate. Narrow and left because it is a *filter*, not content. |
 | Pane header | Top of each pane | 30 px, label type, `fg.faint` | Carries scope, filter state, count and scroll position (§2.5), and hosts the filter bar with zero layout shift. |
-| Status bar | Bottom, full width | 28 px | Breadcrumb · mode word · job ticker · sticky error slot. |
+| Status bar | Bottom, full width | 28 px, `chrome` ground | Where you are and what is running: daemon · breadcrumb · job ticker or sticky error · the buttons that teach the two keys everything else hangs off. |
 | Toast layer | Bottom-right, above the status bar, 320 px wide, 12 px insets | max 3 stacked | Only for events with no other home (§2.7). |
 | Focus ring | 2 px `blue` inset on the focused pane; 2 px `blue` left bar on the cursor row | — | The only blue in the app. |
 
-**Status bar slots, left to right:** breadcrumb `context › repo › row` (flex, truncate-middle) ·
-**mode word** (fixed 84 px, centered, `fg.muted`, uppercase) · job ticker `⟳ <kind> <target> <pct>`
-with `+n` when more run (flex, `fg.muted`) · **sticky error slot** (right, red, `⚠ <text> · !`,
-persists until `!` or `Esc`, replaces the ticker when present).
+**Status bar slots, left to right:** the daemon — a small dot and `fleetd`, green and silent when
+healthy, and `fleetd <word>` in the daemon's tone otherwise (`fleetd connection lost`, `fleetd
+starting`) · the breadcrumb `context › repo › row` (flex, truncates) · the job ticker `⟳ <kind>
+<target> <pct>` with `+n` when more run (`fg.muted`) · the **sticky error slot** (red, `⚠ <text> ·
+!`, persists until `!` or `Esc`, replaces the ticker when present) · the buttons: `Shortcuts ?` in
+the Hub; `Fleet commands ⌃S` and `Shortcuts ⌃S ?` in the Workspace. Over a native agent thread only
+`Shortcuts ⌃S ?` shows: the thread takes `⌃S` as a chord, so there is no prefix mode for a button to
+enter, and holding the chord shows the ⌃S command menu anyway.
 
-### 2.3 Context-bar status chips (all zero-suppressed, in this fixed order)
+There is no mode word (ADR 0023, §2.8). Each state it used to name is on the surface that has it:
+Terminal is the focused grid; Agent is the thread's composer; Prefix is the ⌃S command menu; Scroll
+is the scroll pill; Filter is the filter bar in the pane header; Palette, Dialog and Jobs are the
+overlay itself.
 
-| Chip | Icon | Color | Content | Source |
+### 2.3 Title-bar status cluster (all zero-suppressed, in this fixed order)
+
+Each one is a button that opens what it counts, and its tooltip carries the key that does the same.
+
+| Button | Mark | Color | Content | Opens |
 | --- | --- | --- | --- | --- |
-| Jobs | `loader-circle` (spin) | amber | count of running jobs | `JobManager` |
-| Failed jobs | `triangle-alert` | red | count of failed-and-unseen jobs; replaces the jobs chip's color, never a second chip | §1.8 |
-| Live | `circle-dot` | green | count of `attached` sessions | `WorktreeStatus.session` |
-| Sleeping | `moon` | `fg.muted` | count of `detached` sessions (awake or slept) | idem |
-| Unknown / offline | `circle-help` | **amber** | count of `unknown` sessions **and** unreachable hosts | §1.3 — the count a stale or offline daemon must surface |
-| Review | `flag` | `fg.muted` | count of PRs in the `review` tab | §5 header "review count" |
-| Agent needs you | `bot` | amber | `<n> needs you` — threads blocked on a permission, a question, a plan, or a finished turn nobody has read | `AgentThreadSummary.attention` |
-| Agent working | `loader-circle` (spin) | `fg.muted` | `<n> working` | idem |
-| Agent failed | `circle-x` | red | `<n> failed` | idem |
-| Update | `arrow-up-circle` | `fg.faint` | `↑<version>` when an update is available | §5 `U` |
+| Needs you | dot | amber | `<n> needs you` — top-level threads blocked on a permission, a question, a plan, or a finished turn nobody has read | with one waiting, that thread (as the palette's AGENTS row does); with more, the agents picker (`⌃S d` in the Workspace) |
+| Jobs | `loader-circle` (spin) | `fg.muted` | `<n> job(s)` running | the Jobs sheet (`J`) |
+| Failed jobs | `triangle-alert` | red | `<n> failed`, failed and unseen; replaces the jobs button, never a second one (§1.8) | the Jobs sheet (`J`) |
+| Sleeping | — | `fg.muted` | `<n> sleeping` (detached sessions); inert text — it counts nothing a click could open. Hub only, until the Worktrees subtitle takes the session counts over | — |
+| Update | `arrow-up-circle` | `fg.muted` | `Update <version>` when an update is available. Hub only, where `U` is bound | runs the update (`U`) |
+| Daemon | dot | amber / red | nothing while healthy; `Reconnecting…` (amber) while the link retries on its own, `fleetd down` (red) once it stopped or could not start | the fleetd log (`l` on the banner) |
 
-**[D-1]** The `unknown/offline` chip is mandatory: collapsing attached + detached into one chip
-drops exactly the count that a stale daemon needs to show.
-**[D-2]** "Update available" is a chip and a Settings › About row — **never** a sticky toast. An
+**[D-1]** The live, unknown/offline and review counts left the chrome with the context bar. The
+review count is the *Pull requests* segment's count; the session counts move to the Worktrees
+subtitle, and until they do only `sleeping` stays, muted. An unreachable host is still shown on its
+rows and in the rail.
+**[D-2]** "Update available" is a button and a Settings › About row — **never** a sticky toast. An
 update is never urgent and `U` is already bound.
 
 ### 2.4 Tokens
@@ -247,25 +258,24 @@ Identical toast text within **1 s** coalesces into one toast with a `×2` suffix
 duplicate spam §6 attributes to overlapping operations with no duplicate suppression). Max 3
 stacked; oldest evicted first.
 
-### 2.8 Mode word
+### 2.8 Input modes (no mode word)
 
-Retired by ADR 0023: no mode word is drawn once the title bar replaces the context bar. The table
-stays authoritative for the modes, their key contexts and the harness snapshot's `mode` field.
+ADR 0023 retired the mode word: nothing in Fleet's chrome names the mode. The modes themselves are
+unchanged — they decide the key context, and the harness snapshot reports them as `mode`
+(`TESTING-HARNESS.md` §3) — and each one is visible on the surface that owns the keyboard.
 
-| Mode | Word | gpui key context |
+| Mode (snapshot `mode`) | gpui key context | Where it shows |
 | --- | --- | --- |
-| Normal | `NORMAL` | `Hub`, `Hub > Repos`, `Hub > Worktrees`, `Hub > Prs` |
-| Terminal | `TERMINAL` | `Workspace > Terminal`, `Workspace > Native` |
-| Agent | `AGENT` | `Agent > AgentIdle` / `AgentWorking` / `AgentDecision > …` |
-| Prefix (one-shot) | `^S` (amber) | `Workspace > Prefix` |
-| Scroll | `SCROLL` | `Workspace > Scroll` |
-| Filter | `FILTER` | `Filter` |
-| Palette | `PALETTE` | `Palette` |
-| Dialog | `DIALOG` | browsing `Dialog > <name>`; text ownership `Dialog > <name>Editing > FleetTextInput` |
-| Jobs overlay | `JOBS` | `Jobs` |
-
-The word is 84 px wide, centered in the status bar, present on **every** screen including the
-Workspace and including zoom (`ctrl-s z`).
+| `Normal` | `Hub`, `Hub > Repos`, `Hub > Worktrees`, `Hub > Prs` | the focused pane's ring and the cursor row |
+| `Terminal` | `Workspace > Terminal` | the focused terminal grid and its cursor |
+| `Native` | `Workspace > Native` | the Fleet-drawn pane in the selected tab |
+| `Agent` | `Agent > AgentIdle` / `AgentWorking` / `AgentDecision > …` | the thread's composer, or its open decision |
+| `Prefix` (one-shot) | `Workspace > Prefix` | the ⌃S command menu, once the prefix is held |
+| `Scroll` | `Workspace > Scroll` | the scroll pill over the grid |
+| `Filter` | `Filter` | the filter bar in place of the pane header |
+| `Palette` | `Palette` | the palette |
+| `Dialog` | browsing `Dialog > <name>`; text ownership `Dialog > <name>Editing > FleetTextInput` | the dialog |
+| `Jobs` | `Jobs` | the Jobs sheet |
 
 ### 2.9 Column ladders (inventory §5 breakpoints, authoritative in ch)
 
@@ -315,36 +325,50 @@ frozen the header appends `· stale · <age>` in amber (§1.3).
 
 ## 3. Screens
 
-### 3.1 Hub — Context bar
+### 3.1 Hub — Title bar
 
-**Purpose:** *Which slice of the world am I in, and is anything moving in it?*
+**Purpose:** *Which slice of the world am I in, where can I go, and is anything waiting for me?*
 
 ```
- ▍buk 1    personal 2    oss 3           ⟳2  ◉3  ☾5  ?1  ⚑4  ↑0.2.0            ◍
- └ 2px blue underline on active
+ ●●●  [A] Acme ⌄  [Worktrees 4 │ Pull requests 3 │ Board 5]   [⌕ Search or run a command  :]   ● 1 needs you  ⟳ 2 jobs  3 sleeping  ?  ⚙
 ```
 
 | Element | Content | Position | Why here |
 | --- | --- | --- | --- |
-| Context tab | `Context.name` + faint index digit | left, 12 px pad | Matches the `1`–`9` binding; first place a reader lands. |
-| Active marker | 2 px `blue` underline | under active tab | Blue = "where am I". |
-| Overflow | `+3` faint chip | after tab 9 | >9 contexts are `gt`/palette-reachable. |
-| Status chips | §2.3, zero-suppressed | right | One saccade answers "is anything happening without me". |
-| Daemon dot | §3.12 | far right | The process that owns every job and PTY. |
+| Context switcher | monogram tile, `Context.name`, chevron; opens a menu of every context (`✓` on the active one, `1`–`9` chips), then *New*, *Edit* and *Delete context* (`N`, `E`, `D`; Delete in red) | left, after the traffic lights | The first place a reader lands. The digits are on the menu rows, so the keys are taught where the choice is made. |
+| Section nav | *Worktrees · Pull requests · Board* with counts; the raised segment is the one shown | after the switcher | The Hub's three sections as one control, the same actions as their keys. |
+| Command field | *Search or run a command* and the palette key | centred | §2.2. |
+| Status cluster | §2.3 | right | One saccade answers "is anything happening without me". |
+| Help, Settings | icon buttons | far right | `?` and `,`, with their keys in the tooltip. |
 
 **Intentionally omitted:** context `owners` (Context dialog, Assign dialog and the detail panel),
-`createdAt`, per-context repo counts (the rail counts them), a settings/help gear (`,` / `?`), a
-separate window title bar — the GPUI window uses a 36 px unified titlebar that *is* this row.
+`createdAt`, per-context repo counts (the rail counts them), numbered context tabs (the switcher's
+menu carries the digits), and a separate window title — the GPUI window uses a 44 px unified
+titlebar that *is* this row.
 
-**States:** *loading* → tabs render from the cached snapshot, chips absent. *no contexts* → the
-tab row is replaced by faint `no contexts` and `N create your first context`. *daemon lost* →
-§3.12; the chips freeze and the header of every pane gains `stale · <age>`.
+**States:** *loading* → the bar renders from the cached snapshot, the counts absent. *no contexts*
+→ the switcher reads `No context` and its menu offers *New context*. *first run* → the bar is empty
+(§3.13). *daemon lost* → §3.12; the red `fleetd down` or amber `Reconnecting…` button joins the
+status cluster and the header of every pane gains `stale · <age>`.
 
-**Icons:** `loader-circle`, `triangle-alert`, `circle-dot`, `moon`, `circle-help`, `flag`,
-`arrow-up-circle`, `circle` (daemon dot is a filled 8 px dot, not an icon).
+**Icons:** `chevron-down`, `search`, `loader-circle`, `triangle-alert`, `arrow-up-circle`,
+`circle-question-mark`, `settings-2`; the needs-you and daemon marks are dots, not icons.
 
-**Keyboard:** `1`–`9` jump · `gt` / `gT` cycle · `N` new context · `E` edit active context
-(delete lives inside it, KEYMAP A15) · `:` palette for contexts past 9.
+**Keyboard:** unchanged, and every control has one: `1`–`9` jump · `gt` / `gT` cycle · `N` new
+context · `E` edit · `D` delete · `g w` / `p` / `g b` sections · `:` palette · `J` jobs · `U` update
+· `?` help · `,` settings. The controls are not focusable (ADR 0023): the keyboard path to each is
+its key.
+
+**Workspace:** the switcher and the section nav give way to the breadcrumb `← Worktrees / repo /
+worktree`. *Worktrees* is a button for `⌃S s` (back to the Hub; the session keeps running) and
+shows that chip; the repository and the worktree are text until the worktree switcher replaces the
+worktree in place (§3.6). The command field, the status cluster (without *sleeping* and *Update*,
+whose keys are Hub keys) and Help / Settings stay; Help and Jobs show their `⌃S` chords.
+
+**Harness:** `titlebar.context`, `titlebar.command`, `titlebar.needs_you`, `titlebar.jobs`,
+`titlebar.update`, `titlebar.daemon`, `titlebar.help`, `titlebar.settings`, `titlebar.back`, the
+segments `hub.tab[N]`, and the status bar's `statusbar.shortcuts` and `statusbar.commands`
+(`TESTING-HARNESS.md` §3).
 
 ---
 
@@ -551,7 +575,7 @@ Columns and breakpoints: §2.9.
 
 | Element | Content | Position | Why here | Why needed |
 | --- | --- | --- | --- | --- |
-| Tabs `MINE` / `REVIEW` | label + count; active = 2 px blue underline | row under the context bar | `Tab`/`h`/`l` toggle them; the counts answer "how much is queued" without entering | `PrTab`, §5 |
+| Tabs `MINE` / `REVIEW` | label + count; active = 2 px blue underline | row under the title bar | `Tab`/`h`/`l` toggle them; the counts answer "how much is queued" without entering | `PrTab`, §5 |
 | Fetch age | `fetched 40s ago` / `⟳ refreshing` / red error | same row, right | trust marker for cached data (`github.prTtlSeconds: 90`) | `PrRepoSlice.fetchedAt/loading/error` |
 | Local-presence glyph | §2.5 glyph if a worktree matches, `dot` 30 % if not | col 1 | decides whether `Enter` *opens* or *creates* — the highest-value bit on this screen | §5 "local presence glyph"; match rule §1 |
 | Number | `#{number}` | col 2 | the handle you say out loud | `PullRequest.number` |
@@ -681,7 +705,7 @@ what is running elsewhere.*
 ├─────────────────────────────────────────────────────────────────────────────┤
 │ ⚠ process exited (1) · ^s r restart · ^s x close · ^s c new                 │ 22  only on exit
 ├─────────────────────────────────────────────────────────────────────────────┤
-│ payroll/feat-payroll-fix          TERMINAL          ⟳ prune payroll      ◍  │ 28  status bar
+│ ● fleetd  buk › feat-payroll-fix  ⟳ prune  Fleet commands ⌃S  Shortcuts ⌃S ? │ 28  status bar
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -704,7 +728,7 @@ what is running elsewhere.*
 | Scroll pill | `SCROLL <offset>/<scrollback_len>`, + a second line `v select · y yank · Esc exit` while selecting; 176 × 22 px, `bg.raised`, amber left bar | overlay, top-right **inside** the terminal area, 12 px inset | during scroll the eyes are on content; top-right never covers the prompt and never shifts the grid | `viewport{scrollback_len, offset}` |
 | ⌃S command menu | *Fleet commands*: the held prefix as an amber chip, "Press a key or click", "⌃S again sends it to the terminal" (only where a program is behind it), a Close `esc` button; then every command the prefix reaches here, in the catalogue's groups (Tabs, Session, Terminal, Agents, Panels), each a clickable row of second-key chip + short label | floating, bottom-centre just above the status bar, at most 900 px wide; **delayed 400 ms** after `ctrl-s` | the expert types the second key in < 200 ms and never sees it; the returning user gets the whole table exactly when they hesitate, and can click instead of reading — 0 px and 0 frames of permanent cost. A click runs the row as its key would; the menu never takes focus. The agent popup and a native agent tab show it too, with their own rows | KEYMAP one-shot Prefix mode; the action catalogue |
 | Exit strip | `⚠ process exited (<code>) · ^s r restart · ^s x close · ^s c new` | bottom, 22 px, only when the tab's command exited | tmux's `remain-on-exit` made this recoverable; Fleet must not silently swallow a crashed dev server | §4 `remain-on-exit on` |
-| Mode word | `TERMINAL` / `^S` / `SCROLL` | status bar, center | §2.8 | KEYMAP modes |
+| Status-bar buttons | `Fleet commands ⌃S` (enters the prefix, as `ctrl-s` does) · `Shortcuts ⌃S ?` (Help) | status bar, right | the two keys every other Workspace key hangs off, taught where the eye rests; there is no mode word (§2.8) | KEYMAP one-shot Prefix mode |
 
 **[D-8]** Every Workspace command drawn over the Workspace states its prefix. In Terminal mode
 keys go to the PTY except `ctrl-s` and the standard `cmd-c` / `cmd-v` clipboard actions, so
@@ -712,13 +736,13 @@ bare-key hints (`r restart`, `l log`, `⏎ start now`) are forbidden anywhere in
 are written `^s r`, `^s l`, `^s ⏎`.
 
 **Zoom (`ctrl-s z`)** hides the session header and the tab strip; a 2 px amber bar on the window's
-top edge remains as the only reminder that chrome is hidden. The status bar always stays, because
-it carries the mode word and the daemon dot.
+top edge remains as the only reminder that chrome is hidden. The title bar and the status bar
+always stay, because they carry the way back, the daemon and the ⌃S buttons.
 
 **Intentionally omitted:** the PTY window title (`FrameUpdate.title` names the *tab* only when the
 terminal was never renamed), shell PID, `foreground_command`, cwd, cols × rows readout, latency
 readout, a permanent key cheat sheet, a scrollbar, per-tab byte counters, pane splitting, per-tab
-close buttons, a breadcrumb (the session name in the status bar is the breadcrumb).
+close buttons. The breadcrumb is the title bar's `← Worktrees / repo / worktree` (§3.1).
 
 **States**
 
@@ -731,7 +755,7 @@ close buttons, a breadcrumb (the session name in the status bar is the breadcrum
 | Terminal agent hook attention | the PTY tab keeps the same static amber `NeedsYou` dot used by native tabs, including while selected; each session edge into permission, question, plan, or finished uses the configured toast/sound channels once |
 | Terminal exited | grid frozen at the last frame + the exit strip |
 | Alt-screen app running | the scroll pill is **suppressed**; `ctrl-s [` shows the 1.6 s toast `no scrollback in alt-screen` |
-| Non-agent native pane selected (`fleet://`: `lg`, or the `board` tab of `ctrl-s b`) | the grid, the scroll pill and the exit strip are all absent — there is no PTY. `ctrl-s [` toasts `no scrollback in this tab`; every key except `ctrl-s` belongs to the pane. The mode word stays `TERMINAL`: §2.8 has eight words and this is still "the Workspace has the keyboard". A native **agent thread** is the separate §3.6.0 surface and `ctrl-s [` enters its transcript scroll mode. |
+| Non-agent native pane selected (`fleet://`: `lg`, or the `board` tab of `ctrl-s b`) | the grid, the scroll pill and the exit strip are all absent — there is no PTY. `ctrl-s [` toasts `no scrollback in this tab`; every key except `ctrl-s` belongs to the pane. The snapshot's `mode` is `Native` (§2.8): the Workspace still has the keyboard, and the pane says so itself. A native **agent thread** is the separate §3.6.0 surface and `ctrl-s [` enters its transcript scroll mode. |
 | Job running for this worktree | `⟳n` in the header and the status-bar ticker; **never** an overlay on the grid |
 | Daemon lost | grid dims to 55 %, keys are dropped (not buffered), and the §3.12 C banner replaces the header |
 
@@ -828,7 +852,7 @@ this section is what the screen shows.
 │        │ ╰───────────────────────────────────────────────────────╯ │        │
 │        └───────────────────────────────────────────────────────────┘        │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│ payroll/feat-payroll-fix   AGENT   y allow once · a allow for this session  │  28  status bar
+│ ● fleetd  buk › feat-payroll-fix                         Shortcuts ⌃S ?     │  28  status bar
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -847,7 +871,7 @@ toast; the URL is also a `Notice` row, so it stays reachable when the browser do
 | Tab | `<index> <provider> — <title>`, title from the first message or a later provider metadata update; bare provider name until there is one | the terminal strip | one strip, one numbering: an index addresses exactly one surface | `AgentThreadSummary.title` |
 | Tab mark | spinner · amber dot · neutral dot · `exited <code>` — **at most one** | inside the tab | §3.3 of `NATIVE-AGENTS.md`; amber wins over neutral because amber means *waiting on you* | `AgentThreadSummary.attention` |
 | Session header word | `working` · `needs you` · `failed` · `idle` | header, right | the same vocabulary as the tab and the chips, so three surfaces cannot disagree | idem |
-| Context-bar chips | `3 needs you · 2 working · 1 failed`, including the current tab | §2.3 | a blocked thread on another worktree is invisible otherwise | `AgentCounts` |
+| Title-bar `needs you` | `<n> needs you`, including the current tab; a click opens the waiting thread | §2.3 | a blocked thread on another worktree is invisible otherwise | `AgentCounts` |
 | User turn | the message on `bg.panel`, radius 6, attachments as pills below | transcript | the **only** block with a background: it is the one thing the user wrote | `ItemKind::UserMessage` |
 | Assistant prose | Markdown on the ground — no bubble, no avatar, no header | transcript | the answer is the content; chrome around it is noise | `AssistantText` |
 | Thinking | one collapsed muted line, `thought 6s` + `[⏎] show`; while it streams it **is** the live row | transcript | reasoning is available, never dominant | `ItemKind::Reasoning` |
@@ -874,8 +898,6 @@ toast; the URL is also a `Notice` row, so it stays reachable when the browser do
 | Card composer | `Steering a card run. Its report moves the card when it finishes.` | composer placeholder on a card run only | the reply steers the run; the card's column, not the reader, moves the card | card caller |
 | Account segment | the **last** fact: `signed out` when the harness reports no account, else its email — or its plan when there is no email — and **nothing at all** when the harness reports no account signal (Claude always, Codex until its first `account/read`) | end of the settings strip's facts | the first thing a revoked token costs is a turn, and the composer is where the user finds out why before the refusal | `ThreadProjection.account` |
 | Empty state | `new claude thread · feat-x` over `ask anything · @ files · $ skills · / commands` | centered in an empty transcript | a new thread must say what to type | — |
-| Mode word | `AGENT` | status bar, center | §2.8; keys reach Fleet's composer, not a PTY | `Mode::Agent` |
-| Status-bar hints | the live key set of the current state (see **Keyboard**) | status bar, right | the card's keys are bare letters, so the bar is where they are legible | §9 of `NATIVE-AGENTS.md` |
 
 **Copy is fixed.** `Allow once` · `Allow for this session` — the effective scope is always spelled
 out and the word "always" is never used on a command or a file change, on either harness. The
@@ -957,7 +979,7 @@ A `title_bar_h` (44 px) window header reads, left to right:
 
 There is no "Open as tab": no action moves the popup's PTY session into a Workspace tab, and a
 native thread (`^s a` in a terminal) is a different session. The header states no key hints of
-its own and the status bar mirrors none while the popup is up — every key is on the control that
+its own and the status bar shows no agent keys while the popup is up — every key is on the control that
 does the same thing. The body is the same `TerminalGrid` used by Workspace, sized from its
 measured popup area and resized with the window.
 
@@ -987,7 +1009,7 @@ Agent Scroll mode matches Workspace Scroll mode.
 **Purpose:** *What is the daemon doing for me, is it stuck, what failed, and what can I do about it?*
 
 Right-docked sheet, **440 px** wide (**640 px** when a log is expanded), full height between the
-context bar and the status bar, `bg.raised`, 1 px left border. It appears and disappears in
+title bar and the status bar, `bg.raised`, 1 px left border. It appears and disappears in
 place — nothing slides (DESIGN-SYSTEM §2.7). The list behind stays fully visible and readable —
 a centered modal would hide exactly the rows the jobs are about. A close ✕ sits at the top right of
 the header, and a click anywhere in the band outside the sheet closes it; both dispatch `jobs::Close`,
@@ -1702,7 +1724,7 @@ The filter **replaces the pane header in place** — 30 px, same row, no overlay
 
 | Element | Content | Position | Why |
 | --- | --- | --- | --- |
-| `search` icon | 14 px `fg.muted` | replaces the pane label | signals the mode without a mode word in the pane (the status bar carries `FILTER`) |
+| `search` icon | 14 px `fg.muted` | replaces the pane label | the filter bar *is* how Filter mode shows; there is no mode word (§2.8) |
 | Query | live text, blue caret | inline | — |
 | Match count | `<shown>/<total>` | right | tells you whether to keep typing |
 | `esc` hint | faint, right of the count | right | the two-stage `Esc` is non-obvious |
@@ -1740,7 +1762,7 @@ of them is about reconnecting.
 | --- | --- | --- | --- |
 | **A. Cold start, daemon not yet up** | full window, centered, no chrome | `Starting fleetd…` + spinner; after 3 s it appends `~/.fleet/fleetd.sock` | none (auto-spawn) |
 | **B. Daemon will not start** | full window, centered | `fleetd could not start.` · the last 3 lines of `~/.fleet/logs/fleetd.log` in mono · `The socket ~/.fleet/fleetd.sock is stale.` when that is the cause | `r` retry · `L` open log · `D` run doctor · `ctrl-q` quit |
-| **C. Daemon died while attached** | 28 px amber banner under the context bar; the daemon dot turns red; terminal grids get a 55 % veil | `◍ fleetd stopped · reconnecting in 3s` — the countdown cycles `3s → reconnecting… → 6s` (backoff 1, 2, 4, 8 s, capped 8 s) | `r` reconnect now · `l` open log · `Esc` dismiss the banner (the dot stays red) |
+| **C. Daemon died while attached** | 28 px amber banner under the title bar; the daemon dot turns red; terminal grids get a 55 % veil | `◍ fleetd stopped · reconnecting in 3s` — the countdown cycles `3s → reconnecting… → 6s` (backoff 1, 2, 4, 8 s, capped 8 s) | `r` reconnect now · `l` open log · `Esc` dismiss the banner (the dot stays red) |
 
 **On reconnect after C**, the banner turns amber for 6 s (not green, not 800 ms) and reads,
 verbatim:
@@ -1976,7 +1998,7 @@ each component's full API. `Modal` is an alias of `Dialog` and `TabBar` an alias
 
 | Component | Responsibility | Used by |
 | --- | --- | --- |
-| `AppFrame` | Context bar + body region + status bar; fixed heights 36 / flex / 28 | Hub, PR screen, Workspace |
+| `AppFrame` | Title bar + body region + status bar; fixed heights 44 / flex / 28 | Hub, PR screen, Workspace |
 | `ContextBar` | Numbered context tabs, overflow chip, chip tray, daemon dot | all screens (§3.1) |
 | `StatusBar` | Breadcrumb · `ModeWord` · job ticker · sticky error slot | all screens (§2.2) |
 | `Pane` | Bordered region with a header slot, a body slot and a scroll thumb | repos rail, lists, detail panel |
@@ -1996,7 +2018,7 @@ each component's full API. `Modal` is an alias of `Dialog` and `TabBar` an alias
 | `Row` | One row: leading glyph slot, flex content, trailing columns, selected/dimmed/disabled states | every list |
 | `ColumnLadder` | Resolves a ch-based responsive column set for the current pane width (§2.9) | worktrees list, PR list |
 | `StatusGlyph` | The §2.5 vocabulary — the single source of truth for session/job/clone state rendering | worktree rows, repo rows, PR presence, Workspace header, palette `GO`, confirms, quit dialogs |
-| `Chip` | 22 px pill: icon + text + count, tinted, zero-suppressible | context-bar chips, host chip, degraded chip |
+| `Chip` | 22 px pill: icon + text + count, tinted, zero-suppressible | host chip, degraded chip |
 | `KeepAliveChips` | `⚡` labels with a max-3 + `+n` overflow and the width ladder 18/14/10/0 ch; outranked by `DegradedChip` in the same slot | worktree rows, Workspace header, detail panel, confirms |
 | `DegradedChip` | `⚠ hooks failed` with a link into the Jobs panel | worktree rows, detail panel |
 | `PrBadge` | `#n` + state icon + ≤8 ch word, from the `PrState` priority | worktree rows, PR rows, Workspace header, detail panels |
@@ -2045,10 +2067,10 @@ each component's full API. `Modal` is an alias of `Dialog` and `TabBar` an alias
 | `ScrollPill` | `SCROLL <offset>/<len>` overlay with a selection hint line; **suppressed in alt-screen** | Workspace and Agent Scroll modes |
 | `PrefixMenu` | The ⌃S command menu: every command the held prefix reaches, grouped, clickable, 400 ms delayed, bottom-centre | Workspace, agent popup and agent thread prefixes |
 | `ExitStrip` | `⚠ process exited (<code>)` + prefixed recovery keys | Workspace, Agent popup |
-| `ModeWord` | The §2.8 mode word, fixed 84 px | status bar |
+| `ModeWord` | The embedded Git UI's status word, fixed 84 px (Fleet's chrome has none, §2.8) | Git UI status bar |
 | `Banner` | 28 px full-width amber/red strip with a countdown and prefixed keys | daemon state C (§3.12) |
 | `DaemonSplash` | The full-window cold-start and will-not-start surfaces: title, spinner, socket path, `fleetd.log` tail, bare recovery keys | daemon states A and B (§3.12) |
-| `DaemonDot` | 8 px liveness dot that expands into a labelled pill when degraded | context bar |
+| `DaemonDot` | 8 px liveness dot that expands into a labelled pill when degraded | kit only today: the status bar's daemon slot and the title bar's daemon button carry liveness |
 | `Veil` | 55 % scrim over terminal grids only, with key-dropping | daemon disconnect |
 
 ### 9.6 Native agent transcript
@@ -2126,8 +2148,8 @@ The board has **two surfaces and one pane**. The Hub's third screen tab (`g b`, 
 §3.6) shows that worktree's. Both are drawn by the same `screens::board::BoardScreen` — the two
 are never on screen at once, so there is one of it, one filter editor and one mirror behind them.
 
-On the Hub the board replaces the worktrees list and the repos rail in place, and the context bar
-above it is what scopes it: the board shown is always `EnsureBoard(active_context)`. Switching
+On the Hub the board replaces the worktrees list and the repos rail in place, and the title bar's
+context switcher above it is what scopes it: the board shown is always `EnsureBoard(active_context)`. Switching
 context clears the board and re-ensures the new one.
 
 Inside a worktree session the `fleet://board` tab shows `EnsureWorktreeBoard(worktree)` instead —

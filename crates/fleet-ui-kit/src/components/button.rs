@@ -13,6 +13,12 @@
 //! Use an [`IconButton`] when a glyph alone names the action in a dense toolbar or header; its
 //! label becomes the tooltip and the accessible name. Use a clickable `Row` or `Chip`, not a
 //! button, when the thing clicked is a piece of data rather than a verb.
+//!
+//! Two chrome shapes share the same frame: a [`StatusButton`] is a live count that opens what it
+//! counts (`1 needs you`, `2 jobs`, `fleetd down`), and a [`SwitcherButton`] names the current
+//! choice and opens a menu of the others (the title bar's context switcher, a breadcrumb's
+//! worktree). Both keep their key in the tooltip rather than on the face, because the chrome they
+//! sit in is read at a glance and a row of chips would drown the counts.
 
 use gpui::{
     Action, App, ClickEvent, Div, ElementId, Hsla, SharedString, Stateful, Toggled, Window, div,
@@ -28,6 +34,7 @@ use crate::{
     icons::{Icon, IconSize},
     text::Text,
     theme::{ActiveTheme, Theme},
+    tone::Tone,
 };
 
 /// How loudly a button asks to be pressed.
@@ -387,6 +394,214 @@ impl RenderOnce for IconButton {
             .w(side)
             .child(self.icon.el().size(icon_size).color(paint.fg))
             .with_tooltip(tooltip, cx)
+    }
+}
+
+/// What leads a [`StatusButton`]'s label.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StatusMark {
+    /// A small dot in the button's tone: something is waiting for a person.
+    Dot,
+    /// A glyph in the button's tone.
+    Icon(Icon),
+    /// A spinning `loader-circle`: something is running.
+    Spinner,
+}
+
+/// A ghost button that is a live count and opens what it counts: `1 needs you`, `2 jobs`,
+/// `1 failed`, `fleetd down`.
+///
+/// The label is drawn in the button's [`Tone`], because the colour *is* the state (amber waits for
+/// a person, red failed). The key goes in the tooltip beside the label, not on the face: a status
+/// cluster is read at a glance, and chips between the counts would bury them. Show one only when
+/// its count is non-zero; the caller zero-suppresses, as with every count (§1.2).
+#[derive(IntoElement)]
+pub struct StatusButton {
+    base: ButtonBase,
+    label: SharedString,
+    mark: Option<StatusMark>,
+    tone: Tone,
+    tooltip: Option<SharedString>,
+}
+
+impl StatusButton {
+    /// A compact ghost status button reading `label` in the secondary tone.
+    pub fn new(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Self {
+        let mut base = ButtonBase::new(id.into(), ButtonStyle::Ghost);
+        base.size = ButtonSize::Compact;
+        Self {
+            base,
+            label: label.into(),
+            mark: None,
+            tone: Tone::Secondary,
+            tooltip: None,
+        }
+    }
+
+    button_builders!();
+
+    /// Lead the label with a dot, a glyph or a spinner.
+    pub fn mark(mut self, mark: StatusMark) -> Self {
+        self.mark = Some(mark);
+        self
+    }
+
+    /// Paint the label and its mark in `tone`.
+    pub fn tone(mut self, tone: Tone) -> Self {
+        self.tone = tone;
+        self
+    }
+
+    /// What the tooltip says the click does, e.g. `Open the agent that needs you`. Without it the
+    /// tooltip repeats the label. The key is added beside it either way.
+    pub fn tooltip(mut self, text: impl Into<SharedString>) -> Self {
+        self.tooltip = Some(text.into());
+        self
+    }
+}
+
+impl RenderOnce for StatusButton {
+    fn render(mut self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let kbd = self.base.resolve_kbd(window, cx);
+        let theme = cx.theme();
+        let paint = self.base.paint(theme);
+        let color = self.tone.color(theme);
+        let mark = self.mark.map(|mark| match mark {
+            StatusMark::Dot => div()
+                .flex_none()
+                .size(theme.metrics.dot_size_small)
+                .rounded(theme.radii.full)
+                .bg(color)
+                .into_any_element(),
+            StatusMark::Icon(icon) => icon
+                .el()
+                .size(IconSize::Small)
+                .color(color)
+                .into_any_element(),
+            StatusMark::Spinner => Icon::LoaderCircle
+                .el()
+                .size(IconSize::Small)
+                .color(color)
+                .spinning(true)
+                .id("status-button-spinner")
+                .into_any_element(),
+        });
+        let tooltip =
+            Tooltip::new(self.tooltip.unwrap_or_else(|| self.label.clone())).kbd(kbd.clone());
+        let label = Text::ui(self.label.clone()).color(color);
+        self.base
+            .frame(self.label, kbd.as_ref(), &paint, theme)
+            .flex_none()
+            .px(theme.space.sm)
+            .gap(theme.space.xs)
+            .children(mark)
+            .child(label)
+            .with_tooltip(tooltip, cx)
+    }
+}
+
+/// A ghost button that names the current choice and opens a menu of the others: the title bar's
+/// context switcher (`[A] Acme ⌄`), a breadcrumb's worktree (`⎇ agent ⌄`).
+///
+/// It is always a [`super::PopoverMenu`] trigger with no action of its own; pass the popover's
+/// `open` to [`Self::selected`] so an open menu's trigger stays pressed. The trailing chevron says
+/// a menu opens, which is why the switcher needs no key chip on its face; what each choice's key
+/// is, the menu shows.
+#[derive(IntoElement)]
+pub struct SwitcherButton {
+    base: ButtonBase,
+    label: SharedString,
+    monogram: bool,
+    icon: Option<Icon>,
+    tooltip: Option<SharedString>,
+}
+
+impl SwitcherButton {
+    /// A compact ghost switcher reading `label`.
+    pub fn new(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Self {
+        let mut base = ButtonBase::new(id.into(), ButtonStyle::Ghost);
+        base.size = ButtonSize::Compact;
+        Self {
+            base,
+            label: label.into(),
+            monogram: false,
+            icon: None,
+            tooltip: None,
+        }
+    }
+
+    button_builders!();
+
+    /// Lead the label with a monogram tile: the label's first letter or digit, upper-cased.
+    pub fn monogram(mut self) -> Self {
+        self.monogram = true;
+        self
+    }
+
+    /// Lead the label with a glyph instead of a monogram.
+    pub fn icon(mut self, icon: Icon) -> Self {
+        self.icon = Some(icon);
+        self
+    }
+
+    /// What the tooltip says, e.g. `Switch context`.
+    pub fn tooltip(mut self, text: impl Into<SharedString>) -> Self {
+        self.tooltip = Some(text.into());
+        self
+    }
+}
+
+/// The monogram of `label`: its first letter or digit, upper-cased, or nothing for a label with
+/// neither.
+fn monogram_of(label: &str) -> Option<SharedString> {
+    label
+        .chars()
+        .find(|character| character.is_alphanumeric())
+        .map(|character| SharedString::from(character.to_uppercase().collect::<String>()))
+}
+
+impl RenderOnce for SwitcherButton {
+    fn render(mut self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let kbd = self.base.resolve_kbd(window, cx);
+        let theme = cx.theme();
+        let paint = self.base.paint(theme);
+        let monogram = self
+            .monogram
+            .then(|| monogram_of(&self.label))
+            .flatten()
+            .map(|letter| {
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .size(theme.metrics.monogram_size)
+                    .rounded(theme.radii.sm)
+                    .bg(theme.colors.accent_subtle)
+                    .child(Text::label(letter).color(theme.colors.accent))
+            });
+        let icon = self
+            .icon
+            .map(|icon| icon.el().size(IconSize::Small).color(paint.fg));
+        let tooltip = self.tooltip.map(|text| Tooltip::new(text).kbd(kbd.clone()));
+        let label = Text::ui_strong(self.label.clone())
+            .color(theme.colors.text)
+            .ellipsize();
+        self.base
+            .frame(self.label, kbd.as_ref(), &paint, theme)
+            .flex_none()
+            .min_w_0()
+            .px(theme.space.sm)
+            .children(monogram)
+            .children(icon)
+            .child(label)
+            .child(
+                Icon::ChevronDown
+                    .el()
+                    .size(IconSize::Small)
+                    .color(theme.colors.text_secondary),
+            )
+            .when_some(tooltip, |el, tooltip| el.with_tooltip(tooltip, cx))
     }
 }
 

@@ -38,13 +38,14 @@ fn ticker_content(jobs: &[JobRecord]) -> Option<TickerContent> {
 }
 
 /// Who owns the shared ticker / error slot of the status bar (§2.2).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum StatusSlot {
     /// A sticky error is showing. It always wins: errors never scroll past (§1.8).
     Error(StickyError),
     /// Work is in flight and nothing has failed.
     Ticker(TickerContent),
     /// Nothing to say.
+    #[default]
     Idle,
 }
 

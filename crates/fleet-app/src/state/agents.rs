@@ -15,7 +15,7 @@ use crate::screens::agent_thread::{
     PreparedDecisionObservable, decisions::decision_context, presentation::tab_title,
 };
 
-/// The context bar's `N needs you · N working · N failed`, across every thread in the snapshot.
+/// `N needs you · N working · N failed`, across every top-level thread in the snapshot.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct AgentCounts {
     /// Threads blocked on a permission, a question, a plan, or a fresh completion.
@@ -30,6 +30,8 @@ pub struct AgentCounts {
 struct AgentDerived {
     attention: HashMap<ThreadId, Attention>,
     counts: AgentCounts,
+    /// The one top-level thread that needs you, while exactly one does.
+    waiting: Option<ThreadId>,
     strip_offsets: HashMap<ThreadId, usize>,
     /// Callers with at least one live durable child, rebuilt only when that census changes.
     live_delegation_callers: HashSet<ThreadId>,
@@ -496,6 +498,14 @@ impl AgentThreads {
         self.derived.counts
     }
 
+    /// The top-level thread that needs you when exactly one does: what the title bar's
+    /// `1 needs you` opens. With two or more waiting there is no single answer, and the button
+    /// opens the agents picker instead.
+    #[must_use]
+    pub fn waiting_thread(&self) -> Option<ThreadId> {
+        self.derived.waiting
+    }
+
     /// Zero-based position among the native tabs of this thread's worktree.
     #[must_use]
     pub fn strip_offset(&self, thread: ThreadId) -> Option<usize> {
@@ -534,6 +544,7 @@ impl AgentThreads {
                 .and_modify(|current| *current = std::cmp::max(*current, propagated));
         }
         let mut counts = AgentCounts::default();
+        let mut waiting = None;
         for summary in self
             .summaries
             .iter()
@@ -544,13 +555,17 @@ impl AgentThreads {
                 .copied()
                 .unwrap_or(Attention::Idle)
             {
-                Attention::NeedsYou(_) => counts.needs_you += 1,
+                Attention::NeedsYou(_) => {
+                    counts.needs_you += 1;
+                    waiting = Some(summary.thread);
+                }
                 Attention::Failed => counts.failed += 1,
                 Attention::Working | Attention::Waiting => counts.working += 1,
                 Attention::Unread | Attention::Idle => {}
             }
         }
         self.derived.attention = attention;
+        self.derived.waiting = waiting.filter(|_| counts.needs_you == 1);
         self.derived.counts = counts;
     }
 
@@ -701,8 +716,8 @@ impl AgentThreads {
 
     /// Records whether a thread's transcript has its tail frozen.
     ///
-    /// Returns whether the answer changed: it decides both the key context and the status
-    /// bar's mode word, so a change has to reach the next frame.
+    /// Returns whether the answer changed: it decides both the key context and the harness
+    /// snapshot's `mode`, so a change has to reach the next frame.
     pub fn set_scrolling(&mut self, thread: ThreadId, scrolling: bool) -> bool {
         if scrolling {
             self.scrolling.insert(thread)

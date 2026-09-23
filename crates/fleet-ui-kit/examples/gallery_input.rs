@@ -1483,7 +1483,7 @@ impl Render for InputGallery {
                     .flex_none()
                     .items_center()
                     .justify_between()
-                    .h(theme.metrics.context_bar_h)
+                    .h(theme.metrics.title_bar_h)
                     .px(theme.space.lg)
                     .gap(theme.space.md)
                     .bg(theme.colors.surface)
@@ -1528,11 +1528,6 @@ impl Render for InputGallery {
                     .bg(theme.colors.surface)
                     .border_t(theme.metrics.hairline)
                     .border_color(theme.colors.border)
-                    .child(ModeWord::new(if typing {
-                        Mode::Filter
-                    } else {
-                        Mode::Normal
-                    }))
                     .child(Text::hint(if typing {
                         "typing \u{b7} bare letters go to the field"
                     } else {

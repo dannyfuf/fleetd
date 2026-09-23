@@ -13,7 +13,7 @@ assert screen == Hub && hub_tab == Worktrees && hub_pane == List
 assert targets["hub.tab[0]"] exists && targets["repos.rail"].w == 240
 dump targets
 
-# The segmented tab strip is the one Hub control with an `on_select`, so it is the click path.
+# The title bar's section nav (`hub.tab[N]`) is the click path.
 click hub.tab[1]
 await hub_tab == Prs 15000
 assert screen == Hub && overlay absent

@@ -38,14 +38,12 @@ impl HubScreen {
                 cx,
             )
         };
-        let tabs = hub_tabs(state.read(cx));
 
         let root = div()
             .when(!on_board, |el| el.track_focus(focus))
             .size_full()
             .flex()
             .flex_col()
-            .child(div().px(cx.theme().space.md).child(tabs))
             .child(div().flex_1().min_h_0().child(body))
             .on_action(ctx.act(|ctx, _: &hub::MoveDown, window, cx| ctx.move_by(1, window, cx)))
             .on_action(ctx.act(|ctx, _: &hub::MoveUp, window, cx| ctx.move_by(-1, window, cx)))
@@ -437,5 +435,12 @@ pub(super) fn publish_breadcrumb(state: &Entity<AppState>, model: &HubModel, cx:
                 .map(|row| format!("#{}", row.number)),
         }
     };
-    state.update(cx, |state, _| state.breadcrumb_row = row);
+    // The status bar prepares its model when the state notifies, so a new row has to notify;
+    // an unchanged one must not, or every synchronize would repaint the bar.
+    state.update(cx, |state, cx| {
+        if state.breadcrumb_row != row {
+            state.breadcrumb_row = row;
+            cx.notify();
+        }
+    });
 }

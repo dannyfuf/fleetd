@@ -679,18 +679,18 @@ impl Render for Gallery {
         ];
 
         AppFrame::new()
-            .context_bar(
-                ContextBar::new([ContextTab::new("jobs + terminal gallery", 1)])
+            .title_bar(
+                TitleBar::new()
+                    .leading(Text::ui_strong("jobs + terminal gallery"))
                     .leading_inset(px(84.0))
-                    .chip(Chip::labeled(
+                    .trailing(Chip::labeled(
                         if mode.is_dark() {
                             Icon::Moon
                         } else {
                             Icon::CircleArrowUp
                         },
                         if mode.is_dark() { "dark" } else { "light" },
-                    ))
-                    .daemon(DaemonState::Healthy),
+                    )),
             )
             .body(
                 div()
@@ -717,7 +717,6 @@ impl Render for Gallery {
             .status_bar(
                 StatusBar::new()
                     .breadcrumb("fleet-ui-kit \u{b7} jobs and terminal")
-                    .mode(Mode::Terminal)
                     .ticker(
                         KeyHintRow::new()
                             .key("t", "theme")

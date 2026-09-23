@@ -993,18 +993,18 @@ impl Render for DataGallery {
         ];
 
         AppFrame::new()
-            .context_bar(
-                ContextBar::new([ContextTab::new("data display", 1)])
+            .title_bar(
+                TitleBar::new()
+                    .leading(Text::ui_strong("data display"))
                     .leading_inset(px(84.0))
-                    .chip(Chip::labeled(
+                    .trailing(Chip::labeled(
                         if dark {
                             Icon::Moon
                         } else {
                             Icon::CircleArrowUp
                         },
                         if dark { "dark" } else { "light" },
-                    ))
-                    .daemon(DaemonState::Healthy),
+                    )),
             )
             .body(
                 div()
@@ -1045,7 +1045,6 @@ impl Render for DataGallery {
             .status_bar(
                 StatusBar::new()
                     .breadcrumb("fleet-ui-kit \u{b7} data display")
-                    .mode(Mode::Normal)
                     .ticker(
                         KeyHintRow::new()
                             .key("t", "theme")

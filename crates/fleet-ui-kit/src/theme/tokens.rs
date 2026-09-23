@@ -594,9 +594,8 @@ pub struct Metrics {
     pub dot_size: Pixels,
     /// 6 px terminal activity dot.
     pub dot_size_small: Pixels,
-    /// 36 px unified titlebar / context bar.
-    pub context_bar_h: Pixels,
-    /// 44 px title bar: context switcher, section tabs, command field.
+    /// 44 px title bar: context switcher, section nav, command field, status buttons. It is the
+    /// unified macOS titlebar, so it starts after [`Self::traffic_light_inset`].
     pub title_bar_h: Pixels,
     /// 28 px status bar.
     pub status_bar_h: Pixels,
@@ -670,8 +669,13 @@ pub struct Metrics {
     pub prefix_menu_w: Pixels,
     /// y = 120 px: where the palette is anchored.
     pub palette_top: Pixels,
-    /// 84 px fixed-width mode word.
+    /// 84 px fixed-width mode word of the embedded Git UI's status bar. Fleet's own chrome draws
+    /// no mode word (ADR 0023).
     pub mode_word_w: Pixels,
+    /// 340 px command field centred in the title bar: the button that opens the palette.
+    pub command_field_w: Pixels,
+    /// 18 px monogram tile: the letter of a context in the title bar's context switcher.
+    pub monogram_size: Pixels,
     /// 3 px scroll thumb.
     pub scroll_thumb_w: Pixels,
     /// 2 px focus ring / cursor bar.
@@ -740,7 +744,6 @@ impl Default for Metrics {
             hairline: px(1.0),
             dot_size: px(8.0),
             dot_size_small: px(6.0),
-            context_bar_h: px(36.0),
             title_bar_h: px(44.0),
             status_bar_h: px(28.0),
             pane_header_h: px(30.0),
@@ -778,6 +781,8 @@ impl Default for Metrics {
             prefix_menu_w: px(900.0),
             palette_top: px(120.0),
             mode_word_w: px(84.0),
+            command_field_w: px(340.0),
+            monogram_size: px(18.0),
             scroll_thumb_w: px(3.0),
             focus_ring_w: px(2.0),
             cell_w: px(CH),

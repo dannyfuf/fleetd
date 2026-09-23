@@ -102,11 +102,11 @@ The canvas fixes these decisions; do not relitigate them in code.
 - **Where state shows.** Tab: gray spinner (running), amber dot (needs you), gray dot (unread
   output), `exited 1` in red (dead). The amber dot is the one mark that survives selection — a
   thread blocked on you is blocked whether or not you are reading it. Session header: `working` or
-  `needs you`. Context bar: `3 needs you · 2 working · 1 failed`, which includes the current tab
-  and omits every segment whose count is zero.
+  `needs you`. Title bar: `3 needs you`, which includes the current tab, is absent at zero, and
+  opens the waiting thread (the agents picker when more than one waits).
   **The board reuses this vocabulary unchanged.** A card whose column runs an action wears the same
   gray spinner for progress and the same amber dot for "wants you", on the tile and in the card
-  detail alike, and its pane header counts `1/1 working · 1 needs you` the way the context bar
+  detail alike, and its pane header counts `1/1 working · 1 needs you` the way the title bar
   counts threads — same words, same tones, zero-suppressed the same way. Nothing about a run
   invents a colour or a glyph of its own (`DESIGN-SYSTEM.md` §5.2, `UX-SPEC.md` §Board).
 
@@ -302,16 +302,17 @@ shutdown's synthetic `SessionStateChanged(Stopped)` is not unread transcript out
 writer transaction advances only cursors that were already exactly caught up before that event.
 
 Derived **attention**, in priority order, carried in the thread summary so the tab, the header and
-the context-bar counts agree:
+the title bar's count agree. The title bar counts only what needs a person; working, waiting and
+failed threads show on their tabs and in the palette's `AGENTS` section:
 
-| Attention | When | Tab | Header | Context bar |
+| Attention | When | Tab | Header | Title bar |
 | --- | --- | --- | --- | --- |
 | `NeedsYou(Permission)` | an open permission gate | amber dot | `needs you` | `needs you` |
 | `NeedsYou(Question)` | an open **blocking** question gate | amber dot | `needs you` | `needs you` |
 | `NeedsYou(Plan)` | a settled plan waiting for a decision | amber dot | `needs you` | `needs you` |
-| `Working` | `session == Running` or `turn == Running` or background tasks alive | gray spinner | `working` | `working` |
-| `Waiting(UsageLimit)` | a rejected rate-limit window with no allowed overage | gray spinner + countdown | `waiting` | `waiting` |
-| `Failed` | turn failed, session error, or unexpected exit | `exited 1` red | `failed` | `failed` |
+| `Working` | `session == Running` or `turn == Running` or background tasks alive | gray spinner | `working` | — |
+| `Waiting(UsageLimit)` | a rejected rate-limit window with no allowed overage | gray spinner + countdown | `waiting` | — |
+| `Failed` | turn failed, session error, or unexpected exit | `exited 1` red | `failed` | — |
 | `NeedsYou(Finished)` | a turn settled and its `seq` is newer than `last_seen_seq` | amber dot | `needs you` | `needs you` |
 | `Unread` | new non-terminal output since `last_seen_seq` | gray dot | — | — |
 | `Idle` | otherwise | plain | `idle` | — |
@@ -990,8 +991,8 @@ v1.
 **`Enter` is not bound.** A queued Return keystroke must never approve a shell command — the one
 t3code property worth keeping exactly. Keys are bare letters in a derived context
 (`Agent > AgentDecision > AgentPermission`) so they cannot fire anywhere else, there is no default
-focus and no focus ring, and the status bar mirrors the card's hints **from the same source** so
-it can never advertise a scope the card does not offer.
+focus and no focus ring, and the card's controls read their keys **from the same source** so
+they can never advertise a scope the card does not offer.
 
 Cancellation, death and staleness: a withdrawn request closes as `Withdrawn` with **no** response
 sent; a turn ending with a native question open resolves it as dismissed, because a terminal turn

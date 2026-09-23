@@ -509,14 +509,14 @@ fn escape_clears_the_filter_in_two_stages_and_never_quits() {
 }
 
 #[test]
-fn mode_word_follows_the_overlay_stack() {
+fn the_mode_follows_the_overlay_stack() {
     let now = Instant::now();
     let mut state = AppState::new("/tmp/fleet", now);
-    assert_eq!(state.mode().word(), ModeWord::Normal);
+    assert_eq!(state.mode(), Mode::Normal);
     state.open_overlay(Overlay::Palette);
-    assert_eq!(state.mode().word(), ModeWord::Palette);
+    assert_eq!(state.mode(), Mode::Palette);
     state.open_overlay(Overlay::Dialog(Dialogs::Quit));
-    assert_eq!(state.mode().word(), ModeWord::Dialog);
+    assert_eq!(state.mode(), Mode::Dialog);
 }
 
 #[test]
@@ -549,8 +549,8 @@ fn the_workspace_mode_follows_the_kind_of_the_active_tab() {
     assert!(state.active_terminal_is_native());
     assert_eq!(state.terminal_mode, TerminalMode::Native);
     assert_eq!(state.context_chain(), vec!["Workspace", "Native"]);
-    // §2.8 has no ninth word: the status bar still says the Workspace has the keyboard.
-    assert_eq!(state.mode().word(), ModeWord::Terminal);
+    // A Fleet-drawn pane is its own mode: the harness snapshot reports `Native` (§2.8).
+    assert_eq!(state.mode(), Mode::Native);
 
     // `ctrl-s` over the pane still enters the prefix, and leaving it comes back to Native.
     state.enter_prefix();

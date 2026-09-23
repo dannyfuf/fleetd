@@ -795,19 +795,16 @@ fn glyphs_section(cx: &mut App) -> AnyElement {
             ),
         ),
         LAYOUT.labeled(
-            "mode words",
+            "git ui status words",
             &t,
             strip(
                 &t,
                 vec![
-                    ModeWord::new(Mode::Normal).into_any_element(),
-                    ModeWord::new(Mode::Terminal).into_any_element(),
-                    ModeWord::new(Mode::Prefix).into_any_element(),
-                    ModeWord::new(Mode::Scroll).into_any_element(),
-                    ModeWord::new(Mode::Filter).into_any_element(),
-                    ModeWord::new(Mode::Palette).into_any_element(),
-                    ModeWord::new(Mode::Dialog).into_any_element(),
-                    ModeWord::new(Mode::Jobs).into_any_element(),
+                    ModeWord::word("NORMAL").into_any_element(),
+                    ModeWord::word("STAGING").into_any_element(),
+                    ModeWord::word("REBASING")
+                        .tone(Tone::Warning)
+                        .into_any_element(),
                 ],
             ),
         ),
@@ -1288,47 +1285,46 @@ fn structure_section(cx: &mut App, filter_query: Entity<TextInput>) -> AnyElemen
 
     let bars = box_of(
         &t,
-        t.metrics.context_bar_h,
-        ContextBar::new([
-            ContextTab::new("buk", 1),
-            ContextTab::new("personal", 2),
-            ContextTab::new("oss", 3),
-        ])
-        .active(0)
-        .overflow(3)
-        .chip(
-            Chip::counter(Icon::LoaderCircle, 2)
-                .tone(Tone::Warning)
-                .spinning(true)
-                .id("cb-jobs"),
-        )
-        .chip(Chip::counter(Icon::CircleDot, 3).tone(Tone::Success))
-        .chip(Chip::counter(Icon::Moon, 5).tone(Tone::Secondary))
-        .chip(Chip::counter(Icon::CircleQuestionMark, 1).tone(Tone::Warning))
-        .chip(Chip::counter(Icon::Flag, 4).tone(Tone::Secondary))
-        .daemon(DaemonState::Healthy),
+        t.metrics.title_bar_h,
+        support::chrome::title_bar(
+            "kit-title",
+            support::chrome::TitleSample::Hub,
+            support::chrome::TitleStatus {
+                needs_you: 1,
+                running: 2,
+                ..support::chrome::TitleStatus::QUIET
+            },
+        ),
     );
 
     let status = box_of(
         &t,
         t.metrics.status_bar_h,
-        StatusBar::new()
-            .breadcrumb("buk › payroll › feat/payroll-fix")
-            .mode(Mode::Normal)
-            .ticker(JobTicker::new("clone", "nixos").percent(40).extra(1)),
+        support::chrome::status_buttons(
+            StatusBar::new()
+                .daemon(DaemonState::Healthy, None)
+                .breadcrumb("buk › payroll › feat/payroll-fix")
+                .ticker(JobTicker::new("clone", "nixos").percent(40).extra(1)),
+            "kit-status",
+            false,
+        ),
     );
     let status_error = box_of(
         &t,
         t.metrics.status_bar_h,
-        StatusBar::new()
-            .breadcrumb("buk › payroll › feat/payroll-fix")
-            .mode(Mode::Terminal)
-            .ticker(JobTicker::new("clone", "nixos"))
-            .error(StickyErrorSlot::new("clone failed: gh: HTTP 502")),
+        support::chrome::status_buttons(
+            StatusBar::new()
+                .daemon(DaemonState::Healthy, None)
+                .breadcrumb("buk › payroll › feat/payroll-fix")
+                .ticker(JobTicker::new("clone", "nixos"))
+                .error(StickyErrorSlot::new("clone failed: gh: HTTP 502")),
+            "kit-status-error",
+            true,
+        ),
     );
 
     let children = vec![
-        LAYOUT.labeled("context bar", &t, bars),
+        LAYOUT.labeled("title bar", &t, bars),
         LAYOUT.labeled("status bar", &t, status),
         LAYOUT.labeled("status bar · error", &t, status_error),
         LAYOUT.labeled("panes + split", &t, pane),
@@ -2314,18 +2310,18 @@ impl Render for Gallery {
         ];
 
         AppFrame::new()
-            .context_bar(
-                ContextBar::new([ContextTab::new("fleet-ui-kit gallery", 1)])
+            .title_bar(
+                TitleBar::new()
+                    .leading(Text::ui_strong("fleet-ui-kit gallery"))
                     .leading_inset(px(84.0))
-                    .chip(Chip::labeled(
+                    .trailing(Chip::labeled(
                         if mode.is_dark() {
                             Icon::Moon
                         } else {
                             Icon::CircleArrowUp
                         },
                         if mode.is_dark() { "dark" } else { "light" },
-                    ))
-                    .daemon(DaemonState::Healthy),
+                    )),
             )
             .body(
                 div()
@@ -2344,7 +2340,6 @@ impl Render for Gallery {
             .status_bar(
                 StatusBar::new()
                     .breadcrumb("fleet-ui-kit · every component, every state")
-                    .mode(Mode::Normal)
                     .ticker(KeyHintRow::new().key("t", "toggle theme").key("q", "quit")),
             )
     }

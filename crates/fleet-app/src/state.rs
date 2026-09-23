@@ -23,7 +23,7 @@ use fleet_proto::{
         Cell, CellWidth, CursorShape, CursorState, FrameUpdate, TerminalModes, ViewportInfo,
     },
 };
-use fleet_ui_kit::{Icon, Mode as ModeWord, PrBadgeState, Toast, ToastDuration, Tone};
+use fleet_ui_kit::{Icon, PrBadgeState, Toast, ToastDuration, Tone};
 
 use crate::{
     bridge::BridgeEvent,
@@ -159,7 +159,7 @@ pub struct AppState {
     /// Whether a native agent tab's `^s` is held, waiting for its second key.
     ///
     /// The chord publishes no key context (the tab's chain is derived from daemon state and
-    /// has no room for a mode word), so the harness snapshot does not project it; it is state
+    /// has no room for a one-shot context), so the harness snapshot does not project it; it is state
     /// only so the ⌃S command menu can appear over the thread while it is held. The shell's
     /// keystroke interceptor sets it on `^s` and clears it on the very next key.
     pub agent_chord_armed: bool,

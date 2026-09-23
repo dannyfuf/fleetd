@@ -293,8 +293,8 @@ exit keys as Workspace Scroll mode.
 
 ## Native agent thread
 
-A native agent tab is drawn by Fleet, so keys reach its composer rather than a PTY, and the
-status bar reads `AGENT`. The context is chosen by what the thread is doing: an open decision
+A native agent tab is drawn by Fleet, so keys reach its composer rather than a PTY (the harness
+snapshot's `mode` is `Agent`). The context is chosen by what the thread is doing: an open decision
 card shadows everything else, and the focused transcript row is last.
 
 Creating a thread or selecting an existing agent tab with `ctrl-s 1`–`9` focuses its composer
@@ -333,8 +333,8 @@ Precedence: `AgentNativeScroll` (a frozen tail beats everything, including an op
 `AgentDecision > AgentPermission | AgentQuestion | AgentPlan` > `AgentWorking` > `AgentIdle`.
 
 `ctrl-s [` freezes the transcript's tail, enters `Agent > AgentNativeScroll` and focuses the row
-nearest the bottom of the viewport; the status bar's mode word reads `SCROLL` for as long as it is
-on. `G` jumps to the newest row without leaving the mode — the tail stays frozen until `q`, `i` or
+nearest the bottom of the viewport; the focused row is how the mode shows, and the snapshot's
+`mode` reads `Scroll` for as long as it is on. `G` jumps to the newest row without leaving the mode — the tail stays frozen until `q`, `i` or
 `Esc` leaves it, which is what re-arms the follow.
 
 **Row focus lives inside scroll mode.** `Agent > AgentNativeScroll > AgentRow` is on the chain

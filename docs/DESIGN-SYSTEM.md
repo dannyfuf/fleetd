@@ -76,7 +76,7 @@ other ground. `row_hover` and `control_hover` exist only for the pointer and nev
 | Role | Dark | Light | Use |
 | --- | --- | --- | --- |
 | `bg` | `#111317` | `#FBFBFC` | app ground: the content area |
-| `chrome` | `#0E0F12` | `#F3F4F6` | window chrome: title / context bar, sidebar, status bar |
+| `chrome` | `#0E0F12` | `#F3F4F6` | window chrome: title bar, sidebar, status bar |
 | `surface` | `#16181D` | `#FFFFFF` | rails, panes, scroll pill |
 | `surface_raised` | `#1A1C22` | `#FFFFFF` | cards (board tiles, hub cards, grouped settings), always with a `border` hairline |
 | `elevated` | `#1B1E24` | `#FFFFFF` | dialogs, sheets, toasts, palette, menus, popovers, tooltips |
@@ -187,7 +187,7 @@ rather than trusted. `Theme::with_mono_family` overrides the result.
 | `sentence_label` | system | 11 / 14 | 600 | **as written** (sentence case) | field labels, sidebar and card group headings |
 | `data` | mono | 12.5 / 18 | 400 | as written | branch, path, sha, target, head ref |
 | `data_small` | mono | 11.5 / 16 | 400 | as written | job progress sub-line, log tail |
-| `label` | system | 11 / 14 | 500 | **UPPERCASED** | legacy micro-header: pane and section labels, counts, mode word |
+| `label` | system | 11 / 14 | 500 | **UPPERCASED** | legacy micro-header: pane and section labels, counts, the Git UI's status word |
 | `hint` | mono | 11 / 14 | 400 | as written | key hints |
 
 `Text::page_title`, `section_title`, `caption` and `sentence_label` are the constructors, with
@@ -274,7 +274,7 @@ list below is the complete inventory, in px unless marked `ch`; a unit test in
 
 | Group | Tokens |
 | --- | --- |
-| Window chrome | `title_bar_h 44` · `context_bar_h 36` · `status_bar_h 28` · `traffic_light_inset 84` · `mode_word_w 84` · `banner_h 28` · `strip_h 22` |
+| Window chrome | `title_bar_h 44` · `status_bar_h 28` · `traffic_light_inset 84` · `command_field_w 340` · `monogram_size 18` · `mode_word_w 84` · `banner_h 28` · `strip_h 22` |
 | Layout columns | `sidebar_w 232` · `rail_w 240` · `detail_w 344` · `detail_overlay_w 320` · `sheet_w 440` · `sheet_expanded_w 640` · `sheet_w_detail 736` |
 | Rows and headers | `row_h 30` · `row_h_comfortable 44` · `pane_header_h 30` · `section_header_h 20` · `palette_row_h 34` · `job_row_h 44` · `progress_bar_h 4` |
 | Controls | `button_h 30` · `button_h_compact 26` · `kbd_h 18` · `kbd_h_small 16` · `chip_h 22` · `text_field_h 36` · `field_status_h 18` · `number_field_w 96` · `segment_h 24` · `switch_w 34` · `switch_h 20` · `checkbox_size 16` |
@@ -285,8 +285,10 @@ list below is the complete inventory, in px unless marked `ch`; a unit test in
 | Git UI | `status_pane_h 62` · `stash_pane_h 92` · `editor_box_h 160` · `diff_row_h 18` · `diff_caret_h 14` · `diff_scrollbar_w 5` · `diff_thumb_min_h 24` · `diff_horizontal_step 4ch` |
 
 `row_h` (30) is the dense row, for menus, pickers and terminal-side lists; `row_h_comfortable`
-(44) is the hub-list row. `title_bar_h` and `sidebar_w` are the redesigned chrome; `context_bar_h`
-and `rail_w` stay while the current context bar and repos rail are on screen. `kbd_h_small` is the
+(44) is the hub-list row. `title_bar_h` is the one top row of every window; `command_field_w` is
+the palette field centred in it and `monogram_size` the context switcher's letter tile.
+`mode_word_w` is the embedded Git UI's status word only — Fleet's own chrome draws no mode word.
+`sidebar_w` is the redesigned sidebar; `rail_w` stays while the repos rail is on screen. `kbd_h_small` is the
 key chip inside a compact button or a menu item. `segment_h` plus a `SegmentedControl`'s `xxs`
 inset and hairline on each side is exactly `row_h`, so the control sits in a settings row or a pane
 header without growing it; a `Switch` knob is `switch_h` less an `xxs` inset on each side.
@@ -548,9 +550,9 @@ resolved from the terminal palette.
 ### 6.2 Structure
 
 #### `AppFrame`
-**Purpose.** Context bar (36) + optional banner (28) + flexible body + status bar (28), plus the
+**Purpose.** Title bar (44) + optional banner (28) + flexible body + status bar (28), plus the
 overlay layer.
-**API.** `AppFrame::new().context_bar(..).banner(..).body(..).body_overlay(..).status_bar(..)
+**API.** `AppFrame::new().title_bar(..).banner(..).body(..).body_overlay(..).status_bar(..)
 .overlay(..)`.
 **Variants.** Hub (body = panes) · Workspace (body = terminal) · first run (body = one card).
 **Usage rule.** `overlay` is the window-wide layer for dialogs and the palette; `body_overlay`
@@ -575,27 +577,44 @@ a dialog or sheet is a nested `deferred` and paints after that surface regardles
 **detail panel**, never the list — that is what makes "the rail never moves when `i` opens the
 detail panel" a property of the layout instead of a convention.
 
-#### `ContextBar`
-**Purpose.** Which slice of the world am I in, and is anything moving in it?
-**Anatomy.** `[84 px inset][numbered tabs, 2 px accent underline on the active][+n overflow]
-… [status chips][daemon dot]`.
-**API.** `ContextBar::new([ContextTab::new("buk", 1), ..]).active(usize).overflow(usize)
-.chip(impl IntoElement).daemon(DaemonState).daemon_label(..).leading_inset(Pixels)
-.empty(fact, action)`.
-**States.** default · empty (`no contexts` + `N create your first context`) · daemon degraded.
-**Keyboard.** `1`–`9` jump · `gt`/`gT` cycle · `N` new · `E` edit (the bar does not bind them;
-the screen does).
-**Usage rule.** Pass every chip, including zero-valued ones — `Chip` suppresses itself. The
-84 px inset clears the macOS traffic lights; use 12 px on a platform without them.
-The default is `theme.metrics.traffic_light_inset`.
+#### `TitleBar`
+**Purpose.** The one 44 px row at the top of every window: where you are, a way to search or run
+anything, and what needs you. It is the unified macOS titlebar.
+**Anatomy.** `[traffic-light inset][leading …][CommandField, centred in the window][… trailing]`.
+In the Hub, leading is the context switcher (a `SwitcherButton` with a monogram, opening a
+`PopoverMenu`) and the section nav (a `SegmentedControl` with counts); in the Workspace it is the
+breadcrumb `← Worktrees / repo / worktree`. Trailing is the status cluster — `StatusButton`s for
+what needs you, jobs, an update and an unhealthy daemon, each only while non-zero — then Help and
+Settings as `IconButton`s.
+**API.** `TitleBar::new().leading_inset(Pixels).leading(..).center(..).trailing(..)`; `leading`
+and `trailing` append, left to right.
+**States.** Hub · Workspace · first run (empty: there is nowhere to go yet) · busy (status buttons
+present) · daemon unhealthy (amber `Reconnecting…` / red `fleetd down` pill).
+**Usage rule.** Once per window, through `AppFrame::title_bar`; the frame owns the height. The two
+side regions split the width either side of the field equally and clip, so a narrow window loses
+the ends of its labels, never the field. A floating window of its own (the agent popup) draws a
+header, not a second title bar. The default inset is the `md` gutter; pass
+`metrics.traffic_light_inset` on macOS.
+
+#### `CommandField`
+**Purpose.** A button drawn as a search field — magnifier, `Search or run a command`, key chip —
+that opens the palette.
+**API.** `CommandField::new(id, placeholder).action(Box<dyn Action>).kbd(Kbd)`.
+**Usage rule.** It is not an input: the click dispatches the palette's open action and the typing
+happens in the palette. `command_field_w` wide, `button_h` tall. The chip resolves from the live
+keymap like every `Button`'s.
 
 #### `StatusBar`
-**Purpose.** Breadcrumb · mode word · job ticker · sticky error slot.
-**API.** `StatusBar::new().breadcrumb(..).breadcrumb_ch(usize).mode(Mode)
-.ticker(..).error(..).trailing(..)`.
-**Variants.** With ticker · with error (the error **replaces** the ticker) · Workspace (breadcrumb
-is the session name).
-**Usage rule.** `mode` is not optional in practice: §2.8 requires the word on every screen.
+**Purpose.** Where you are and what is running: daemon · breadcrumb · job ticker or sticky error ·
+trailing buttons.
+**API.** `StatusBar::new().daemon(DaemonState, Option<word>).breadcrumb(..).breadcrumb_ch(usize)
+.ticker(..).error(..).trailing(..)`; `trailing` appends.
+**Variants.** Hub (`Shortcuts ?`) · Workspace (`Fleet commands ⌃S`, `Shortcuts ⌃S ?`) · with ticker ·
+with error (the error **replaces** the ticker) · daemon unhealthy (`fleetd unreachable` in the
+daemon's tone).
+**Usage rule.** There is no mode word (ADR 0023): a state that changes what keys do is shown on the
+surface that has it — the scroll pill, the filter bar, the open overlay, the focused pane, the ⌃S
+command menu. A healthy daemon is a green dot and `fleetd`, nothing more.
 
 #### `Pane`
 **Purpose.** A bordered region with a header slot, a body slot, a scroll thumb and the focus ring.
@@ -790,7 +809,7 @@ how `unknown` starts rendering like `none`, which is the exact live defect §1.3
 Spinning kinds need `.id(..)`.
 
 #### `Chip`
-**Purpose.** The 22 px pill of the context bar and the row chrome.
+**Purpose.** The 22 px pill of the row chrome.
 **API.** `Chip::{new, counter(Icon, usize), labeled(Icon, text)}().icon(..).text(..).count(..)
 .tone(Tone).color(Hsla).filled(bool).spinning(bool).id(..).zero_suppress(bool)`;
 `Chip::is_visible()`.
@@ -1332,14 +1351,11 @@ swallow a crashed dev server. `ExitStrip::new(None)` reads `process exited (kill
 signal-killed process has no exit code and the strip must not invent `128 + signo`.
 
 #### `ModeWord`
-**Purpose.** The fixed 84 px word in the center of the status bar.
-**API.** `ModeWord::{new(Mode), word(text)}().tone(Tone)`;
-`Mode::{Normal, Terminal, Agent, Prefix, Scroll, Filter, Palette, Dialog, Jobs}` with
-`.word() .tone() .keys_reach_pty()` and `Mode::ALL`.
-**Usage rule.** Present on **every** screen, including the Workspace and including zoom. Only
-`Prefix` is amber, because it is the one mode that expires on its own. `Agent` is a separate
-word from `Terminal` because keys reach Fleet's own composer rather than a PTY: `keys_reach_pty()`
-is false for it, so a view's hints keep their bare form.
+**Purpose.** The fixed 84 px status word of the embedded Git UI (`fleet-lazygit`): the key owner
+(`NORMAL`, `STAGING`, `DIALOG`) and the repository operation (`REBASING`, `MERGING`).
+**API.** `ModeWord::word(text).tone(Tone)`.
+**Usage rule.** Only the Git UI draws it, because it mirrors lazygit's status line. Fleet's own
+chrome has no mode word (ADR 0023); do not add one to the status bar or the title bar.
 
 #### `Banner`
 **Purpose.** A 28 px full-width strip with a countdown and recovery keys.
@@ -1356,7 +1372,7 @@ surface exists to prevent.
 **API.** `DaemonSplash::{starting, failed}(title).detail(..).log_lines(..).hints(KeyHintRow)`;
 `DaemonSplashKind::{Starting, Failed}`.
 **Usage rule.** `Banner` covers case C only, because that one is a 28 px strip under the
-context bar. Cases A and B are chrome-less full-window surfaces and neither fits `EmptyState`,
+title bar. Cases A and B are chrome-less full-window surfaces and neither fits `EmptyState`,
 which is two lines and pane-scoped: A needs a spinner plus the socket path after 3 s, B needs a
 mono tail of `~/.fleet/logs/fleetd.log`. The keys here are **bare** (`r`, `L`, `D`, `ctrl-q`) —
 the D-8 prefix rule applies over a terminal grid, and there is no terminal on this screen.
@@ -1816,6 +1832,31 @@ an action, and runs before the action when both are set. An action invalid on th
 **not rendered**; `.disabled(true)` is only for an action that will become valid on this surface
 (§4). The accessible name is the label; a single-stroke chip is also announced as the shortcut
 (`aria-keyshortcuts`, which cannot express a sequence).
+
+#### `StatusButton`
+**Purpose.** A live count that opens what it counts: `1 needs you`, `2 jobs`, `1 failed`,
+`Update 0.2.0`, `fleetd down` — the title bar's status cluster.
+**Anatomy.** A compact `Ghost` frame; a mark (`StatusMark::{Dot, Icon(Icon), Spinner}`) then the
+label, both in the button's tone, `xs` apart, `sm` side padding.
+**API.** `StatusButton::new(id, label).mark(StatusMark).tone(Tone).tooltip(text)` and the shared
+`.action .on_click .kbd .disabled .selected .size .style`.
+**States.** as `Button`; the tone is the state (amber waits for a person, red failed, secondary is
+running or informational).
+**Usage rule.** The caller zero-suppresses: render one only while its count is non-zero. The key
+rides in the tooltip beside the label rather than on the face, because a status cluster is read at
+a glance. Prefer `.action(..)`; `.on_click` only where the target depends on state (`1 needs you`
+opens that thread, `2 needs you` the agents picker).
+
+#### `SwitcherButton`
+**Purpose.** Names the current choice and opens a menu of the others: the title bar's context
+switcher (`[A] Acme ⌄`), a breadcrumb's worktree.
+**Anatomy.** A compact `Ghost` frame; an optional monogram tile (`monogram_size`, `accent_subtle`
+fill, the label's first letter in `accent`) or glyph, the label in `UiStrong` `text`, a trailing
+`chevron-down`.
+**API.** `SwitcherButton::new(id, label).monogram().icon(Icon).tooltip(text)` and the shared
+builders; pass the popover's `open` to `.selected(..)`.
+**Usage rule.** Always a `PopoverMenu` trigger with no action of its own. The chevron says a menu
+opens; each choice's key is on its menu row, not on the switcher.
 
 #### `IconButton`
 **Purpose.** A square, glyph-only button for dense headers and toolbars.

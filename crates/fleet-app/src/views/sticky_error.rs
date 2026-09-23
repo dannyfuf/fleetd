@@ -17,10 +17,10 @@ pub(crate) const fn focus_key(screen: &Screen) -> &'static str {
     }
 }
 
-/// How much of an error the 28 px status bar can carry before the mode word is at risk.
+/// How much of an error the 28 px status bar can carry before it crowds out the breadcrumb.
 const MAX_LINE: usize = 72;
 
-/// One line of at most `budget` characters, so a long `gh` error cannot push the mode word out
+/// One line of at most `budget` characters, so a long `gh` error cannot push the breadcrumb out
 /// of the status bar. Truncation is at the tail, because the head of an error names its cause.
 #[must_use]
 fn one_line(text: &str, budget: usize) -> String {

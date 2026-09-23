@@ -180,17 +180,9 @@ impl Shell {
         };
         let state = self.state.read(cx);
         let mut frame = AppFrame::new()
-            .context_bar(
-                self.context_bar
-                    .clone()
-                    .cached(gpui::StyleRefinement::default().size_full()),
-            )
+            .title_bar(chrome_view(&self.title_bar))
             .body(body)
-            .status_bar(
-                self.status_bar
-                    .clone()
-                    .cached(gpui::StyleRefinement::default().size_full()),
-            )
+            .status_bar(chrome_view(&self.status_bar))
             .body_overlay(
                 ToastStack::new(state.toasts.iter().map(|live| live.toast.clone()))
                     .bottom_inset(toast_bottom_inset(state, cx)),
@@ -214,6 +206,21 @@ impl Shell {
             };
         }
         frame.into_any_element()
+    }
+}
+
+/// A bar, cached so a frame that changes nothing it draws replays its last paint.
+///
+/// Not while the harness records targets: a cached view replays its paint without running it,
+/// so `titlebar.*`, `hub.tab[N]` and `statusbar.*` would drop out of every frame the bar did not
+/// repaint in. The bar draws the same pixels either way; only the replay is skipped.
+fn chrome_view(view: &gpui::Entity<crate::shell::chrome::Chrome>) -> AnyElement {
+    if fleet_ui_kit::harness::is_recording() {
+        view.clone().into_any_element()
+    } else {
+        view.clone()
+            .cached(gpui::StyleRefinement::default().size_full())
+            .into_any_element()
     }
 }
 

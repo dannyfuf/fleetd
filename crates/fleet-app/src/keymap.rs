@@ -26,7 +26,7 @@
 //! literal `ctrl-s`.
 //!
 //! A native agent tab spells its prefix as two-keystroke rows (`ctrl-s s`) rather than as a
-//! context, because its chain is derived from daemon state and has no room for a mode word. Those
+//! context, because its chain is derived from daemon state and has no room for a one-shot context. Those
 //! rows are still never matched by GPUI: the shell's keystroke interceptor takes `ctrl-s` and the
 //! key after it, and resolves the pair here through [`chord_action_for_chain`]. GPUI replays the
 //! keystrokes of a sequence that matched nothing as *input*, so leaving the chord to it typed a
@@ -370,6 +370,26 @@ pub fn is_prefix_key(keystroke: &Keystroke) -> bool {
         && !modifiers.shift
         && !modifiers.platform
         && !modifiers.function
+}
+
+/// The keystrokes of the first row binding `action` in exactly `context`.
+///
+/// For a control whose chip must name a key of a context the focus is not in right now: the
+/// Workspace's chrome shows `⌃S ?` for Help, and `?` is bound in `Workspace > Prefix`, a context
+/// the window is in for one key only. [`fleet_ui_kit::Kbd::for_action`] resolves against the
+/// focused context and would find nothing there.
+#[must_use]
+pub fn keystrokes_in(context: &str, action: &dyn Action) -> Option<Vec<Keystroke>> {
+    let name = action.name();
+    let spec = cached_table()
+        .iter()
+        .find(|spec| spec.context == context && spec.action == name)?;
+    spec.keys
+        .split_whitespace()
+        .map(Keystroke::parse)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| tracing::error!(keys = spec.keys, %error, "unparsable key table row"))
+        .ok()
 }
 
 /// How deep a context predicate matches a live chain, or `None` if it does not match.

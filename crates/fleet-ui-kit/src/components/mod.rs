@@ -17,7 +17,6 @@ mod checkbox;
 mod chip;
 mod column_ladder;
 mod confirm_dialog;
-mod context_bar;
 mod control;
 mod cycler;
 mod daemon_dot;
@@ -79,6 +78,7 @@ mod switch;
 mod terminal_grid;
 mod terminal_modes;
 mod terminal_tab_strip;
+mod title_bar;
 mod toast_stack;
 mod toggle;
 mod tooltip;
@@ -91,7 +91,9 @@ pub use agent::*;
 pub use app_frame::AppFrame;
 pub use badge::{Badge, BadgeStyle};
 pub use banner::Banner;
-pub use button::{Button, ButtonSize, ButtonStyle, IconButton};
+pub use button::{
+    Button, ButtonSize, ButtonStyle, IconButton, StatusButton, StatusMark, SwitcherButton,
+};
 pub use callout::Callout;
 pub use card_tile::{
     ASSIGNEE_INITIALS, BlockedTone, CARD_TITLE_LINES, CardTile, RunMark, initials, label_tone,
@@ -100,7 +102,6 @@ pub use checkbox::Checkbox;
 pub use chip::Chip;
 pub use column_ladder::{ColumnLadder, ColumnSpec, ColumnWidth, ResolvedColumn};
 pub use confirm_dialog::ConfirmDialog;
-pub use context_bar::{ContextBar, ContextTab};
 pub use cycler::{Cycler, CyclerForm, SEGMENTED_MAX, SEGMENTED_MAX_CHARS};
 pub use daemon_dot::{DaemonDot, DaemonState};
 pub use daemon_splash::{DaemonSplash, DaemonSplashKind};
@@ -147,7 +148,7 @@ pub use menu::{
     ContextMenu, Dropdown, MENU_ITEM_TARGET, MENU_KEY_CONTEXT, Menu, MenuAnchor, MenuItem,
     PopoverMenu, menu_actions, menu_holds_focus, menu_key_bindings,
 };
-pub use mode_word::{Mode, ModeWord};
+pub use mode_word::ModeWord;
 pub use multiline_input::{
     HISTORY_LIMIT, MULTILINE_INPUT_KEY_CONTEXT, MultilineInput, MultilineInputEvent, PromptHistory,
     Trigger,
@@ -182,6 +183,7 @@ pub use terminal_grid::{
 };
 pub use terminal_modes::{TerminalMode, TerminalModes};
 pub use terminal_tab_strip::{TerminalAgentState, TerminalTab, TerminalTabKind, TerminalTabStrip};
+pub use title_bar::{CommandField, TitleBar};
 pub use toast_stack::{COALESCE_WINDOW_MS, Toast, ToastDuration, ToastStack};
 pub use toggle::Toggle;
 pub use tooltip::{Tooltip, WithTooltip};

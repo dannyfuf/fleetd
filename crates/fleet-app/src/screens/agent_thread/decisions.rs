@@ -60,16 +60,6 @@ impl QuestionWizard {
         }
     }
 
-    /// A wizard sized for `questions` whose keys address question `cursor`.
-    ///
-    /// The status bar mirrors the drawer's keys and rebuilds the decision from `AppState` rather
-    /// than from the view's live selection, so it needs the cursor without the choices.
-    pub(crate) fn at(questions: usize, cursor: usize) -> Self {
-        let mut wizard = Self::new(questions);
-        wizard.cursor = cursor.min(questions.saturating_sub(1));
-        wizard
-    }
-
     /// Resize the wizard for a different request, keeping nothing.
     pub(crate) fn resize(&mut self, questions: usize) {
         if self.selected.len() != questions {

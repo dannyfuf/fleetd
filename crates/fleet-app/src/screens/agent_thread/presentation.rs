@@ -7,18 +7,15 @@
 
 use fleet_core::{
     agents::{
-        AccountStatus, AgentKind, AgentThreadSummary, Attention, ModelSelection, OpenGate,
-        PermissionMode, ThreadProjection,
+        AccountStatus, AgentKind, AgentThreadSummary, Attention, ModelSelection, PermissionMode,
+        ThreadProjection,
     },
     ids::CardId,
 };
-use fleet_ui_kit::{KeyHintRow, MetadataSegment, format_cost, format_duration, format_token_count};
+use fleet_ui_kit::{MetadataSegment, format_cost, format_duration, format_token_count};
 use gpui::SharedString;
 
-use super::{
-    composer::{ComposerMode, InteractionMode},
-    decisions::{QuestionWizard, decision_for},
-};
+use super::composer::{ComposerMode, InteractionMode};
 
 /// The mark a tab carries for a thread's attention (§3.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -344,72 +341,4 @@ pub(crate) fn unreachable_hint(host: &str) -> String {
 #[must_use]
 pub(crate) fn unreachable_notice(host: &str) -> String {
     format!("{host} is unreachable \u{b7} your message is kept in the composer")
-}
-
-/// The status-bar hints for the composer's key set (§12), as data.
-///
-/// The argument is §3.3's `Working` predicate — the very one the key context is picked from —
-/// and deliberately not [`Attention`]: a plan gate on a running turn reads `NeedsYou(Plan)`
-/// while `Agent > AgentWorking` still owns the keys, so an attention-driven row would advertise
-/// commands nothing is bound to (DESIGN-SYSTEM §4: an invalid command is not listed).
-#[must_use]
-pub(crate) const fn key_hint_set(
-    working: bool,
-    scrolling: bool,
-) -> &'static [(&'static str, &'static str)] {
-    if scrolling {
-        return &[
-            ("j/k", "row"),
-            ("\u{23ce}", "expand"),
-            ("d", "diff"),
-            ("gg/G", "ends"),
-            ("q", "leave"),
-        ];
-    }
-    if working {
-        &[
-            ("esc", "interrupt"),
-            ("\u{23ce}", "steer"),
-            ("^s [", "scroll"),
-            ("^s F", "terminal"),
-        ]
-    } else {
-        &[
-            ("\u{23ce}", "send"),
-            ("\u{21e7}\u{21e5}", "plan mode"),
-            ("^s m", "model"),
-            ("^s t", "access"),
-            ("^s [", "scroll"),
-            // The one Workspace session row the bar names: an agent tab replaces the
-            // `Workspace > …` chain rather than covering it, so the way out of a session is
-            // the row a reader is least likely to guess is still there.
-            ("^s s", "hub"),
-            ("^s F", "terminal"),
-        ]
-    }
-}
-
-/// The same set, rendered for the status bar.
-#[must_use]
-pub(crate) fn key_hints(working: bool, scrolling: bool) -> KeyHintRow {
-    key_hint_set(working, scrolling)
-        .iter()
-        .fold(KeyHintRow::new(), |row, (keys, label)| {
-            row.key(*keys, *label)
-        })
-}
-
-/// The open decision's own keys, which the status bar mirrors verbatim (§6.2).
-///
-/// Reading them off the decision is what keeps the two surfaces from disagreeing about the scope
-/// `[a]` grants or about how many options a question offers. `cursor` is the question the keys
-/// currently address: on a multi-question request the advertised `1–N` range and `space` move
-/// with it, so a fixed question 0 would put a different key set on the two surfaces.
-#[must_use]
-pub(crate) fn decision_hints(gate: &OpenGate, provider: AgentKind, cursor: usize) -> KeyHintRow {
-    let questions = match &gate.kind {
-        fleet_core::agents::GateKind::Question { questions } => questions.len(),
-        _ => 0,
-    };
-    decision_for(gate, provider, &QuestionWizard::at(questions, cursor)).key_hints()
 }

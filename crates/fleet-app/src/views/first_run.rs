@@ -18,7 +18,6 @@ const IMPORT_IS_SAFE: &str = "(nothing in ~/.swarm is modified)";
 /// Typed copy for each empty surface. `{}` in a fact is replaced by the caller's scope.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EmptySurface {
-    Contexts,
     Repos,
     Worktrees,
     WorktreesRepo,
@@ -30,7 +29,6 @@ pub(crate) enum EmptySurface {
 impl EmptySurface {
     pub(crate) fn copy(self, scope: Option<&str>) -> (SharedString, &'static str) {
         let (fact, action) = match self {
-            Self::Contexts => ("No contexts yet.", "N  create your first context"),
             Self::Repos => ("No repos in {}.", "n  clone one"),
             Self::Worktrees => ("No worktrees yet.", "n  create one"),
             Self::WorktreesRepo => ("No worktrees for {} yet.", "n  create one"),
@@ -224,8 +222,8 @@ mod tests {
             ("Nothing matches \"rut\".".into(), "esc  clear")
         );
         assert_eq!(
-            EmptySurface::Contexts.copy(None),
-            ("No contexts yet.".into(), "N  create your first context"),
+            EmptySurface::Worktrees.copy(None),
+            ("No worktrees yet.".into(), "n  create one"),
             "an unscoped fact is a static string, not a substitution"
         );
     }

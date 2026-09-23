@@ -294,6 +294,8 @@ The names Fleet paints today, by surface:
 | --- | --- |
 | Repositories rail | `repos.rail`, `repos.row[N]`. The rail's own `w` is the collapse oracle — 240 expanded, 44 collapsed — because `H` is its only collapse affordance and Fleet has no control to name. |
 | Hub lists | `worktrees.row[N]`, `prs.row[N]`, `jobs.row[N]`, `hub.tab[N]`, `prs.tab[N]` |
+| Title bar | `titlebar.context`, `titlebar.command`, `titlebar.needs_you`, `titlebar.jobs`, `titlebar.update`, `titlebar.daemon`, `titlebar.help`, `titlebar.settings`, `titlebar.back` |
+| Status bar | `statusbar.shortcuts`, `statusbar.commands` |
 | Board | `board.column[C]`, `board.column[C].card[R]`, `board.filter` |
 | Filter and palette | `filter.input`, `palette.input`, `palette.row[N]` (one flat numbering across the Go / Do / Context sections) |
 | Dialogs | `dialog.field[N]`, `dialog.row[N]`, `dialog.close`, `dialog.button[N]`, `dialog.checkbox`, `dialog.segment[N]` |
@@ -305,6 +307,18 @@ The names Fleet paints today, by surface:
 | Menus | `menu.item[N]`: the items of the one open kit `Menu` (a ⋯, `+`, right-click or dropdown menu), numbered over the visible items in order, separators and headers skipped |
 | ⌃S command menu | `prefix_menu`, `prefix_menu.item[N]`, `prefix_menu.close` |
 | Native agents | `agents.popup`, `agents.popup.agent[N]` (the header's provider switch: 0 Claude, 1 Codex), `agents.popup.restart`, `agents.popup.hide`, `agents.transcript`, `agents.composer`, `agents.decision`, `agents.approval.allow_once`, `agents.approval.allow_always`, `agents.approval.deny`, `agents.approval.deny_and_stop`, `agents.approval.edit`, `agents.send`, `agents.tool[N]`, `agents.row[N]` |
+
+`hub.tab[N]` is the title bar's section nav — `0` Worktrees, `1` Pull requests, `2` Board — painted
+only on the Hub. The `titlebar.*` names are its other controls. `titlebar.context` is the context
+switcher; clicking it opens a kit menu whose `menu.item[N]` are the contexts in order, then *New*,
+*Edit* and *Delete context*. `titlebar.command` opens the palette, `titlebar.help` Help and
+`titlebar.settings` Settings. Four are conditional: `titlebar.needs_you` exists only while an
+agent thread needs you (one waiting opens that thread, two or more the agents picker),
+`titlebar.jobs` only while a job runs or has failed, `titlebar.update` only on the Hub with an
+update available, and `titlebar.daemon` only while the daemon is unhealthy. In the Workspace the
+switcher and the section nav give way to `titlebar.back` (`⌃S s`). The status bar paints
+`statusbar.shortcuts` (Help) everywhere and `statusbar.commands` (`⌃S`, entering the prefix) over
+a terminal or a Fleet-drawn pane, not over a native agent thread.
 
 `prefix_menu` is the ⌃S command menu's panel, painted only once a held prefix has waited out
 `motion.prefix_hint_delay` — a scenario awaits it rather than assuming it. `prefix_menu.item[N]`

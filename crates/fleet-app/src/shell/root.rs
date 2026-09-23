@@ -74,7 +74,7 @@ pub struct Shell {
     jobs: JobsPanel,
     dialogs: Entity<crate::dialogs::ActiveDialog>,
     diagnostics: Entity<crate::views::doctor_view::DiagnosticView>,
-    context_bar: Entity<chrome::Chrome>,
+    title_bar: Entity<chrome::Chrome>,
     status_bar: Entity<chrome::Chrome>,
     _subscriptions: Vec<Subscription>,
     _tasks: Vec<Task<()>>,
@@ -135,17 +135,24 @@ impl Shell {
             )
         });
         let diagnostics = cx.new(|cx| crate::views::doctor_view::DiagnosticView::new(&state, cx));
-        let context_bar =
-            cx.new(|cx| chrome::Chrome::new(state.clone(), chrome::ChromeKind::Context, cx));
-        let status_bar =
-            cx.new(|cx| chrome::Chrome::new(state.clone(), chrome::ChromeKind::Status, cx));
+        let title_bar = cx.new(|cx| {
+            chrome::Chrome::new(state.clone(), bridge.clone(), chrome::ChromeKind::Title, cx)
+        });
+        let status_bar = cx.new(|cx| {
+            chrome::Chrome::new(
+                state.clone(),
+                bridge.clone(),
+                chrome::ChromeKind::Status,
+                cx,
+            )
+        });
         Self {
             window: None,
             dialogs,
             diagnostics,
             local_files: observations::LocalFiles::default(),
             user_home: crate::presentation::home_dir(),
-            context_bar,
+            title_bar,
             status_bar,
             state,
             bridge,

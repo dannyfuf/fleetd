@@ -1173,7 +1173,7 @@ Property rows in the card detail reuse `KeyValueList`/`FactRow`; pickers reuse
 
 - **Screen**: the board is a hub tab: `HubTab::Board`, key `g b`, tab label "Board", rendered by
   `screens/board.rs::BoardScreen` with the frozen screen signature (`docs/APP-CONTRACTS.md` §2).
-  The hub context bar scopes it: the board shown is `EnsureBoard(active_context)`.
+  The title bar's context switcher scopes it: the board shown is `EnsureBoard(active_context)`.
   A worktree Workspace's `fleet://board` tab (`ctrl-s b`) is the board's second surface and
   shows `EnsureWorktreeBoard(worktree)`. It builds nothing of its own: `Shell` owns the one
   `BoardScreen` and lends it to whichever surface is drawing, since the two are never visible

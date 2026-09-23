@@ -527,53 +527,14 @@ fn visible_rows(window_height: f32, cx: &App) -> usize {
 }
 
 fn row_capacity(window_height: f32, metrics: fleet_ui_kit::theme::Metrics) -> usize {
-    let chrome = f32::from(metrics.context_bar_h)
+    let chrome = f32::from(metrics.title_bar_h)
         + f32::from(metrics.status_bar_h)
         + 2.0 * f32::from(metrics.pane_header_h);
     (((window_height - chrome).max(0.0) / f32::from(metrics.row_h).max(1.0)) as usize).max(2)
 }
 
-/// The Hub's screen tabs; summary counts are context scoped, independent of repo scope.
-fn hub_tabs(state: &AppState) -> fleet_ui_kit::SegmentedControl {
-    use fleet_ui_kit::{Segment, SegmentedControl};
-    let summary = state
-        .snapshot
-        .as_ref()
-        .and_then(|snapshot| context_board_summary(&snapshot.boards, state.active_context()));
-    let label = if summary.is_some_and(|board| board.conflict_count > 0) {
-        "Board •"
-    } else {
-        "Board"
-    };
-    let board = Segment::new(label)
-        .count(summary.map(|summary| summary.open_count))
-        .loading(state.board.loading);
-    let active = match state.screen {
-        Screen::Hub { tab: HubTab::Prs } => 1,
-        Screen::Hub { tab: HubTab::Board } => 2,
-        _ => 0,
-    };
-    SegmentedControl::new(
-        "hub-tabs",
-        [
-            Segment::new("Worktrees"),
-            Segment::new("Pull requests"),
-            board,
-        ],
-    )
-    .active(Some(active))
-    .harness_segments("hub.tab")
-    .on_select(|index, window, cx| {
-        let action: Box<dyn gpui::Action> = match index {
-            1 => Box::new(hub::GoPrs),
-            2 => Box::new(crate::actions::board::GoBoard),
-            _ => Box::new(hub::GoWorktrees),
-        };
-        window.dispatch_action(action, cx);
-    })
-}
-
-fn context_board_summary<'a>(
+/// The context's own board, as the title bar's Board segment counts it (§2.2).
+pub(crate) fn context_board_summary<'a>(
     boards: &'a [BoardSummary],
     context: Option<&ContextId>,
 ) -> Option<&'a BoardSummary> {

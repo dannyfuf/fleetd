@@ -96,7 +96,7 @@ fn state_with(threads: Vec<AgentThreadSummary>) -> AppState {
 }
 
 #[test]
-fn the_context_bar_counts_every_thread_in_the_snapshot() {
+fn the_agent_counts_cover_every_thread_in_the_snapshot() {
     let state = state_with(vec![
         summary("a", Attention::NeedsYou(AttentionKind::Permission), 3),
         summary("b", Attention::NeedsYou(AttentionKind::Finished), 3),
@@ -116,6 +116,24 @@ fn the_context_bar_counts_every_thread_in_the_snapshot() {
     );
     assert!(state.agents.counts().any());
     assert!(!AgentCounts::default().any());
+    assert_eq!(
+        state.agents.waiting_thread(),
+        None,
+        "two threads need you, so `2 needs you` opens the picker rather than guessing"
+    );
+}
+
+#[test]
+fn the_waiting_thread_is_named_while_exactly_one_needs_you() {
+    let waiting = summary("a", Attention::NeedsYou(AttentionKind::Question), 3);
+    let state = state_with(vec![
+        waiting.clone(),
+        summary("b", Attention::Working, 3),
+        summary("c", Attention::Idle, 3),
+    ]);
+    assert_eq!(state.agents.waiting_thread(), Some(waiting.thread));
+    let state = state_with(vec![summary("b", Attention::Working, 3)]);
+    assert_eq!(state.agents.waiting_thread(), None);
 }
 
 #[test]
@@ -488,7 +506,6 @@ fn an_open_gate_routes_the_keyboard_to_its_decision_context() {
     );
     assert_eq!(state.context_chain(), vec!["Agent", "AgentIdle"]);
     assert_eq!(state.mode(), crate::state::Mode::Agent);
-    assert_eq!(state.mode().word(), fleet_ui_kit::Mode::Agent);
 
     let mut projection = ThreadProjection::new(thread.thread, worktree("feat"), AgentKind::Claude);
     projection.session = AgentSessionState::Running;
@@ -677,12 +694,10 @@ fn a_daemon_restart_re_reports_every_cursor_this_window_already_read() {
     );
 }
 
-/// UX-11: the status bar mirrors the keys that fire, and a plan gate on a running turn reads
-/// `NeedsYou(Plan)` while `Agent > AgentWorking` still owns them.
+/// UX-11: a plan gate on a running turn reads `NeedsYou(Plan)` while `Agent > AgentWorking`
+/// still owns the keys.
 #[test]
-fn the_status_bar_key_set_follows_the_context_not_the_badge() {
-    use crate::screens::agent_thread::presentation::key_hint_set;
-
+fn a_plan_gate_on_a_running_turn_keeps_the_working_keys() {
     let thread = summary("feat", Attention::NeedsYou(AttentionKind::Plan), 1);
     let mut state = state_with(vec![thread.clone()]);
     state.screen = crate::state::Screen::Workspace {
@@ -715,16 +730,11 @@ fn the_status_bar_key_set_follows_the_context_not_the_badge() {
         state.agents.is_working(thread.thread),
         "a running turn is `Working` whatever the tab badge says"
     );
-    // While the plan note is being typed the card stands its keys down and the composer's set
-    // is shown — which must be the working one, since that is the context that is live.
+    // While the plan note is being typed the card stands its keys down and the composer's
+    // working set is the one that is live.
     state.agents.set_composing(thread.thread, true);
     assert_eq!(
         state.agent_context_chain(),
         Some(vec!["Agent", "AgentWorking"])
-    );
-    assert_eq!(
-        key_hint_set(state.agents.is_working(thread.thread), false).first(),
-        Some(&("esc", "interrupt")),
-        "the bar advertised idle commands nothing in `AgentWorking` is bound to"
     );
 }
