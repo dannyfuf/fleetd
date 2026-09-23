@@ -2345,8 +2345,9 @@ one number in it that is not about a terminal.
 
 **Header.** A `PageHeader`, not a pane header. On the left the board's name as the page title and
 its prefix badge, and under them one muted line: `8 cards` (`3 of 8 cards` while the filter hides
-some), then `1 of 2 runs working` — the cards holding a run slot, live **or** owed, over
-`settings.max_live_runs` — and then, in amber, `1 needs you`, which is clickable and selects the
+some), then `1 of 2 runs working` — the cards holding a run slot, over
+`settings.max_live_runs`, or `1 working · 1 waiting` while a card is owed a run the limit has no
+slot for yet — and then, in amber, `1 needs you`, which is clickable and selects the
 first card waiting on a person. Both counts are zero-suppressed; the dirty (`⬆2`) and conflict
 (`⚠1`) counters and the `refreshing` spinner follow them on the same line. On the right, in order:
 the **sync button**, which reads the backend's registry label and its age (`Jira · synced 2m`,

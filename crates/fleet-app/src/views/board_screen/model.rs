@@ -195,6 +195,8 @@ pub struct BoardMarks {
     pub by_card: HashMap<CardId, TileMark>,
     /// Cards holding or owed a run slot — the header's numerator.
     pub working: u32,
+    /// Of those, the cards only owed one: waiting for a slot to free.
+    pub waiting: u32,
     /// Cards waiting on a person — the header's amber count.
     pub needs_you: u32,
     /// The branch, and its pull request, of every worktree a card on this board links.
@@ -238,11 +240,14 @@ pub struct HeaderFacts {
     pub error: Option<String>,
     /// Cards holding or owed a run slot.
     pub working: u32,
+    /// Of those, the cards only owed one.
+    pub waiting: u32,
     /// How many runs this board lets itself hold at once (`BoardSettings::max_live_runs`).
     pub live_limit: u32,
     /// Cards waiting on a person.
     pub needs_you: u32,
-    /// `1 of 2 runs working`, already composed, or `None` while nothing is running.
+    /// `1 of 2 runs working`, or `1 working · 1 waiting` while a card is owed a run the limit
+    /// has no slot for; already composed, or `None` while nothing is running or owed.
     ///
     /// The string is built here rather than in the header body for the reason every other
     /// string on this screen is: `docs/APP-CONTRACTS.md:101` — *render prepares nothing*.
@@ -287,16 +292,37 @@ impl HeaderFacts {
                 .count(),
             error: view.board.sync.last_error.clone(),
             working: marks.working,
+            waiting: marks.waiting,
             live_limit,
             needs_you: marks.needs_you,
-            working_label: (marks.working > 0).then(|| {
-                let runs = if live_limit == 1 { "run" } else { "runs" };
-                format!("{} of {live_limit} {runs} working", marks.working)
-            }),
+            working_label: working_label(marks.working, marks.waiting, live_limit),
             needs_you_label: (marks.needs_you > 0)
                 .then(|| format!("{} needs you", marks.needs_you)),
         }
     }
+}
+
+/// The header's run count, or `None` while no card holds or is owed a slot.
+///
+/// While every counted card holds its slot the count is read against the limit, `1 of 2 runs
+/// working`. Once one is only owed a run, `N of M` would put more over the limit than it
+/// allows (`2 of 1 run working`), so the two are stated apart — `1 working · 1 waiting` — and
+/// either half is left out at zero.
+fn working_label(working: u32, waiting: u32, live_limit: u32) -> Option<String> {
+    if working == 0 {
+        return None;
+    }
+    let live = working.saturating_sub(waiting);
+    if waiting == 0 {
+        let runs = if live_limit == 1 { "run" } else { "runs" };
+        return Some(format!("{live} of {live_limit} {runs} working"));
+    }
+    let waiting = format!("{waiting} waiting");
+    Some(if live == 0 {
+        waiting
+    } else {
+        format!("{live} working \u{b7} {waiting}")
+    })
 }
 
 /// One card, prepared for its tile.

@@ -78,6 +78,9 @@ pub struct CardMarks {
     pub by_card: HashMap<CardId, TileMarks>,
     /// Cards with a live or pending run, which is the header's numerator.
     pub working: u32,
+    /// Of those, the cards only owed a run: a pending run and no live one, which is a card
+    /// waiting for a slot the board's `max_live_runs` has not freed yet.
+    pub waiting: u32,
     /// Cards waiting on a person (`ops::query::attention`).
     pub needs_you: u32,
     /// Bumped only when the map or a counter actually differs.
@@ -353,11 +356,12 @@ impl AppState {
             // The numerator is what occupies a run slot, which is the live and the owed runs —
             // not the marks, because a `Blocked` child is still holding its checkout. A child
             // the mirror has and the view has not is holding one too.
-            if card.pending_run.is_some()
-                || live_child.is_some()
-                || card.runs.last().is_some_and(CardRun::is_live)
-            {
+            let live = live_child.is_some() || card.runs.last().is_some_and(CardRun::is_live);
+            if live || card.pending_run.is_some() {
                 marks.working = marks.working.saturating_add(1);
+            }
+            if !live && card.pending_run.is_some() {
+                marks.waiting = marks.waiting.saturating_add(1);
             }
             if attention(card, &stamp) {
                 marks.needs_you = marks.needs_you.saturating_add(1);

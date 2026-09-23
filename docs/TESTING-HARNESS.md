@@ -259,7 +259,9 @@ a `board` row's badge counts that same population. A `board` row carries `action
 column starts a run on arrival, which is the `on_enter` automation alone. `board.summary` holds
 the board header's two counts as one row in their compact form — `1/1 working · 1 needs you`,
 each half omitted while its count is zero, where the header itself reads `1 of 1 run working` —
-and the list is absent when both are. `card.runs` is one row per run of the open
+and the list is absent when both are. Its `working` numerator counts live and owed runs alike;
+while any of them is only owed a slot, the row carries the mark `waiting:N` and the header reads
+`1 working · 1 waiting` instead. `card.runs` is one row per run of the open
 card, oldest first: `label` is the run row the detail draws, `badges` is the provider, and
 `marks` is that run's mark word. `card.properties` is one row per row of the open card's
 property column, top to bottom — the index `card_detail.property[N]` paints — with `label` the

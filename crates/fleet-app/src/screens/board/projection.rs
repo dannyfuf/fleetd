@@ -90,6 +90,7 @@ fn marks(state: &AppState) -> board_screen::BoardMarks {
             })
             .collect(),
         working: marks.working,
+        waiting: marks.waiting,
         needs_you: marks.needs_you,
         links: HashMap::new(),
     }

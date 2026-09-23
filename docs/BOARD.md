@@ -1765,11 +1765,13 @@ prompt's instructions, and falls back to `runs the card` / `runs <skill>`. Click
 Board settings drilled into that column (§11.10).
 
 The board header's subtitle carries two zero-suppressed counts: `1 of 2 runs working` over
-`settings.max_live_runs`, counting the cards that hold a run slot — live **or** owed — and, in
-amber, `1 needs you` from `attention()`, which selects the first card whose mark waits on a person.
+`settings.max_live_runs`, counting the cards that hold a run slot, or — while a card is owed a run
+the limit has no slot for — `1 working · 1 waiting`, the live and the owed runs stated apart so
+the count never reads over the limit; and, in amber, `1 needs you` from `attention()`, which selects the first card whose mark waits on a person.
 They are the board-face version of `BoardSummary`'s two counts (§11.5), computed in the app from
 the same definitions so a pane and a board list agree. The harness's `board.summary` row keeps its
-compact `1/1 working · 1 needs you` form (`TESTING-HARNESS.md` §3).
+compact `1/1 working · 1 needs you` form, whose numerator counts live **and** owed runs, and
+marks the owed ones `waiting:N` (`TESTING-HARNESS.md` §3).
 
 A run whose start never reached a thread has no mark to draw, so it raises the sticky error once
 instead, with the run's own `detail`. `UX-SPEC.md` § Board states the glyphs, tones and wording.

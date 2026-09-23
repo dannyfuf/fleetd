@@ -411,8 +411,9 @@ impl AppState {
     ///
     /// The same two numbers `views::board_screen::model::HeaderFacts` states, in the compact
     /// `1/1 working · 1 needs you` form the scenarios were written against: the header now
-    /// spells the first `1 of 1 run working`, and a scenario reads the counts, not the prose
-    /// (`docs/TESTING-HARNESS.md` §3). A board with nothing running and nobody waiting carries
+    /// spells the first `1 of 1 run working` (or `1 working · 1 waiting`), and a scenario reads
+    /// the counts, not the prose (`docs/TESTING-HARNESS.md` §3). The owed runs inside the
+    /// working count ride as a `waiting:N` mark. A board with nothing running and nobody waiting carries
     /// no counts at all, so the list is absent rather than a row saying `0/1 working`.
     fn board_summary_row(&self, view: &BoardView) -> Option<RowSnapshot> {
         let marks = &self.board.marks;
@@ -424,11 +425,16 @@ impl AppState {
         if marks.needs_you > 0 {
             parts.push(format!("{} needs you", marks.needs_you));
         }
+        // How many of the `working` count are only owed a slot, which the header states apart.
+        let marks_out = (marks.waiting > 0)
+            .then(|| format!("waiting:{}", marks.waiting))
+            .into_iter()
+            .collect();
         (!parts.is_empty()).then(|| RowSnapshot {
             id: "summary".to_owned(),
             label: parts.join(" \u{b7} "),
             badges: Vec::new(),
-            marks: Vec::new(),
+            marks: marks_out,
         })
     }
 

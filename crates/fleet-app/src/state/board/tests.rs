@@ -709,9 +709,13 @@ fn a_live_run_marks_its_card_as_working() {
         "applying the view is what derives the mark; nothing re-derives it in render"
     );
     assert_eq!(
-        (state.board.marks.working, state.board.marks.needs_you),
-        (1, 0),
-        "a live run holds a slot and asks nobody for anything"
+        (
+            state.board.marks.working,
+            state.board.marks.waiting,
+            state.board.marks.needs_you
+        ),
+        (1, 0, 0),
+        "a live run holds a slot, waits for none, and asks nobody for anything"
     );
 }
 
@@ -833,8 +837,9 @@ fn an_owed_run_turns_amber_once_the_wait_is_the_story() {
     state.refresh_card_marks(at("2026-09-20T11:59:59Z"));
     assert_eq!(first_marks(&state).run, Some(RunMark::Pending));
     assert_eq!(
-        state.board.marks.working, 1,
-        "an owed run counts against the live limit that is holding it up"
+        (state.board.marks.working, state.board.marks.waiting),
+        (1, 1),
+        "an owed run counts against the live limit that is holding it up, and as waiting"
     );
 
     state.refresh_card_marks(at(NOW));

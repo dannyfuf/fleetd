@@ -151,6 +151,7 @@ assert lists["board.cards"].rows[1].badges[0] == "AGE-2"
 await lists["board.cards"].rows[1].marks[0] == "pending" 40000
 await agents.delegations[0].status == blocked 30000
 await lists["board.summary"].rows[0].label == "2/1 working" 20000
+assert lists["board.summary"].rows[0].marks[0] == "waiting:1"
 assert lists.board.rows[3].badges[0] == "2" && lists.board.rows[3].marks[0] == "action"
 shot workflow-marks
 

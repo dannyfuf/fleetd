@@ -229,6 +229,30 @@ fn the_header_counts_are_composed_with_the_model_and_hidden_at_zero() {
     assert_eq!(busy.needs_you_label.as_deref(), Some("1 needs you"));
 }
 
+/// A card owed a run the limit has no slot for is stated as waiting, never counted over the
+/// limit as working (`2 of 1 run working` was the defect).
+#[test]
+fn the_header_states_an_owed_run_as_waiting_not_over_the_limit() {
+    let mut view = view();
+    view.board.settings.max_live_runs = Some(1);
+    let label = |working, waiting| {
+        HeaderFacts::of(
+            &view,
+            None,
+            0,
+            &BoardMarks {
+                working,
+                waiting,
+                ..BoardMarks::default()
+            },
+        )
+        .working_label
+    };
+    assert_eq!(label(1, 0).as_deref(), Some("1 of 1 run working"));
+    assert_eq!(label(2, 1).as_deref(), Some("1 working \u{b7} 1 waiting"));
+    assert_eq!(label(1, 1).as_deref(), Some("1 waiting"));
+}
+
 /// A column wears the `⚡` for what it starts, not for where it sends a card afterwards.
 #[test]
 fn only_an_on_enter_column_carries_an_action() {
