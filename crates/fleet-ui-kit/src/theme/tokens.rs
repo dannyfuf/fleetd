@@ -618,6 +618,10 @@ pub struct Metrics {
     pub switch_w: Pixels,
     /// 20 px `Switch` track height. The knob is this less an `xxs` inset on each side.
     pub switch_h: Pixels,
+    /// 16 px `Checkbox` box.
+    pub checkbox_size: Pixels,
+    /// 34 px icon tile that leads an alert dialog's title (a confirm).
+    pub alert_tile: Pixels,
     /// 18 px key chip.
     pub kbd_h: Pixels,
     /// 16 px key chip inside a compact button or a menu item.
@@ -747,6 +751,8 @@ impl Default for Metrics {
             segment_h: px(24.0),
             switch_w: px(34.0),
             switch_h: px(20.0),
+            checkbox_size: px(16.0),
+            alert_tile: px(34.0),
             kbd_h: px(18.0),
             kbd_h_small: px(16.0),
             status_pane_h: px(62.0),

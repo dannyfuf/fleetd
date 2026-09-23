@@ -1778,7 +1778,7 @@ fn overlays_section(
         &t,
         px(300.0),
         Dialog::new("New worktree")
-            .subtitle("· buk/payroll")
+            .subtitle("buk/payroll")
             .icon(Icon::GitBranchPlus)
             .width(px(460.0))
             .body(
@@ -1787,8 +1787,16 @@ fn overlays_section(
                     .flex_col()
                     .gap(px(8.0))
                     .child(dialog_branch)
-                    .child(Text::hint("⚡ prepared copy ready — create takes ~2 s").faint()),
+                    .child(
+                        Callout::new(Tone::Success, Icon::Zap, "Prepared copy ready — about 2 s")
+                            .detail("Hooks: pnpm install (run in background)"),
+                    ),
             )
+            .footer_start(Checkbox::new(
+                "kit-dialog-open-after",
+                "Open after creating",
+                true,
+            ))
             .on_dismiss(|_, _| {})
             .actions(vec![
                 Button::new("kit-dialog-cancel", "Cancel").kbd(gallery_kbd("escape")),

@@ -31,6 +31,7 @@ pub struct Segment {
     count: Option<usize>,
     loading: bool,
     kbd: Option<Kbd>,
+    disabled: bool,
 }
 
 impl Segment {
@@ -42,7 +43,15 @@ impl Segment {
             count: None,
             loading: false,
             kbd: None,
+            disabled: false,
         }
+    }
+
+    /// Dim this one segment and ignore clicks on it: an option that exists but cannot be
+    /// chosen now (an unreachable host). The surface says why next to the control.
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
     }
 
     /// A leading glyph.
@@ -193,7 +202,11 @@ impl RenderOnce for SegmentedControl {
                 } else {
                     Tone::Muted
                 };
-                let on_select = self.on_select.clone().filter(|_| clickable);
+                let on_select = self
+                    .on_select
+                    .clone()
+                    .filter(|_| clickable && !segment.disabled);
+                let segment_disabled = segment.disabled;
                 let name = segment.label.clone();
                 div()
                     .id(("segment", ix))
@@ -214,6 +227,9 @@ impl RenderOnce for SegmentedControl {
                         gpui::transparent_black()
                     })
                     .when(is_active, |el| el.bg(colors.control))
+                    .when(segment_disabled && !self.disabled, |el| {
+                        el.opacity(theme.metrics.dimmed_opacity)
+                    })
                     .role(gpui::Role::RadioButton)
                     .aria_label(name)
                     .aria_toggled(if is_active {

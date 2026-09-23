@@ -1,7 +1,8 @@
 //! The visual and behavioural test bench for the **input** group of `fleet-ui-kit`.
 //!
 //! `TextInput` · `FuzzyList` · `FilterBar` · `Cycler` · `Toggle` · `NumberField` ·
-//! `Switch` · `SegmentedControl` · `SegmentedTabs` · `Select` · `ConfirmDialog` · `Palette`.
+//! `Switch` · `Checkbox` · `SegmentedControl` · `SegmentedTabs` · `Select` · `Callout` ·
+//! `ConfirmDialog` · `Palette`.
 //!
 //! Every component appears in every state it can be in, in both themes, and the interactive
 //! ones are *live*: the inputs really edit, the palette really filters and highlights, the
@@ -896,6 +897,23 @@ fn fuzzy_section(
                 ),
             ),
             LAYOUT.labeled(
+                "badges + chosen check (a choice, not a launcher)",
+                theme,
+                card(
+                    theme,
+                    px(420.0),
+                    FuzzyList::new(
+                        "gallery-fuzzy-choice",
+                        [
+                            FuzzyItem::new("origin/main").badge("default").checked(true),
+                            FuzzyItem::new("origin/release/2.4").badge("previous base"),
+                            FuzzyItem::new("origin/feat/payroll-export"),
+                        ],
+                    )
+                    .cursor(0),
+                ),
+            ),
+            LAYOUT.labeled(
                 "empty",
                 theme,
                 card(
@@ -1063,6 +1081,42 @@ fn choice_section(
                     .child(Switch::new("switch-disabled-off", false).disabled(true)),
             ),
             LAYOUT.labeled(
+                "checkbox: checked, unchecked, disabled",
+                theme,
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(theme.space.lg)
+                    .child(Checkbox::new("checkbox-on", "Open after creating", true))
+                    .child(Checkbox::new("checkbox-off", "Open after creating", false))
+                    .child(Checkbox::new("checkbox-disabled", "Locked", true).disabled(true)),
+            ),
+            LAYOUT.labeled(
+                "callout: success, warning",
+                theme,
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(theme.space.sm)
+                    .w(px(460.0))
+                    .child(
+                        Callout::new(
+                            Tone::Success,
+                            Icon::Zap,
+                            "Prepared copy ready \u{2014} about 2 s",
+                        )
+                        .detail("Hooks: pnpm install (run in background)"),
+                    )
+                    .child(
+                        Callout::new(
+                            Tone::Warning,
+                            Icon::Hourglass,
+                            "No prepared copy \u{2014} the first create copies the repo (~40 s) in the background",
+                        )
+                        .detail("Hooks: none"),
+                    ),
+            ),
+            LAYOUT.labeled(
                 "number fields (+ \u{2212})",
                 theme,
                 card(
@@ -1224,6 +1278,20 @@ fn tabs_and_select_section(
                     .active(Some(1))
                     .full_width(),
                 ),
+            ),
+            LAYOUT.labeled(
+                "segmented \u{b7} one option unavailable (dimmed, not clickable)",
+                theme,
+                SegmentedControl::new(
+                    "gallery-segmented-unavailable",
+                    [
+                        Segment::new("local"),
+                        Segment::new("devbox"),
+                        Segment::new("archdev").disabled(true),
+                    ],
+                )
+                .active(Some(0))
+                .on_select(|_, _, _| {}),
             ),
             LAYOUT.labeled(
                 "select, open (o)",

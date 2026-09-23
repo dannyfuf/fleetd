@@ -277,8 +277,8 @@ list below is the complete inventory, in px unless marked `ch`; a unit test in
 | Window chrome | `title_bar_h 44` · `context_bar_h 36` · `status_bar_h 28` · `traffic_light_inset 84` · `mode_word_w 84` · `banner_h 28` · `strip_h 22` |
 | Layout columns | `sidebar_w 232` · `rail_w 240` · `detail_w 344` · `detail_overlay_w 320` · `sheet_w 440` · `sheet_expanded_w 640` · `sheet_w_detail 736` |
 | Rows and headers | `row_h 30` · `row_h_comfortable 44` · `pane_header_h 30` · `section_header_h 20` · `palette_row_h 34` · `job_row_h 44` · `progress_bar_h 4` |
-| Controls | `button_h 30` · `button_h_compact 26` · `kbd_h 18` · `kbd_h_small 16` · `chip_h 22` · `text_field_h 36` · `field_status_h 18` · `number_field_w 96` · `segment_h 24` · `switch_w 34` · `switch_h 20` |
-| Dialogs and floating layers | `dialog_w 560` · `confirm_compact_w 480` · `dialog_header_h 44` · `dialog_footer_h 44` · `palette_w 640` · `palette_top 120` · `prefix_menu_w 900` · `palette_input_h 44` · `overlay_help_w 640` · `toast_w 320` · `toast_inset 12` · `scroll_pill_w 176` · `menu_min_w 240` |
+| Controls | `button_h 30` · `button_h_compact 26` · `kbd_h 18` · `kbd_h_small 16` · `chip_h 22` · `text_field_h 36` · `field_status_h 18` · `number_field_w 96` · `segment_h 24` · `switch_w 34` · `switch_h 20` · `checkbox_size 16` |
+| Dialogs and floating layers | `dialog_w 560` · `confirm_compact_w 480` · `dialog_header_h 44` · `dialog_footer_h 44` · `palette_w 640` · `palette_top 120` · `prefix_menu_w 900` · `palette_input_h 44` · `overlay_help_w 640` · `toast_w 320` · `toast_inset 12` · `scroll_pill_w 176` · `menu_min_w 240` · `alert_tile 34` |
 | Lines and marks | `hairline 1` · `focus_ring_w 2` · `scroll_thumb_w 3` · `dot_size 8` · `dot_size_small 6` |
 | Terminal | `cell_w 7.5` · `cell_h 18` · `terminal_tab_min_w 84` · `terminal_tab_max_w 200` · `new_terminal_tab_w 36` |
 | Detail and doctor columns | `fact_label_w 104` · `doctor_check_w 120` · `doctor_status_w 64` |
@@ -1001,7 +1001,10 @@ paragraph wraps like text rather than like a flex row.
 #### `FuzzyList` / `FuzzyItem`
 **Purpose.** A scrolling list of already-ranked results.
 **API.** `FuzzyItem::new(primary).detail(..).secondary(..).trailing(..).leading(..)
-.disabled(bool).key(..).matches(..).destructive(bool)`;
+.disabled(bool).key(..).matches(..).destructive(bool).badge(..).checked(bool)`; `badge` is a
+neutral `Badge` naming what the row is among its siblings (`default`, `previous base`), and
+`checked` ends the row with an accent `✓` — the chosen value of a list that is a choice rather
+than a launcher (the create dialog's base refs);
 `FuzzyList::new(id, items).cursor(usize).cap(usize).visible_rows(usize).track_scroll(&ScrollHandle)
 .on_click(|ix, window, cx| ..).under_text_field(bool).empty(..).row_height(Pixels)
 .harness_rows(part, first)`; `.binds_jk()`, `.shown()`,
@@ -1015,8 +1018,8 @@ to one line — zero-suppression. `detail` is a muted qualifier drawn **on the s
 the primary label: use it when the qualifier is part of the row's identity (§3.8.5's context
 owners), and `secondary` only for a description that earns a second line.
 **Caps.** Unbounded by default. A cap is a product decision where a predictable `Enter` beats
-completeness: 8 (Clone results) · 6 (Create base list) · 10 (palette). To bound the *height* and
-keep every result reachable, use `visible_rows` instead.
+completeness: 8 (Clone results) · 50 (Create base list, 6 visible) · 10 (palette). To bound the
+*height* and keep every result reachable, use `visible_rows` instead.
 **Keyboard.** `ctrl-n`/`ctrl-p` or `↓`/`↑` under a text field; `j`/`k` too when there is none.
 **Usage rule.** Matching, ranking and the 150 ms debounce belong to the caller — they need the
 domain's fields. Where a surface keeps a cap, the footer says `9 of 63`.
@@ -1047,8 +1050,10 @@ the rest of the row, so a long value never pushes the setting's name out. A cycl
 caller lists no options, or whose value is off the configured steps (none of the segments), draws
 the compact dropdown field alone, stating the value.
 **API.** `Cycler::{new(value), labeled(label, value)}().options(iter).on_select(Fn(ix, window,
-app)).id(..).has_prev(bool).has_next(bool).focused(bool).disabled(bool).label_width(Pixels)
-.off_grid(bool)`; `.is_visible()`, `.form() -> CyclerForm::{Segmented(ix), Dropdown(listed)}`.
+app)).unavailable(indices).harness_segments(part).id(..).has_prev(bool).has_next(bool)
+.focused(bool).disabled(bool).label_width(Pixels).off_grid(bool)`; `unavailable` dims those
+options and refuses a click on them (a dropdown leaves them out of its list) while the keys still
+reach them, so the surface states why next to the control; `.is_visible()`, `.form() -> CyclerForm::{Segmented(ix), Dropdown(listed)}`.
 **Keyboard.** `←`/`→` (`h`/`l`), bound by the surface. **Pointer.** Only with `on_select`: a click
 on a segment, or on a dropdown option, calls it with the option's index; point it at the update the
 keys make. Without it the control is drawn only and takes no click.
@@ -1900,11 +1905,12 @@ the `UiStrong` weight, sentence case as given · optional count in `Caption` (`�
 hairline with `text`; the others are clear with `text_secondary` and keep a clear hairline, so
 raising one never shifts its neighbours. `row_hover` on a clickable, unraised segment.
 **API.** `SegmentedControl::new(id, [Segment::new(label).icon(Icon).count(Option<usize>)
-.loading(bool).kbd(Option<Kbd>)]).active(Option<usize>).disabled(bool).full_width()
+.loading(bool).kbd(Option<Kbd>).disabled(bool)]).active(Option<usize>).disabled(bool).full_width()
 .on_select(Fn(ix, window, app)).harness_segments(part)`; `Segment::count_text()`,
 `SegmentedControl::{len, is_empty}`.
 **States.** raised · none raised (`active(None)`) · hover · with icons · with counts and a
-loading count · with a key chip · disabled · full width.
+loading count · with a key chip · one segment unavailable (dimmed, takes no click) · disabled ·
+full width.
 **Usage rule.** No keyboard of its own and not focusable (ADR 0023): the surface binds the keys,
 and `on_select` dispatches the action those keys dispatch. A key chip shows only on a segment a
 click would switch to. Past four options, or labels that no longer fit, use a `Dropdown`.
@@ -1918,6 +1924,29 @@ inside the track. Hover deepens the track (`accent_fill_hover` / `text_secondary
 **States.** on · off · hover · disabled on · disabled off.
 **Usage rule.** Inside a settings list, use `Toggle`, which owns the row, the label and `Space`.
 Not focusable; announced as `Role::Switch` with the setting's name.
+
+#### `Checkbox`
+**Purpose.** A boolean that qualifies the action beside it: "Open after creating" next to Create.
+**Anatomy.** A `checkbox_size` square, `radii.xs`: checked is `accent_fill` with an
+`accent_fill_text` check, unchecked is `control` in a `border_strong` hairline; then the label in
+`Ui`. The whole box-and-label takes the click; hover deepens the square.
+**API.** `Checkbox::new(id, label, checked).disabled(bool).on_toggle(Fn(bool, window, app))`;
+`.is_checked()`.
+**States.** checked · unchecked · hover · disabled.
+**Usage rule.** A boolean *setting* is a `Toggle` row, not a checkbox. Not focusable (ADR 0023):
+the surface keeps its key for the same choice (`⌥⏎` creates without opening whatever the box
+says). Announced as `Role::CheckBox` with its label.
+
+#### `Callout`
+**Purpose.** State what an action *will* do before the user commits: "Prepared copy ready —
+about 2 s".
+**Anatomy.** A `radii.md` box filled with the tone's fill in a tone-coloured hairline at
+`banner_border_opacity`, `md`/`sm` padding: a 16 px icon in the tone, one line of `Ui`, and an
+optional muted detail line under it.
+**API.** `Callout::new(Tone, Icon, text).detail(..)`.
+**States.** success · warning (any `Tone`), with and without detail.
+**Usage rule.** Information, not an alarm: a `Banner` spans a screen and says something is wrong
+now; a `Dialog`'s footer error says the last action failed.
 
 **Gallery.** `examples/gallery_buttons.rs` binds a keymap and wires every button with
 `.action(..)`, so each chip there is resolved live and clicking or pressing the key reports the

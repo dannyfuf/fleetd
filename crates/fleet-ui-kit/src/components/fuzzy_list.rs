@@ -26,7 +26,7 @@ use gpui::{
 use std::rc::Rc;
 
 use crate::{
-    components::{ColumnAlign, Row, RowColumn},
+    components::{Badge, ColumnAlign, Row, RowColumn},
     harness::HarnessTargetExt as _,
     icons::{Icon, IconSize},
     text::{Text, TextRole},
@@ -47,6 +47,8 @@ pub struct FuzzyItem {
     matches: Vec<usize>,
     destructive: bool,
     disabled: bool,
+    badge: Option<SharedString>,
+    checked: bool,
 }
 
 impl FuzzyItem {
@@ -62,7 +64,24 @@ impl FuzzyItem {
             matches: Vec::new(),
             destructive: false,
             disabled: false,
+            badge: None,
+            checked: false,
         }
+    }
+
+    /// A neutral [`super::Badge`] after the label that names what the row *is* among its
+    /// siblings (`default`, `previous base`), where [`FuzzyItem::trailing`] states a value.
+    pub fn badge(mut self, badge: impl Into<SharedString>) -> Self {
+        self.badge = Some(badge.into());
+        self
+    }
+
+    /// End the row with an accent `✓`: the chosen value of a list that is a choice rather than
+    /// a launcher (the create dialog's base ref). The cursor band still shows where the keys
+    /// are; the check says what was chosen.
+    pub fn checked(mut self, checked: bool) -> Self {
+        self.checked = checked;
+        self
     }
 
     /// A muted second line. The row collapses to one line when this is absent (§3.8.2:
@@ -406,6 +425,7 @@ impl RenderOnce for FuzzyList {
                 .fold(Pixels::ZERO, |sum, h| sum + h)
         });
         let danger = theme.colors.danger;
+        let accent = theme.colors.accent;
 
         div()
             .id(self.id)
@@ -460,6 +480,19 @@ impl RenderOnce for FuzzyList {
                             row = row.column(
                                 RowColumn::auto(Text::ui(trailing).faint())
                                     .align(ColumnAlign::Right),
+                            );
+                        }
+                        if let Some(badge) = item.badge {
+                            row = row.column(
+                                RowColumn::auto(Badge::new(badge)).align(ColumnAlign::Right),
+                            );
+                        }
+                        if item.checked {
+                            row = row.column(
+                                RowColumn::auto(
+                                    Icon::Check.el().size(IconSize::Medium).color(accent),
+                                )
+                                .align(ColumnAlign::Right),
                             );
                         }
                         if let Some(key) = item.key {

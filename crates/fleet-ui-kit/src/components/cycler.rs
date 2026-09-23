@@ -44,6 +44,8 @@ pub struct Cycler {
     off_grid: bool,
     label_width: Option<gpui::Pixels>,
     on_select: Option<Rc<CyclerSelect>>,
+    unavailable: Vec<usize>,
+    harness_segments: Option<&'static str>,
 }
 
 /// How a cycler draws, decided from what its caller told it.
@@ -70,6 +72,8 @@ impl Cycler {
             off_grid: false,
             label_width: None,
             on_select: None,
+            unavailable: Vec::new(),
+            harness_segments: None,
         }
     }
 
@@ -101,6 +105,21 @@ impl Cycler {
     /// row's `←` / `→` makes; without it the control is drawn only.
     pub fn on_select(mut self, on_select: impl Fn(usize, &mut Window, &mut App) + 'static) -> Self {
         self.on_select = Some(Rc::new(on_select));
+        self
+    }
+
+    /// The options (indices into [`Cycler::options`]) that exist but cannot be chosen now: they
+    /// draw dimmed and ignore a click. The keys still reach them, so the caller states why each
+    /// one is unavailable next to the control.
+    pub fn unavailable(mut self, indices: impl IntoIterator<Item = usize>) -> Self {
+        self.unavailable = indices.into_iter().collect();
+        self
+    }
+
+    /// Name each option `<part>[<index>]` for the harness target recorder while the cycler
+    /// draws side by side (`dialog.segment`). A dropdown's options are `menu.item[N]` instead.
+    pub fn harness_segments(mut self, part: &'static str) -> Self {
+        self.harness_segments = Some(part);
         self
     }
 
@@ -197,9 +216,17 @@ impl RenderOnce for Cycler {
 
         let control = match form {
             CyclerForm::Segmented(active) => {
-                let control = SegmentedControl::new(id, options.into_iter().map(Segment::new))
+                let unavailable = self.unavailable.clone();
+                let segments = options
+                    .into_iter()
+                    .enumerate()
+                    .map(|(ix, option)| Segment::new(option).disabled(unavailable.contains(&ix)));
+                let mut control = SegmentedControl::new(id, segments)
                     .active(Some(active))
                     .disabled(disabled);
+                if let Some(part) = self.harness_segments {
+                    control = control.harness_segments(part);
+                }
                 match on_select {
                     Some(on_select) => control
                         .on_select(move |ix, window, cx| on_select(ix, window, cx))
@@ -212,9 +239,14 @@ impl RenderOnce for Cycler {
                 match on_select.filter(|_| listed) {
                     Some(on_select) => {
                         let current = self.value.clone();
+                        let unavailable = self.unavailable.clone();
                         dropdown
                             .menu(move |menu, _, _| {
                                 options.iter().enumerate().fold(menu, |menu, (ix, option)| {
+                                    // A dropdown lists only what a click can choose.
+                                    if unavailable.contains(&ix) {
+                                        return menu;
+                                    }
                                     let on_select = on_select.clone();
                                     menu.item(
                                         MenuItem::new(option.clone())
