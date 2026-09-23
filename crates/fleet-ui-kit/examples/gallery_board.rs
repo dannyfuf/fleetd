@@ -70,6 +70,9 @@ const BOARD_H: f32 = 420.0;
 /// The width one static card panel is measured at; a real column is `COLUMN_WIDTH_CH` wide.
 const TILE_W: f32 = 260.0;
 
+/// The column a drop target is shown in: a header, a pill, one tile and the slot.
+const DROP_COLUMN_H: f32 = 300.0;
+
 /// The width a static text-area panel is measured at.
 const AREA_W: f32 = 320.0;
 
@@ -932,6 +935,46 @@ fn card_tile_section(cx: &mut App) -> AnyElement {
             row_of(&t, vec![selected, focused]),
         ),
         LAYOUT.labeled("label tokens", &t, row_of(&t, vec![unknown_token])),
+        LAYOUT.labeled("mid-drag: lifted · left behind", &t, {
+            let lifted = panel(
+                TILE_W,
+                CardTile::new("tile-lifted", "FLT-3", "Seed the board preset")
+                    .priority(PriorityLevel::Medium)
+                    .labels(vec![("board".into(), Some("accent".into()))])
+                    .estimate(Some(3))
+                    .lifted(true),
+            );
+            let left_behind = panel(
+                TILE_W,
+                CardTile::new("tile-left-behind", "FLT-3", "Seed the board preset")
+                    .priority(PriorityLevel::Medium)
+                    .selected(true)
+                    .left_behind(true),
+            );
+            row_of(&t, vec![lifted, left_behind])
+        }),
+        LAYOUT.labeled("drop slot", &t, {
+            let slot = panel(
+                TILE_W,
+                DropSlot::new("Drop to start FLT-3 \u{b7} codex will pick it up"),
+            );
+            let column = stage(
+                &t,
+                px(DROP_COLUMN_H),
+                KanbanColumn::new("drop-column", "In progress")
+                    .count(1)
+                    .accent(Some(t.colors.warning))
+                    .automation("On enter: codex implements")
+                    .drop_target(true)
+                    .tiles(vec![
+                        CardTile::new("drop-column-tile", "FLT-5", "Build real git origins")
+                            .run(RunMark::Working)
+                            .into_any_element(),
+                    ])
+                    .drop_slot(1, "Drop to start FLT-3 \u{b7} codex will pick it up"),
+            );
+            row_of(&t, vec![slot, panel(TILE_W + 40.0, column)])
+        }),
     ];
     LAYOUT.section("card tile", &t, children)
 }

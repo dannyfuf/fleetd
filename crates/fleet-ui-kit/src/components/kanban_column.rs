@@ -12,6 +12,11 @@
 //! as they do for [`super::ListView`]; these two only draw. Every pointer affordance is a slot
 //! the screen fills, so a drop target or a drag handle can be added to a column without the
 //! column knowing what a card is.
+//!
+//! Dragging a tile is the screen's too: it owns the drag, and tells the column two facts —
+//! [`KanbanColumn::drop_target`], that the drag is over it (an accent hairline), and
+//! [`KanbanColumn::drop_slot`], where the tile would land and what landing there does (a
+//! [`super::DropSlot`] drawn in the gap before that tile).
 
 use std::sync::Arc;
 
@@ -20,6 +25,7 @@ use gpui::{
     SharedString, Window, div, prelude::*, px,
 };
 
+use super::DropSlot;
 use crate::{
     focus::FocusRing,
     icons::{Icon, IconSize},
@@ -54,6 +60,8 @@ pub struct KanbanColumn {
     on_automation: Option<ClickHandler>,
     accent: Option<Hsla>,
     focused: bool,
+    drop_target: bool,
+    drop_slot: Option<(usize, SharedString)>,
     width: Option<Pixels>,
     empty_hint: Option<SharedString>,
     add: Option<AnyElement>,
@@ -95,6 +103,8 @@ impl KanbanColumn {
             on_automation: None,
             accent: None,
             focused: false,
+            drop_target: false,
+            drop_slot: None,
             width: None,
             empty_hint: None,
             add: None,
@@ -141,6 +151,20 @@ impl KanbanColumn {
     /// Draw the 2 px focus ring: the keyboard is in this column.
     pub fn focused(mut self, focused: bool) -> Self {
         self.focused = focused;
+        self
+    }
+
+    /// Draw the column as the place a dragged tile is over: an accent hairline around the well.
+    pub fn drop_target(mut self, drop_target: bool) -> Self {
+        self.drop_target = drop_target;
+        self
+    }
+
+    /// Draw a [`DropSlot`] saying `label` before the tile at `index`; `index` equal to the tile
+    /// count puts it after the last tile, above the footer. The empty column's hint gives way
+    /// to it.
+    pub fn drop_slot(mut self, index: usize, label: impl Into<SharedString>) -> Self {
+        self.drop_slot = Some((index, label.into()));
         self
     }
 
@@ -276,7 +300,8 @@ impl RenderOnce for KanbanColumn {
         });
 
         let mut footer = self.footer;
-        let hint = self.empty_hint.map(|hint| {
+        let slot = self.drop_slot;
+        let hint = self.empty_hint.filter(|_| slot.is_none()).map(|hint| {
             div()
                 .px(theme.space.sm)
                 .py(theme.space.xs)
@@ -293,6 +318,8 @@ impl RenderOnce for KanbanColumn {
             // The gap lives on each row, not on the body: a virtualized list lays its items out
             // itself, so a container gap would apply to nothing. The footer is the item after
             // the last tile, so it follows the cards instead of sinking to the column's floor.
+            // The slot rides inside the item it precedes, so the list measures it with that
+            // item and no row is spliced in or out while the pointer moves.
             Some((list, count, mut render_row)) if count > 0 => body.child(
                 gpui::list(list, move |index, window, cx| {
                     let item = if index < count {
@@ -300,18 +327,39 @@ impl RenderOnce for KanbanColumn {
                     } else {
                         footer.take().unwrap_or_else(|| div().into_any_element())
                     };
-                    div().pb(gap).child(item).into_any_element()
+                    let slot = slot
+                        .as_ref()
+                        .filter(|(at, _)| *at == index)
+                        .map(|(_, label)| DropSlot::new(label.clone()));
+                    div()
+                        .flex()
+                        .flex_col()
+                        .w_full()
+                        .gap(gap)
+                        .pb(gap)
+                        .children(slot)
+                        .child(item)
+                        .into_any_element()
                 })
                 .size_full(),
             ),
-            Some(_) => body.gap(gap).children(hint).children(footer),
-            None => body
+            Some(_) => body
                 .gap(gap)
-                .overflow_y_scroll()
-                .when_some(self.scroll, |el, scroll| el.track_scroll(&scroll))
-                .when(empty, |el| el.children(hint))
-                .children(self.tiles)
+                .children(hint)
+                .children(slot.map(|(_, label)| DropSlot::new(label)))
                 .children(footer),
+            None => {
+                let mut tiles = self.tiles;
+                if let Some((at, label)) = slot {
+                    tiles.insert(at.min(tiles.len()), DropSlot::new(label).into_any_element());
+                }
+                body.gap(gap)
+                    .overflow_y_scroll()
+                    .when_some(self.scroll, |el, scroll| el.track_scroll(&scroll))
+                    .when(empty, |el| el.children(hint))
+                    .children(tiles)
+                    .children(footer)
+            }
         };
 
         let content = div()
@@ -337,7 +385,11 @@ impl RenderOnce for KanbanColumn {
             .rounded(theme.radii.dialog)
             .bg(theme.colors.surface)
             .border(theme.metrics.hairline)
-            .border_color(theme.colors.border)
+            .border_color(if self.drop_target {
+                theme.colors.accent
+            } else {
+                theme.colors.border
+            })
             .child(FocusRing::pane(self.focused).content(content))
     }
 }

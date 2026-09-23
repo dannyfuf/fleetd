@@ -763,6 +763,8 @@ pub struct Metrics {
     pub skeleton_opacity: f32,
     /// No-session status glyph opacity.
     pub no_session_opacity: f32,
+    /// A dragged card tile under the pointer: nearly opaque, so the board shows through it.
+    pub drag_preview_opacity: f32,
 }
 
 impl Default for Metrics {
@@ -861,6 +863,7 @@ impl Default for Metrics {
             semantic_fill_opacity: 0.14,
             skeleton_opacity: 0.30,
             no_session_opacity: 0.30,
+            drag_preview_opacity: 0.95,
         }
     }
 }

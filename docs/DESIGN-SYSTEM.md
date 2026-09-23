@@ -302,7 +302,7 @@ The same token set owns the opacity ladder, and *that* list is complete — deri
 with one of these rather than adding a near-duplicate token or a bare float:
 `veil 0.55` · `dimmed 0.40` · `refreshing 0.60` · `stale 0.55` · `terminal_blink 0.70` ·
 `banner_border 0.35` · `error_hover 0.22` · `neutral_fill 0.08` · `semantic_fill 0.14` ·
-`skeleton 0.30` · `no_session 0.30`.
+`skeleton 0.30` · `no_session 0.30` · `drag_preview 0.95`.
 
 The native-agent canvas has its own constants, and they live in `components::agent::metrics`
 rather than in `Metrics`: `AGENT_CONTENT_W 760` · `AGENT_TOOL_KIND_W 60` · `AGENT_CARET_H 17` ·
@@ -1924,7 +1924,8 @@ key line's right end.
 **API.** `CardTile::new(id, key, title).priority(PriorityLevel)
 .labels(Vec<(SharedString, Option<SharedString>)>).assignee(..).estimate(..).due(..)
 .worktree(bool).branch(Option<SharedString>).pr(Option<(u64, PrBadgeState)>).dirty(bool)
-.conflict(bool).selected(bool).focused(bool).extras(..).run(RunMark).run_label(..)
+.conflict(bool).selected(bool).focused(bool).lifted(bool).left_behind(bool).extras(..)
+.run(RunMark).run_label(..)
 .blocked(u32, BlockedTone).blocked_label(..).action(impl IntoElement).menu(impl IntoElement)
 .on_click(..).on_double_click(..).on_secondary_click(..)`; helpers `label_tone(Option<&str>) ->
 Tone` and `initials(&str) -> String` (`ASSIGNEE_INITIALS` = 2); `RunMark::{Pending, Stalled,
@@ -1933,7 +1934,9 @@ gallery.
 **States.** default · hover (a `border_strong` hairline and `theme.lift_shadow()`, and the `⋯`
 appears) · selected (`row_selected`; the `⋯` stays, and the key line makes room for it so it
 never covers the state pill) · focused (2 px cursor bar) · selected +
-focused.
+focused · lifted (the drag preview under the pointer: an `accent` hairline, `popover_shadow()`,
+`drag_preview_opacity`, no hover) · left behind (the place a dragged card left: `dimmed_opacity`
+and a dashed hairline at the tile's own height, so the column does not reflow under the drag).
 **Pointer** (UX-SPEC §5.1). A press selects, a double-click's second press opens, a right click
 calls `on_secondary_click` — the caller selects there and wraps the tile in a `ContextMenu`. The
 `⋯` is that same menu's visible twin, so no card action is right-click-only.
@@ -1955,16 +1958,18 @@ row: the category **dot** (`dot_size_small`) · the status name as written (`UiS
 something, the **automation pill** (`tile_chip_h`, `control` fill, an amber `zap`, `Caption`
 words). Then the gapped body of tiles, virtualized through `gpui::list` when the caller supplies
 a `ListState`, ending in the **footer** slot · a faint `Caption` hint when the column is empty ·
-`Pane`'s 2 px focus ring.
+`Pane`'s 2 px focus ring. While a drag is over it, an `accent` hairline replaces the `border` one
+and a `DropSlot` sits in the gap the tile would take.
 **API.** `KanbanColumn::new(id, title).count(usize).accent(Option<Hsla>).automation(label)
-.on_automation_click(..).focused(bool).width(Pixels).empty_hint(..).add_button(impl IntoElement)
-.footer(impl IntoElement)` then either `.tiles(impl IntoIterator<Item = AnyElement>)
+.on_automation_click(..).focused(bool).drop_target(bool).drop_slot(index, label).width(Pixels)
+.empty_hint(..).add_button(impl IntoElement).footer(impl IntoElement)` then either `.tiles(impl IntoIterator<Item = AnyElement>)
 .scroll_handle(ScrollHandle)` or `.rows(ListState, usize, impl FnMut(usize, &mut Window,
 &mut App) -> AnyElement)`; `KanbanColumn::list_state() -> ListState` builds the state with the
 column's own overdraw, and `list_state_with_footer()` one already holding the footer's item.
 `COLUMN_WIDTH_CH` = 34. `KanbanBoard::new(id).columns(..).scroll_handle(ScrollHandle)`.
 **States.** default · focused (the 2 px pane ring) · empty (the hint, then the footer) · with and
-without the automation pill.
+without the automation pill · drop target (the accent hairline) · with a drop slot (before tile
+`index`, or after the last one when `index` is the count; an empty column's hint gives way to it).
 **Variants.** column (vertical, `COLUMN_WIDTH_CH` wide) · board (the horizontal scroller).
 **Usage rule.** The count renders even at `0` — a column header is a ledger, and a missing
 count reads as "unknown", not as "empty". `automation(..)` takes the words, and which columns
@@ -1978,7 +1983,20 @@ elements builds and measures every one of them every frame. `gpui::list` and not
 `uniform_list`: a `CardTile` is not uniform-height. Neither container binds a key: `h` / `l` /
 `j` / `k` move a cursor the screen owns, exactly as they do for `ListView`. Every pointer
 affordance is a slot, so a drop target or a drag handle can join a column without the kit
-learning what a card is.
+learning what a card is: the screen owns the drag and tells the column only `drop_target` and
+`drop_slot`. In the `rows(..)` form the slot is drawn inside the item it precedes, so the list
+measures it with that item and nothing is spliced while the pointer moves.
+
+#### `DropSlot`
+**Purpose.** Where a dragged tile will land, and what landing there does.
+**Anatomy.** A full-width well at least `row_h_comfortable` tall, `lg` vertical padding,
+`radii.card`, a dashed `accent` hairline on `accent_subtle`, one centred `Caption` in the accent
+tone: `Drop to start FLT-3 · codex will pick it up`.
+**API.** `DropSlot::new(label)`.
+**States.** one; it exists only while a drag hovers the place it marks.
+**Usage rule.** The label is the drop's consequence in words, written by the app; the slot is not
+pressable and is never drawn where the drop would do nothing. Inside a column reach for
+`KanbanColumn::drop_slot`, which places it; use `DropSlot` directly only in another container.
 
 **Gallery.** The board group's bench is `examples/gallery_board.rs` (live cursor, live editor,
 `[` / `]` moving a card, `p` cycling the priority); `kit_gallery`'s `board` section shows the

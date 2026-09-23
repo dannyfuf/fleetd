@@ -182,6 +182,8 @@ pub struct CardTile {
     conflict: bool,
     selected: bool,
     focused: bool,
+    lifted: bool,
+    left_behind: bool,
     extras: Vec<SharedString>,
     run: Option<RunMark>,
     run_label: Option<SharedString>,
@@ -217,6 +219,8 @@ impl CardTile {
             conflict: false,
             selected: false,
             focused: false,
+            lifted: false,
+            left_behind: false,
             extras: Vec::new(),
             run: None,
             run_label: None,
@@ -304,6 +308,20 @@ impl CardTile {
     /// the card then keeps the background and loses the bar.
     pub fn focused(mut self, focused: bool) -> Self {
         self.focused = focused;
+        self
+    }
+
+    /// Draw the tile as the one under the pointer mid-drag: an accent hairline, the popover
+    /// shadow and a little transparency. This is the face a drag preview wears.
+    pub fn lifted(mut self, lifted: bool) -> Self {
+        self.lifted = lifted;
+        self
+    }
+
+    /// Draw the tile as the place a dragged card left: faded, with a dashed hairline and no
+    /// hover. It keeps its height, so the column does not reflow under the drag.
+    pub fn left_behind(mut self, left_behind: bool) -> Self {
+        self.left_behind = left_behind;
         self
     }
 
@@ -417,8 +435,11 @@ impl CardTile {
 impl RenderOnce for CardTile {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
-        let selected = self.selected;
-        let focused = self.focused;
+        // A tile mid-drag — the preview or the place it left — is not the cursor: the cursor
+        // is the card itself, which is neither of the two while it is in the air.
+        let moving = self.lifted || self.left_behind;
+        let selected = self.selected && !moving;
+        let focused = self.focused && !moving;
         let has_meta = self.has_meta();
         let key_mark = self.key_mark();
         let makes_room = selected && self.menu.is_some();
@@ -466,6 +487,7 @@ impl RenderOnce for CardTile {
         });
         let hover_border = theme.colors.border_strong;
         let lift = theme.lift_shadow();
+        let (lifted, left_behind) = (self.lifted, self.left_behind);
 
         let unnamed_worktree = self.worktree && self.branch.is_none();
         let meta = has_meta.then(|| {
@@ -623,14 +645,25 @@ impl RenderOnce for CardTile {
             .flex_none()
             .rounded(theme.radii.card)
             .border(theme.metrics.hairline)
-            .border_color(theme.colors.border)
+            .border_color(if lifted {
+                theme.colors.accent
+            } else {
+                theme.colors.border
+            })
             .bg(if selected {
                 theme.colors.row_selected
             } else {
                 theme.colors.surface_raised
             })
+            .when(lifted, |el| {
+                el.shadow(theme.popover_shadow())
+                    .opacity(theme.metrics.drag_preview_opacity)
+            })
+            .when(left_behind, |el| {
+                el.border_dashed().opacity(theme.metrics.dimmed_opacity)
+            })
             // Hover lifts the tile: pointer feedback only, and never over a selection (§3.3).
-            .when(!selected, |el| {
+            .when(!selected && !moving, |el| {
                 el.hover(move |style| style.border_color(hover_border).shadow(lift.clone()))
             })
             .when(pressable, |el| el.cursor_pointer())
