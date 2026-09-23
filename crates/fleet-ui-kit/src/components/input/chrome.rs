@@ -96,8 +96,10 @@ impl TextInput {
                             .w_full()
                             .overflow_hidden()
                             .child(match self.invalid.clone() {
-                                Some(message) => Text::hint(message).tone(Tone::Danger).ellipsize(),
-                                None => Text::hint(self.preview.clone().unwrap_or_default())
+                                Some(message) => {
+                                    Text::caption(message).tone(Tone::Danger).ellipsize()
+                                }
+                                None => Text::caption(self.preview.clone().unwrap_or_default())
                                     .faint()
                                     .ellipsize(),
                             }),

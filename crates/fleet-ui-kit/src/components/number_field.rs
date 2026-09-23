@@ -203,7 +203,7 @@ impl RenderOnce for NumberField {
                     // The unit is a label, not a value: it never competes with the number.
                     .children(self.unit.map(|unit| Text::data(unit).faint())),
             )
-            .children(message.map(|message| Text::hint(message).tone(Tone::Danger).ellipsize()));
+            .children(message.map(|message| Text::caption(message).tone(Tone::Danger).ellipsize()));
 
         super::control::cursor_row(theme, focused, false, body)
     }

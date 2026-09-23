@@ -913,7 +913,8 @@ It owns the buffer, selection, undo history, clipboard bridge, focus, input hand
 cache and scrolling.
 **Anatomy.** optional label · 36 px single-line box or `min_rows`–`max_rows` multi-line box ·
 optional leading icon · placeholder/value · selection · caret · marked-text underline. A
-single-line input reserves an 18 px status slot containing either preview or validation; a
+single-line input reserves an 18 px status slot containing either preview or validation, in the
+`Caption` role (the UI face: a hint is prose, not code); a
 multi-line input has no status slot. Multi-line values and placeholders soft-wrap at the box
 width, and `min_rows` / `max_rows` count visual rows. Single-line mode never wraps and scrolls
 horizontally instead. Both use the border ladder danger → focus → rest.
