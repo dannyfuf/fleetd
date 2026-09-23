@@ -201,6 +201,14 @@ fn states_section(pinned: bool, cx: &mut Context<ButtonsGallery>) -> AnyElement 
                 .tooltip("Fetch every remote now"),
         ),
         LAYOUT.labeled(
+            "with a status dot",
+            &t,
+            Button::new("status-dot", "In progress")
+                .dot(t.colors.warning)
+                .size(ButtonSize::Compact)
+                .tooltip("A value with a colour of its own: a card's status"),
+        ),
+        LAYOUT.labeled(
             "full width",
             &t,
             div().w(px(360.0)).child(

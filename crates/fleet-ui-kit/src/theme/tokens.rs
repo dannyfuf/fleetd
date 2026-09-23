@@ -688,6 +688,8 @@ pub struct Metrics {
     pub detail_w: Pixels,
     /// 736 px right-side sheet showing a full detail (a board card).
     pub sheet_w_detail: Pixels,
+    /// 268 px property column inside the `sheet_w_detail` card sheet.
+    pub sheet_detail_props_w: Pixels,
     /// 440 px docked sheet.
     pub sheet_w: Pixels,
     /// 640 px docked sheet with a log expanded.
@@ -816,6 +818,7 @@ impl Default for Metrics {
             sidebar_w: px(232.0),
             detail_w: px(344.0),
             sheet_w_detail: px(736.0),
+            sheet_detail_props_w: px(268.0),
             sheet_w: px(440.0),
             sheet_expanded_w: px(640.0),
             toast_w: px(320.0),

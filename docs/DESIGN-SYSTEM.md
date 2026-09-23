@@ -280,7 +280,7 @@ list below is the complete inventory, in px unless marked `ch`; a unit test in
 | Group | Tokens |
 | --- | --- |
 | Window chrome | `title_bar_h 44` · `status_bar_h 28` · `traffic_light_inset 84` · `command_field_w 340` · `filter_field_w 220` · `monogram_size 18` · `mode_word_w 84` · `banner_h 28` · `frame_banner_h 40` · `strip_h 22` |
-| Layout columns | `sidebar_w 232` · `rail_w 240` · `detail_w 344` · `detail_overlay_w 320` · `sheet_w 440` · `sheet_expanded_w 640` · `sheet_w_detail 736` · `first_run_w 560` |
+| Layout columns | `sidebar_w 232` · `rail_w 240` · `detail_w 344` · `detail_overlay_w 320` · `sheet_w 440` · `sheet_expanded_w 640` · `sheet_w_detail 736` · `sheet_detail_props_w 268` · `first_run_w 560` |
 | Rows and headers | `row_h 30` · `row_h_comfortable 44` · `pane_header_h 30` · `section_header_h 20` · `palette_row_h 34` · `palette_tile 22` · `job_row_h 44` · `progress_bar_h 4` |
 | Controls | `button_h 30` · `button_h_compact 26` · `kbd_h 18` · `kbd_h_small 16` · `chip_h 22` · `tile_chip_h 18` · `avatar_size 20` · `text_field_h 36` · `field_status_h 18` · `number_field_w 96` · `segment_h 24` · `switch_w 34` · `switch_h 20` · `checkbox_size 16` · `step_badge 28` |
 | Dialogs and floating layers | `dialog_w 560` · `confirm_compact_w 480` · `dialog_header_h 44` · `dialog_footer_h 44` · `palette_w 640` · `palette_top 120` · `prefix_menu_w 900` · `palette_input_h 44` · `overlay_help_w 640` · `toast_w 320` · `toast_inset 12` · `scroll_pill_w 176` · `menu_min_w 240` · `alert_tile 34` |
@@ -676,10 +676,12 @@ filter mode opens, and owns the keys — as with `FilterBar`, which stays the in
 dense pane header. `button_h` tall.
 
 #### `Sheet`
-**Purpose.** A docked panel (the Jobs panel; the board card detail).
+**Purpose.** A docked panel (the Jobs panel; the board card detail, which docks between the
+title and status bars at `sheet_w_detail` with the scrim on).
 **API.** `Sheet::new(open: bool).expanded(bool).width(Pixels).side(SheetSide).scrim(bool)
-.dismiss_action(Box<dyn Action>).on_dismiss(handler).header(..).body(..).footer(..)`;
-`.resolved_width(&Theme)`.
+.dismiss_action(Box<dyn Action>).on_dismiss(handler).close_target(name).header(..).body(..)
+.footer(..)`; `.resolved_width(&Theme)`. `close_target` records the ✕ under a second harness
+name beside `sheet.close` (`card_detail.close`).
 **Variants.** 440 px · 640 px expanded for an inline log · `sheet_w_detail` 736 px for a full
 detail · `SheetSide::Right` (default) or `Left` · dismissable (close ✕ at the top right of the
 header, painted `sheet.close`; a click in the band outside the panel closes) · `scrim(true)`
@@ -717,7 +719,8 @@ runs in that dialog; the pointer dispatches it to the focused element as the key
 **Harness.** The ✕ paints `dialog.close`; footer buttons paint `dialog.button[N]`, `0` leftmost.
 An alert has no ✕, so it paints no `dialog.close`.
 **Widths.** 460 context/assign · 480 compact confirm · 520 quit · 560 create/clone/expanded
-confirm · 720 settings/prune · 880 card detail · 1040 help (clamped to the window).
+confirm · 720 settings/prune · 1040 help (clamped to the window). The card detail is a
+`Sheet` at `sheet_w_detail`, not a dialog.
 **States.** default · error (red footer line, dialog stays open).
 **Keyboard.** `Esc` closes. Buttons are not focusable (ADR 0023): each shows the key that is
 its keyboard path.
@@ -1855,6 +1858,15 @@ pickers).
 information), so the ladder still reads in grayscale. `None` is dashed and hollow because
 "nobody decided" is not the same as `Low`.
 
+#### `Avatar`
+**Purpose.** A person as a round badge of their initials: a card's assignee, a comment's author.
+**Anatomy.** An `avatar_size` disc in `radii.pill` on the tone's fill, the `initials` (at most
+`ASSIGNEE_INITIALS`) in `Caption` and the tone's colour.
+**API.** `Avatar::new(name: &str).tone(Tone)`; `Tone::Accent` by default.
+**Usage rule.** The same name draws the same mark everywhere: the tile's assignee and the card
+detail's comment authors both go through it. A run's report wears `Tone::Secondary`, so an agent
+never reads as a person.
+
 #### `CardTile`
 **Purpose.** One card on the board — the list row of the kanban world.
 **Anatomy.** A `surface_raised` card, `radii.card`, `border` hairline. Three lines:
@@ -1997,9 +2009,10 @@ longer uses it); `fleet_app::presentation::pretty_keys` re-exports it.
 `button_h_compact`) tall, `radii.control`, a hairline. Label in `UiStrong`; icon 14 px (12
 compact); the chip `kbd_h` (`kbd_h_small` compact) and toned for the fill.
 **API.** `Button::new(id, label)` then `.style(ButtonStyle::{Primary, Secondary, Ghost, Danger, GhostDanger})
-.size(ButtonSize::{Default, Compact}) .icon(Icon) .kbd(Kbd) .action(Box<dyn Action>) .prefer_key(keys)
+.size(ButtonSize::{Default, Compact}) .icon(Icon) .dot(Hsla) .kbd(Kbd) .action(Box<dyn Action>) .prefer_key(keys)
 .on_click(Fn(&ClickEvent, &mut Window, &mut App)) .disabled(bool) .selected(bool) .full_width()
-.tooltip(text)`.
+.tooltip(text)`. `.dot(color)` leads the label with a `dot_size_small` dot of a token colour —
+a value that has a colour of its own, such as the card detail's status button.
 **Styles.** `Primary`: `accent_fill` / `accent_fill_hover` / `accent_fill_active`, label and chip
 in `accent_fill_text` — a surface's one primary action. `Secondary` (default): `control` /
 `control_hover` / `control_active` in a `control_border` hairline. `Ghost`: no fill until

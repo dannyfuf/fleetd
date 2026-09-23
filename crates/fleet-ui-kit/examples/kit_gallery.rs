@@ -558,6 +558,11 @@ fn geometry_section(cx: &mut App) -> AnyElement {
             m.sheet_w_detail,
             m.row_h,
         ),
+        bar(
+            format!("sheet_detail_props_w {}", f32::from(m.sheet_detail_props_w)),
+            m.sheet_detail_props_w,
+            m.row_h,
+        ),
     ];
     let motion = Text::data(format!(
         "tooltip_delay {} ms · prefix_hint_delay {} ms",
@@ -2270,6 +2275,17 @@ fn board_section(cx: &mut App, areas: &[Entity<TextInput>]) -> AnyElement {
             .collect(),
     );
 
+    let avatars = strip(
+        &t,
+        vec![
+            Avatar::new("Danny Fuentes").into_any_element(),
+            Avatar::new("ana.perez").into_any_element(),
+            Avatar::new("codex")
+                .tone(Tone::Secondary)
+                .into_any_element(),
+        ],
+    );
+
     let markdown = div()
         .w_full()
         .p(t.space.md)
@@ -2294,6 +2310,7 @@ fn board_section(cx: &mut App, areas: &[Entity<TextInput>]) -> AnyElement {
         LAYOUT.labeled("kanban board", &t, box_of(&t, px(360.0), board)),
         LAYOUT.labeled("card tiles", &t, tiles),
         LAYOUT.labeled("priority glyphs", &t, priorities),
+        LAYOUT.labeled("avatars", &t, avatars),
         LAYOUT.labeled("markdown", &t, markdown),
         LAYOUT.labeled("multi-line text inputs", &t, text_areas),
     ];

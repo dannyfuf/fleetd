@@ -295,6 +295,7 @@ pub struct Button {
     base: ButtonBase,
     label: SharedString,
     icon: Option<Icon>,
+    dot: Option<Hsla>,
     full_width: bool,
     tooltip: Option<SharedString>,
 }
@@ -306,6 +307,7 @@ impl Button {
             base: ButtonBase::new(id.into(), ButtonStyle::Secondary),
             label: label.into(),
             icon: None,
+            dot: None,
             full_width: false,
             tooltip: None,
         }
@@ -316,6 +318,13 @@ impl Button {
     /// Lead the label with a glyph.
     pub fn icon(mut self, icon: Icon) -> Self {
         self.icon = Some(icon);
+        self
+    }
+
+    /// Lead the label with a small dot of `color`: a value that has a colour of its own, such
+    /// as a board card's status. Pass a theme token, never a literal.
+    pub fn dot(mut self, color: Hsla) -> Self {
+        self.dot = Some(color);
         self
     }
 
@@ -346,6 +355,13 @@ impl RenderOnce for Button {
         let icon = self
             .icon
             .map(|icon| icon.el().size(icon_size).color(paint.fg));
+        let dot = self.dot.map(|color| {
+            div()
+                .flex_none()
+                .size(theme.metrics.dot_size_small)
+                .rounded(theme.radii.full)
+                .bg(color)
+        });
         let label = Text::ui_strong(self.label.clone()).color(paint.fg);
         let tooltip = self.tooltip.map(Tooltip::new);
         let full_width = self.full_width;
@@ -360,6 +376,7 @@ impl RenderOnce for Button {
                 }
             })
             .children(icon)
+            .children(dot)
             .child(label)
             .children(chip)
             .when_some(tooltip, |el, tooltip| el.with_tooltip(tooltip, cx))

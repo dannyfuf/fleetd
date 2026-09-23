@@ -8,6 +8,7 @@
 mod age_label;
 pub mod agent;
 mod app_frame;
+mod avatar;
 mod badge;
 mod banner;
 mod button;
@@ -96,6 +97,7 @@ pub use copy_field::CopyField;
 pub use age_label::{AgeLabel, format_age};
 pub use agent::*;
 pub use app_frame::AppFrame;
+pub use avatar::Avatar;
 pub use badge::{Badge, BadgeStyle};
 pub use banner::Banner;
 pub use button::{

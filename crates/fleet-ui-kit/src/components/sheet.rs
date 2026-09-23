@@ -43,6 +43,7 @@ pub struct Sheet {
     side: SheetSide,
     scrim: bool,
     dismiss: Option<Dismiss>,
+    close_target: Option<&'static str>,
 }
 
 impl Sheet {
@@ -58,6 +59,7 @@ impl Sheet {
             side: SheetSide::Right,
             scrim: false,
             dismiss: None,
+            close_target: None,
         }
     }
 
@@ -73,6 +75,13 @@ impl Sheet {
     /// usually *about* the rows behind it, which must stay readable.
     pub fn scrim(mut self, scrim: bool) -> Self {
         self.scrim = scrim;
+        self
+    }
+
+    /// Also record the close ✕ under `name`, beside the `sheet.close` every sheet paints: for a
+    /// sheet whose scenarios name its own close (`card_detail.close`).
+    pub fn close_target(mut self, name: &'static str) -> Self {
+        self.close_target = Some(name);
         self
     }
 
@@ -127,11 +136,13 @@ impl RenderOnce for Sheet {
         let width = self.resolved_width(theme);
         let side = self.side;
         let on_outside = self.dismiss.as_ref().map(Dismiss::callback);
+        let close_target = self.close_target;
         let close = self.dismiss.as_ref().map(|dismiss| {
             div().flex_none().p(theme.space.sm).child(
                 dismiss
                     .close_button("sheet-close")
-                    .harness_target("sheet.close"),
+                    .harness_target("sheet.close")
+                    .harness_target_named(close_target),
             )
         });
         let header = match (self.header, close) {

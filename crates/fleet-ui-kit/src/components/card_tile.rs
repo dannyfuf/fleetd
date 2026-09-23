@@ -469,17 +469,9 @@ impl RenderOnce for CardTile {
 
         let unnamed_worktree = self.worktree && self.branch.is_none();
         let meta = has_meta.then(|| {
-            let avatar = self.assignee.map(|assignee| {
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .justify_center()
-                    .size(theme.metrics.avatar_size)
-                    .rounded(theme.radii.pill)
-                    .bg(Tone::Accent.fill(theme))
-                    .child(Text::caption(initials(&assignee)).tone(Tone::Accent))
-            });
+            let avatar = self
+                .assignee
+                .map(|assignee| super::avatar::Avatar::new(&assignee));
             let branch = self.branch.map(|branch| {
                 div()
                     .flex()
