@@ -83,6 +83,11 @@ pub(crate) struct DialogHost {
     pub(super) rename_input: Option<Entity<TextInput>>,
     pub(super) rename_input_subscription: Option<Subscription>,
     pub palette: palette::PaletteState,
+    /// Help's draft, for as long as Help is open.
+    pub help: Option<help::HelpState>,
+    /// Help's search field.
+    pub(super) help_input: Option<Entity<TextInput>>,
+    pub(super) help_input_subscription: Option<Subscription>,
     /// What the next Confirm dialog asks about, published by whoever opens it.
     pub pending_confirm: Option<ConfirmRequest>,
     /// Repository the next hook editor should load.
@@ -457,6 +462,9 @@ fn focused_input_entity(state: &Entity<AppState>, cx: &mut App) -> Option<Entity
             Dialogs::EditHooks => host.hook_inputs.get(host.edit_hooks.field),
             Dialogs::RenameTerminal => host.rename_input.as_ref(),
             Dialogs::Settings => host.settings_input.as_ref(),
+            // Typing goes to Help's search: its keys are `↑`/`↓`/`⏎`/`esc`/`?`, none printable
+            // but the last, which closes Help as it always has.
+            Dialogs::Help => host.help_input.as_ref(),
             _ => None,
         }?;
         Some(input.clone())
@@ -508,6 +516,7 @@ pub(crate) fn dialog_fields(state: &Entity<AppState>, cx: &mut App) -> Vec<Field
         // typed value — a model or an effort no catalogue offered — can be read back.
         Dialogs::CardPicker => named(&[("query", host.card_picker_input.as_ref())]),
         Dialogs::CloneRepo => named(&[("search", host.clone_query.as_ref())]),
+        Dialogs::Help => named(&[("search", host.help_input.as_ref())]),
         // The one row-scoped editor Board settings mounts, named after the row it belongs to.
         // It is the only place a value typed into that dialog can be read back — every other
         // row is a cycler the projection already carries — and it follows the `section` field
@@ -664,6 +673,9 @@ fn close_with(state: &Entity<AppState>, preserve_card_detail: bool, cx: &mut App
         host.edit_hooks = Default::default();
         host.rename_terminal = Default::default();
         host.palette = Default::default();
+        host.help = None;
+        host.help_input = None;
+        host.help_input_subscription = None;
         host.card_create_title = None;
         host.card_create_description = None;
         host.card_create_input_subscriptions.clear();

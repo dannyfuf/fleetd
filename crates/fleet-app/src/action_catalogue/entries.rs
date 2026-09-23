@@ -75,6 +75,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Open the command palette",
         "Search for any command, worktree or session by name and run it.",
     )
+    .featured(80)
     .short("Command palette"),
     e(
         &["fleet::OpenSettings"],
@@ -83,6 +84,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Open settings",
         "Change Fleet's preferences and see how fleetd is doing.",
     )
+    .featured(85)
     .short("Settings")
     .palette(),
     e(
@@ -108,7 +110,8 @@ pub(super) const ENTRIES: &[Entry] = &[
         G::App,
         "Import from swarm",
         "Bring in the repositories and worktrees swarm knows about, as a background job.",
-    ),
+    )
+    .featured(91),
     e(
         &["hub::MoveDown"],
         P::Hub,
@@ -194,7 +197,8 @@ pub(super) const ENTRIES: &[Entry] = &[
         G::Navigation,
         "Switch between worktrees and pull requests",
         "Flip the main list between your worktrees and your pull requests.",
-    ),
+    )
+    .featured(75),
     e(
         &["board::GoBoard"],
         P::Hub,
@@ -202,6 +206,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Go to the board",
         "Show this context's board of cards.",
     )
+    .featured(70)
     .short("Go to board")
     .palette(),
     e(
@@ -224,7 +229,8 @@ pub(super) const ENTRIES: &[Entry] = &[
         G::Navigation,
         "Filter the list",
         "Type to narrow the list you are in.",
-    ),
+    )
+    .featured(40),
     e(
         &["fleet::Cancel"],
         P::Hub,
@@ -238,14 +244,16 @@ pub(super) const ENTRIES: &[Entry] = &[
         G::Navigation,
         "Open in the browser",
         "Open the selected pull request or repository on its website.",
-    ),
+    )
+    .featured(65),
     e(
         &["hub::ToggleDetail"],
         P::Hub,
         G::Panels,
         "Show or hide details",
         "Toggle the panel that describes the selected row.",
-    ),
+    )
+    .featured(50),
     e(
         &["hub::ToggleRepoRail"],
         P::Hub,
@@ -260,6 +268,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Open the Claude agent window",
         "Show the floating Claude terminal. Press again to hide it; it keeps running in fleetd.",
     )
+    .featured(30)
     .short("Claude window")
     .palette(),
     e(
@@ -269,6 +278,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Open the Codex agent window",
         "Show the floating Codex terminal. Press again to hide it; it keeps running in fleetd.",
     )
+    .featured(62)
     .short("Codex window")
     .palette(),
     e(
@@ -310,6 +320,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "New context",
         "Create a context: a named group of repositories with its own board.",
     )
+    .featured(90)
     .palette(),
     e(
         &["hub::EditContext"],
@@ -334,7 +345,8 @@ pub(super) const ENTRIES: &[Entry] = &[
         G::Repository,
         "Open the repository",
         "Show this repository's worktrees.",
-    ),
+    )
+    .featured(10),
     e(
         &["repos::Clone"],
         P::Hub,
@@ -342,6 +354,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Clone a repository",
         "Search GitHub and clone a repository into this context, as a background job.",
     )
+    .featured(20)
     .palette(),
     e(
         &["repos::MoveToContext"],
@@ -357,7 +370,8 @@ pub(super) const ENTRIES: &[Entry] = &[
         G::Repository,
         "Edit setup commands",
         "Change the commands that run when one of its worktrees is prepared or created.",
-    ),
+    )
+    .featured(60),
     e(
         &["repos::DismissClone"],
         P::Hub,
@@ -409,6 +423,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Open the selected worktree",
         "Go to its terminals and agents. The worktree you were in goes to sleep.",
     )
+    .featured(10)
     .short("Open"),
     e(
         &["worktrees::OpenKeepAwake"],
@@ -424,6 +439,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "New worktree",
         "Create a separate checkout of a branch, with its own terminals and agents.",
     )
+    .featured(20)
     .palette(),
     e(
         &["worktrees::Delete"],
@@ -432,6 +448,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Delete the worktree safely",
         "Remove it after showing what would be lost. Asks first, and you can undo it.",
     )
+    .featured(60)
     .short("Delete it safely")
     .destructive()
     .palette(),
@@ -502,6 +519,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Open the pull request's worktree",
         "Check out its branch in a worktree, creating it if needed. The one you were in sleeps.",
     )
+    .featured(10)
     .short("Open"),
     e(
         &["prs::OpenKeepAwake"],
@@ -523,7 +541,8 @@ pub(super) const ENTRIES: &[Entry] = &[
         G::PullRequests,
         "Next list",
         "Switch between your pull requests and the ones waiting for your review.",
-    ),
+    )
+    .featured(20),
     e(
         &["prs::PrevTab"],
         P::PullRequests,
@@ -559,7 +578,8 @@ pub(super) const ENTRIES: &[Entry] = &[
         G::PullRequests,
         "Back to worktrees",
         "Leave the pull requests for the list of worktrees.",
-    ),
+    )
+    .featured(58),
     // ── Board ─────────────────────────────────────────────────────────────────────────────
     e(
         &["board::OpenCard"],
@@ -568,6 +588,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Open the card",
         "Show the card's details, comments and agent runs.",
     )
+    .featured(10)
     .short("Open")
     .palette(),
     e(
@@ -577,6 +598,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "New card",
         "Add a card to the board.",
     )
+    .featured(20)
     .palette(),
     e(
         &["board::CreateWorktree"],
@@ -585,6 +607,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Start a worktree for the card",
         "Create a worktree whose branch is named after the card.",
     )
+    .featured(25)
     .short("New worktree")
     .palette(),
     e(
@@ -594,6 +617,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Open the card's worktree",
         "Go to the worktree this card is being worked on in.",
     )
+    .featured(27)
     .palette(),
     e(
         &["board::NextCard"],
@@ -634,6 +658,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Move the card right",
         "Move the selected card to the next column.",
     )
+    .featured(35)
     .palette(),
     e(
         &["board::MovePrevColumn"],
@@ -747,6 +772,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Filter the cards",
         "Type to show only the cards that match.",
     )
+    .featured(40)
     .palette(),
     e(
         &["board::Sync"],
@@ -925,7 +951,8 @@ pub(super) const ENTRIES: &[Entry] = &[
         G::Tabs,
         "New terminal",
         "Open a new shell tab in this worktree.",
-    ),
+    )
+    .featured(30),
     e(
         &["prefix::CloseTerminal"],
         P::Terminal,
@@ -971,6 +998,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Back to the hub",
         "Leave this worktree for the hub. Everything here keeps running.",
     )
+    .featured(10)
     .short("Back to hub"),
     e(
         &["prefix::SleepAndGoHub"],
@@ -1011,6 +1039,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Scroll back through the output",
         "Freeze the terminal to scroll, select and copy its history.",
     )
+    .featured(40)
     .short("Scroll back"),
     e(
         &["prefix::Paste"],
@@ -1019,6 +1048,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Paste into the terminal",
         "Paste the clipboard as if you had typed it.",
     )
+    .featured(60)
     .short("Paste"),
     e(
         &["prefix::ToggleZoom"],
@@ -1027,6 +1057,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Zoom the pane",
         "Hide the header and tabs so the terminal gets the whole window. Press again to undo.",
     )
+    .featured(55)
     .short("Zoom pane"),
     e(
         &["prefix::RestartCommand"],
@@ -1035,6 +1066,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Restart the command",
         "Run this tab's command again after it has exited.",
     )
+    .featured(57)
     .short("Restart command"),
     e(
         &["prefix::SendLiteral"],
@@ -1103,6 +1135,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "New Claude thread in a tab",
         "Start a Claude agent working in this worktree, in its own tab.",
     )
+    .featured(20)
     .short("New Claude thread"),
     e(
         &["native_agent::NewCodex"],
@@ -1143,6 +1176,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Open the worktree's board",
         "Show this worktree's board in a tab, creating it the first time.",
     )
+    .featured(50)
     .short("Board")
     .palette(),
     e(
@@ -1182,6 +1216,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Send the message",
         "Send what you typed to the agent.",
     )
+    .featured(5)
     .short("Send"),
     e(
         &["native_agent::Steer"],
@@ -1190,6 +1225,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Steer the agent",
         "Send a message while the agent works; it reads it straight away.",
     )
+    .featured(5)
     .short("Steer"),
     e(
         &["native_agent::SendBackground"],
@@ -1205,6 +1241,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Stop the agent",
         "Interrupt what the agent is doing now. The thread stays open.",
     )
+    .featured(6)
     .short("Stop"),
     e(
         &["native_agent::PlanMode"],
@@ -1212,7 +1249,8 @@ pub(super) const ENTRIES: &[Entry] = &[
         G::Agents,
         "Switch between build and plan",
         "In plan mode the agent proposes a plan before it changes anything.",
-    ),
+    )
+    .featured(15),
     e(
         &["native_agent::Model"],
         P::AgentThread,
@@ -1220,6 +1258,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Switch the agent's model",
         "Pick the model this thread uses.",
     )
+    .featured(25)
     .short("Model…"),
     e(
         &["native_agent::Traits"],
@@ -1266,6 +1305,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Allow the agent's request once",
         "Let the agent run this one command or make this one change.",
     )
+    .featured(1)
     .short("Allow once"),
     e(
         &["native_agent::AllowSession"],
@@ -1274,6 +1314,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Allow it for the rest of the session",
         "Stop asking about requests like this one for now.",
     )
+    .featured(2)
     // Never "always" (NATIVE-AGENTS §6.2): the grant lasts for this session, and says so.
     .short("Allow for this session"),
     e(
@@ -1283,6 +1324,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Deny the request",
         "Refuse it; the agent carries on without it.",
     )
+    .featured(3)
     .short("Deny"),
     e(
         &["native_agent::EditCommand"],
@@ -1298,7 +1340,8 @@ pub(super) const ENTRIES: &[Entry] = &[
         G::Decisions,
         "Deny and stop the agent",
         "Refuse the request and interrupt what the agent is doing.",
-    ),
+    )
+    .featured(4),
     e(
         &[
             "native_agent::Choose1",
@@ -1326,7 +1369,8 @@ pub(super) const ENTRIES: &[Entry] = &[
         G::Decisions,
         "Send the answer",
         "Answer the question, or go on to the next one.",
-    ),
+    )
+    .featured(2),
     e(
         &["native_agent::Previous"],
         P::AgentThread,
@@ -1341,6 +1385,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Go ahead with the plan",
         "Let the agent carry out the plan it proposed.",
     )
+    .featured(1)
     .short("Implement"),
     e(
         &["native_agent::Refine"],
@@ -1349,6 +1394,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Ask for changes to the plan",
         "Write what should change; the agent revises the plan.",
     )
+    .featured(2)
     .short("Refine"),
     e(
         &["native_agent::Scroll"],
@@ -1420,28 +1466,32 @@ pub(super) const ENTRIES: &[Entry] = &[
         G::Scroll,
         "Stop scrolling",
         "Go back to the live conversation and follow it again.",
-    ),
+    )
+    .featured(4),
     e(
         &["native_agent::ExpandRow"],
         P::AgentThread,
         G::Agents,
         "Expand or collapse the row",
         "Show or hide the focused row's details; on a sub-agent row, open its thread.",
-    ),
+    )
+    .featured(1),
     e(
         &["native_agent::DiffRow"],
         P::AgentThread,
         G::Agents,
         "Show the changes",
         "Open the diff of the focused edit or turn.",
-    ),
+    )
+    .featured(2),
     e(
         &["native_agent::OpenInEditor"],
         P::AgentThread,
         G::Agents,
         "Open the file in your editor",
         "Open the file the focused row is about.",
-    ),
+    )
+    .featured(3),
     e(
         &["native_agent::CopyRow"],
         P::AgentThread,
@@ -1505,6 +1555,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Hide the agent window",
         "Put the floating agent away. It keeps running in fleetd.",
     )
+    .featured(10)
     .short("Hide"),
     e(
         &["agent::EnterPrefix"],
@@ -1557,7 +1608,8 @@ pub(super) const ENTRIES: &[Entry] = &[
         G::Scroll,
         "Scroll up half a page",
         "Move the view half a screen towards the oldest output.",
-    ),
+    )
+    .featured(30),
     e(
         &["scroll::PageDown"],
         P::Scroll,
@@ -1578,21 +1630,24 @@ pub(super) const ENTRIES: &[Entry] = &[
         G::Scroll,
         "Go to the oldest output",
         "Jump to the start of the history.",
-    ),
+    )
+    .featured(40),
     e(
         &["scroll::Bottom"],
         P::Scroll,
         G::Scroll,
         "Go to the newest output",
         "Jump to the live bottom, still scrolling.",
-    ),
+    )
+    .featured(45),
     e(
         &["scroll::StartSelection"],
         P::Scroll,
         G::Scroll,
         "Start selecting",
         "Mark where a selection begins; move to extend it.",
-    ),
+    )
+    .featured(20),
     e(
         &["scroll::Yank"],
         P::Scroll,
@@ -1600,6 +1655,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Copy the selection",
         "Put the selected text on the clipboard.",
     )
+    .featured(25)
     .short("Copy"),
     e(
         &["scroll::Escape"],
@@ -1614,7 +1670,8 @@ pub(super) const ENTRIES: &[Entry] = &[
         G::Scroll,
         "Stop scrolling",
         "Go back to the live terminal at the bottom.",
-    ),
+    )
+    .featured(10),
     e(
         &["scroll::Search"],
         P::Scroll,
@@ -1978,6 +2035,14 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Close help",
         "Go back to where you were.",
     ),
+    e(
+        &["help::SwitchTab"],
+        P::Dialog,
+        G::Dialog,
+        "Switch between guides and shortcuts",
+        "Show the other half of Help: the task guides, or every shortcut.",
+    )
+    .short("Switch tab"),
     e(
         &["quit_dialog::Accept"],
         P::Dialog,

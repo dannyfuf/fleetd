@@ -327,65 +327,18 @@ const AGENT_CONTROL_ROWS: &[SharedRow] = &[
     ("ctrl-s F", || Box::new(native_agent::TerminalFallback)),
 ];
 
-/// The context × row products the table registers after its literal rows, in that order.
-///
-/// The first field is the sub-head the help overlay lists the product under: a reader sees each
-/// of these once, under the family it belongs to, instead of thirty-odd identical rows repeated
-/// beneath every sub-mode.
-const SHARED_TABLES: &[(&str, &[&str], &[SharedRow])] = &[
-    (
-        "any mode: select",
-        AGENT_THREAD_CONTEXTS,
-        AGENT_SELECTION_ROWS,
-    ),
-    (
-        "any mode: session",
-        AGENT_THREAD_CONTEXTS,
-        AGENT_SESSION_ROWS,
-    ),
-    (
-        "with a composer",
-        AGENT_CONTROL_CONTEXTS,
-        AGENT_CONTROL_ROWS,
-    ),
+/// The context × row products the table registers after its literal rows, in that order: every
+/// row of a family is registered under each context of that family.
+const SHARED_TABLES: &[(&[&str], &[SharedRow])] = &[
+    (AGENT_THREAD_CONTEXTS, AGENT_SELECTION_ROWS),
+    (AGENT_THREAD_CONTEXTS, AGENT_SESSION_ROWS),
+    (AGENT_CONTROL_CONTEXTS, AGENT_CONTROL_ROWS),
 ];
-
-/// One product of [`SHARED_TABLES`], as a reader should see it: the rows once, and where they
-/// apply.
-#[derive(Debug, Clone)]
-pub struct SharedTable {
-    /// The sub-head this product is listed under.
-    pub label: &'static str,
-    /// Every key context the rows are registered against.
-    pub contexts: &'static [&'static str],
-    /// One representative spec per row, as registered against the first of those contexts.
-    pub rows: Vec<BindingSpec>,
-}
-
-/// The shared products, so the help overlay can list each one once.
-#[must_use]
-pub fn shared_tables() -> Vec<SharedTable> {
-    SHARED_TABLES
-        .iter()
-        .map(|(label, contexts, table)| SharedTable {
-            label,
-            contexts,
-            rows: table
-                .iter()
-                .map(|(keys, action)| BindingSpec {
-                    keys,
-                    context: contexts[0],
-                    action: action().name(),
-                })
-                .collect(),
-        })
-        .collect()
-}
 
 /// Every `(spec, action)` pair [`SHARED_TABLES`] stands for, built once per consumer.
 fn shared_rows() -> Vec<(BindingSpec, Box<dyn Action>)> {
     let mut rows = Vec::new();
-    for (_, contexts, table) in SHARED_TABLES {
+    for (contexts, table) in SHARED_TABLES {
         for context in *contexts {
             for (keys, action) in *table {
                 let action = action();
@@ -424,7 +377,7 @@ pub fn is_prefix_key(keystroke: &Keystroke) -> bool {
 /// gpui reads `A > B` as "B somewhere below A", not "B's parent is A", so the words are matched
 /// as a subsequence and the answer is the chain index the last word landed on — which is the
 /// depth `cx.bind_keys` ranks competing rows by.
-fn context_depth(context: &str, chain: &[&str]) -> Option<usize> {
+pub(crate) fn context_depth(context: &str, chain: &[&str]) -> Option<usize> {
     let mut index = 0;
     let mut depth = 0;
     // The live chain carries identifiers but not attributes. Attribute predicates can never be
@@ -998,6 +951,8 @@ key_table! {
 
     "escape",       "Dialog > Help" => help::Close;
     "?",            "Dialog > Help" => help::Close;
+    "ctrl-tab",     "Dialog > Help" => help::SwitchTab;
+    "ctrl-shift-tab", "Dialog > Help" => help::SwitchTab;
 
     "y",            "Dialog > Quit" => quit_dialog::Accept;
     "n",            "Dialog > Quit" => quit_dialog::Reject;

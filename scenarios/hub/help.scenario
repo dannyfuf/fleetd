@@ -1,8 +1,12 @@
-# KEYMAP.md §Dialogs and text inputs — Help (`?`): "`Esc` / `?` close"
+# KEYMAP.md §Dialogs and text inputs — Help (`?`): "`Esc` / `?` close", `ctrl-tab` switches the
+# tab, `↑`/`↓` move, `⏎` runs; UX-SPEC §3.8.7 — Help is a guide, and every row runs.
 #
 # Help is the discoverability promise of a modal app, and it is the one dialog with two ways
 # out. Both are checked, because `?` closing is the half a refactor drops: `?` is still bound
 # under `Hub`, and a Help overlay that does not bind it for itself simply re-opens.
+#
+# Then the guide itself, by pointer only: a new user opens Help, picks "Start work on a task"
+# and clicks its first step's button, which closes Help and runs `g b` on the Hub behind it.
 fixture: one-repo
 await idle 30000
 assert screen == Hub && overlay absent
@@ -11,6 +15,14 @@ key ?
 await overlay == Dialog 10000
 assert mode == Dialog && dialog.name == Help
 assert key_contexts[0] == Dialog && key_contexts[1] == Help
+# It opens on the Guides tab: a search field, the six things the Worktrees list is for, and
+# the guides, with the first one shown.
+await targets["help.search"] exists 10000
+assert targets["help.tab[0]"] exists && targets["help.tab[1]"] exists
+assert targets["help.here[0]"] exists && targets["help.here[5]"] exists
+assert targets["help.guide[0]"] exists && targets["help.guide[6]"] exists
+assert targets["help.step[0].action[0]"] exists
+assert dialog.fields[0].name == search && dialog.fields[0].focused == true
 shot help
 dump help
 
@@ -27,4 +39,59 @@ key escape
 await overlay absent
 assert screen == Hub && mode == Normal && dialog absent
 dump closed
+
+# A guide by pointer: the list shows it, and its steps each carry a button with its key.
+key ?
+await overlay == Dialog 10000
+await targets["help.guide[4]"] exists 10000
+click help.guide[4]
+await targets["help.step[5].action[0]"] exists 5000
+shot help-automate-guide
+
+# `↓` and `↑` walk the list the field sits over; typing goes to the field.
+key down
+key up
+type agent
+await dialog.fields[0].value == agent 5000
+await targets["help.shortcut[0]"] exists 5000
+shot help-search-guides
+
+# All shortcuts, by the tab switch: the table searches the same query, grouped by where it works.
+click help.tab[1]
+await targets["help.place[0]"] exists 5000
+await targets["help.shortcut[0]"] exists 5000
+assert dialog.fields[0].value == agent
+shot help-shortcuts-agent
+
+# `ctrl-tab` goes back, keeping the query.
+key ctrl-tab
+await targets["help.guide[1]"] exists 5000
+key escape
+await overlay absent
+assert screen == Hub && mode == Normal
+
+# The footer's Run doctor closes Help and raises the doctor report, which replaces the Hub's
+# body until `Esc` dismisses it. The report has no snapshot field of its own, so the worktree
+# row it covers is the observable.
+key ?
+await overlay == Dialog 10000
+await targets["dialog.button[0]"] exists 10000
+click dialog.button[0]
+await overlay absent 10000
+await targets["worktrees.row[0]"] absent 30000
+shot help-ran-doctor
+key escape
+await targets["worktrees.row[0]"] exists 10000
+
+# A new user completes the first step of "Start work on a task" by clicking only.
+key ?
+await overlay == Dialog 10000
+await targets["help.guide[0]"] exists 10000
+click help.guide[0]
+await targets["help.step[0].action[0]"] exists 5000
+click help.step[0].action[0]
+await overlay absent 10000
+await hub_tab == Board 10000
+assert screen == Hub && dialog absent
+shot help-ran-go-to-board
 quit

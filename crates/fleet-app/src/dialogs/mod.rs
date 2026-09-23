@@ -49,15 +49,23 @@ const NARROW_W: Pixels = px(460.0);
 const PROMPT_W: Pixels = px(520.0);
 /// §3.8 card width for the settings rail plus pane.
 const WIDE_W: Pixels = px(720.0);
-/// §3.8 card width for the three-column keymap.
-const HELP_W: Pixels = px(880.0);
+/// §3.8 card width for the card detail.
+const CARD_DETAIL_W: Pixels = px(880.0);
+/// §3.8.7 Help: a large panel, `1040 × 720`, clamped to the window on a narrow one.
+const HELP_W: Pixels = px(1040.0);
+/// §3.8.7 Help's Guides sidebar: "Here in …" and the guide list.
+pub(crate) const HELP_GUIDES_W: Pixels = px(300.0);
+/// §3.8.7 Help's All shortcuts table: the Where column.
+pub(crate) const HELP_WHERE_COL_W: Pixels = px(150.0);
+/// §3.8.7 Help's All shortcuts table: the Keys column, wide enough for `Ctrl+S 1 – 9`.
+pub(crate) const HELP_KEYS_COL_W: Pixels = px(150.0);
 
 /// §3.8.2 card height for the clone-repo list: `560 × 420`.
 const CLONE_H: Pixels = px(420.0);
 /// §3.8.6 card height for the settings rail plus pane: `720 × 560`.
 const SETTINGS_H: Pixels = px(560.0);
-/// §3.8.7 card height for the three-column keymap: `880 × 620`.
-const HELP_H: Pixels = px(620.0);
+/// §3.8.7 card height for Help: `1040 × 720`.
+const HELP_H: Pixels = px(720.0);
 
 /// Which dialog is open (§3.8).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,7 +148,8 @@ impl Dialogs {
                 NARROW_W
             }
             Self::Settings => WIDE_W,
-            Self::CardDetail | Self::Help => HELP_W,
+            Self::CardDetail => CARD_DETAIL_W,
+            Self::Help => HELP_W,
             Self::Quit => PROMPT_W,
         }
     }
@@ -214,7 +223,7 @@ impl Dialogs {
             Self::EditHooks => edit_hooks::render(state, bridge, focus, host, window, cx),
             Self::Settings => settings::render(state, bridge, focus, host, window, cx),
             Self::RenameTerminal => rename_terminal::render(state, bridge, focus, host, window, cx),
-            Self::Help => help::render(state, focus, window, cx),
+            Self::Help => help::render(state, focus, host, window, cx),
             Self::Quit => quit::render_quit(state, focus, window, cx),
             Self::QuitDaemon => quit::render_quit_daemon(state, focus, window, cx),
         }
@@ -241,7 +250,7 @@ pub(crate) fn seed(dialog: &Dialogs, state: &Entity<AppState>, bridge: &Bridge, 
         Dialogs::EditHooks => edit_hooks::seed(state, cx),
         Dialogs::Settings => settings::seed(state, bridge, cx),
         Dialogs::RenameTerminal => rename_terminal::seed(state, cx),
-        Dialogs::Help => help::prepare(),
+        Dialogs::Help => help::seed(state, cx),
         Dialogs::Quit | Dialogs::QuitDaemon => {}
     }
 }

@@ -1099,7 +1099,7 @@ dialog is rebuilt; until then its footer is the hint row and label described her
 | New / Edit context | 460 × 260 | `boxes` |
 | Assign repo to context | 460 × 340 | `arrow-right-left` |
 | Settings | 720 × 560 | `settings-2` |
-| Help | 880 × 620 | `circle-question` |
+| Help | 1040 × 720, the whole window less the scrim margin when narrower | — (the search field takes the title's place) |
 | Quit (`ctrl-q`) | 520 × auto | `circle-question` |
 | Quit + stop daemon | 560 × auto | `power` |
 
@@ -1457,29 +1457,76 @@ that editor owns the keyboard every printable key types, `Enter` saves, and `↓
 
 #### 3.8.7 Help (`?`)
 
-880 × 620, **three columns × ~14 rows**, grouped by *mode* because the app is modal:
-`Hub` · `Worktrees & PRs` · `Terminal (^s)` · `Scroll` · `Agent popup (^s)` ·
-`Agent thread (^s)` · `Board` · `Dialogs & filter`. Keys in a 68 px mono `fg` column, action in
-`fg.muted`. The action is its hand-written label from the action catalogue (`KEYMAP.md` § *Action
-catalogue*), never a spelling of its type name; a numbered range is one row whose keys read `1–9`,
-and a sub-head names the surface it covers ("Pull requests", "After ^s") rather than its context
-word. Context-sensitive: opening `?` from a Workspace terminal, the Agent popup or a native
-agent tab renders that surface's group **first and in accent** and dims the others to 55 %.
+**Purpose:** *What can I do here, and how do I get this task done?* Help is a guide, not a key
+dump, and everything in it does what it describes when clicked.
 
-A group whose sub-modes share a table lists it **once**, under a sub-head naming the family
-(`any mode: session`) rather than repeating it beneath each sub-mode: the six native agent-thread
-contexts share thirty-odd `^s` rows, and printing the product per context is a wall rather than a
-reference.
+1040 × 720; on a window too small for that it takes the whole window less the scrim's margin.
+The header is a focused **search field** ("What do you want to do?  Try “agent”, “delete”,
+“copy”") in place of the title, then the **Guides | All shortcuts** switch and the close ✕.
+The footer reads `Fleet <version> · fleetd up 3h · protocol 8` and ends in a **Run doctor**
+button, which closes Help and raises the doctor report.
 
-The dialog opens with one block above the columns, which is the single most valuable paragraph in
-the app:
+**Guides tab.**
 
-> **What keeps running.** Jobs and sessions live in fleetd. Closing a dialog, leaving a screen or
-> quitting Fleet (`ctrl-q`) never stops them. Only `c` in the Jobs panel, `K`, and `ctrl-shift-q`
-> stop things. Terminals survive a **daemon** restart and reattach on their own.
+* Left, **Here in <surface>**: the six most useful actions of the surface Help was opened over
+  (the Worktrees list, the board, a terminal, an agent thread…), each with its key. They come
+  from the action catalogue's `rank` and from the key table resolved against that surface's
+  context chain, deeper bindings shadowing shallower ones, so a key the surface does not reach
+  is never offered. Under it, **Guides**: the seven task guides.
+* Right, the selected guide: a title, a sentence of context, then one card per step — a number,
+  what to do, what happens — with a button per action the step needs, each showing its key.
+* The guides, in `dialogs/help/guides.rs`: *Start work on a task* (card → worktree → open →
+  agent → back to the hub), *Work with an agent* (start a thread, `@` files, `$` skills, `/`
+  commands, requests, plan mode, steering, stopping, reviewing changes), *Review a pull request*,
+  *Plan on the board*, *Automate a board column* (board settings → Columns → on enter →
+  provider, instructions, expect → on success; worktree boards only), *Terminals: copy, paste,
+  scroll* and *What keeps running*. Every sentence describes what the code does; a guide that
+  drifts from it is a bug in the guide.
+* *Start work*, *Work with an agent*, *Review a pull request* and *Terminals* end with the one
+  callout that confuses everyone: **inside a terminal, Fleet's keys start with `ctrl-s`**;
+  everything else goes to the program, and `ctrl-s` twice sends it to the program.
 
-Footer: `Fleet <version> · protocol 4 · fleetd up 3h`.
-**Omitted:** prose explanations, links, a search field (the palette *is* the searchable surface).
+**What keeps running** is the old paragraph, rewritten as a guide: closing Fleet never stops
+your work — terminals, agents and jobs run in fleetd and terminals even survive a fleetd restart
+— and three things do stop it: cancelling a job in the Jobs panel, ending a session (`K`, asks
+first), and quitting with fleetd (`ctrl-shift-q`, lists what dies and asks first). Sleep is
+named as the gentler fourth: it closes idle terminals and keeps agents, servers and unsaved
+editors, and opening another worktree sleeps the one left unless it is opened keeping it awake.
+
+**Terminal clipboard**, as the *Terminals* guide states it: drag selects, double-click selects a
+word, triple-click a line, and the text is copied **when the button is released**; the copy key
+copies a selection and, with none, goes to the program; the paste key pastes, bracketed when the
+program asks. `ctrl-c` and `ctrl-v` stay the program's.
+
+**All shortcuts tab.**
+
+* Left, **Where**: *All places*, then every catalogue place (Everywhere, Hub, Worktrees, … ,
+  Editing text, fleetd), each with how many shortcuts the search matches there, and **you are
+  here** on the surface Help was opened over. *All places* leaves out *Editing text*: the forty
+  text-field editing keys are there when asked for and do not bury the rest. Under the list, a
+  **Reading the keys** legend: `ctrl-s` then `a`, `g` then `b`, and a capital letter as Shift.
+* Right, a table of **Action** (the catalogue label), **Where** (its place) and **Keys** (its key
+  in that place, the prefix spelled out; a numbered range reads `1`–`9`). The row under the
+  cursor, or the pointer, shows **Run ⏎** when its key works where Help was opened, and a click
+  on such a row runs it. A range never runs from Help.
+* Under the table, **Related guide** when the search matches a guide; clicking it opens the
+  guide.
+
+**Search.** Words match an action's label, its description, its place and its keys, the label
+first. On the Guides tab the search lists matching guides first, then matching actions; the
+right side shows the selected guide, or the selected action with its description, place, keys
+and **Run** when it works here. The cursor starts on the best matching action that works here,
+so `?`, a word and `⏎` does the thing: `ctrl-s ?`, "zoom", `⏎` zooms the terminal.
+
+**Running.** A row or a step button closes Help and runs its action on the surface Help was
+opened over — the same action its key dispatches, landing where the key would
+(`APP-CONTRACTS.md`, the pending action). A step whose action does not work there keeps its
+button, disabled, with its key and a tooltip saying where it works; a step may offer
+alternatives (the board's `w` or the card's `w`) and runs the first one that works.
+
+**Keys.** `?` opens (`ctrl-s ?` inside a terminal or an agent tab); `Esc` or `?` closes; typing
+goes to the search field; `↓` / `↑` (and `ctrl-n` / `ctrl-p`) move in the list; `⏎` runs the
+row, or opens a guide found by search; `ctrl-tab` / `ctrl-shift-tab` or a click switch the tab.
 
 ---
 
@@ -1951,7 +1998,7 @@ each component's full API. `Modal` is an alias of `Dialog` and `TabBar` an alias
 | `Toggle` | A labelled row ending in a `Switch`, `Space` | Settings |
 | `SegmentedControl` | Two to four options side by side, the chosen one raised; a click runs the surface's own action | Hub screens, agent popup provider, Settings choices |
 | `NumberField` | Integer with a unit suffix and a clamp | Settings (grace, TTLs, intervals, pool) |
-| `SegmentedTabs` | Underlined tabs with counts, `Tab`/`S-Tab`/`h`/`l` | PR Mine/Review, Help columns |
+| `SegmentedTabs` | Underlined tabs with counts, `Tab`/`S-Tab`/`h`/`l` | PR Mine/Review, Help's Guides / All shortcuts switch |
 | `ConfirmDialog` | Compact/expanded switch driven by `FactList`; binds only `y`/`Y`/`Enter`/`n`/`Esc`/`q` (+ `I`, + `s` for prune) | §3.8.3, §3.8.8, §3.8.9 |
 | `Palette` | Default sectioned `GO`/`DO`/`CONTEXT` result list with right-aligned key hints, cap 10; seeded agent mode is one `AGENTS` section whose rows carry attention, provider/title, worktree, child/caller status, and optional strip index | §3.9 |
 | `Select` | A closed choice rendered as a row with its current value, for a set too long for `Cycler` | Settings, Create dialog |

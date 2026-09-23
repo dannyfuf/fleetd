@@ -35,6 +35,9 @@ there (`action_catalogue/entries.rs`):
   Panels, Navigation, Worktree, Card, …).
 - **destructive** and **palette** — whether it always goes through a confirm, and whether the
   command palette offers it.
+- **rank** — for the few entries that answer "what is this surface for", where they rank in
+  Help's *Here in …* list, lower first. Help shows the six lowest ranks whose keys reach the
+  surface it was opened over, so one number serves every surface an entry works on.
 
 A numbered range (`SelectTab1`–`9`, `SelectContext1`–`9`, `Choose1`–`5`) is one entry whose keys
 are shown as `1`–`9`. Help, the palette, the `^s` menu, buttons and tooltips read their words from
@@ -600,7 +603,7 @@ exception: its query is a filter that never contains a space, so it always publi
 | Repository hooks (`e`) | one editor per command row, `Tab` / `S-Tab` between them; a filled trailing row grows the next blank one · `Enter` saves |
 | Assign repo to context (`m`) | this dialog has **no** text field, so `j` / `k` move the selection as well as `↓` / `↑` and `ctrl-n` / `ctrl-p` |
 | Settings (`,`) | browsing is `Dialog > Settings`: `Space` toggles · `h` / `l` or `←` / `→` cycle a choice · `j` / `k` move · `E` opens `config.json` · `D` runs doctor · `Enter` on a text or number row opens it for editing, and saves on every other row. That row's editor publishes `Dialog > SettingsEditing`, where every printable key types and `Enter` saves; `ctrl-n` / `ctrl-p` or `↓` / `↑` move to the next row and close it, and `Esc` discards in either word. |
-| Help (`?`) | `Esc` / `?` close |
+| Help (`?`) | `Esc` / `?` close · typing goes to its search field · `↓` / `↑` or `ctrl-n` / `ctrl-p` move in its list · `Enter` runs the row (or opens a guide a search found) on the surface Help was opened over · `ctrl-tab` / `ctrl-shift-tab` switch Guides ⇄ All shortcuts |
 | Quit (`ctrl-q`) | `y` quit · `n` / `Esc` cancel · `J` open the jobs panel · `W` never warn again (writes `jobs.warnBeforeQuit=false`) and quit [A23] |
 | Quit and stop daemon (`ctrl-shift-q`) | `Y` stop and quit · `n` / `Esc` cancel |
 
@@ -706,8 +709,8 @@ and "cancel job" in the Jobs panel. `b` is "open in browser" in the Hub and on t
 "this worktree's board tab" after `ctrl-s`.
 `f` cycles the Jobs filter in the list and toggles follow
 inside an expanded log. `y` copies a path, a URL or a log path depending on the pane. All are
-mode- or pane-disjoint; the Help dialog groups by mode precisely so they can be read side by
-side.
+mode- or pane-disjoint; Help's All shortcuts table files every key under the place it works, so
+they are read side by side with their place.
 
 ## Board and card detail (BOARD §8)
 

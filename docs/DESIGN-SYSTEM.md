@@ -1753,9 +1753,12 @@ key is the character typed (`g`). An uppercase key in the keymap is `shift` (`Y`
 menu's header, and nowhere else). Not focusable, not disabled on its own (it dims with its
 button).
 **Usage rule.** `fleet-app` resolves a chip with `for_action` / `for_action_in` and never types a
-key; `parse` is for galleries and tests. `pretty_keys` (the old `^s` / `S-⇥` text spelling)
-lives beside it only until the Help overlay, the palette and the prefix toast are rebuilt;
-`fleet_app::presentation::pretty_keys` re-exports it.
+key. A chip for a key bound somewhere other than the focused context — Help describing the
+surface under it, the agent popup's prefix keys — is built from that row of `keymap::table()`
+(`Kbd::parse` on its keys, `Kbd::new` on its strokes), which is still the live keymap; a
+literal key string is for galleries and tests only. `pretty_keys` (the old `^s` / `S-⇥` text
+spelling) lives beside it only until the palette and the prefix toast are rebuilt (Help no
+longer uses it); `fleet_app::presentation::pretty_keys` re-exports it.
 
 #### `Button`
 **Purpose.** A verb the pointer can press, showing the key that does the same thing.

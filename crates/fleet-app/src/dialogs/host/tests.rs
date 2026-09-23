@@ -160,3 +160,50 @@ fn agents_picker_opens_with_the_agents_seed_and_leaves_prefix(cx: &mut TestAppCo
         assert_ne!(state.terminal_mode, crate::state::TerminalMode::Prefix);
     });
 }
+
+/// Help describes the surface under it, its field owns the keyboard, typing searches, a row
+/// runs by closing Help and leaving the action for the surface behind, and closing drops the
+/// draft with its editor.
+#[gpui::test]
+fn help_searches_from_its_field_and_runs_a_row_on_the_surface_behind(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        cx.set_global(fleet_ui_kit::Theme::dark());
+        crate::keymap::init(cx);
+    });
+    let state = cx.new(|_| {
+        let mut state = AppState::new("/tmp/help-dialog", Instant::now());
+        state.open_overlay(Overlay::Dialog(Dialogs::Help));
+        state
+    });
+    cx.update(|cx| {
+        with_host(&state, cx, |host| host.open = Some(Dialogs::Help));
+        super::super::help::seed(&state, cx);
+        assert!(
+            focused_input(&state, cx).is_some(),
+            "typing goes to the search field"
+        );
+        let here = with_host(&state, cx, |host| {
+            host.help.as_ref().map(|help| help.here.heading.to_string())
+        });
+        assert_eq!(here.as_deref(), Some("Here in Worktrees"));
+        let input = with_host(&state, cx, |host| host.help_input.clone()).expect("a field");
+        input.update(cx, |input, cx| input.set_text("new worktree", cx));
+    });
+    cx.run_until_parked();
+    cx.update(|cx| {
+        let action = with_host(&state, cx, |host| {
+            let help = host.help.as_ref()?;
+            help.runnable(help.selected()?)
+        });
+        assert_eq!(action, Some("worktrees::Create"));
+        super::super::help::run(&state, "worktrees::Create", cx);
+        assert!(
+            state.read(cx).overlay.is_none(),
+            "running closes Help first"
+        );
+        assert_eq!(state.read(cx).pending_action, Some("worktrees::Create"));
+        close(&state, cx);
+        assert!(with_host(&state, cx, |host| host.help.is_none()
+            && host.help_input.is_none()));
+    });
+}

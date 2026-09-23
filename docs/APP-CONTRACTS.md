@@ -942,6 +942,7 @@ shell's focus reconciliation hands the keyboard to whichever editor the draft sa
 | `edit_hooks` + `hook_inputs` | `edit_hooks::EditHooksState` + `Vec<Entity<TextInput>>` | one editor per command row, prepare commands first and post-create after them, split by `prepare_len`. Each list always ends in a blank row; typing into that row appends the next one and renumbers the labels below it |
 | `rename_terminal` + `rename_input` | `rename_terminal::RenameState` + `Option<Entity<TextInput>>` | the terminal name; the draft keeps only the target terminal, the refusal and the in-flight flag |
 | `settings` + `settings_input` | `settings::SettingsState` + `Option<Entity<TextInput>>` | the row `Enter` opened; `SettingsState.editing` is its `String` mirror and the `SettingsEditing` predicate, `Changed` commits through `commit_value`, and a number row filters to ASCII digits |
+| `help` + `help_input` | `Option<help::HelpState>` + `Option<Entity<TextInput>>` | Help's search, for Help's whole lifetime; `Changed` re-runs the search in the update path, and the draft also holds what runs where Help was opened (`Here`, from `AppState::base_context_chain`), the tab, the Where filter and the cursor |
 
 `DialogHost.palette + palette_input` is the §3.9 query: `PaletteState.query` is a `String`
 mirrored from a live single-line `TextInput` created when the palette opens and dropped with the

@@ -215,6 +215,10 @@ pub struct ActionInfo {
     pub destructive: bool,
     /// The command palette offers it as a command row.
     pub palette: bool,
+    /// Where it ranks among the most useful things to do in the places its keys work: Help's
+    /// "Here in …" lists the six lowest ranks reachable from where it was opened. `None` for
+    /// an entry that is only ever found by search or in the full table.
+    pub rank: Option<u8>,
 }
 
 /// One catalogue entry: the action names it covers and what to call them.
@@ -246,6 +250,7 @@ impl Entry {
                 group,
                 destructive: false,
                 palette: false,
+                rank: None,
             },
         }
     }
@@ -265,6 +270,12 @@ impl Entry {
     /// Offers the entry as a palette command.
     const fn palette(mut self) -> Self {
         self.info.palette = true;
+        self
+    }
+
+    /// Features the entry in Help's "Here in …" list at `rank`, lower first.
+    const fn featured(mut self, rank: u8) -> Self {
+        self.info.rank = Some(rank);
         self
     }
 

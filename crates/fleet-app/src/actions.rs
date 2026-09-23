@@ -718,6 +718,8 @@ pub mod help {
         [
             /// `?` / `Esc` — close the help overlay.
             Close,
+            /// `ctrl-tab` / `ctrl-shift-tab` — switch between Guides and All shortcuts.
+            SwitchTab,
         ]
     );
 }

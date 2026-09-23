@@ -387,6 +387,13 @@ impl AppState {
                 _ => overlay.context_chain(),
             };
         }
+        self.base_context_chain()
+    }
+
+    /// The chain of the surface under any overlay: what [`Self::context_chain`] would be with
+    /// nothing open on top. Help reads it to say what can be done where it was opened from.
+    #[must_use]
+    pub fn base_context_chain(&self) -> Vec<&'static str> {
         // §3.12 B replaces the whole window, so its keys outrank every base surface's.
         if matches!(self.daemon, DaemonLink::Failed { .. }) {
             return vec!["Daemon", "Down"];

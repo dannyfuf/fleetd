@@ -297,6 +297,7 @@ The names Fleet paints today, by surface:
 | Board | `board.column[C]`, `board.column[C].card[R]`, `board.filter` |
 | Filter and palette | `filter.input`, `palette.input`, `palette.row[N]` (one flat numbering across the Go / Do / Context sections) |
 | Dialogs | `dialog.field[N]`, `dialog.row[N]`, `dialog.close`, `dialog.button[N]` |
+| Help | `help.search` (also `dialog.field[0]`), `help.tab[N]` (0 Guides, 1 All shortcuts), `help.here[N]` (the *Here in …* rows), `help.guide[N]` (by the guide's position in the full list, searched or not), `help.step[N].action[M]` (the shown guide's step `N`, button `M`, both from 0), `help.shortcut[N]` (the table's rows, or the actions a Guides-tab search lists), `help.place[N]` (0 All places, then the catalogue places in order), `help.run`, `help.related` |
 | Sheets | `sheet.close` |
 | Jobs panel | `jobs.row[N].retry`, `jobs.row[N].cancel`, `jobs.row[N].log`, `jobs.filter[N]`, `jobs.clear`, `jobs.more`, `jobs.log.back`, `jobs.log.follow`, `jobs.log.end` |
 | Tabs | `tabs.tab[N]` for a process tab, `agents.tabs.tab[N]` for a conversation, sharing one numbering |
@@ -313,7 +314,7 @@ comment and checks what it did. `prefix_menu.close` is the header's Close button
 
 `dialog.field[N]` counts the dialog's **tab cycle**: create-worktree `0` branch / `1` base /
 `2` host (absent on a single-host daemon); new and edit context `0` name / `1` owners;
-rename-terminal `0`; clone-repo `0` search; edit-hooks `0..` prepare commands then post-create;
+rename-terminal `0`; clone-repo `0` search; help `0` search; edit-hooks `0..` prepare commands then post-create;
 new-card `0` title / `1` description; card-property `0` query. `dialog.row[N]` is a dialog's
 result list — the assign-repo contexts, the clone-repo matches, the create-worktree base refs.
 
