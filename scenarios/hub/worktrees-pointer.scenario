@@ -1,0 +1,63 @@
+# UX-SPEC §3.3 / §5.1 — the Worktrees page answers the pointer: a click selects a row, a
+# double-click opens it, a right-click and the row's `⋯` open the same row menu, and every item
+# runs the action its key runs.
+#
+# The page itself — H1, subtitle, toolbar, column heads, comfortable rows and the detail panel,
+# which is open by default at the harness's 1440 px — is the `worktrees-page` shot's job.
+fixture: busy
+await idle 30000
+assert screen == Hub && hub_pane == List && focused == worktrees.row[0]
+assert targets["worktrees.new"] exists && targets["worktrees.filter"] exists
+assert targets["detail.open"] exists
+shot worktrees-page
+
+# A click selects: the cursor moves, and the row's hover actions are drawn for it.
+click worktrees.row[2]
+await focused == worktrees.row[2]
+assert lists.worktrees.selected.label == hotfix && hub_pane == List
+await targets["worktrees.row[2].menu"] exists
+assert targets["worktrees.row[2].open"] exists
+
+# The ⋯ menu lists the row's verbs: Open, Open keep awake, Sleep, Inspect, Copy path, Copy
+# branch, Kill session, Delete. Delete (item 7) asks first; Cancel leaves the row alone.
+click worktrees.row[2].menu
+await targets["menu.item[7]"] exists
+shot row-menu
+click menu.item[7]
+await dialog.name == Confirm 10000
+click dialog.button[0]
+await dialog absent 10000
+assert screen == Hub && lists.worktrees.selected.label == hotfix
+
+# A right-click selects the row under the pointer and opens the same menu there; Esc closes it.
+click right worktrees.row[1]
+await targets["menu.item[0]"] exists
+assert lists.worktrees.selected.label == broken
+shot context-menu
+key escape
+await targets["menu.item[0]"] absent
+
+# The failed-hooks row's `View log` opens Jobs.
+click worktrees.row[1].log
+await overlay == Jobs 10000
+key escape
+await overlay absent 10000
+
+# A click on the filter field opens the same filter mode `/` does; its box becomes the editor.
+click worktrees.filter
+await focused == filter.input
+type ho
+await lists.worktrees.rows[1] absent
+assert lists.worktrees.rows[0].label == hotfix
+shot filter-editing
+key escape
+key escape
+await lists.worktrees.rows[3] exists
+
+# A double-click opens the worktree, exactly like ⏎.
+click left 2 worktrees.row[0]
+await screen == Workspace 20000
+shot workspace
+key ctrl-s s
+await screen == Hub
+quit

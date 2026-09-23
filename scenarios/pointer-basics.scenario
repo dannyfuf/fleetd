@@ -1,9 +1,9 @@
 # Phase 3 acceptance — every pointer path Fleet actually paints, end to end.
 #
-# Fleet's Hub rows carry no click handler (`views/worktrees_list.rs`, `views/repos_rail.rs`,
-# `views/prs_screen.rs` and `screens/jobs/presentation.rs` register none), so a row is *named*
-# for the pointer but only *opened* from the keyboard. The title bar's section nav is the Hub
-# control with an `on_select`, so that is what the click half of this scenario drives.
+# The title bar's section nav is the Hub control with an `on_select`, so that is what the click
+# half of this scenario drives. Worktree rows answer the pointer too — click, double-click,
+# right-click, their hover buttons and ⋯ menu — and `hub/worktrees-pointer.scenario` drives them;
+# the rail and PR rows are named for the pointer but still opened from the keyboard.
 fixture: one-repo
 await idle
 assert screen == Hub && hub_tab == Worktrees
@@ -28,7 +28,7 @@ scroll 0 -2 at worktrees.row[0]
 await idle
 dump after-pointer
 
-# Open the session from the keyboard, because the row has no pointer affordance, ...
+# Open the session from the keyboard — the double-click is `hub/worktrees-pointer`'s — ...
 key o
 await screen == Workspace 20000
 shot workspace
