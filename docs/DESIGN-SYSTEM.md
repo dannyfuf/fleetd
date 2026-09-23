@@ -77,7 +77,7 @@ other ground. `row_hover` and `control_hover` exist only for the pointer and nev
 | --- | --- | --- | --- |
 | `bg` | `#111317` | `#FBFBFC` | app ground: the content area |
 | `chrome` | `#0E0F12` | `#F3F4F6` | window chrome: title / context bar, sidebar, status bar |
-| `surface` | `#16181D` | `#FFFFFF` | rails, panes, scroll pill, prefix hint |
+| `surface` | `#16181D` | `#FFFFFF` | rails, panes, scroll pill |
 | `surface_raised` | `#1A1C22` | `#FFFFFF` | cards (board tiles, hub cards, grouped settings), always with a `border` hairline |
 | `elevated` | `#1B1E24` | `#FFFFFF` | dialogs, sheets, toasts, palette, menus, popovers, tooltips |
 | `overlay` | `rgba(5,6,8,.55)` | `rgba(0,0,0,.30)` | scrim behind a dialog, sheet or popover (see §2.6) |
@@ -1184,7 +1184,7 @@ the app converts `proto::Cell` on the way in, resolving `Palette(u8)` through
 An unfocused terminal draws a hollow cursor. The selection is painted as a
 `terminal.selection` quad per row span, behind the text. `.scrollback(offset, len)` paints a
 `ScrollbackBadge` in the top-right corner when `offset > 0`. The only things ever drawn **over**
-the cells are the two scroll overlays and the prefix hint (§3.6); `.modes(..)` feeds the
+the cells are the two scroll overlays and the ⌃S command menu (§3.6); `.modes(..)` feeds the
 alt-screen suppression and paints nothing — the badges belong to the Workspace header.
 
 #### `TerminalModes`
@@ -1240,14 +1240,6 @@ blocked on the reader (`attention`) — the one mark that survives selection.
 **Usage rule.** **Suppressed in alt-screen** — when an alt-screen app is running, `ctrl-s [`
 shows the 1.6 s toast `no scrollback in alt-screen` instead. Top-right inside the terminal area,
 because during scroll the eyes are on content and the top right never covers the prompt.
-
-#### `PrefixHint`
-**Purpose.** The `^S` pill and its six keys.
-**API.** `PrefixHint::new(visible).prefix(..).hints(KeyHintRow)`; `.is_visible()`. The hints
-default to the six §3.6 prefix keys rather than an empty row.
-**Usage rule.** The 400 ms delay is the caller's timer (`theme.motion.prefix_hint_delay`). The
-expert types the second key in under 200 ms and never sees this; the returning user gets it
-exactly when they hesitate — 0 px and 0 frames of permanent cost.
 
 #### `PrefixMenu`
 **Purpose.** The ⌃S command menu: every command the held prefix reaches, grouped into columns,

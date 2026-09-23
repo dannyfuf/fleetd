@@ -156,6 +156,13 @@ pub struct AppState {
     pub displayed_hub: crate::presentation::DisplayedHub,
     /// The Workspace sub-mode.
     pub terminal_mode: TerminalMode,
+    /// Whether a native agent tab's `^s` is held, waiting for its second key.
+    ///
+    /// The chord publishes no key context (the tab's chain is derived from daemon state and
+    /// has no room for a mode word), so the harness snapshot does not project it; it is state
+    /// only so the ⌃S command menu can appear over the thread while it is held. The shell's
+    /// keystroke interceptor sets it on `^s` and clears it on the very next key.
+    pub agent_chord_armed: bool,
     /// The floating agent popup, independent of the base Hub or Workspace screen.
     pub agent_popup: Option<AgentPopupState>,
     /// The native structured agent threads: daemon summaries, opened projections, seen cursors.
@@ -268,6 +275,7 @@ impl AppState {
             jobs_panel: JobsPanelMirror::default(),
             displayed_hub: crate::presentation::DisplayedHub::default(),
             terminal_mode: TerminalMode::Terminal,
+            agent_chord_armed: false,
             agent_popup: None,
             agents: AgentThreads::default(),
             terminal_config: fleet_core::config::TerminalConfig::default(),

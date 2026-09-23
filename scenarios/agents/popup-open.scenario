@@ -1,5 +1,6 @@
 # docs/KEYMAP.md §Hub — `a` / `A` open the floating Claude / Codex agent popup [A21]
 # docs/KEYMAP.md §Agent popup — `^s` is the popup's one-shot prefix and `^s q` hides it
+# docs/UX-SPEC.md §3.6 — a held `^s` shows the ⌃S command menu after the prefix delay
 # docs/NATIVE-AGENTS.md §10 — the popup is the *terminal* fallback: a PTY, not a native thread
 # docs/UX-SPEC.md §3.6.1 — the window header's provider switch, Restart and Hide, and the scrim
 #
@@ -36,6 +37,15 @@ await agents.popup absent 10000
 assert screen == Hub && mode == Normal && focused == worktrees.row[0]
 key a
 await agents.popup == Terminal 10000
+# A held `^s` shows the popup's own ⌃S command menu (UX-SPEC §3.6): its prefix table, not the
+# Workspace's. `Esc` cancels it and the popup keeps the keyboard.
+key ctrl-s
+await agents.popup == Prefix 10000
+await targets["prefix_menu"] exists 5000
+shot claude-popup-prefix-menu
+key escape
+await agents.popup == Terminal 10000
+assert targets["prefix_menu"] absent && focused == agents.popup
 
 # `^s q` hides it and hands the Hub back its own selection. The Hub underneath never moved.
 key ctrl-s q

@@ -45,9 +45,8 @@ use fleet_proto::{
     terminal::{Key, KeyAction, KeyEvent, Modifiers, ScrollCommand},
 };
 use fleet_ui_kit::{
-    ActiveTheme, CellMetrics, ExitStrip, Icon, KeyHintRow, PrBadgeState, PrefixHint, ScrollPill,
-    SplitLayout, StatusKind, TerminalMode as KitTerminalMode, TerminalTabStrip, Text, Toast,
-    ToastDuration,
+    ActiveTheme, CellMetrics, ExitStrip, Icon, PrBadgeState, ScrollPill, SplitLayout, StatusKind,
+    TerminalMode as KitTerminalMode, TerminalTabStrip, Text, Toast, ToastDuration,
 };
 use gpui::{
     AnyElement, App, ClipboardItem, Div, Entity, FocusHandle, Focusable, KeyDownEvent, MouseButton,
@@ -66,7 +65,7 @@ use crate::{
         MouseCell, SelectionGranularity, absolute_selection_at, cell_size, grid_modes, measure,
         surface, try_selection_text, viewport_base, zoom_bar,
     },
-    views::{workspace_header::WorkspaceHeader, workspace_tabs},
+    views::{prefix_menu::PrefixSurface, workspace_header::WorkspaceHeader, workspace_tabs},
 };
 
 /// What `ctrl-s c` and the `+` tab ask fleetd to type into a fresh login shell.
@@ -205,11 +204,16 @@ impl WorkspaceScreen {
         if model.zoomed {
             root = root.child(zoom_bar(&theme));
         }
+        // The ⌃S command menu floats over the bottom of the screen, just above the status bar,
+        // whichever tab — terminal, Fleet-drawn pane or agent thread — holds the prefix.
+        let prefix_menu = self.local.borrow().prefix_menu.render(state, cx);
         root = root
+            .relative()
             .children(header)
             .children(tabs)
             .child(body)
-            .children(model.exit_code.map(ExitStrip::new));
+            .children(model.exit_code.map(ExitStrip::new))
+            .children(prefix_menu);
 
         self.with_keys(root, bridge, state).into_any_element()
     }

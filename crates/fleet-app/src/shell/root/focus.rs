@@ -10,12 +10,7 @@ use gpui::{
     MousePressureEvent, MouseUpEvent, PinchEvent, PlatformInput, ScrollWheelEvent, Window, canvas,
     deferred, div, prelude::*,
 };
-use std::{
-    cell::{Cell, RefCell},
-    collections::VecDeque,
-    rc::Rc,
-    time::Instant,
-};
+use std::{cell::RefCell, collections::VecDeque, rc::Rc, time::Instant};
 
 /// Maximum input retained while GPUI is painting a new keyboard-focus owner.
 pub(super) const STALE_KEY_CAPACITY: usize = 64;
@@ -272,9 +267,6 @@ pub(super) fn install_input_gates(
     let key_state = state.clone();
     let key_bridge = bridge.clone();
     let intercepted_keys = Rc::clone(focus_owner_keys);
-    // The one-shot memory of a native agent tab's `^s`. It is deliberately not `AppState`: the
-    // chord changes no key context, paints nothing and must not move the harness snapshot.
-    let agent_chord_armed = Cell::new(false);
     let interceptor = cx.intercept_keystrokes(move |event, window, cx| {
         let chain = key_state.read(cx).context_chain();
         let (prefix_consumed, prefix_action) = key_state.update(cx, |state, cx| {
@@ -292,11 +284,26 @@ pub(super) fn install_input_gates(
             return;
         }
 
-        let chord = agent_chord(&chain, agent_chord_armed.replace(false), &event.keystroke);
+        // The one-shot memory of a native agent tab's `^s` lives in `AppState` only so the ⌃S
+        // command menu can appear over the thread while it is held; the chord changes no key
+        // context. Every key clears it, whatever it turns out to mean.
+        // Read first: the state is touched only on the two keys a chord spans, so every other
+        // keystroke reaches GPUI exactly as it did before the menu existed.
+        let armed = key_state.read(cx).agent_chord_armed;
+        if armed {
+            key_state.update(cx, |state, cx| {
+                state.agent_chord_armed = false;
+                cx.notify();
+            });
+        }
+        let chord = agent_chord(&chain, armed, &event.keystroke);
         match chord {
             AgentChord::Passthrough => {}
             AgentChord::Armed => {
-                agent_chord_armed.set(true);
+                key_state.update(cx, |state, cx| {
+                    state.agent_chord_armed = true;
+                    cx.notify();
+                });
                 cx.stop_propagation();
                 return;
             }

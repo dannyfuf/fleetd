@@ -205,12 +205,21 @@ impl WorkspaceScreen {
         }
     }
 
-    /// Starts the 400 ms timer that reveals the prefix hint, once per prefix (§3.6).
-    pub(super) fn arm_prefix_hint(&self, model: &Model, state: &Entity<AppState>, cx: &mut App) {
+    /// Builds the ⌃S command menu when a prefix arms and starts the timer that reveals it, once
+    /// per prefix (§3.6). A native agent tab's chord counts as held only while its tab is the
+    /// one on screen.
+    pub(super) fn arm_prefix_menu(&self, model: &Model, state: &Entity<AppState>, cx: &mut App) {
+        let active = if model.mode == TerminalMode::Prefix {
+            Some(PrefixSurface::Workspace)
+        } else if model.agent.is_some() && state.read(cx).agent_chord_armed {
+            Some(PrefixSurface::AgentThread)
+        } else {
+            None
+        };
         self.local
             .borrow_mut()
-            .hint
-            .reconcile(model.mode == TerminalMode::Prefix, state, cx);
+            .prefix_menu
+            .reconcile(active, state, cx);
     }
 
     /// Fills the shared branch → pull-request cache once per repository when Hub has not.
@@ -294,7 +303,7 @@ impl WorkspaceScreen {
             local.pending.clear();
             local.clear_selections();
             local.state.pending_selection_scroll = None;
-            local.hint.clear();
+            local.prefix_menu.clear();
             local.wheel.reconcile(None);
             local.state.pane_focused = false;
             drop(local);
@@ -344,7 +353,7 @@ impl WorkspaceScreen {
         self.reconcile(&model, bridge, state, cell, cx);
         self.cache_viewport(state, cx);
         self.track_selection(state, cx);
-        self.arm_prefix_hint(&model, state, cx);
+        self.arm_prefix_menu(&model, state, cx);
         self.lookup_pr(&model, bridge, state, cx);
         self.sync_panes(&model, bridge, state, window, cx);
         self.sync_board_scope(&model, bridge, state, cx);

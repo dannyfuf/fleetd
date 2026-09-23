@@ -672,9 +672,12 @@ what is running elsewhere.*
 │ ⏺ Reading src/payroll/rounding.rb…                       ┌────────────────┐ │
 │                                                          │ SCROLL 412/2000│ │ scroll pill
 │                                                          └────────────────┘ │
-│  ┌────┐                                                                     │
-│  │ ^S │ s hub · 1-9 tab · c new · x close · [ scroll · a agent              │ prefix hint
-│  └────┘  (appears only after 400 ms of hesitation)                          │
+│    ┌─────────────────────────────────────────────────────────────────┐      │
+│    │ ⌃S Fleet commands  Press a key or click. ⌃S again…  Close esc   │      │ ⌃S command
+│    │ Tabs          Session         Terminal     Agents        Panels │      │ menu (only
+│    │ 1–9 Go to tab s Back to hub   [ Scroll back a New Claude… ? All…│      │ after 400 ms
+│    │ c New terminal …              …            …             …      │      │ of hesitation)
+│    └─────────────────────────────────────────────────────────────────┘      │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │ ⚠ process exited (1) · ^s r restart · ^s x close · ^s c new                 │ 22  only on exit
 ├─────────────────────────────────────────────────────────────────────────────┤
@@ -699,7 +702,7 @@ what is running elsewhere.*
 | Terminal area | painted cell grid, 8 px padding, no border | fills | maximum rows; chrome is ≤ 86 px total | — |
 | Native pane | the Fleet-drawn view for this tab, filling the terminal area exactly | replaces the grid | the tab is a tab: same header, same strip, same bars, same pixel positions | `Terminal.kind = Native`, `Worktree.path` |
 | Scroll pill | `SCROLL <offset>/<scrollback_len>`, + a second line `v select · y yank · Esc exit` while selecting; 176 × 22 px, `bg.raised`, amber left bar | overlay, top-right **inside** the terminal area, 12 px inset | during scroll the eyes are on content; top-right never covers the prompt and never shifts the grid | `viewport{scrollback_len, offset}` |
-| Prefix hint | `^S` pill + the 6 most-used prefix keys, mono 11 px, `fg.faint`, on `bg.raised` | bottom-left inside the terminal area, **delayed 400 ms** after `ctrl-s` | the expert types the second key in < 200 ms and never sees it; the returning user gets it exactly when they hesitate — 0 px and 0 frames of permanent cost | KEYMAP one-shot Prefix mode |
+| ⌃S command menu | *Fleet commands*: the held prefix as an amber chip, "Press a key or click", "⌃S again sends it to the terminal" (only where a program is behind it), a Close `esc` button; then every command the prefix reaches here, in the catalogue's groups (Tabs, Session, Terminal, Agents, Panels), each a clickable row of second-key chip + short label | floating, bottom-centre just above the status bar, at most 900 px wide; **delayed 400 ms** after `ctrl-s` | the expert types the second key in < 200 ms and never sees it; the returning user gets the whole table exactly when they hesitate, and can click instead of reading — 0 px and 0 frames of permanent cost. A click runs the row as its key would; the menu never takes focus. The agent popup and a native agent tab show it too, with their own rows | KEYMAP one-shot Prefix mode; the action catalogue |
 | Exit strip | `⚠ process exited (<code>) · ^s r restart · ^s x close · ^s c new` | bottom, 22 px, only when the tab's command exited | tmux's `remain-on-exit` made this recoverable; Fleet must not silently swallow a crashed dev server | §4 `remain-on-exit on` |
 | Mode word | `TERMINAL` / `^S` / `SCROLL` | status bar, center | §2.8 | KEYMAP modes |
 
@@ -1941,7 +1944,7 @@ each component's full API. `Modal` is an alias of `Dialog` and `TabBar` an alias
 | `ScrollbackBadge` | `↥ <offset>/<len>` in the grid corner whenever the viewport is scrolled back, in or out of Scroll mode | Workspace |
 | `TerminalTabStrip` | Numbered tabs 84–200 px with an activity dot, a per-tab waking spinner, keep-alive icon, exited mark (code or `—`) and a `+` tab | Workspace |
 | `ScrollPill` | `SCROLL <offset>/<len>` overlay with a selection hint line; **suppressed in alt-screen** | Workspace and Agent Scroll modes |
-| `PrefixHint` | `^S` pill + contextual keys, 400 ms delayed, bottom-left inside the terminal area | Workspace and Agent Prefix modes |
+| `PrefixMenu` | The ⌃S command menu: every command the held prefix reaches, grouped, clickable, 400 ms delayed, bottom-centre | Workspace, agent popup and agent thread prefixes |
 | `ExitStrip` | `⚠ process exited (<code>)` + prefixed recovery keys | Workspace, Agent popup |
 | `ModeWord` | The §2.8 mode word, fixed 84 px | status bar |
 | `Banner` | 28 px full-width amber/red strip with a countdown and prefixed keys | daemon state C (§3.12) |

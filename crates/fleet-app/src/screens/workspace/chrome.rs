@@ -122,14 +122,3 @@ impl WorkspaceScreen {
 pub(super) fn watch_width(window_width: f32) -> f32 {
     (window_width * 0.4).clamp(360.0, 640.0)
 }
-
-/// The six prefix keys the delayed hint strip lists (§3.6).
-pub(super) fn prefix_hints() -> KeyHintRow {
-    KeyHintRow::new()
-        .key("s", "hub")
-        .key("1-9", "tab")
-        .key("c", "new")
-        .key("x", "close")
-        .key("[", "scroll")
-        .key("a", "claude")
-}

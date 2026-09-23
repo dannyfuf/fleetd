@@ -57,7 +57,6 @@ mod pane_header;
 #[cfg(test)]
 mod pointer_tests;
 mod pr_badge;
-mod prefix_hint;
 mod prefix_menu;
 mod priority_glyph;
 mod row;
@@ -153,7 +152,6 @@ pub use palette::{Palette, PaletteRow, PaletteSection, PaletteSectionKind};
 pub use pane::{Pane, PaneBorder};
 pub use pane_header::PaneHeader;
 pub use pr_badge::{PrBadge, PrBadgeState};
-pub use prefix_hint::PrefixHint;
 pub use prefix_menu::{PrefixMenu, PrefixMenuColumn, PrefixMenuItem};
 pub use priority_glyph::{PRIORITY_BARS, PriorityGlyph, PriorityLevel};
 pub use row::GLYPH_COLUMN_CH;

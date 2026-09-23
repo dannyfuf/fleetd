@@ -9,6 +9,7 @@ pub(crate) mod harness;
 pub mod hub_context_bar;
 pub mod job_ticker;
 pub mod jobs_panel;
+pub(crate) mod prefix_menu;
 pub mod prs_screen;
 pub mod repos_rail;
 pub mod sticky_error;

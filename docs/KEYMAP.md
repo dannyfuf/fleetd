@@ -226,6 +226,18 @@ alone preserves them.
 | `?` | help overlay listing this table |
 | `Esc` | cancel prefix |
 
+**The ⌃S command menu.** Holding the prefix for `motion.prefix_hint_delay` (400 ms) without a
+second key shows *Fleet commands*: every row of this table the live chain reaches, grouped by
+the catalogue's headings (Tabs, Session, Terminal, Agents, Panels) and labelled with each entry's
+short label. A row shows only its second key, because the prefix is already held; `ctrl-s` itself
+and `Esc` are the header (the note that pressing the prefix again sends it, and a Close button).
+Clicking a row leaves Prefix and runs the row's action, exactly as the key would; clicking Close
+is `Esc`. The menu takes no focus and changes nothing about the keys: a second key typed before
+the delay skips it, every row above keeps working, and an unbound key still leaves Prefix and
+does nothing. The agent popup (`Agent > Prefix`) and a native agent tab (`ctrl-s <key>` chords)
+show the same menu with their own rows; a row whose key already works without the prefix
+(`cmd-c`, `ctrl-q`) is left off.
+
 Watch navigation uses uppercase `N`/`P` because lowercase `n`/`p` already move between
 terminal tabs; uppercase acts on the watch pane, mirroring `v`/`V`. With no watches,
 both keys toast `no subagent watches`. With one watch, selection is unchanged and no

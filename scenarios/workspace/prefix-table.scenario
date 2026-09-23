@@ -11,16 +11,39 @@ key o
 await screen == Workspace 20000
 assert mode == Terminal
 
-# `ctrl-s` on its own arms the one-shot Prefix context and nothing else.
+# `ctrl-s` on its own arms the one-shot Prefix context and nothing else. UX-SPEC §3.6: a
+# held prefix shows the ⌃S command menu after `motion.prefix_hint_delay`, every command the
+# table reaches here as a clickable row; a key typed before the delay skips it.
 key ctrl-s
 await mode == Prefix 10000
 assert key_contexts[0] == Workspace && key_contexts[1] == Prefix && overlay absent
+await targets["prefix_menu"] exists 5000
+assert targets["prefix_menu.item[0]"] exists && targets["prefix_menu.close"] exists
 shot prefix
 
-# `Esc` cancels the prefix ("Esc | cancel prefix"), leaving the terminal exactly as it was.
+# `Esc` cancels the prefix ("Esc | cancel prefix"), leaving the terminal exactly as it was, and
+# the menu goes with it.
 key escape
 await mode == Terminal 10000
-assert overlay absent
+assert overlay absent && targets["prefix_menu"] absent
+
+# The menu's Close button is `Esc` by pointer: it leaves the prefix and runs nothing.
+key ctrl-s
+await targets["prefix_menu.close"] exists 5000
+click prefix_menu.close
+await mode == Terminal 10000
+assert overlay absent && targets["prefix_menu"] absent
+
+# A row runs its command exactly as its key would. Row 21 is Panels › All shortcuts, the `?`
+# row, which opens Help — the same oracle as the key below.
+key ctrl-s
+await targets["prefix_menu.item[21]"] exists 5000
+click prefix_menu.item[21]
+await overlay == Dialog 10000
+assert dialog.name == Help && mode == Dialog && targets["prefix_menu"] absent
+key escape
+await overlay absent 10000
+assert mode == Terminal
 
 # `?` opens the help overlay listing this very table.
 key ctrl-s ?

@@ -11,10 +11,10 @@ use fleet_proto::{
     request::RequestBody,
     terminal::{Key, KeyAction, KeyEvent, Modifiers, WheelEvent},
 };
-use fleet_ui_kit::{ActiveTheme, CellMetrics, Icon};
-use gpui::{App, Entity, Keystroke, ScrollWheelEvent, Task};
+use fleet_ui_kit::{CellMetrics, Icon};
+use gpui::{App, Entity, Keystroke, ScrollWheelEvent};
 use std::{
-    cell::{Cell, RefCell},
+    cell::RefCell,
     collections::{BTreeMap, HashMap},
     rc::Rc,
     time::{Duration, Instant},
@@ -115,7 +115,7 @@ pub(crate) struct TerminalSurface<S> {
     pub(crate) history_frame: Option<(u64, u64, u64, u16, u16)>,
     pub(crate) mouse_selection: Option<MouseSelection>,
     pub(crate) row_caches: HashMap<TerminalId, TerminalRowCache>,
-    pub(crate) hint: PrefixHintState,
+    pub(crate) prefix_menu: crate::views::prefix_menu::PrefixMenuState,
     pub(crate) presentation: TerminalPresentation,
 }
 
@@ -790,38 +790,6 @@ pub(crate) fn selection_scrolled_away<S>(
         app.toast_short("selection scrolled away", Icon::Info, Instant::now());
         cx.notify();
     });
-}
-
-#[derive(Default)]
-pub(crate) struct PrefixHintState {
-    visible: Rc<Cell<bool>>,
-    task: Option<Task<()>>,
-}
-impl PrefixHintState {
-    pub(crate) fn visible(&self) -> bool {
-        self.visible.get()
-    }
-    pub(crate) fn clear(&mut self) {
-        self.task = None;
-        self.visible.set(false);
-    }
-    pub(crate) fn reconcile(&mut self, active: bool, state: &Entity<AppState>, cx: &mut App) {
-        if !active {
-            self.clear();
-            return;
-        }
-        if self.task.is_some() {
-            return;
-        }
-        let visible = Rc::clone(&self.visible);
-        let state = state.downgrade();
-        let delay = Duration::from_millis(cx.theme().motion.prefix_hint_delay);
-        self.task = Some(cx.spawn(async move |cx| {
-            cx.background_executor().timer(delay).await;
-            visible.set(true);
-            let _ = state.update(cx, |_, cx| cx.notify());
-        }));
-    }
 }
 
 fn modifiers(mods: gpui::Modifiers) -> Modifiers {

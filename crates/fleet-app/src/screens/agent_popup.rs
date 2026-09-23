@@ -33,7 +33,7 @@ use fleet_proto::{
 };
 use fleet_ui_kit::{
     ActiveTheme, ExitStrip, HarnessTargetExt, KeyHintRow, Overlay as FloatingOverlay, OverlayLayer,
-    PrefixHint, ScrollPill, StatusDot, Text, Tone, Veil,
+    ScrollPill, StatusDot, Text, Tone, Veil,
 };
 use gpui::{
     AnyElement, App, ClipboardItem, Div, Entity, FocusHandle, KeyDownEvent, Keystroke, MouseButton,
@@ -48,6 +48,7 @@ use crate::{
         MouseCell, absolute_selection_at, cell_size, grid_size, measure, surface,
         try_selection_text, viewport_base,
     },
+    views::prefix_menu::PrefixSurface,
 };
 
 /// How much of the window the floating card covers, leaving the Workspace visible around it.

@@ -99,11 +99,13 @@ impl AgentPopup {
         }
     }
 
-    pub(super) fn arm_prefix_hint(&self, model: &Model, state: &Entity<AppState>, cx: &mut App) {
+    /// Builds the popup's ⌃S command menu when its prefix arms, and starts the reveal delay.
+    pub(super) fn arm_prefix_menu(&self, model: &Model, state: &Entity<AppState>, cx: &mut App) {
+        let active = (model.mode == AgentPopupMode::Prefix).then_some(PrefixSurface::AgentPopup);
         self.local
             .borrow_mut()
-            .hint
-            .reconcile(model.mode == AgentPopupMode::Prefix, state, cx);
+            .prefix_menu
+            .reconcile(active, state, cx);
     }
 
     /// Reconcile state before rendering, including hidden-surface teardown.
@@ -121,7 +123,7 @@ impl AgentPopup {
         self.reconcile(&model, bridge, state, cell_size(cx.theme()), cx);
         self.cache_selection(&model, state, cx);
         self.track_selection(&model, state, cx);
-        self.arm_prefix_hint(&model, state, cx);
+        self.arm_prefix_menu(&model, state, cx);
 
         if let Some(grid) = model
             .terminal
@@ -147,5 +149,5 @@ pub(super) fn detach_local(
     local.clear_selections();
     local.discard_pending();
     local.wheel.reconcile(None);
-    local.hint.clear();
+    local.prefix_menu.clear();
 }
