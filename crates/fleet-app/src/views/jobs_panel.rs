@@ -10,7 +10,7 @@ use std::rc::Rc;
 use fleet_proto::job::{JobRecord, JobStatus};
 use fleet_ui_kit::{
     ActiveTheme, Button, ButtonSize, ButtonStyle, ContextMenu, EmptyState, Icon, IconButton,
-    IconSize, JobRow, ListPointer, MenuAnchor, MenuItem, PopoverMenu, SegmentedTab, SegmentedTabs,
+    IconSize, JobRow, ListPointer, MenuAnchor, MenuItem, PopoverMenu, Segment, SegmentedControl,
     Text, Tone, format_age, prelude::*,
 };
 use gpui::{Action, AnyElement, App, SharedString, Window, div};
@@ -168,17 +168,21 @@ pub fn header(props: HeaderProps, cx: &App) -> AnyElement {
     });
     let on_filter = props.on_filter;
     let counts = props.counts;
-    let filter = SegmentedTabs::new(
-        JobFilter::ALL.map(|filter| SegmentedTab::new(filter.title(), counts.of(filter))),
-    )
-    .underlined(false)
-    .active(props.filter.index())
-    .harness_tabs("jobs.filter")
-    .on_select(move |index, window, cx| {
-        if let Some(filter) = JobFilter::ALL.get(index) {
-            on_filter(*filter, window, cx);
-        }
-    });
+    // A segment says `0` rather than vanish: an empty filter must still say it is empty.
+    let filter = div().flex().child(
+        SegmentedControl::new(
+            "jobs-filter",
+            JobFilter::ALL
+                .map(|filter| Segment::new(filter.title()).count(Some(counts.of(filter)))),
+        )
+        .active(Some(props.filter.index()))
+        .harness_segments("jobs.filter")
+        .on_select(move |index, window, cx| {
+            if let Some(filter) = JobFilter::ALL.get(index) {
+                on_filter(*filter, window, cx);
+            }
+        }),
+    );
 
     div()
         .flex()
