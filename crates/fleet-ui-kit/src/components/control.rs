@@ -2,7 +2,8 @@
 //! clickable semantics it gains once a caller can activate it.
 
 use gpui::{
-    App, Div, InteractiveElement, StatefulInteractiveElement, Styled, Window, div, prelude::*,
+    App, ClickEvent, Div, InteractiveElement, StatefulInteractiveElement, Styled, Window, div,
+    prelude::*,
 };
 
 use crate::{focus::FocusRing, theme::Theme};
@@ -34,9 +35,19 @@ pub(super) fn on_activate<E: InteractiveElement + StatefulInteractiveElement + S
     name: impl Into<gpui::SharedString>,
     activate: impl Fn(&mut Window, &mut App) + 'static,
 ) -> E {
+    on_click_named(element, name, move |_, window, cx| activate(window, cx))
+}
+
+/// [`on_activate`] for a handler that reads the click itself (its modifiers or click count), as
+/// a [`super::Button`]'s caller-supplied `on_click` does.
+pub(super) fn on_click_named<E: InteractiveElement + StatefulInteractiveElement + Styled>(
+    element: E,
+    name: impl Into<gpui::SharedString>,
+    handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> E {
     element
         .cursor_pointer()
-        .on_click(move |_, window, cx| activate(window, cx))
+        .on_click(handler)
         .role(gpui::Role::Button)
         .aria_label(name)
 }

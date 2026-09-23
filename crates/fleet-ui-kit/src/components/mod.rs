@@ -10,6 +10,7 @@ pub mod agent;
 mod app_frame;
 mod badge;
 mod banner;
+mod button;
 mod card_tile;
 mod chip;
 mod column_ladder;
@@ -34,6 +35,7 @@ mod input;
 mod job_row;
 mod job_ticker;
 mod kanban_column;
+mod kbd;
 mod keep_alive_chips;
 mod key_hint;
 mod key_value_list;
@@ -70,6 +72,7 @@ mod terminal_modes;
 mod terminal_tab_strip;
 mod toast_stack;
 mod toggle;
+mod tooltip;
 mod veil;
 
 pub use crate::focus::{FocusRing, FocusRingKind};
@@ -79,6 +82,7 @@ pub use agent::*;
 pub use app_frame::AppFrame;
 pub use badge::{Badge, BadgeStyle};
 pub use banner::Banner;
+pub use button::{Button, ButtonSize, ButtonStyle, IconButton};
 pub use card_tile::{
     ASSIGNEE_INITIALS, BlockedTone, CARD_TITLE_LINES, CardTile, RunMark, initials, label_tone,
 };
@@ -109,6 +113,7 @@ pub use input::{
 pub use job_row::{JobRow, JobStatus};
 pub use job_ticker::JobTicker;
 pub use kanban_column::{COLUMN_WIDTH_CH, KanbanBoard, KanbanColumn};
+pub use kbd::{Kbd, KbdSize, KbdTone, pretty_keys};
 pub use keep_alive_chips::MAX_VISIBLE;
 pub use keep_alive_chips::{KeepAliveChips, KeepAliveLabel};
 pub use key_hint::{KeyHint, KeyHintRow};
@@ -161,4 +166,5 @@ pub use terminal_modes::{TerminalMode, TerminalModes};
 pub use terminal_tab_strip::{TerminalAgentState, TerminalTab, TerminalTabKind, TerminalTabStrip};
 pub use toast_stack::{COALESCE_WINDOW_MS, Toast, ToastDuration, ToastStack};
 pub use toggle::Toggle;
+pub use tooltip::{Tooltip, WithTooltip};
 pub use veil::Veil;

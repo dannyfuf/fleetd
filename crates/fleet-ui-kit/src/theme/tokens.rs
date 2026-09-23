@@ -65,6 +65,8 @@ pub struct ColorTokens {
     pub accent_fill: Hsla,
     /// Pointer hover on [`Self::accent_fill`].
     pub accent_fill_hover: Hsla,
+    /// [`Self::accent_fill`] while the pointer is pressed on it.
+    pub accent_fill_active: Hsla,
     /// Label and key chip drawn on [`Self::accent_fill`].
     pub accent_fill_text: Hsla,
     /// Low-alpha accent wash behind a blue chip or an informational callout.
@@ -73,6 +75,8 @@ pub struct ColorTokens {
     pub control: Hsla,
     /// Pointer hover on a control, a ghost button or an icon button.
     pub control_hover: Hsla,
+    /// A control, a ghost button or an icon button while the pointer is pressed on it.
+    pub control_active: Hsla,
     /// Hairline around a resting control.
     pub control_border: Hsla,
     /// Key chip (`Kbd`) fill.
@@ -83,8 +87,13 @@ pub struct ColorTokens {
     pub success: Hsla,
     /// Needs attention / in flight / unknown / degraded.
     pub warning: Hsla,
-    /// Broken / destructive.
+    /// Broken / destructive. Also the fill of a destructive button's strong form, with
+    /// [`Self::text_inverse`] on it.
     pub danger: Hsla,
+    /// Pointer hover on a [`Self::danger`] button fill.
+    pub danger_fill_hover: Hsla,
+    /// A [`Self::danger`] button fill while the pointer is pressed on it.
+    pub danger_fill_active: Hsla,
     /// Neutral information. Shares the accent hue; never used for state.
     pub info: Hsla,
     /// 1 px hairlines.
@@ -126,16 +135,20 @@ impl ColorTokens {
             accent: c(0x58A6FF),
             accent_fill: c(0x58A6FF),
             accent_fill_hover: c(0x79B8FF),
+            accent_fill_active: c(0x4493F8),
             accent_fill_text: c(0x0B0E14),
             accent_subtle: ca(0x58A6FF24),
             control: c(0x1A1D23),
             control_hover: c(0x22262D),
+            control_active: c(0x2A2E36),
             control_border: c(0x2C3039),
             kbd_bg: c(0x23262D),
             kbd_border: c(0x30343D),
             success: c(0x3FB950),
             warning: c(0xD29922),
             danger: c(0xF85149),
+            danger_fill_hover: c(0xFF6A63),
+            danger_fill_active: c(0xEA4A42),
             info: c(0x58A6FF),
             border: c(0x22262E),
             border_strong: c(0x2C313A),
@@ -167,16 +180,20 @@ impl ColorTokens {
             accent: c(0x0969DA),
             accent_fill: c(0x0969DA),
             accent_fill_hover: c(0x0858C0),
+            accent_fill_active: c(0x0A4A9E),
             accent_fill_text: c(0xFFFFFF),
             accent_subtle: ca(0x0969DA1F),
             control: c(0xFFFFFF),
             control_hover: c(0xF3F4F6),
+            control_active: c(0xE8EAEE),
             control_border: c(0xD3D6DC),
             kbd_bg: c(0xF3F4F6),
             kbd_border: c(0xD3D6DC),
             success: c(0x1A7F37),
             warning: c(0x9A6700),
             danger: c(0xCF222E),
+            danger_fill_hover: c(0xB31D28),
+            danger_fill_active: c(0x9A1822),
             info: c(0x0969DA),
             border: c(0xE3E5E9),
             border_strong: c(0xD3D6DC),

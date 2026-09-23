@@ -44,21 +44,9 @@ pub fn contains_folded(haystack: &str, lowered_needle: &str) -> bool {
     })
 }
 
-/// The Help and Palette spelling of a keymap chord.
-///
-/// The substitutions are ordered longest-name-first, so `backspace` becomes `⌫` instead of
-/// being eaten by the `space` rule. Unlike [`fleet_lazygit::keymap::pretty_keys`], `cmd-` is
-/// left spelled out: Fleet's clipboard rows read `cmd-c`, not `⌘c`.
-pub fn pretty_keys(keys: &str) -> String {
-    keys.replace("ctrl-", "^")
-        .replace("shift-", "S-")
-        .replace("alt-", "⌥")
-        .replace("backspace", "⌫")
-        .replace("escape", "esc")
-        .replace("enter", "⏎")
-        .replace("tab", "⇥")
-        .replace("space", "␣")
-}
+/// The retiring Help and Palette spelling of a keymap chord (`^s`, `S-⇥`), now owned by the kit
+/// beside [`fleet_ui_kit::Kbd`], which replaces it surface by surface.
+pub use fleet_ui_kit::pretty_keys;
 
 #[cfg(test)]
 mod tests {

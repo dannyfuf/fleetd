@@ -90,16 +90,20 @@ other ground. `row_hover` and `control_hover` exist only for the pointer and nev
 | `accent` | `#58A6FF` | `#0969DA` | cursor, focus and links: the one blue |
 | `accent_fill` | `#58A6FF` | `#0969DA` | fill of a surface's one primary button |
 | `accent_fill_hover` | `#79B8FF` | `#0858C0` | pointer hover on `accent_fill` |
+| `accent_fill_active` | `#4493F8` | `#0A4A9E` | `accent_fill` while pressed |
 | `accent_fill_text` | `#0B0E14` | `#FFFFFF` | label and key chip on `accent_fill` |
 | `accent_subtle` | `rgba(88,166,255,.14)` | `rgba(9,105,218,.12)` | wash behind a blue chip or an informational callout |
 | `control` | `#1A1D23` | `#FFFFFF` | resting fill of a secondary button or a control |
 | `control_hover` | `#22262D` | `#F3F4F6` | pointer hover on a control, ghost button or icon button |
+| `control_active` | `#2A2E36` | `#E8EAEE` | a control, ghost button or icon button while pressed |
 | `control_border` | `#2C3039` | `#D3D6DC` | hairline around a resting control |
 | `kbd_bg` | `#23262D` | `#F3F4F6` | key chip (`Kbd`) fill |
 | `kbd_border` | `#30343D` | `#D3D6DC` | key chip (`Kbd`) outline |
 | `success` | `#3FB950` | `#1A7F37` | attached, pass, approved, done |
 | `warning` | `#D29922` | `#9A6700` | needs a person: running, pending, dirty, unknown, degraded |
-| `danger` | `#F85149` | `#CF222E` | failed, changes requested, destructive |
+| `danger` | `#F85149` | `#CF222E` | failed, changes requested, destructive; the fill of a danger button, under `text_inverse` |
+| `danger_fill_hover` | `#FF6A63` | `#B31D28` | pointer hover on a danger button |
+| `danger_fill_active` | `#EA4A42` | `#9A1822` | a danger button while pressed |
 | `info` | `#58A6FF` | `#0969DA` | neutral information (same hue as accent; never state) |
 | `border` | `#22262E` | `#E3E5E9` | 1 px hairlines |
 | `border_strong` | `#2C313A` | `#D3D6DC` | hairline on top of `elevated` |
@@ -115,8 +119,9 @@ other ground. `row_hover` and `control_hover` exist only for the pointer and nev
 `info` are all that hue, never a second one. Amber (`warning`) keeps meaning "needs a person".
 
 **Contrast.** `text`, `text_secondary` and `text_muted` each meet WCAG AA (4.5:1) on every
-ground from `chrome` to `elevated` in both modes, and `accent_fill_text` meets it on
-`accent_fill`. `theme::contrast_ratio(fg, bg)` computes the ratio; a unit test in
+ground from `chrome` to `elevated` in both modes; a button's label meets it on its fill at rest,
+hovered and pressed (`accent_fill_text` on the three `accent_fill` roles, `text_inverse` on
+`danger` and its two fill roles, `text` on `control_active`). `theme::contrast_ratio(fg, bg)` computes the ratio; a unit test in
 `theme/contrast.rs` holds the palette to it, and the gallery's colour page prints each ratio.
 
 Semantic tones are selected through `Tone`, never by reaching for the field:
@@ -459,7 +464,9 @@ There are exactly three exceptions, and they are gpui **entities** the surface h
 `TextInput` (§6.4), which owns a caret, a selection, an undo history, a painted-layout cache and
 an IME session (ADR 0020), and `TranscriptList` and `MultilineInput` (§6.6), which own measured
 row geometry, a scroll machine, and — for the composer — the `TextInput` it wraps. Nothing else
-in the kit implements `Render`.
+in the kit implements `Render` except the view behind `Tooltip` (§6.8), which holds no state at
+all: gpui's tooltip slot takes an `AnyView`, so the tooltip is built as a throwaway entity each
+time it opens.
 
 Legend for the "states" rows: **default · focused · selected · disabled · loading · error**.
 A component that cannot be in a state says so rather than pretending.
@@ -798,7 +805,9 @@ stay usable. Copy is swarm's, verbatim.
 renders from `state.json` immediately; a skeleton where cached truth exists is a lie.
 
 #### `KeyHint` / `KeyHintRow`
-**Purpose.** The most repeated component in the app.
+**Purpose.** A key and its label as text, for the two surfaces with no control to carry a key
+(§4). Everywhere else a control shows a `Kbd` (§6.8); existing hint rows move over as their
+surfaces are rebuilt.
 **API.** `KeyHint::{new(keys), labeled(keys, label)}().label(..).tone(Tone).key_tone(Tone)`;
 `KeyHintRow::new().hint(KeyHint).key(keys, label).merge(other)`.
 **Usage rule.** See §4 — prefix every Workspace hint.
@@ -1520,6 +1529,116 @@ key: `h` / `l` / `j` / `k` move a cursor the screen owns, exactly as they do for
 `[` / `]` moving a card, `p` cycling the priority); `kit_gallery`'s `board` section shows the
 same components as a static overview in both themes.
 
+### 6.8 Controls
+
+The four primitives every redesigned surface is built from (ADR 0023): a key chip that always
+says what the keymap says, a button that shows one, an icon-only button, and a tooltip. None of
+them is focusable. The keyboard path to a control is the key on its chip, so a click and a key
+press are one dispatch, and `Tab`, `j`/`k` and pane focus keep their meaning.
+
+**How the app passes a key in.** The kit takes no domain type, but a gpui `Action` is not one: it
+is the same currency the keymap binds. A view hands the kit the action (`Button::action(Box<dyn
+Action>)`, `Kbd::for_action(&dyn Action, &Window, &App)`), and the kit asks the window for the
+highest-precedence binding in the context the focused handle has in the last painted frame
+(`Window::highest_precedence_binding_for_action_in`), or in the context another `FocusHandle`
+would have (`Kbd::for_action_in`). It deliberately does not call
+`Window::highest_precedence_binding_for_action`: at gpui v1.18.1 that reads whatever context stack
+the dispatch tree was left holding when painting ended rather than the focused element's path, and
+in the gallery it resolved no chip at all. A binding the focused context does not reach, or an action nothing binds, gives
+`None` and the control shows no chip. So a Workspace button's chip carries the `⌃S` prefix
+because the binding does, and a remapped key shows its new spelling with no app change.
+
+**Lookup at render, not cached.** Like Zed's `KeyBinding::for_action`, the chip is resolved inside
+`render`. The lookup is a hash probe for the action's bindings plus a walk of the keymap for each
+candidate against the context stack to rule out shadowing — a few thousand predicate checks per
+chip, under the 8 ms budget for the handful of chips a surface shows, and a render happens only
+on a notify. A `Global` cache per keymap revision was rejected: its key would have to include the
+focused context stack, which changes with every focus move, so it would miss exactly when it
+matters. The one visible cost is the same as Zed's: the chip reads the *previous* frame's dispatch
+tree, so on the first frame after a focus change it can show the old context's key for one frame,
+and a window's very first frame (nothing painted yet) shows no chips until focus lands and gpui
+redraws.
+Revisit if a list ever renders a chip per row.
+
+#### `Kbd`
+**Purpose.** A keystroke sequence as chips: one chip per stroke, the modifiers inside it —
+`⌃S` `a`, `g` `b`, `⇧Y`.
+**Anatomy.** Per stroke: a `kbd_h` (or `kbd_h_small`) chip at least as wide as it is tall, `xs`
+padding, `radii.sm`, `kbd_bg` fill inside a `kbd_border` hairline, the key in the `Hint` role in
+`text_secondary`; strokes `xs` apart.
+**Spelling.** Modifiers in Apple's order (⌃ ⌥ ⇧ ⌘): stacked glyphs on macOS (`⌃⌥⇧⌘K`), words
+joined by `+` elsewhere (`Ctrl+Alt+Shift+Super+K`). Named keys: `⏎ esc ⇥ ␣ ⌫ del ↑ ↓ ← →`,
+`home`, `end`, `pgup`, `pgdn`. A key under a modifier is a key cap (`⌃S`, `Alt+F5`); a bare
+key is the character typed (`g`). An uppercase key in the keymap is `shift` (`Y` → `⇧Y`).
+**API.** `Kbd::for_action(&dyn Action, &Window, &App) -> Option<Kbd>`,
+`Kbd::for_action_in(&dyn Action, &FocusHandle, &Window) -> Option<Kbd>`,
+`Kbd::from_binding(&KeyBinding)`, `Kbd::new(&[Keystroke])`,
+`Kbd::parse("ctrl-s a") -> Result<Kbd, InvalidKeystrokeError>`; then
+`.tone(KbdTone::{Default, OnAccent, OnDanger}) .size(KbdSize::{Default, Small})`;
+`Kbd::{strokes, chip_labels, aria_shortcut}` for tests and accessibility.
+**States.** default · small · on accent · on danger. Not focusable, not disabled on its own (it
+dims with its button).
+**Usage rule.** `fleet-app` resolves a chip with `for_action` / `for_action_in` and never types a
+key; `parse` is for galleries and tests. `pretty_keys` (the old `^s` / `S-⇥` text spelling)
+lives beside it only until the Help overlay, the palette and the prefix toast are rebuilt;
+`fleet_app::presentation::pretty_keys` re-exports it.
+
+#### `Button`
+**Purpose.** A verb the pointer can press, showing the key that does the same thing.
+**Anatomy.** `[icon] label [Kbd]`, `sm` apart, `md` side padding (`sm` compact), `button_h` (or
+`button_h_compact`) tall, `radii.control`, a hairline. Label in `UiStrong`; icon 14 px (12
+compact); the chip `kbd_h` (`kbd_h_small` compact) and toned for the fill.
+**API.** `Button::new(id, label)` then `.style(ButtonStyle::{Primary, Secondary, Ghost, Danger})
+.size(ButtonSize::{Default, Compact}) .icon(Icon) .kbd(Kbd) .action(Box<dyn Action>)
+.on_click(Fn(&ClickEvent, &mut Window, &mut App)) .disabled(bool) .selected(bool) .full_width()
+.tooltip(text)`.
+**Styles.** `Primary`: `accent_fill` / `accent_fill_hover` / `accent_fill_active`, label and chip
+in `accent_fill_text` — a surface's one primary action. `Secondary` (default): `control` /
+`control_hover` / `control_active` in a `control_border` hairline. `Ghost`: no fill until
+hovered, label `text_secondary`. `Danger`: `danger` / `danger_fill_hover` / `danger_fill_active`
+under `text_inverse` — the strong form of a destructive action, the `Y` of a
+`ConfirmKey::Upper` confirmation (§4).
+**States.** default · hover (pointer only) · pressed · selected (`row_selected` fill, announced as
+toggled — only for a toggle, and only on `Secondary` / `Ghost`) · disabled (40 %, no hover, no
+click). Never focused.
+**Usage rule.** Wire it with `.action(..)`: the click dispatches that action to the focused element
+with `window.dispatch_action`, and the chip is `Kbd::for_action` of the same action unless `.kbd`
+overrides it — so the button and its key cannot disagree. `.on_click` is for a control that is not
+an action, and runs before the action when both are set. An action invalid on the surface is
+**not rendered**; `.disabled(true)` is only for an action that will become valid on this surface
+(§4). The accessible name is the label; a single-stroke chip is also announced as the shortcut
+(`aria-keyshortcuts`, which cannot express a sequence).
+
+#### `IconButton`
+**Purpose.** A square, glyph-only button for dense headers and toolbars.
+**Anatomy.** `button_h` (or `button_h_compact`) square, the glyph centred, `Ghost` by default.
+**API.** `IconButton::new(id, Icon, label)` then the same `.style .size .kbd .action .on_click
+.disabled .selected` as `Button`.
+**States.** as `Button`.
+**Usage rule.** The label is a constructor argument so it cannot be forgotten: it is the tooltip,
+and the accessible name. The key is not drawn on the button; it rides in the tooltip, resolved
+the same way. Use a labelled `Button` whenever there is room for the word.
+
+#### `Tooltip` / `WithTooltip`
+**Purpose.** A label, plus its key when it has one, floating by the pointer after
+`motion.tooltip_delay`.
+**Anatomy.** `elevated` fill, `border_strong` hairline, `radii.popover`, `popover_shadow()`;
+`Caption` label in `text` and a small `Kbd`, `sm` apart; inset `sm` from the pointer.
+**API.** `Tooltip::new(label).kbd(impl Into<Option<Kbd>>)`; `element.with_tooltip(Tooltip, cx)`
+on any element with an id (a blanket trait over gpui's `StatefulInteractiveElement`), which sets
+gpui's tooltip builder and show delay. `Tooltip` is also an `IntoElement`, for the gallery.
+**States.** hidden · shown. Pointer only: a tooltip never holds anything the keyboard user
+lacks, so it names an icon-only control and repeats its key.
+**Usage rule.** `IconButton` always has one; a `Button` takes one only to explain itself further
+(`.tooltip(text)`), since its key is already on it. Never put the only statement of a fact in a
+tooltip.
+
+**Gallery.** `examples/gallery_buttons.rs` binds a keymap and wires every button with
+`.action(..)`, so each chip there is resolved live and clicking or pressing the key reports the
+same action in the status bar; it shows every style × size with and without icon and chip, the
+disabled, selected and full-width states, an unbound action with no chip, icon buttons with their
+tooltips, and each `Kbd` spelling and tone. `kit_gallery`'s `controls` section is the overview.
+
 ---
 
 ## 7. What is deliberately not in the kit
@@ -1541,8 +1660,8 @@ same components as a static overview in both themes.
    adding it to §5.1 here.
 3. A new component gets its own module under `src/components/`, a `pub use` in
    `components/mod.rs`, an entry in §6 here, and a panel in the matching per-group gallery
-   (`gallery_structure`, `gallery_data`, `gallery_input`, `gallery_terminal`, `gallery_agent`, or
-   `gallery_board`) showing **every** state. `kit_gallery` remains the combined overview. If a
+   (`gallery_structure`, `gallery_data`, `gallery_input`, `gallery_buttons`, `gallery_terminal`,
+   `gallery_agent`, or `gallery_board`) showing **every** state. `kit_gallery` remains the combined overview. If a
    state is not in a gallery, it is not implemented.
 4. `cargo check -p fleet-ui-kit --examples` and
    `cargo run -p fleet-ui-kit --example kit_gallery` are the acceptance gate.

@@ -2039,6 +2039,76 @@ fn board_section(cx: &mut App, areas: &[Entity<TextInput>]) -> AnyElement {
     LAYOUT.section("board", &t, children)
 }
 
+/// The controls group in brief; `gallery_buttons` has every state, live against a keymap.
+fn controls_section(cx: &mut App) -> AnyElement {
+    let t = cx.theme().clone();
+    let kbd = |keys: &str| Kbd::parse(keys).unwrap_or_else(|error| panic!("{keys:?}: {error}"));
+    let children = vec![
+        LAYOUT.labeled(
+            "button",
+            &t,
+            strip(
+                &t,
+                vec![
+                    Button::new("kit-primary", "Create worktree")
+                        .style(ButtonStyle::Primary)
+                        .kbd(kbd("enter"))
+                        .into_any_element(),
+                    Button::new("kit-secondary", "Cancel")
+                        .kbd(kbd("escape"))
+                        .into_any_element(),
+                    Button::new("kit-ghost", "Board")
+                        .style(ButtonStyle::Ghost)
+                        .icon(Icon::GitBranch)
+                        .kbd(kbd("g b"))
+                        .into_any_element(),
+                    Button::new("kit-danger", "Delete anyway")
+                        .style(ButtonStyle::Danger)
+                        .kbd(kbd("shift-y"))
+                        .into_any_element(),
+                    Button::new("kit-compact", "Close")
+                        .size(ButtonSize::Compact)
+                        .kbd(kbd("ctrl-s x"))
+                        .into_any_element(),
+                    Button::new("kit-disabled", "Save")
+                        .kbd(kbd("ctrl-enter"))
+                        .disabled(true)
+                        .into_any_element(),
+                ],
+            ),
+        ),
+        LAYOUT.labeled(
+            "icon button · tooltip",
+            &t,
+            strip(
+                &t,
+                vec![
+                    IconButton::new("kit-refresh", Icon::RefreshCw, "Refresh")
+                        .kbd(kbd("r"))
+                        .into_any_element(),
+                    IconButton::new("kit-search", Icon::Search, "Filter")
+                        .style(ButtonStyle::Secondary)
+                        .kbd(kbd("/"))
+                        .into_any_element(),
+                    Tooltip::new("Refresh").kbd(kbd("r")).into_any_element(),
+                ],
+            ),
+        ),
+        LAYOUT.labeled(
+            "kbd",
+            &t,
+            strip(
+                &t,
+                ["ctrl-s a", "g b", "cmd-k", "shift-tab", "enter", "escape"]
+                    .into_iter()
+                    .map(|keys| kbd(keys).into_any_element())
+                    .collect(),
+            ),
+        ),
+    ];
+    LAYOUT.section("controls", &t, children)
+}
+
 impl Render for Gallery {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mode = cx.theme().mode;
@@ -2062,6 +2132,7 @@ impl Render for Gallery {
             structure_section(cx, filter_query),
             terminal_section(cx),
             input_section(cx, &fields),
+            controls_section(cx),
             board_section(cx, &areas),
             overlays_section(cx, dialog_branch, palette_query),
         ];

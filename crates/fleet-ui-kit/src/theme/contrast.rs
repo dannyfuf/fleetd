@@ -77,11 +77,47 @@ mod tests {
                     );
                 }
             }
-            let ratio = contrast_ratio(colors.accent_fill_text, colors.accent_fill);
-            assert!(
-                ratio >= CONTRAST_AA,
-                "{mode}: accent_fill_text on accent_fill is {ratio:.2}:1"
-            );
+            // A button label keeps its contrast through hover and press.
+            for (label_name, label, fill_name, fill) in [
+                (
+                    "accent_fill_text",
+                    colors.accent_fill_text,
+                    "accent_fill",
+                    colors.accent_fill,
+                ),
+                (
+                    "accent_fill_text",
+                    colors.accent_fill_text,
+                    "accent_fill_hover",
+                    colors.accent_fill_hover,
+                ),
+                (
+                    "accent_fill_text",
+                    colors.accent_fill_text,
+                    "accent_fill_active",
+                    colors.accent_fill_active,
+                ),
+                ("text_inverse", colors.text_inverse, "danger", colors.danger),
+                (
+                    "text_inverse",
+                    colors.text_inverse,
+                    "danger_fill_hover",
+                    colors.danger_fill_hover,
+                ),
+                (
+                    "text_inverse",
+                    colors.text_inverse,
+                    "danger_fill_active",
+                    colors.danger_fill_active,
+                ),
+                ("text", colors.text, "control_active", colors.control_active),
+            ] {
+                let ratio = contrast_ratio(label, fill);
+                assert!(
+                    ratio >= CONTRAST_AA,
+                    "{mode}: {label_name} on {fill_name} is {ratio:.2}:1"
+                );
+            }
         }
     }
 }
