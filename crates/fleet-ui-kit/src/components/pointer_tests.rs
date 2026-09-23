@@ -14,8 +14,8 @@ use gpui::{
 
 use crate::{
     components::{
-        Cycler, FuzzyItem, FuzzyList, ListView, Row, RowColumn, Segment, SegmentedControl, Switch,
-        Toggle, menu_key_bindings,
+        Cycler, FuzzyItem, FuzzyList, ListPointer, ListView, NavItem, Row, RowColumn, Segment,
+        SegmentedControl, Sidebar, SidebarSection, Switch, Toggle, menu_key_bindings,
     },
     harness::{self, HarnessTargetExt as _},
     text::Text,
@@ -484,5 +484,146 @@ fn a_decision_in_flight_reports_nothing(cx: &mut TestAppContext) {
     assert!(
         log.borrow().is_empty(),
         "an answer in flight is not sent twice"
+    );
+}
+
+/// Three sidebar items routed through one `ListPointer`, the second with a hover action, in a
+/// sidebar whose edge reports every width a drag asks for.
+struct PointerSidebar {
+    log: Log,
+    widths: Rc<RefCell<Vec<Pixels>>>,
+}
+
+impl Render for PointerSidebar {
+    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        harness::begin_frame(window);
+        let (select, open, menu) = (self.log.clone(), self.log.clone(), self.log.clone());
+        let pointer = ListPointer::new()
+            .on_select(move |ix, _, _| select.borrow_mut().push(Asked::Select(ix)))
+            .on_open(move |ix, _, _| open.borrow_mut().push(Asked::Open(ix)))
+            .on_menu(move |ix, _, _, _| menu.borrow_mut().push(Asked::Menu(ix)));
+        let widths = self.widths.clone();
+        div().flex().size_full().child(
+            Sidebar::new("pointer-sidebar")
+                .section(
+                    SidebarSection::new("Items").body(div().flex().flex_col().children(
+                        (0..3).map(|ix| {
+                            let item = NavItem::new(("nav", ix), "item").pointer(&pointer, ix);
+                            let item = if ix == 1 {
+                                item.hover_action(
+                                    div()
+                                        .w(px(20.0))
+                                        .h(px(10.0))
+                                        .harness_target_indexed("test.nav_action", ix),
+                                )
+                            } else {
+                                item
+                            };
+                            item.harness_target_indexed("test.nav", ix)
+                        }),
+                    )),
+                )
+                .on_resize(move |width, _, _| widths.borrow_mut().push(width))
+                .handle_target("test.edge"),
+        )
+    }
+}
+
+#[gpui::test]
+fn a_nav_item_selects_on_a_click_opens_on_a_double_click_and_asks_for_its_menu(
+    cx: &mut TestAppContext,
+) {
+    let log = Log::default();
+    let recorded = log.clone();
+    let mut cx = open(cx, move || PointerSidebar {
+        log,
+        widths: Rc::default(),
+    });
+
+    let second = centre(&mut cx, "test.nav[2]");
+    press(&mut cx, second, MouseButton::Left, 1);
+    press(&mut cx, second, MouseButton::Left, 2);
+    let first = centre(&mut cx, "test.nav[0]");
+    press(&mut cx, first, MouseButton::Right, 1);
+
+    assert_eq!(
+        *recorded.borrow(),
+        vec![
+            Asked::Select(2),
+            Asked::Select(2),
+            Asked::Open(2),
+            Asked::Select(0),
+            Asked::Menu(0),
+        ]
+    );
+}
+
+#[gpui::test]
+fn a_nav_items_hover_action_is_painted_only_while_the_pointer_is_on_it(cx: &mut TestAppContext) {
+    let mut cx = open(cx, || PointerSidebar {
+        log: Log::default(),
+        widths: Rc::default(),
+    });
+    let painted = |cx: &mut VisualTestContext| {
+        cx.update(|window, _| harness::painted(window))
+            .into_iter()
+            .any(|target| target.name.as_ref() == "test.nav_action[1]")
+    };
+
+    let away = centre(&mut cx, "test.nav[0]");
+    cx.simulate_mouse_move(away, None, Modifiers::none());
+    cx.run_until_parked();
+    assert!(!painted(&mut cx), "hidden while another item is hovered");
+
+    let over = centre(&mut cx, "test.nav[1]");
+    cx.simulate_mouse_move(over, None, Modifiers::none());
+    cx.run_until_parked();
+    assert!(painted(&mut cx), "shown on the hovered item");
+}
+
+#[gpui::test]
+fn dragging_the_sidebar_edge_reports_widths_clamped_to_the_drag_range(cx: &mut TestAppContext) {
+    let widths = Rc::new(RefCell::new(Vec::new()));
+    let reported = widths.clone();
+    let mut cx = open(cx, move || PointerSidebar {
+        log: Log::default(),
+        widths,
+    });
+    let metrics = Theme::dark().metrics;
+
+    let edge = centre(&mut cx, "test.edge");
+    cx.simulate_event(MouseDownEvent {
+        button: MouseButton::Left,
+        position: edge,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    for x in [260.0, 300.0, 900.0, 20.0] {
+        cx.simulate_mouse_move(point(px(x), edge.y), MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+    }
+    cx.simulate_event(MouseUpEvent {
+        button: MouseButton::Left,
+        position: point(px(20.0), edge.y),
+        modifiers: Modifiers::none(),
+        click_count: 1,
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        reported.borrow().last().copied(),
+        Some(metrics.sidebar_min_w),
+        "a drag past the leading side stops at the minimum"
+    );
+    assert!(
+        reported.borrow().contains(&px(300.0)),
+        "the width follows the pointer: {:?}",
+        reported.borrow()
+    );
+    assert!(
+        reported.borrow().contains(&metrics.sidebar_max_w),
+        "a drag far past the edge stops at the maximum: {:?}",
+        reported.borrow()
     );
 }

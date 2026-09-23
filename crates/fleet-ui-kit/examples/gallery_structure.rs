@@ -1,8 +1,9 @@
 //! Visual bench for the **structure** group of `fleet-ui-kit`.
 //!
 //! Every structural component, in every state it can be in, in both themes:
-//! `AppFrame`, `SplitLayout`, `TitleBar`, `CommandField`, `StatusButton`, `SwitcherButton`,
-//! `StatusBar`, `Pane`, `PaneHeader`, `Sheet`, `Dialog`, `Overlay`, `ToastStack`, `StepCard`, `Veil`,
+//! `AppFrame`, `SplitLayout`, `Sidebar` / `SidebarSection` / `NavItem`, `TitleBar`,
+//! `CommandField`, `StatusButton`, `SwitcherButton`, `StatusBar`, `Pane`, `PaneHeader`, `Sheet`,
+//! `Dialog`, `Overlay`, `ToastStack`, `StepCard`, `Veil`,
 //! `Banner`, `ModeWord` and `DaemonDot`.
 //!
 //! The floating layers are wired as **live layers of this window**, not as pictures of
@@ -76,6 +77,8 @@ struct StructureGallery {
     toasts: bool,
     veil: bool,
     focused_pane: usize,
+    /// The live demo sidebar's dragged width; `None` is `metrics.sidebar_w`.
+    sidebar_w: Option<Pixels>,
 }
 
 impl StructureGallery {
@@ -104,6 +107,7 @@ impl StructureGallery {
             toasts: false,
             veil: true,
             focused_pane: 0,
+            sidebar_w: None,
         }
     }
 
@@ -310,7 +314,7 @@ fn app_frame_section(cx: &mut App) -> AnyElement {
 fn split_section(cx: &mut App) -> AnyElement {
     let t = cx.theme().clone();
     let rail = |label: &str| {
-        Pane::fixed(t.metrics.rail_w)
+        Pane::fixed(t.metrics.sidebar_w)
             .raised(true)
             .header(PaneHeader::new(label.to_string()).total(6))
             .body(filler(&t, 4))
@@ -320,13 +324,13 @@ fn split_section(cx: &mut App) -> AnyElement {
         &t,
         vec![
             specimen(
-                "horizontal · leading fixed 240 (rail) · trailing flexes",
+                "horizontal · leading fixed 232 (sidebar) · trailing flexes",
                 &t,
                 stage(
                     &t,
                     px(160.0),
                     SplitLayout::horizontal()
-                        .leading_size(t.metrics.rail_w)
+                        .leading_size(t.metrics.sidebar_w)
                         .leading(rail("repos"))
                         .trailing(
                             Pane::new()
@@ -342,7 +346,7 @@ fn split_section(cx: &mut App) -> AnyElement {
                     &t,
                     px(160.0),
                     SplitLayout::horizontal()
-                        .leading_size(t.metrics.rail_w)
+                        .leading_size(t.metrics.sidebar_w)
                         .leading(rail("repos"))
                         .trailing(
                             SplitLayout::horizontal()
@@ -372,6 +376,168 @@ fn split_section(cx: &mut App) -> AnyElement {
                         .leading(filler(&t, 2))
                         .trailing(filler(&t, 3))
                         .divider(false),
+                ),
+            ),
+        ],
+    )
+}
+
+/// The Hub sidebar in every state: a scope row with the cursor, a repo with an issue chip, a
+/// clone running and one failed, the hover `⋯`, the Agents section's dots and chip, the
+/// collapsed icon column, and a live draggable edge.
+fn sidebar_section(width: Option<Pixels>, cx: &mut Context<StructureGallery>) -> AnyElement {
+    let t = cx.theme().clone();
+    let gallery = cx.entity().downgrade();
+    let more = |ix: usize| {
+        IconButton::new(("gallery-nav-more", ix), Icon::Ellipsis, "More actions")
+            .size(ButtonSize::Compact)
+    };
+    let count = |n: usize| Text::caption(n.to_string()).muted();
+    let dot = |tone: Tone| StatusDot::small(tone);
+    let repos = |collapsed: bool| {
+        let t = &t;
+        SidebarSection::new("Repositories")
+            .action(
+                IconButton::new("gallery-sidebar-clone", Icon::Plus, "Clone a repository")
+                    .size(ButtonSize::Compact),
+            )
+            .grow(true)
+            .body(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(t.space.xxs)
+                    .child(
+                        NavItem::new("g-all", "All repositories")
+                            .leading(Icon::LayoutGrid.el().size(IconSize::Small))
+                            .trailing(count(4))
+                            .selected(true)
+                            .cursor(true)
+                            .collapsed(collapsed),
+                    )
+                    .child(
+                        NavItem::new("g-api", "acme/api")
+                            .leading(dot(Tone::Muted))
+                            .trailing(Chip::new().text("1 issue").tone(Tone::Warning).filled(true))
+                            .trailing(count(3))
+                            .hover_action(more(1))
+                            .collapsed(collapsed),
+                    )
+                    .child(
+                        NavItem::new("g-web", "acme/web")
+                            .leading(dot(Tone::Success))
+                            .trailing(count(1))
+                            .hover_action(more(2))
+                            .collapsed(collapsed),
+                    )
+                    .child(
+                        NavItem::new("g-nixos", "nixos")
+                            .leading(
+                                Icon::LoaderCircle
+                                    .el()
+                                    .size(IconSize::Small)
+                                    .spinning(true)
+                                    .id("g-nixos-spin"),
+                            )
+                            .tone(Tone::Muted)
+                            .trailing(Text::caption("cloning 40%").muted())
+                            .progress(Some(40))
+                            .collapsed(collapsed),
+                    )
+                    .child(
+                        NavItem::new("g-old", "old-api")
+                            .leading(Icon::CircleX.el().size(IconSize::Small).tone(Tone::Danger))
+                            .trailing(Text::caption("failed").faint())
+                            .hover_action(more(4))
+                            .collapsed(collapsed),
+                    ),
+            )
+    };
+    let agents = |collapsed: bool| {
+        SidebarSection::new("Agents").body(
+            div()
+                .flex()
+                .flex_col()
+                .child(
+                    NavItem::new("g-agent-0", "codex · apply the README fix")
+                        .leading(dot(Tone::Warning))
+                        .trailing(
+                            Chip::new()
+                                .text("needs you")
+                                .tone(Tone::Warning)
+                                .filled(true),
+                        )
+                        .collapsed(collapsed),
+                )
+                .child(
+                    NavItem::new("g-agent-1", "claude · spike")
+                        .leading(dot(Tone::Success))
+                        .collapsed(collapsed),
+                )
+                .child(
+                    NavItem::new("g-agent-2", "claude · agent window")
+                        .leading(dot(Tone::Muted))
+                        .collapsed(collapsed),
+                ),
+        )
+    };
+    let footer = |collapsed: bool| {
+        IconButton::new(
+            ("gallery-sidebar-collapse", usize::from(collapsed)),
+            if collapsed {
+                Icon::PanelLeftOpen
+            } else {
+                Icon::PanelLeftClose
+            },
+            if collapsed {
+                "Expand the sidebar"
+            } else {
+                "Collapse the sidebar"
+            },
+        )
+        .size(ButtonSize::Compact)
+    };
+    LAYOUT.section(
+        "Sidebar — sections of nav items on the chrome ground; drag the edge, 200–320",
+        &t,
+        vec![
+            specimen(
+                "expanded, focused · the edge is live: drag it",
+                &t,
+                stage(
+                    &t,
+                    px(360.0),
+                    div().flex().h_full().child(
+                        Sidebar::new("gallery-sidebar")
+                            .width(width)
+                            .focused(true)
+                            .section(repos(false))
+                            .section(agents(false))
+                            .footer(footer(false))
+                            .on_resize(move |width, _, cx| {
+                                gallery
+                                    .update(cx, |gallery, cx| {
+                                        gallery.sidebar_w = Some(width);
+                                        cx.notify();
+                                    })
+                                    .ok();
+                            }),
+                    ),
+                ),
+            ),
+            specimen(
+                "collapsed: 44 px of icons, labels as tooltips",
+                &t,
+                stage(
+                    &t,
+                    px(360.0),
+                    div().flex().h_full().child(
+                        Sidebar::new("gallery-sidebar-collapsed")
+                            .collapsed(true)
+                            .section(repos(true))
+                            .section(agents(true))
+                            .footer(footer(true)),
+                    ),
                 ),
             ),
         ],
@@ -1462,6 +1628,7 @@ impl Render for StructureGallery {
         let sections = vec![
             app_frame_section(cx),
             split_section(cx),
+            sidebar_section(self.sidebar_w, cx),
             title_bar_section(cx),
             status_bar_section(cx),
             pane_section(cx, focused_pane, filter_query),

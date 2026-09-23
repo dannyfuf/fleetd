@@ -682,8 +682,16 @@ pub struct Metrics {
     pub avatar_size: Pixels,
     /// 240 px repos rail (drag range 200-320).
     pub rail_w: Pixels,
-    /// 232 px sidebar (repos and agents).
+    /// 232 px sidebar (repositories and agents): its width until the user drags its edge.
     pub sidebar_w: Pixels,
+    /// 200 px: the narrowest a dragged sidebar goes.
+    pub sidebar_min_w: Pixels,
+    /// 320 px: the widest a dragged sidebar goes.
+    pub sidebar_max_w: Pixels,
+    /// 44 px collapsed sidebar: one column of icons (`H`).
+    pub sidebar_collapsed_w: Pixels,
+    /// 6 px grab strip on a resizable edge, inside the region it resizes.
+    pub resize_handle_w: Pixels,
     /// 344 px detail panel.
     pub detail_w: Pixels,
     /// 736 px right-side sheet showing a full detail (a board card).
@@ -816,6 +824,10 @@ impl Default for Metrics {
             avatar_size: px(20.0),
             rail_w: px(240.0),
             sidebar_w: px(232.0),
+            sidebar_min_w: px(200.0),
+            sidebar_max_w: px(320.0),
+            sidebar_collapsed_w: px(44.0),
+            resize_handle_w: px(6.0),
             detail_w: px(344.0),
             sheet_w_detail: px(736.0),
             sheet_detail_props_w: px(268.0),

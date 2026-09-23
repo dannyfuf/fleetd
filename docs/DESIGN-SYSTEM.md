@@ -280,7 +280,7 @@ list below is the complete inventory, in px unless marked `ch`; a unit test in
 | Group | Tokens |
 | --- | --- |
 | Window chrome | `title_bar_h 44` · `status_bar_h 28` · `traffic_light_inset 84` · `command_field_w 340` · `filter_field_w 220` · `monogram_size 18` · `mode_word_w 84` · `banner_h 28` · `frame_banner_h 40` · `strip_h 22` |
-| Layout columns | `sidebar_w 232` · `rail_w 240` · `detail_w 344` · `detail_overlay_w 320` · `sheet_w 440` · `sheet_expanded_w 640` · `sheet_w_detail 736` · `sheet_detail_props_w 268` · `first_run_w 560` |
+| Layout columns | `sidebar_w 232` · `rail_w 240` · `detail_w 344` · `detail_overlay_w 320` · `sheet_w 440` · `sheet_expanded_w 640` · `sheet_w_detail 736` · `sheet_detail_props_w 268` · `first_run_w 560` · `sidebar_min_w 200` · `sidebar_max_w 320` · `sidebar_collapsed_w 44` · `resize_handle_w 6` |
 | Rows and headers | `row_h 30` · `row_h_comfortable 44` · `pane_header_h 30` · `section_header_h 20` · `palette_row_h 34` · `palette_tile 22` · `job_row_h 44` · `progress_bar_h 4` |
 | Controls | `button_h 30` · `button_h_compact 26` · `kbd_h 18` · `kbd_h_small 16` · `chip_h 22` · `tile_chip_h 18` · `avatar_size 20` · `text_field_h 36` · `field_status_h 18` · `number_field_w 96` · `segment_h 24` · `switch_w 34` · `switch_h 20` · `checkbox_size 16` · `step_badge 28` |
 | Dialogs and floating layers | `dialog_w 560` · `confirm_compact_w 480` · `dialog_header_h 44` · `dialog_footer_h 44` · `palette_w 640` · `palette_top 120` · `prefix_menu_w 900` · `palette_input_h 44` · `overlay_help_w 640` · `toast_w 320` · `toast_inset 12` · `scroll_pill_w 176` · `menu_min_w 240` · `alert_tile 34` |
@@ -293,7 +293,7 @@ list below is the complete inventory, in px unless marked `ch`; a unit test in
 (44) is the hub-list row. `title_bar_h` is the one top row of every window; `command_field_w` is
 the palette field centred in it and `monogram_size` the context switcher's letter tile. `filter_field_w` is the `FilterField` in a page header's toolbar.
 `mode_word_w` is the embedded Git UI's status word only — Fleet's own chrome draws no mode word.
-`sidebar_w` is the redesigned sidebar; `rail_w` stays while the repos rail is on screen. `kbd_h_small` is the
+`sidebar_w` is the Hub sidebar's width until its edge is dragged, within `sidebar_min_w`–`sidebar_max_w`; `sidebar_collapsed_w` is its icon column (`H`) and `resize_handle_w` the grab strip on a draggable edge; `rail_w` stays while the repos rail is on screen. `kbd_h_small` is the
 key chip inside a compact button or a menu item. `segment_h` plus a `SegmentedControl`'s `xxs`
 inset and hairline on each side is exactly `row_h`, so the control sits in a settings row or a pane
 header without growing it; a `Switch` knob is `switch_h` less an `xxs` inset on each side.
@@ -397,7 +397,7 @@ if let Some(bytes) = fleet_ui_kit::kit_asset(path) { return Ok(Some(Cow::Borrowe
 An absent asset must return `Ok(None)`, never `Err`: `svg()` logs nothing, so an erroring source
 turns an invisible icon into an invisible crash.
 
-### 5.1 The closed icon set (82 glyphs)
+### 5.1 The closed icon set (85 glyphs)
 
 | Purpose | Icons |
 | --- | --- |
@@ -409,7 +409,7 @@ turns an invisible icon into an invisible crash.
 | Keep-alive | `zap` `bot` `sparkles` `server` `file-pen` |
 | Terminal | `terminal` `square-terminal` `square-kanban` `chevrons-up` `command` `maximize-2` `plus` |
 | Dialogs | `trash` `scissors` `power` `x` `boxes` `arrow-right-left` `settings-2` `hourglass` |
-| Chrome | `flag` `circle-arrow-up` `circle-arrow-down` `search` `clipboard-check` `delete` `ellipsis` `check` `minus` `chevron-left` `chevron-right` `chevron-down` `sailboat` |
+| Chrome | `flag` `circle-arrow-up` `circle-arrow-down` `search` `clipboard-check` `delete` `ellipsis` `check` `minus` `chevron-left` `chevron-right` `chevron-down` `sailboat` `layout-grid` `panel-left-close` `panel-left-open` |
 | Native agent | `brain` `wrench` `square-pen` `paperclip` `minimize-2` `undo-2` `copy` `external-link` `square` `square-check` `shield` `list-checks` |
 
 Two Lucide renames the UX spec predates: `circle-help` is now **`circle-question-mark`**, and
@@ -477,9 +477,10 @@ row geometry, a scroll machine, and — for the composer — the `TextInput` it 
 (§6.8), which owns a `FocusHandle` and a highlight while it is open. The surface holds the first
 three; a menu is held by the wrapper that opened it (`PopoverMenu`, `ContextMenu`, `Dropdown`) in
 gpui element state keyed by the wrapper's id, so a screen keeps no field per menu. Nothing else
-in the kit implements `Render` except the view behind `Tooltip` (§6.8), which holds no state at
-all: gpui's tooltip slot takes an `AnyView`, so the tooltip is built as a throwaway entity each
-time it opens.
+in the kit implements `Render` except two views that hold no state at all: the one behind
+`Tooltip` (§6.8), because gpui's tooltip slot takes an `AnyView`, so the tooltip is built as a
+throwaway entity each time it opens; and the empty view a `Sidebar` (§6.2) hands gpui while its
+edge is dragged, because gpui draws a view under the pointer for every drag.
 
 Legend for the "states" rows: **default · focused · selected · disabled · loading · error**.
 A component that cannot be in a state says so rather than pretending.
@@ -580,9 +581,48 @@ a dialog or sheet is a nested `deferred` and paints after that surface regardles
 **Purpose.** A fixed region, a hairline, and a flexible region.
 **API.** `SplitLayout::{horizontal, vertical}().leading(..).trailing(..).leading_size(Pixels)
 .trailing_size(Pixels).divider(bool)`.
-**Usage rule.** The Hub is two nested splits: `rail | (list | detail)`. Fix the **rail** and the
-**detail panel**, never the list — that is what makes "the rail never moves when `i` opens the
-detail panel" a property of the layout instead of a convention.
+**Usage rule.** The Hub is two nested splits: `sidebar | (list | detail)`. Fix the **sidebar**
+and the **detail panel**, never the list — that is what makes "the sidebar never moves when `i`
+opens the detail panel" a property of the layout instead of a convention.
+
+#### `Sidebar`
+**Purpose.** The Hub's left column on the `chrome` ground: labelled sections of `NavItem`s, a
+control pinned to its foot, and a trailing edge the pointer can drag.
+**API.** `Sidebar::new(id).width(Option<Pixels>).collapsed(bool).focused(bool)
+.section(SidebarSection).footer(impl IntoElement).on_resize(Fn(Pixels, &mut Window, &mut App))
+.handle_target(name)`; `section` appends.
+**States.** expanded (`width`, else `sidebar_w`; clamped to `sidebar_min_w`–`sidebar_max_w`) ·
+collapsed (`sidebar_collapsed_w` of icons, section titles hidden, labels as tooltips, no drag
+edge) · focused (the 2 px pane ring) · resizable (a `resize_handle_w` strip inside the trailing
+edge with the column-resize cursor; a drag reports each clamped width to `on_resize`).
+**Usage rule.** The caller owns the width and the collapsed flag and passes them down each frame;
+the sidebar only reports a drag. The one gpui `Render` it adds is the empty view gpui draws
+under the pointer during a drag, which holds nothing but which sidebar is being resized.
+
+#### `SidebarSection`
+**Purpose.** One group of a `Sidebar`: a sentence-case title (`Text::sentence_label`) with an
+optional control at its end — `Repositories  +` — over its items.
+**API.** `SidebarSection::new(title).action(impl IntoElement).header(impl IntoElement)
+.body(impl IntoElement).grow(bool)`.
+**Usage rule.** `grow` gives a section the height the others leave, so its list scrolls inside
+it (the repositories); the rest keep their natural height. `header` replaces the title row in
+place for a live editor (the filter bar). Hide a section with nothing in it rather than drawing
+an empty title.
+
+#### `NavItem`
+**Purpose.** One sidebar row: leading icon or dot, label, trailing facts (a chip, a count).
+**API.** `NavItem::new(id, label).leading(..).trailing(..).hover_action(..).progress(Option<u8>)
+.tone(Tone).selected(bool).cursor(bool).collapsed(bool).pointer(&ListPointer, ix)`; `trailing`
+appends.
+**States.** default (secondary label) · hover (`row_hover`) · selected (`row_selected`, default
+label) · cursor (the 2 px bar) · hover action (the `⋯` trigger takes the trailing slot's place
+while hovered) · progress (a `progress_bar_h` bar along the foot) · collapsed (the leading
+element alone, the label as a tooltip).
+**Usage rule.** Always `row_h` tall and `radii.control` round, so a sidebar list can be a uniform
+`ListView`; never grow a second line. `pointer` routes presses through the list's `ListPointer`:
+a click selects, a double-click opens, a right-click selects and shows the menu (UX-SPEC §5.1).
+Every action behind `hover_action` also has its key and the right-click menu. A content list
+row with columns is a `Row`, not a `NavItem`.
 
 #### `TitleBar`
 **Purpose.** The one 44 px row at the top of every window: where you are, a way to search or run
@@ -628,7 +668,7 @@ command menu. A healthy daemon is a green dot and `fleetd`, nothing more.
 **API.** `Pane::{new, fixed(Pixels)}().header(..).body(..).footer(..).focused(bool)
 .width(Pixels).border(PaneBorder).raised(bool).scroll_thumb(offset: f32, visible: f32)`.
 **States.** default · focused (2 px ring) · scrolled (3 px thumb).
-**Usage rule.** `Pane::fixed` for the 240 px rail and the 344 px detail panel; `Pane::new` for
+**Usage rule.** `Pane::fixed` for the 344 px detail panel; `Pane::new` for
 the list, which must flex. Only one pane in a screen is `focused` at a time.
 
 #### `PaneHeader`

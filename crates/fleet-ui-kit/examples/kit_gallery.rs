@@ -1425,6 +1425,19 @@ fn structure_section(cx: &mut App, filter_query: Entity<TextInput>) -> AnyElemen
                 .action(Button::new("kit-board-new", "New card").style(ButtonStyle::Primary)),
         ),
         LAYOUT.labeled(
+            "sidebar · expanded / collapsed (drag and hover: gallery_structure)",
+            &t,
+            box_of(
+                &t,
+                px(240.0),
+                div()
+                    .flex()
+                    .h_full()
+                    .child(kit_sidebar("kit-sidebar", false, &t))
+                    .child(kit_sidebar("kit-sidebar-collapsed", true, &t)),
+            ),
+        ),
+        LAYOUT.labeled(
             "filter field · retained / clearable, narrow / editing / no match",
             &t,
             strip(
@@ -1490,6 +1503,72 @@ fn structure_section(cx: &mut App, filter_query: Entity<TextInput>) -> AnyElemen
         ),
     ];
     LAYOUT.section("structure", &t, children)
+}
+
+/// A sidebar with a scope row, a repo carrying an issue chip, a clone running and an agent.
+fn kit_sidebar(id: &'static str, collapsed: bool, t: &Theme) -> Sidebar {
+    Sidebar::new(id)
+        .collapsed(collapsed)
+        .focused(!collapsed)
+        .section(
+            SidebarSection::new("Repositories")
+                .action(
+                    IconButton::new((id, 0usize), Icon::Plus, "Clone a repository")
+                        .size(ButtonSize::Compact),
+                )
+                .grow(true)
+                .body(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(t.space.xxs)
+                        .child(
+                            NavItem::new((id, 1usize), "All repositories")
+                                .leading(Icon::LayoutGrid.el().size(IconSize::Small))
+                                .trailing(Text::caption("4").muted())
+                                .selected(true)
+                                .cursor(true)
+                                .collapsed(collapsed),
+                        )
+                        .child(
+                            NavItem::new((id, 2usize), "acme/api")
+                                .leading(StatusDot::small(Tone::Muted))
+                                .trailing(
+                                    Chip::new().text("1 issue").tone(Tone::Warning).filled(true),
+                                )
+                                .trailing(Text::caption("3").muted())
+                                .collapsed(collapsed),
+                        )
+                        .child(
+                            NavItem::new((id, 3usize), "nixos")
+                                .leading(
+                                    Icon::CircleX.el().size(IconSize::Small).tone(Tone::Danger),
+                                )
+                                .trailing(Text::caption("cloning 40%").muted())
+                                .progress(Some(40))
+                                .collapsed(collapsed),
+                        ),
+                ),
+        )
+        .section(
+            SidebarSection::new("Agents").body(
+                NavItem::new((id, 4usize), "claude · spike")
+                    .leading(StatusDot::small(Tone::Success))
+                    .collapsed(collapsed),
+            ),
+        )
+        .footer(
+            IconButton::new(
+                (id, 5usize),
+                if collapsed {
+                    Icon::PanelLeftOpen
+                } else {
+                    Icon::PanelLeftClose
+                },
+                "Collapse the sidebar",
+            )
+            .size(ButtonSize::Compact),
+        )
 }
 
 fn terminal_section(cx: &mut App) -> AnyElement {
