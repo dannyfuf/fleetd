@@ -866,12 +866,11 @@ impl AppState {
             .collect()
     }
 
-    /// Every job the panel shows, in its filtered snapshot order.
+    /// Every job the panel shows, in the order it draws them (`JobFilter::visible`).
     fn job_rows(&self, snapshot: &fleet_proto::snapshot::Snapshot) -> Vec<RowSnapshot> {
-        snapshot
-            .jobs
-            .iter()
-            .filter(|job| self.jobs_panel.filter.matches(job))
+        self.jobs_panel
+            .filter
+            .visible(&snapshot.jobs)
             .map(|job| {
                 let mut marks = Vec::new();
                 if job.cancellable {

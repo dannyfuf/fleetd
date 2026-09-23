@@ -1,53 +1,100 @@
-# KEYMAP.md §Jobs panel (`J`) — open, expand a log, collapse it, close restoring prior focus
+# KEYMAP.md §Jobs panel (`J`) · UX-SPEC.md §3.7 — the job actions by key and by pointer: open,
+# move, expand a log and collapse it, filter, retry a failure, close restoring the prior focus.
 #
-# Two successful runner-side injections deterministically fill the live daemon's in-memory job
-# registry; preset startup work is deliberately not part of this scenario's precondition.
-# `Esc` is the interesting key here — it collapses an expanded log and only closes the panel on
-# the second press, which is checked by asserting the panel is *still* open in between.
+# Runner-side injections deterministically fill the live daemon's in-memory job registry; preset
+# startup work (`Inspect worktrees`, `Prepare copies for …`) lands between them in an order the
+# daemon does not promise, so no assertion here names a finished row by position. The panel
+# draws live and failed jobs above the "Finished" group, which is what makes the failure row 0.
 fixture: busy
 job success
 job success
+job failure
 await idle 30000
-await lists.jobs.rows[0] exists 30000
+await lists.jobs.rows[2] exists 30000
 # Injecting jobs creates worktrees and follows the newest row. Pin the prior focus explicitly.
 key g g
 await focused == worktrees.row[0]
 assert screen == Hub && overlay absent && focused == worktrees.row[0]
 
-# `J` opens the panel. It is an overlay: its own key context, its own focus owner.
+# `J` opens the panel. It is an overlay: its own key context, its own focus owner. The failure
+# is row 0, expanded inline with its buttons.
 key J
 await overlay == Jobs
 assert mode == Jobs && key_contexts[0] == Jobs && focused == jobs.row[0]
 assert lists.jobs.selected exists && lists.jobs.rows[0].id ~= "^job-"
+assert lists.jobs.rows[0].badges[0] == failed && lists.jobs.rows[1].badges[0] == succeeded
+assert targets["jobs.row[0].retry"] exists && targets["jobs.row[0].log"] exists
+assert targets["jobs.filter[0]"] exists && targets["jobs.filter[3]"] exists
 shot jobs
 dump jobs
 
 # Moving the panel cursor must move both the focus target and the selected projected row.
 key j
 await focused == jobs.row[1]
-assert lists.jobs.selected.label ~= "^Create acme/api#injected-[01]$"
+assert lists.jobs.selected.badges[0] == succeeded
+assert lists.jobs.selected.label ~= "^(Create acme/api#injected-[01]|Prepare copies for acme/api|Inspect worktrees)$"
+
+# A press on a row selects it, exactly as `j`/`k` would.
+click jobs.row[0]
+await focused == jobs.row[0]
+assert lists.jobs.selected.badges[0] == failed
 
 # `Enter` expands the selected job's log; the panel stays open ...
 key enter
-await idle
+await targets["jobs.log.back"] exists
 assert overlay == Jobs && mode == Jobs && key_contexts[0] == Jobs
+shot log
 dump expanded
 
 # ... `Esc` collapses the log and the panel is *still* open ...
 key escape
-await idle
-assert overlay == Jobs && mode == Jobs && focused == jobs.row[1]
-assert lists.jobs.selected.label ~= "^Create acme/api#injected-[01]$"
+await targets["jobs.log.back"] absent
+assert overlay == Jobs && mode == Jobs && focused == jobs.row[0]
 
-# All injected jobs are finished, so the running filter leaves no projected rows.
+# ... and the pointer does the same: the row's Show log, then the log's Back.
+click jobs.row[0].log
+await targets["jobs.log.back"] exists
+click jobs.log.back
+await targets["jobs.log.back"] absent
+assert overlay == Jobs && focused == jobs.row[0]
+
+# The filter is a segmented control, and `f` still cycles it: Done → All.
+click jobs.filter[3]
+await lists.jobs.filter == "done"
+assert lists.jobs.rows[0].badges[0] == succeeded && overlay == Jobs
 key f
-await lists.jobs.rows[0] absent
-assert lists.jobs.filter == "running"
-assert lists.jobs.selected absent && overlay == Jobs
+await lists.jobs.rows[3] exists
+assert lists.jobs.rows[0].badges[0] == failed
 
-# ... and `q` closes it, restoring the pane, row and mode the Hub had before.
+# Retry by pointer: the Failed segment leaves the one failure at row 0; its Retry submits the
+# same clone again, which fails the same way, so the segment grows a second row.
+click jobs.filter[2]
+await lists.jobs.filter == "failed"
+assert lists.jobs.rows[0].badges[0] == failed && lists.jobs.rows[1] absent
+click jobs.row[0].retry
+await lists.jobs.rows[1] exists 30000
+assert lists.jobs.rows[1].badges[0] == failed
+
+# `q` closes it, restoring the pane, row and mode the Hub had before.
 key q
 await overlay absent
 assert screen == Hub && mode == Normal && hub_pane == List && focused == worktrees.row[0]
 dump closed
+
+# The Running segment: `job long` is a post-create hook run, which the daemon cannot stop, so
+# its row offers no Cancel at all — an action that cannot work here is hidden, never greyed.
+# (It also creates a worktree the Hub follows, which is why the focus check above comes first.)
+job long
+key J
+await overlay == Jobs
+click jobs.filter[1]
+await lists.jobs.rows[0] exists 20000
+assert lists.jobs.filter == "running" && lists.jobs.rows[0].badges[0] == running
+assert targets["jobs.row[0].cancel"] absent && targets["jobs.row[0]"] exists
+shot running
+
+# The ✕ closes it by pointer, through the same `jobs::Close`.
+click sheet.close
+await overlay absent
+assert screen == Hub && mode == Normal
 quit

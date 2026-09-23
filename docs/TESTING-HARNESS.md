@@ -265,9 +265,11 @@ on a board that may not carry automation at all — a context board, or a board 
 answer to its backend. The elapsed time inside a `card.runs` label is as of the last projection:
 nothing keys on the wall clock, so a scenario awaits a row or a mark, never a duration.
 
-`lists.jobs.rows` is the row set accepted by the Jobs panel's current filter, and
-`lists.jobs.selected` is the row at the panel cursor within that filtered set. Thus
-`jobs.row[N]` and `lists.jobs.rows[N]` address the same job.
+`lists.jobs.rows` is the row set accepted by the Jobs panel's current filter, in the order the
+panel draws it — live and failed jobs first, then the "Finished" group (succeeded and cancelled),
+each in the daemon's order — and `lists.jobs.selected` is the row at the panel cursor within that
+filtered set. Thus `jobs.row[N]` and `lists.jobs.rows[N]` address the same job.
+`lists.jobs.filter` is `""` for All, then `running`, `failed` or `done`.
 
 The snapshot is memoised behind a key naming every input its builder reads, and its revision moves
 only when the projected content actually differs — a repainted frame that changes nothing does not
@@ -296,6 +298,7 @@ The names Fleet paints today, by surface:
 | Filter and palette | `filter.input`, `palette.input`, `palette.row[N]` (one flat numbering across the Go / Do / Context sections) |
 | Dialogs | `dialog.field[N]`, `dialog.row[N]`, `dialog.close`, `dialog.button[N]` |
 | Sheets | `sheet.close` |
+| Jobs panel | `jobs.row[N].retry`, `jobs.row[N].cancel`, `jobs.row[N].log`, `jobs.filter[N]`, `jobs.clear`, `jobs.more`, `jobs.log.back`, `jobs.log.follow`, `jobs.log.end` |
 | Tabs | `tabs.tab[N]` for a process tab, `agents.tabs.tab[N]` for a conversation, sharing one numbering |
 | Toasts and errors | `toasts.toast[N]` (0 is the oldest, matching the `toasts` array), `sticky_error.retry` |
 | Menus | `menu.item[N]`: the items of the one open kit `Menu` (a ⋯, `+`, right-click or dropdown menu), numbered over the visible items in order, separators and headers skipped |
@@ -335,7 +338,18 @@ shown.
 
 `dialog.close` is the close ✕ in every dialog's header; clicking it runs the action `Esc` runs in
 that dialog, and so does a click on the scrim outside the card. `sheet.close` is the same ✕ on a
-dismissable sheet (the Jobs panel). `dialog.button[N]` is a button in a dialog's footer, `0`
+dismissable sheet (the Jobs panel).
+
+The Jobs panel's buttons are named by the row they act on, and each one first puts the cursor on
+that row: `jobs.row[N].retry` (a retryable failure), `jobs.row[N].log` (Show log, on a failure)
+and `jobs.row[N].cancel` (a cancellable live job; it shows only while its row is hovered or
+selected, so a scenario selects the row before clicking it). A button whose action cannot work on that job is not
+painted, so its name is absent rather than disabled. `jobs.filter[N]` is the filter's segment —
+`0` All, `1` Running, `2` Failed, `3` Done. `jobs.clear` is Clear finished (absent with nothing to
+clear), `jobs.more` the ⋯ holding Cancel all (absent with nothing cancellable). While a log is
+open the header is the log's toolbar: `jobs.log.back`, `jobs.log.follow`, `jobs.log.end`.
+
+`dialog.button[N]` is a button in a dialog's footer, `0`
 leftmost, painted by `Dialog::actions`: a dialog still on the legacy footer, whose `Dialog::primary`
 renders a label rather than a control, paints none, so a scenario may target `dialog.button[N]`
 only in a dialog that has been moved onto the button footer.

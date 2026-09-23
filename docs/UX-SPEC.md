@@ -989,56 +989,73 @@ a centered modal would hide exactly the rows the jobs are about. A close ✕ sit
 the header, and a click anywhere in the band outside the sheet closes it; both dispatch `jobs::Close`,
 the action `Esc` runs when no log is expanded (ADR 0023).
 
+The mockup dims the rows behind the sheet; Fleet deliberately does not (no scrim), because those
+rows are what the jobs are about and must stay readable.
+
 ```
                               ┌──────────────────────────────────────────────┐
-                              │ JOBS      ⟳2 running · ✕1 failed · ✓5 done   │ 30
-                              │ ~/.fleet/logs/jobs/j-8f3c.log            y   │ 22
+                              │ Jobs  1 running · 1 failed  Clear finished D ⋯│ ✕
+                              │ [All 7] Running 1  Failed 1  Done 5           │
                               ├──────────────────────────────────────────────┤
-                              │▌⟳ clone   nixos                 0:42     40% │ 44
-                              │   Receiving objects: 40% (81/202)            │
-                              │ ⟳ hooks   buk/payroll#feat-rut  0:08         │
-                              │   pnpm install (2/3)                         │
+                              │▌⟳ Clone acme/infra               0:42 Cancel c│
+                              │   ██████████████░░░░░░░░░░░░░░░░░░░░░    64% │
+                              │   Receiving objects: 64% (5121/8002)        │
+                              │ ✕ Run hooks for acme/api#broken          0:07 │
+                              │   ┌ npm install exited with code 1 ────────┐ │
+                              │   └ ERR! peer dep react@18 conflicts … ────┘ │
+                              │   [Retry R] [Show log ⏎] Copy log path y     │
+                              │ Finished                                     │
+                              │ ✓ Create acme/api#injected-1     2s · 1m ago │
+                              │ ✓ Inspect worktrees              1s · 3m ago │
                               ├──────────────────────────────────────────────┤
-                              │ ✕ prs     review                1m       R   │ 44
-                              │   gh: HTTP 502 upstream connect error        │
-                              ├──────────────────────────────────────────────┤
-                              │ ✓ prune   buk/www          deleted 2    12s  │ 30
-                              │ ⊘ fetch   dannyfuf/fleetd  cancelled    —    │ 30
-                              ├──────────────────────────────────────────────┤
-                              │ ⏎ log · c cancel · R retry · y copy log path │ 24
-                              │ f filter · D dismiss · X cancel all · Esc    │ 24
+                              │ Jobs run in fleetd and survive closing this  │
+                              │ window.                                      │
                               └──────────────────────────────────────────────┘
 ```
 
 | Element | Content | Position | Why here | Why needed |
 | --- | --- | --- | --- | --- |
-| Header counts | `⟳n running · ✕n failed · ✓n done` | top | the count is why you opened it | `JobManager` |
-| Log path | `~/.fleet/logs/jobs/<id>.log` of the selected job, verbatim, mono 11 px | header row 2 | makes the failure survivable **outside** the app; `y` copies it | ARCHITECTURE `FLEET_HOME` |
+| Title and summary | `Jobs` + `n running · n failed`, zero-suppressed, the failed count in `danger` | header row 1 | the count is why you opened it | `JobManager` |
+| Clear finished · ⋯ | `Clear finished D` (hidden with nothing to clear); ⋯ holds `Cancel all X`, danger, behind the existing confirm (hidden with nothing cancellable) | header row 1, right | the panel-wide verbs sit on the panel, the row verbs on the row | [A19] |
+| Filter | segmented `All / Running / Failed / Done`, each with its count (a segment says `0` rather than vanish); `f` still cycles it | header row 2 | a filter you can see and click, not a hidden cycle | `Job.status` |
 | Status glyph | `clock` queued · `loader-circle` running · `circle-stop` cancelling · `circle-slash` cancelled · `circle-check` done · `circle-x` failed | col 0 | — | `Job.status` |
-| Kind | fixed 7-ch slug: `clone`, `pool`, `hooks`, `prune`, `create`, `delete`, `fetch`, `prs`, `inspect`, `update`, `import` | col 1, 56 px | fixed width makes the column scannable as a shape | §6 job table |
-| Target | `RepoId` or `WorktreeId` — the real domain id | col 2, flex | swarm's footer got this wrong (`hot-copy:<repo>` matched no row) | `Job.target` |
-| Elapsed | `m:ss`, shown after 30 s | col 3, 6 ch right | — | `Job` timestamps |
-| Progress | percent when parseable | col 4, 4 ch right | — | last progress line |
-| Progress sub-line | last stdout line, 1 line, `fg.muted` 11 px, tail-truncated | row 2 of the item | the single most reassuring artifact for a long job, and the only way to see a stuck clone | §6 "last progress line" |
+| Sentence | the job as a sentence: verb phrase + the real domain id in mono (`Clone acme/infra`, `Create acme/api#injected-0`, `Run hooks for acme/api#broken`). The daemon's title is used when it ends in the job's target; otherwise the kind's verb phrase (`Clone`, `Prepare copies for`, `Run hooks for`, `Inspect worktrees`, …) | col 1, flex | reads as what is happening; the mono id still matches the row it is about (swarm's `hot-copy:<repo>` matched nothing) | `Job.kind`, `.target`, `.title` |
+| Time | running: `m:ss` after 30 s; finished: `2s · 1m ago` (duration · age); cancelled: the age | right | — | `Job` timestamps |
+| Progress | running only: a bar with its percent when the output states one (no bar otherwise), then the last stdout line, muted mono, tail-truncated | under the sentence | the single most reassuring artifact for a long job, and the only way to see a stuck clone | last progress line |
+| Cancel | `Cancel c`, on a cancellable live row, shown while the row is hovered or selected | right | the button sits on the row it acts on | `Job.cancellable` |
+| Inline error | failed only: the error's first line in the danger wash, the last output line under it | under the sentence | the failure is read without opening the log | `JobStatus::Failed.error` |
+| Failure actions | `Retry R` (primary, when retryable) · `Show log ⏎` · `Copy log path y` | under the error | every key lives on the button it triggers | `Job.retryable`, `log_path` |
+| Finished group | succeeded and cancelled jobs, one quiet line each (sentence in `text_secondary`), under a `Finished` label when live or failed rows sit above them | bottom of the list | finished work stops competing for the eye | `Job.status` |
+| Footer | `Jobs run in fleetd and survive closing this window.`, muted, one line | bottom | the product promise, stated once, where it is being demonstrated | — |
 
-**Log view.** `Enter` expands the sheet to 640 px and shows the tail of `logs/jobs/<id>.log`
-(last 200 lines, mono 11.5 px, 16 ms batched — the existing budget maps 1:1). `f` inside the log
-toggles follow; `j`/`k` scroll; `G` re-enables follow; `Esc` collapses back to 440 px.
+The list is ordered live and failed jobs first, then the finished group, each in the daemon's
+order; the cursor, `j`/`k` and `jobs.row[N]` all index that one order. A press on a row selects
+it, a double-click opens its log (`Enter`), a right click opens its menu — Show log, Retry,
+Cancel, Copy log path, each only when it can work. A row's button first puts the cursor on its
+row, then runs the same action as the key.
+
+**Log view.** `Enter` (or Show log, or a double-click) expands the sheet to 640 px and shows the
+tail of `logs/jobs/<id>.log` (last 200 lines, mono 11.5 px, 16 ms batched — the existing budget
+maps 1:1). The header becomes the log's toolbar: `← Back esc`, the job's sentence, a `Following f`
+toggle and `Jump to end G`; under it the log path, verbatim, with `Copy log path y` — the path is
+what makes a failure survivable **outside** the app. `j`/`k` scroll; `G` re-enables follow; `Esc`
+collapses back to 440 px.
 
 **Retention. [D-9]** Failed jobs are **never** auto-dismissed: they stay until `D`, and hold the
 red jobs chip and the status-bar sticky error slot until the panel has been opened. Succeeded and
-cancelled jobs collapse to a single 30 px line after 10 s and are kept for
+cancelled jobs fold into the quiet one-line "Finished" group as soon as they end and are kept for
 `jobs.keepFinishedFor` (Settings, default **10 min**, `0` = forever). Evidence of what ran never
 decays on a timer the user did not set.
 
 **Intentionally omitted:** job ids in the row (they are in the log path and on `y`), queue
 position, concurrency limits, per-job PID, absolute start timestamps, progress bars for
-non-percent jobs, pool "skip-if-fresh" no-ops (logged, not listed).
+non-percent jobs, pool "skip-if-fresh" no-ops (logged, not listed), a key legend (every key is on
+the button it triggers).
 
-**States:** *empty* → centered faint `Nothing running.` + `Jobs and sessions live in fleetd, so
-they survive closing this window.` (the product promise, stated once, in the one place it is
-being demonstrated). *daemon down* → amber strip at the top: `The daemon is unreachable — job
-state is from <age> ago`, rows still readable.
+**States:** *empty* → centered faint `Nothing running.` (the footer already states the promise);
+a filtered segment with nothing in it says `No <filter> jobs.` *daemon down* → amber strip at
+the top: `The daemon is unreachable — job state is from <age> ago`, rows still readable.
+*cancel all armed* → amber strip `Cancel n cancellable jobs?` with `Keep` and `Cancel all X`.
 
 **Icons:** `activity` (panel title), `loader-circle`, `circle-check`, `circle-x`, `circle-slash`,
 `circle-stop`, `clock`, `cloud-download` (clone), `copy-plus` (pool), `terminal` (hooks),
@@ -1048,8 +1065,11 @@ state is from <age> ago`, rows still readable.
 **Keyboard:** `J` toggle (also `ctrl-s J` from a terminal) · `j`/`k` · `gg`/`G` · `Enter` expand
 log · `c` cancel (only when `cancellable`) · `X` cancel every cancellable job (confirm) ·
 `R` retry a failed job with identical parameters · `y` copy the log path · `D` dismiss finished
-and failed · `f` cycle filter all → running → failed · `Esc`/`J` close and **restore the exact
-prior focus** (pane, row, terminal and mode).
+and failed · `f` cycle filter all → running → failed → done · `Esc`/`J` close and **restore the
+exact prior focus** (pane, row, terminal and mode).
+
+The title-bar jobs chip is to show as pressed while the sheet is open once the title bar lands
+(CHO-9); today's context-bar chip is unchanged.
 
 ---
 
@@ -1936,7 +1956,7 @@ each component's full API. `Modal` is an alias of `Dialog` and `TabBar` an alias
 
 | Component | Responsibility | Used by |
 | --- | --- | --- |
-| `JobRow` | Two-line job item: glyph · kind (7 ch) · target · elapsed · percent · optional `(restartable)` / `(not restartable)`, plus the progress sub-line | Jobs panel, quit dialogs |
+| `JobRow` | A job as a sentence: glyph · verb phrase + mono target · time, then its state's details (progress bar and last line, inline error and buttons) · optional `(restartable)` / `(not restartable)` | Jobs panel, quit dialogs |
 | `JobTicker` | Newest running job as one status-bar line with a `+n` suffix | status bar |
 | `StickyErrorSlot` | Red, addressable (`!`), persists until dismissed; owns the last failed job | status bar |
 | `LogView` | Tail of `logs/jobs/<id>.log`, last 200 lines, 16 ms batching, follow toggle, `G` re-follow | Jobs panel |

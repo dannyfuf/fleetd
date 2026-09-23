@@ -185,6 +185,64 @@ fn cycling_the_filter_updates_the_app_state_mirror(cx: &mut gpui::TestAppContext
     });
 }
 
+/// A click on a row and a click on a filter segment move the same state `j` and `f` move.
+#[gpui::test]
+fn pointer_selection_and_filter_picks_update_the_app_state_mirror(cx: &mut gpui::TestAppContext) {
+    let state = cx.new(|_| {
+        app_with_jobs(
+            "/tmp/fleet-jobs-pointer",
+            vec![
+                job("job-a", JobStatus::Succeeded, false, false),
+                job("job-b", JobStatus::Running, true, false),
+                job(
+                    "job-c",
+                    JobStatus::Failed {
+                        error: "boom".to_owned(),
+                    },
+                    false,
+                    true,
+                ),
+            ],
+        )
+    });
+    let jobs = cx.update(JobsPanel::new);
+    let select = jobs.select_row(&state);
+    let pick = jobs.pick_filter(&state);
+    let window = cx.add_window(|_, _| ActionHarness);
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+
+    window
+        .update(&mut visual, |_, window, cx| select(2, window, cx))
+        .unwrap_or_else(|error| panic!("select a row: {error}"));
+    visual.update(|_, cx| {
+        let panel = jobs.state.read(cx);
+        assert_eq!(
+            panel
+                .selected(snapshot_jobs(&state, cx))
+                .map(|job| job.id.as_str()),
+            Some("job-a"),
+            "row 2 is the finished job, drawn under the live and failed ones"
+        );
+        assert_eq!(state.read(cx).jobs_panel.cursor, 2);
+    });
+
+    window
+        .update(&mut visual, |_, window, cx| {
+            pick(JobFilter::Done, window, cx)
+        })
+        .unwrap_or_else(|error| panic!("pick a filter: {error}"));
+    visual.update(|_, cx| {
+        assert_eq!(
+            state.read(cx).jobs_panel,
+            JobsPanelMirror {
+                cursor: 0,
+                filter: JobFilter::Done,
+            },
+            "the one Done row keeps the cursor in range"
+        );
+    });
+}
+
 #[test]
 fn the_cursor_indexes_the_visible_rows_not_the_daemons_list() {
     let jobs = vec![
@@ -231,7 +289,7 @@ fn the_cursor_is_clamped_and_mirrored_when_the_filter_shrinks_the_list(
             panel.cursor = 2;
             panel.filter = JobFilter::Running;
         });
-        presentation::synchronize(&jobs.state, &state, &jobs.list_scroll, None, cx);
+        presentation::synchronize(&jobs.state, &state, &jobs.list_scroll, cx);
     });
 
     cx.read(|cx| {
@@ -673,53 +731,58 @@ fn job_list_measures_mixed_heights_and_reuses_unchanged_rows(cx: &mut gpui::Test
     jobs[1].status = JobStatus::Failed {
         error: "failed command".into(),
     };
+    jobs[2].status = JobStatus::Failed {
+        error: "another failed command".into(),
+    };
     let scroll = ListState::new(0, ListAlignment::Top, gpui::px(0.0));
     let mut prepared = presentation::PreparedJobs::default();
-    assert!(prepared.update(&jobs, JobFilter::All, None, &scroll));
+    assert!(prepared.update(&jobs, JobFilter::All, &scroll));
     let rows = prepared.rows.clone();
-    assert!(!prepared.update(&jobs, JobFilter::All, None, &scroll));
+    assert!(!prepared.update(&jobs, JobFilter::All, &scroll));
     assert!(Rc::ptr_eq(&rows, &prepared.rows));
+    assert!(
+        rows[0].error.is_some() && rows[1].error.is_some() && rows[2].is_finished(),
+        "failures sit above the finished group"
+    );
     let cx = cx.add_empty_window();
     let harness = cx.new(|_| JobListHarness {
         rows: rows.clone(),
         scroll: scroll.clone(),
     });
     JobListHarness::draw(&harness, cx);
-    assert_eq!(
+    let height = |ix: usize| {
         scroll
-            .bounds_for_item(0)
-            .expect("first row laid out")
-            .size
-            .height,
-        gpui::px(30.0)
-    );
-    assert!(
-        scroll
-            .bounds_for_item(1)
-            .expect("failure laid out")
+            .bounds_for_item(ix)
+            .unwrap_or_else(|| panic!("row {ix} laid out"))
             .size
             .height
-            > gpui::px(30.0),
-        "a failure grows to show its error"
+    };
+    assert!(
+        height(0) > gpui::px(30.0),
+        "a failure grows to show its error and its buttons inline"
     );
     assert!(
         scroll.bounds_for_item(5000).is_none(),
         "offscreen rows must not be laid out"
     );
-    jobs[1].status = JobStatus::Succeeded;
-    assert!(prepared.update(&jobs, JobFilter::All, None, &scroll));
+
+    // The second failure is retried and succeeds: it moves into the finished group, and only
+    // the rows whose job changed are rebuilt.
+    jobs[2].status = JobStatus::Succeeded;
+    assert!(prepared.update(&jobs, JobFilter::All, &scroll));
     assert!(Rc::ptr_eq(&rows[0], &prepared.rows[0]));
     assert!(Rc::ptr_eq(&rows[9999], &prepared.rows[9999]));
-    assert!(!Rc::ptr_eq(&rows[1], &prepared.rows[1]));
+    assert!(prepared.rows[1].is_finished());
     harness.update(cx, |harness, _| harness.rows = prepared.rows.clone());
     JobListHarness::draw(&harness, cx);
+    assert!(
+        height(1) > gpui::px(30.0),
+        "the first finished row carries the group's label"
+    );
     assert_eq!(
-        scroll
-            .bounds_for_item(1)
-            .expect("changed row laid out")
-            .size
-            .height,
-        gpui::px(30.0)
+        height(2),
+        gpui::px(30.0),
+        "a finished job is one quiet line"
     );
 }
 
@@ -732,23 +795,18 @@ struct JobListHarness {
 
 impl gpui::Render for JobListHarness {
     fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
-        presentation::list_body(
-            self.rows.clone(),
-            0,
-            JobFilter::All,
-            &self.scroll,
-            1_788_523_230,
-        )
+        presentation::list_body(inert_body(self.rows.clone(), &self.scroll))
     }
 }
 
 impl JobListHarness {
-    /// Lays the list out in a 440x140 viewport, the size the panel gets in the shell.
+    /// Lays the list out in a 440x320 viewport: the panel's width, and tall enough for two grown
+    /// failures and the first finished rows.
     fn draw(this: &Entity<Self>, cx: &mut gpui::VisualTestContext) {
         let view = this.clone();
         cx.draw(
             gpui::Point::default(),
-            gpui::size(gpui::px(440.0), gpui::px(140.0)),
+            gpui::size(gpui::px(440.0), gpui::px(320.0)),
             |_, _| view.into_any_element(),
         );
     }
@@ -765,7 +823,7 @@ fn the_jobs_panel_names_its_rows_for_the_harness(cx: &mut gpui::TestAppContext) 
         .collect();
     let scroll = ListState::new(0, ListAlignment::Top, gpui::px(0.0));
     let mut prepared = presentation::PreparedJobs::default();
-    assert!(prepared.update(&jobs, JobFilter::All, None, &scroll));
+    assert!(prepared.update(&jobs, JobFilter::All, &scroll));
     let cx = cx.add_empty_window();
     let harness = cx.new(|_| FramedJobList {
         rows: prepared.rows.clone(),
@@ -801,12 +859,26 @@ struct FramedJobList {
 
 impl gpui::Render for FramedJobList {
     fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
-        fleet_ui_kit::AppFrame::new().body(presentation::list_body(
+        fleet_ui_kit::AppFrame::new().body(presentation::list_body(inert_body(
             self.rows.clone(),
-            0,
-            JobFilter::All,
             &self.scroll,
-            1_788_523_230,
-        ))
+        )))
+    }
+}
+
+/// The list at the cursor's first row, with a pointer contract that does nothing.
+fn inert_body(
+    rows: Rc<[Rc<crate::presentation::JobDisplay>]>,
+    scroll: &ListState,
+) -> presentation::ListBody<'_> {
+    let select: jobs_panel::SelectRow = Rc::new(|_, _, _| {});
+    presentation::ListBody {
+        rows,
+        cursor: 0,
+        filter: JobFilter::All,
+        scroll,
+        now: 1_788_523_230,
+        pointer: presentation::row_pointer(&select),
+        select,
     }
 }

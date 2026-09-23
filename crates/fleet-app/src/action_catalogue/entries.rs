@@ -1643,7 +1643,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Show or hide the job's log",
         "Expand the selected job to read its output as it runs.",
     )
-    .short("Log"),
+    .short("Show log"),
     e(
         &["jobs::Retry"],
         P::Jobs,
@@ -1675,13 +1675,14 @@ pub(super) const ENTRIES: &[Entry] = &[
         G::Jobs,
         "Clear finished jobs",
         "Remove finished and failed jobs from the list.",
-    ),
+    )
+    .short("Clear finished"),
     e(
         &["jobs::CycleFilter"],
         P::Jobs,
         G::Jobs,
         "Change which jobs are shown",
-        "Cycle between all, running and failed jobs. In an open log, turn following on or off.",
+        "Cycle between all, running, failed and done jobs. In an open log, turn following on or off.",
     ),
     e(
         &["jobs::CopyLogPath"],
@@ -1689,7 +1690,8 @@ pub(super) const ENTRIES: &[Entry] = &[
         G::Jobs,
         "Copy the log's path",
         "Put the selected job's log file path on the clipboard.",
-    ),
+    )
+    .short("Copy log path"),
     e(
         &["jobs::MoveDown"],
         P::Jobs,
@@ -1717,14 +1719,16 @@ pub(super) const ENTRIES: &[Entry] = &[
         G::Jobs,
         "Go to the last job",
         "Select the last job; in an open log, jump to the end and follow it.",
-    ),
+    )
+    .short("Jump to end"),
     e(
         &["jobs::CollapseLog"],
         P::Jobs,
         G::Jobs,
         "Collapse the log",
         "Fold the open log away without closing the panel.",
-    ),
+    )
+    .short("Back"),
     e(
         &["jobs::Close"],
         P::Jobs,

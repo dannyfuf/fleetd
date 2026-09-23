@@ -476,10 +476,17 @@ Scroll mode is suppressed while an alt-screen app is running: `ctrl-s [` then sh
 | `R` | retry a failed job with identical parameters [A19] |
 | `y` | copy the log path of the selected job [A19] |
 | `D` | dismiss finished and failed jobs [A19] |
-| `f` | cycle the filter all → running → failed; inside an expanded log, toggle follow [A19] |
+| `f` | cycle the filter all → running → failed → done; inside an expanded log, toggle follow [A19] |
 
 Inside an **expanded log**: `f` toggles follow, `j` / `k` scroll, `G` re-enables follow, `Esc`
 collapses the sheet back to 440 px (a second `Esc` closes the panel).
+
+Every key has a pointer twin that dispatches the same action (ADR 0023): a press on a row moves
+the cursor, a double-click is `Enter`, a right click opens the row's menu (Show log, Retry, Cancel,
+Copy log path — each only when it can work). A failed row carries Retry `R`, Show log `⏎` and Copy
+log path `y`; a cancellable running row shows Cancel `c` while it is hovered or selected. The
+header's segments pick the filter `f` cycles, Clear finished is `D`, the ⋯ holds Cancel all `X`,
+and the ✕ is `Esc`. In an expanded log: Back `Esc`, Following `f`, Jump to end `G`.
 
 ## Dialogs and text inputs
 

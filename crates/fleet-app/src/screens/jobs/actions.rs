@@ -466,10 +466,12 @@ impl JobsPanel {
         let panel = self.state.clone();
         let state = state.clone();
         let log_scroll = self.log_scroll.clone();
+        let home = self.home.clone();
         move |_, _, cx| {
-            let Some(job) = selected_job(&panel, &state, cx).map(|job| job.id) else {
+            let Some(record) = selected_job(&panel, &state, cx) else {
                 return;
             };
+            let job = record.id.clone();
             let already = panel.read_with(cx, |panel, _| panel.expanded.as_ref() == Some(&job));
             if already {
                 panel.update(cx, |panel, _| {
@@ -478,9 +480,18 @@ impl JobsPanel {
                 notify(&state, cx);
                 return;
             }
+            let (lead, subject) = crate::presentation::job_sentence(&record);
+            let title = jobs_panel::LogTitle {
+                lead: lead.into(),
+                subject: subject.map(Into::into),
+                path: crate::presentation::tilde(&record.log_path, home.as_deref())
+                    .into_owned()
+                    .into(),
+            };
             panel.update(cx, |panel, _| {
                 panel.collapse();
                 panel.expanded = Some(job.clone());
+                panel.log_title = Some(title);
                 panel.following = true;
             });
             start_tail(

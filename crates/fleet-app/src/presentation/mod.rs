@@ -16,7 +16,7 @@ pub use formatting::{
 };
 pub use jobs::{
     JobDisplay, active_job_summary, is_active, is_dismissable, job_kind_label, job_outcome_toast,
-    job_target, latest_unseen_failure, parse_percent, sub_line,
+    job_sentence, job_target, latest_unseen_failure, parse_percent, sub_line,
 };
 pub use keys::{FuzzyQuery, contains_folded, humanize, pretty_keys};
 pub use navigation::enter_session;
