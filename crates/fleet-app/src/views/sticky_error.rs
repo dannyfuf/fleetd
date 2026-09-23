@@ -1,21 +1,9 @@
-//! Bounded sticky-error text and screen-specific focus hints.
+//! Bounded sticky-error text, and the status-bar slot that opens and dismisses it.
 
-use fleet_ui_kit::{HarnessTargetExt, StickyErrorSlot};
+use fleet_ui_kit::{HarnessTargetExt, Kbd, StickyErrorSlot};
 use gpui::{AnyElement, IntoElement, SharedString};
 
-use crate::state::{Screen, StickyError};
-
-/// The key that focuses the slot from the current screen.
-///
-/// `KEYMAP.md` binds `!` in `Hub` and `ctrl-s !` in `Workspace > Prefix`; the affordance drawn
-/// over a terminal grid must spell the chord it needs, not the one the Hub uses.
-#[must_use]
-pub(crate) const fn focus_key(screen: &Screen) -> &'static str {
-    match screen {
-        Screen::Hub { .. } => "!",
-        Screen::Workspace { .. } => "^s !",
-    }
-}
+use crate::{actions::fleet, state::StickyError};
 
 /// How much of an error the 28 px status bar can carry before it crowds out the breadcrumb.
 const MAX_LINE: usize = 72;
@@ -38,40 +26,30 @@ fn one_line(text: &str, budget: usize) -> String {
 }
 
 /// The status-bar slot itself.
+///
+/// A click on the error runs `!` (`fleet::FocusStickyError`: the Jobs panel, on the failure) and
+/// the ✕ beside it `fleet::DismissStickyError`, both dispatched as their keys would be. `kbd` is
+/// the chip for `!` on the current screen — prefixed over a terminal, where a bare `!` would go to
+/// the PTY (KEYMAP A18, [D-8]).
 #[must_use]
-pub(crate) fn render(error: &StickyError, screen: &Screen) -> AnyElement {
-    // `docs/TESTING-HARNESS.md` §3 names this `sticky_error.retry`, and the whole slot is what
-    // the name stands for: the status bar draws no separate retry button, so the slot's rect is
-    // where a scenario points after `!` and what it reads to prove the error is still up.
-    StickyErrorSlot::new(SharedString::from(one_line(&error.text, MAX_LINE)))
-        .key(focus_key(screen))
-        .harness_target("sticky_error.retry")
-        .into_any_element()
+pub(crate) fn render(error: &StickyError, kbd: Option<Kbd>) -> AnyElement {
+    // `docs/TESTING-HARNESS.md` §3 names the error `sticky_error.retry`: the whole slot, which is
+    // what a scenario clicks to open the failure and reads to prove the error is still up. The
+    // slot names its own ✕ `sticky_error.close`.
+    StickyErrorSlot::new(
+        "sticky-error",
+        SharedString::from(one_line(&error.text, MAX_LINE)),
+    )
+    .kbd(kbd)
+    .action(Box::new(fleet::FocusStickyError))
+    .dismiss_action(Box::new(fleet::DismissStickyError))
+    .harness_target("sticky_error.retry")
+    .into_any_element()
 }
 
 #[cfg(test)]
 mod tests {
-    use fleet_core::ids::SessionId;
-
     use super::*;
-    use crate::state::HubTab;
-
-    #[test]
-    fn the_focus_key_carries_the_prefix_over_a_terminal() {
-        let hub = Screen::Hub {
-            tab: HubTab::Worktrees,
-        };
-        assert_eq!(focus_key(&hub), "!");
-        let workspace = Screen::Workspace {
-            session: SessionId::try_from("payroll/feat-rut")
-                .unwrap_or_else(|error| panic!("{error}")),
-        };
-        assert_eq!(
-            focus_key(&workspace),
-            "^s !",
-            "a bare `!` over a terminal would go to the PTY"
-        );
-    }
 
     #[test]
     fn a_long_error_is_collapsed_to_one_line() {

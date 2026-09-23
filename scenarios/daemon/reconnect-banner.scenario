@@ -1,5 +1,5 @@
 # UX-SPEC.md §3.12 C and [D-17] · KEYMAP.md §Daemon-down surfaces — fleetd dies while Fleet is
-# attached, the 28 px amber banner says so, and the restart says the sessions did not survive.
+# attached, the 40 px amber banner says so, and the restart says the sessions did not survive.
 #
 # This is the degraded state the app spends the least time in and the most credibility on: [D-17]
 # calls a warm "reconnected" after a real restart "the single most damaging false reassurance in
@@ -32,13 +32,16 @@ await idle 20000
 assert screen == Hub && daemon.link == connected && daemon.dismissed == false
 
 # SIGKILL the private fleetd. The banner is appended innermost, behind the Hub's own chain, so
-# its `r` / `l` / `Esc` outrank the Hub's while it is up (§3.12 C).
+# its `r` / `l` / `Esc` outrank the Hub's while it is up (§3.12 C). Each is also a control on the
+# 40 px banner (ADR 0023): `banner.button[0]` Reconnect now, `banner.button[1]` Open log and
+# `banner.close` the ✕.
 daemon kill
 await daemon.link == lost 30000
 assert key_contexts[2] == "Daemon" && key_contexts[3] == "Banner"
+assert targets["banner.button[0]"] exists && targets["banner.button[1]"] exists && targets["banner.close"] exists
 shot banner
 
-# The lists stay at 100 % and stay true while disconnected — they are frozen, not emptied.
+# The lists stay true while disconnected, dimmed but listed — they are frozen, not emptied.
 assert lists.worktrees.rows[0].id == "acme/api#feature" && lists.repos.rows[1].label == "acme/api"
 
 # Bring fleetd back. A daemon that really restarted must say so: `restarted` is what makes the
@@ -46,6 +49,7 @@ assert lists.worktrees.rows[0].id == "acme/api#feature" && lists.repos.rows[1].l
 daemon restart
 await daemon.link == reconnected 60000
 assert daemon.restarted == true
+assert targets["banner.button[0]"] absent && targets["banner.close"] absent
 dump recovered
 
 # The restart banner is a 6 s dwell the app stores itself, so `advance` retires it (§1).

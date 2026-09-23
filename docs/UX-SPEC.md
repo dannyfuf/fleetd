@@ -43,8 +43,8 @@ Responsive ladders are expressed in **ch of the pane that owns the columns**, no
    `none`; `none` renders a dim `dot` at 30 % opacity, and a truly blank cell means "this row has
    no such column". Every nullable inspection fact (`ahead`, `behind`, `uniqueCommits`, §1
    `WorktreeInspection`) renders `—` **never `0`**, accompanied by the verbatim `warnings[]`
-   string that explains it. A pane whose data is frozen carries a `stale · <age>` stamp in its
-   header. This closes §9's live defect: *"Local status failures can show existing session as
+   string that explains it. A screen whose data is frozen carries one amber `Stale · <age>` chip
+   in its list header. This closes §9's live defect: *"Local status failures can show existing session as
    `none`; only remote failure uses safer `unknown`"*.
 4. **Four colors, all semantic, never decorative.** `green` = healthy / done / approved,
    `amber` = needs attention / in flight / unknown, `red` = broken / destructive, `blue` = *only*
@@ -69,7 +69,8 @@ Responsive ladders are expressed in **ch of the pane that owns the columns**, no
    variant").
 8. **Errors are sticky and actionable; successes are transient.** A failed job stays in the Jobs
    panel until dismissed, with `R retry` and `y copy log path`, and holds an addressable sticky
-   slot in the status bar (`!` focuses it). Successes get at most a 3.2 s toast, and only under
+   slot in the status bar (`!` or a click on it opens the failure in the Jobs panel; its ✕ or `X`
+   clears the slot and leaves the failed jobs in the panel). Successes get at most a 3.2 s toast, and only under
    the toast law (§2.7). Nothing blinks, nothing re-announces itself, nothing decays on a timer
    that the user did not set.
 9. **Every action has a key and a visible control, and the state is shown where it matters.**
@@ -144,8 +145,9 @@ chrome — it is the pane's content, like a list header — and it stays.
 **Status bar slots, left to right:** the daemon — a small dot and `fleetd`, green and silent when
 healthy, and `fleetd <word>` in the daemon's tone otherwise (`fleetd connection lost`, `fleetd
 starting`) · the breadcrumb `context › repo › row` (flex, truncates) · the job ticker `⟳ <kind>
-<target> <pct>` with `+n` when more run (`fg.muted`) · the **sticky error slot** (red, `⚠ <text> ·
-!`, persists until `!` or `Esc`, replaces the ticker when present) · the buttons: `Shortcuts ?` in
+<target> <pct>` with `+n` when more run (`fg.muted`) · the **sticky error slot** (red, `⚠ <text>`
+and its `!` chip, then a ✕; a click on it does what `!` does, the ✕ or `X` clears it; it replaces
+the ticker when present) · the buttons: `Shortcuts ?` in
 the Hub; `Fleet commands ⌃S` and `Shortcuts ⌃S ?` in the Workspace. Over a native agent thread only
 `Shortcuts ⌃S ?` shows: the thread takes `⌃S` as a chord, so there is no prefix mode for a button to
 enter, and holding the chord shows the ⌃S command menu anyway.
@@ -227,7 +229,7 @@ Every fact that comes from a **job** (`inspect`, `prune --dry-run`, PR fetch) ra
 | 60 s – 10 min | normal contrast; stamp in `fg.muted` |
 | > 10 min | the derived marks (`✎` dirty, `#n` PR badge) drop to **55 % opacity**; stamp turns amber |
 | errored | mark is not drawn at all; the detail panel shows `error: <message>` and `I retry` |
-| whole pane frozen (daemon lost) | pane header gains `stale · <age>`; every session glyph forced to `circle-help` |
+| whole pane frozen (daemon lost) | the list header gains one amber `Stale · <age>` chip and the Worktrees rows dim to 55 %; every session glyph forced to `circle-help` |
 
 **[D-4] Auto-inspect cadence.** The daemon
 re-inspects (a) the **selected** worktree with `--no-fetch`, debounced **400 ms** after the cursor
@@ -247,12 +249,12 @@ that would drift. Consequences today:
 | --- | --- | --- | --- |
 | Clipboard | `Path copied` / `PR URL copied` / `Branch copied` / `Log path copied` | 1.6 s | `clipboard-check` |
 | Sleep report with kept windows | `Slept · kept cc (claude)` | 3.2 s | `moon` |
-| Background success whose row is off-screen | `Cloned buk/ledger · ⏎ opens` | 3.2 s | `circle-check` |
-| Dialog-close reassurance | `⟳ base fetch still running · J` | 3.2 s | `loader-circle` |
-| Action refused, with the reason | `Nothing to prune in payroll — 11 skipped · J for reasons` | 3.2 s | `info` |
+| Background success whose row is off-screen | `Cloned buk/ledger` + `View J` (opens Jobs) | 3.2 s | `circle-check` |
+| Dialog-close reassurance | `Base fetch still running` + `View J` (opens Jobs) | 1.6 s | `loader-circle` |
+| Action refused, with the reason | `Nothing to prune in payroll — 11 skipped` + `View J` (the reasons, in Jobs) | 1.6 s | `scissors` |
 | Duplicate action suppressed | `Already running` | 1.6 s | `info` |
 | Mode no-op | `no scrollback in alt-screen` | 1.6 s | `chevrons-up` |
-| Terminal agent attention | `<session>: needs permission` / `asks a question` / `proposed a plan` / `agent finished` | 3.2 s | `lock` / `circle-question-mark` / `clipboard-check` / `circle-check` |
+| Agent attention | `<session>: needs permission` / `asks a question` / `proposed a plan` / `agent finished`; a native agent thread's adds `View`, which opens that thread | 3.2 s | `lock` / `circle-question-mark` / `clipboard-check` / `circle-check` |
 
 **Never a toast:** job started, job succeeded when its row is on screen, worktree created,
 PR refreshed, context switched, session opened, settings saved, update available, **and any
@@ -326,7 +328,8 @@ Left: `WORKTREES` (label type) + `· <repo | All>` scope. Right, in order: `show
 filter is active (else just `total`), then the **visible range** `<first>–<last>/<total>` — the
 scroll-position indicator inventory §5 requires and no proposal supplied. A 3 px `border` scroll
 thumb is drawn on the pane's right edge whenever the content overflows. When the pane data is
-frozen the header appends `· stale · <age>` in amber (§1.3).
+frozen the header appends an amber `Stale · <age>` chip (§1.3); the repos rail beside it carries
+none, so the screen says it once.
 
 ---
 
@@ -356,7 +359,7 @@ titlebar that *is* this row.
 **States:** *loading* → the bar renders from the cached snapshot, the counts absent. *no contexts*
 → the switcher reads `No context` and its menu offers *New context*. *first run* → the bar is empty
 (§3.13). *daemon lost* → §3.12; the red `fleetd down` or amber `Reconnecting…` button joins the
-status cluster and the header of every pane gains `stale · <age>`.
+status cluster and the list header gains one `Stale · <age>` chip.
 
 **Icons:** `chevron-down`, `search`, `loader-circle`, `triangle-alert`, `arrow-up-circle`,
 `circle-question-mark`, `settings-2`; the needs-you and daemon marks are dots, not icons.
@@ -444,7 +447,8 @@ to context · `i` detail · `ga` jump to `All` (KEYMAP A7) · `H` collapse/expan
 **Page header.** An H1 `Worktrees` (`page_title`) over one subtitle the view model builds:
 `<n> across <r> repositories`, or `<n> in <owner/name>` when one repository is selected (or the
 scope holds only one), then `· <k> needs attention` when a row has failed hooks, an offline host
-or an inspection error (zero-suppressed). A frozen snapshot appends `· stale · <age>` in amber.
+or an inspection error (zero-suppressed). A frozen snapshot appends an amber `Stale · <age>` chip
+and draws the rows at 55 % (`stale_opacity`); they stay navigable.
 The toolbar on the right: the **filter field** (`/`; a click opens the same filter mode, §3.10),
 `Clone repo` (`repos::Clone`) and the primary `New worktree  n` (`worktrees::Create`).
 
@@ -1252,7 +1256,7 @@ a `create` job appears in the ticker and the Jobs panel. *duplicate id* →
 (turning §3's idempotency rule into a shortcut). *conflict* (existing id with a different
 explicit `--branch`/`--host`) → the exact conflict message in red in the footer, dialog stays
 open. *closed while a base fetch is running* → the fetch **keeps running** and a 3.2 s toast says
-`⟳ base fetch still running · J` (retires §9 "create-dialog close does not cancel forced fetch").
+`Base fetch still running` with a `View J` button (retires §9 "create-dialog close does not cancel forced fetch").
 
 **Icons:** `git-branch-plus`, `search`, `loader-circle`, `check`, `zap`, `hourglass`, `cloud-off`.
 
@@ -1430,7 +1434,7 @@ a background `inspect --no-fetch` swaps values in place, with no highlight or fl
 *prune dry-run running* → the body shows
 `⟳ checking 8 worktrees…` and the action button is disabled until facts exist (it is a button
 now, and a button that does nothing when clicked must say so). *nothing eligible to prune* → the dialog does **not** open; a 3.2 s toast says
-`Nothing to prune in payroll — 11 skipped · J for reasons`.
+`Nothing to prune in payroll — 11 skipped`, whose `View J` button opens the Jobs panel with the reasons.
 
 **Keyboard:** `y`/`Y`/`Enter` confirm · `n`/`Esc`/`q` cancel · `I` re-check (delete) · `s` toggle
 the KEEP list (prune). Nothing else is bound, so muscle memory cannot misfire. On cancel the exact
@@ -1863,7 +1867,15 @@ repo change or a screen change.
 
 Rendering: bottom-right, above the status bar, **320 px** wide, 12 px insets, max **3** stacked,
 **3.2 s** (1.6 s for instant-action acknowledgements). A toast appears and vanishes in place —
-it does not slide or fade (DESIGN-SYSTEM §2.7). One line, one icon, no title, no close button.
+it does not slide or fade (DESIGN-SYSTEM §2.7). One line, one icon, no title, and a ✕ that takes
+it down at once.
+
+**Pointer (ADR 0023).** A toast that points somewhere — a background success the Jobs panel
+holds, an agent thread that needs you — carries a small ghost `View` button with the key that goes
+to the same place (`J` for Jobs; none for a thread, which `1 needs you` in the title bar also
+opens); a click on the button or on the line goes there and retires the toast. The key is never
+spelled into the text (`· J` is gone). **Hovering a toast holds its dwell**: it does not decay
+while the pointer rests on it, and resumes with the time it had left when the pointer leaves.
 Contents and the governing law: **§2.7**.
 
 ---
@@ -1876,8 +1888,8 @@ of them is about reconnecting.
 | Situation | Surface | Exact text | Keys |
 | --- | --- | --- | --- |
 | **A. Cold start, daemon not yet up** | full window, centered, no chrome | `Starting fleetd…` + spinner; after 3 s it appends `~/.fleet/fleetd.sock` | none (auto-spawn) |
-| **B. Daemon will not start** | full window, centered | `fleetd could not start.` · the last 3 lines of `~/.fleet/logs/fleetd.log` in mono · `The socket ~/.fleet/fleetd.sock is stale.` when that is the cause | `r` retry · `L` open log · `D` run doctor · `ctrl-q` quit |
-| **C. Daemon died while attached** | 28 px amber banner under the title bar; the daemon dot turns red; terminal grids get a 55 % veil | `◍ fleetd stopped · reconnecting in 3s` — the countdown cycles `3s → reconnecting… → 6s` (backoff 1, 2, 4, 8 s, capped 8 s) | `r` reconnect now · `l` open log · `Esc` dismiss the banner (the dot stays red) |
+| **B. Daemon will not start** | full window, centered | `fleetd could not start.` · the last 3 lines of `~/.fleet/logs/fleetd.log` in mono · `The socket ~/.fleet/fleetd.sock is stale.` when that is the cause | buttons `Retry r` (primary) · `Open log L` · `Run doctor D` · `Quit ctrl-q`; a protocol mismatch drops `Retry` and leads with `Run doctor` |
+| **C. Daemon died while attached** | 40 px amber banner under the title bar; the title bar's `Reconnecting…` pill is amber (red `fleetd down` only once it stopped); the daemon dot turns red; terminal grids get a 55 % veil | `Lost connection to fleetd — reconnecting in 3s. Your terminals and agents keep running.` (`fleetd stopped — …` after a shutdown) — the countdown cycles `3s → reconnecting… → 6s` (backoff 1, 2, 4, 8 s, capped 8 s) in its own slot | buttons `Reconnect now r` · `Open log l` · ✕ (`Esc`) dismisses the banner (the dot stays red) |
 
 **On reconnect after C**, the banner turns amber for 6 s (not green, not 800 ms) and reads,
 verbatim:
@@ -1899,8 +1911,8 @@ shorter than the scrollback that preceded it. The banner still dwells the full s
 restart means the `fleetd` binary changed, which is worth noticing. If the daemon merely dropped
 the *connection* without dying, the banner instead reads `reconnected` and leaves after 800 ms.
 
-**While disconnected (case C):** the lists stay at 100 % opacity and remain navigable — they are
-true, just frozen — every pane header gains `· stale · <age>`, **every** session glyph is forced
+**While disconnected (case C):** the lists remain navigable — they are true, just frozen — the
+Worktrees rows are drawn at 55 % (`stale_opacity`) so the frozen state reads at a glance, the list header gains one amber `Stale · <age>` chip (the rail carries none), **every** session glyph is forced
 to `circle-help` (`unknown`, never `none`), and read-only actions keep working (`j`/`k`, `y`, `b`,
 `/`, `i`, `:`). Mutating keys flash the banner instead of erroring. Terminal grids are veiled at
 55 % and keys typed into them are **dropped, not buffered**.
@@ -1918,6 +1930,7 @@ to `circle-help` (`unknown`, never `none`), and read-only actions keep working (
 ```
 
 Failures render `red`, `ok` renders `fg.muted` (zero-suppression of good news at the color level).
+The report's footer is three buttons with their keys: `Run again D`, `Open log L`, `Close Esc`.
 
 **Degraded worktree.** A worktree whose post-create hooks failed keeps a persisted degraded fact
 (§6) and shows `triangle-alert` + `⚠ hooks failed` on its row until the hooks job is re-run
@@ -1942,32 +1955,33 @@ pane only**, never full-screen, so surrounding panes stay usable. Copy is swarm'
 | Jobs | `Nothing running.` | `Jobs and sessions live in fleetd, so they survive closing this window.` |
 | Terminal exited | `process exited (<code>)` | `^s x  close    ^s c  new    ^s r  restart` |
 
-**First run** (no contexts, no repos) is a single centered card. **[D-18]** For this user the
-empty state is a **migration**, not an onboarding, so the import row is the primary path and is
-shown only when `~/.swarm/state.json` exists:
+**First run** (no contexts, no repos) is a single centered page, 560 px wide, under a bare title
+bar (no context switcher, no section nav, no mode word). It says what Fleet is for and gets the
+user started with controls, each showing its key (ADR 0023):
 
 ```
-                ┌──────────────────────────────────────────┐
-                │                 ⛵ Fleet                  │
-                │   Copies, sessions and PRs — all owned    │
-                │   by fleetd, so they survive this window. │
-                │                                          │
-                │   Found ~/.swarm.                         │
-                │   i   import contexts, repos and worktrees│
-                │       (nothing in ~/.swarm is modified)   │
-                │                                          │
-                │   N   create your first context           │
-                │   n   clone a repository                  │
-                │   ?   keymap        ,   settings          │
-                │                                          │
-                │   ◍ fleetd running · 0.1.0 · ~/.fleet     │
-                └──────────────────────────────────────────┘
+   ⛵
+   Run many branches and agents at once — they keep running when you close Fleet.
+   Three steps to your first workspace.
+
+   ┌ (1) Create a context                                             N ┐   ← current: accent
+   │     Group repositories by GitHub org or client, e.g. “Acme”.        │
+   ├ (2) Clone a repository                                           n ┤
+   │     Search your orgs on GitHub; it clones in the background.        │
+   ├ (3) Start a worktree and an agent                       after step 2 ┤   ← dimmed, no click
+   │     A branch copy with its own terminals and Claude or Codex threads.│
+   └┄┄ ⛵ Import from ~/.swarm                                         i ┄┘   ← dashed; only with ~/.swarm
+         Brings over contexts, repos and worktrees. Nothing in ~/.swarm changes.
+   ─────────────────────────────────────────────────────────────────────
+   ● fleetd running · 0.1.0 · ~/.fleet          Keyboard shortcuts ?   Settings ,
 ```
 
-`i` runs `fleet import --from-swarm` as a **job** and lands the user in a populated Hub. Without
-`~/.swarm`, the import block is omitted entirely (zero-suppression) and the card shows the `N` /
-`n` / `?` rows under a single centered 32 px `boxes` glyph. **No** onboarding carousel, tour,
-checklist or sample data.
+Clicking a step card does the step — the same action as its key (`N` opens New context, `n` Clone
+a repository). Step 3 needs a repository, so it stays dimmed with `after step 2` in place of a key.
+**[D-18]** For this user the empty state is also a **migration**, so the dashed import card is
+shown only when `~/.swarm/state.json` exists (zero-suppression); `i` or a click runs `fleet import
+--from-swarm` as a **job** and lands the user in a populated Hub. **No** onboarding carousel, tour
+or sample data.
 
 ---
 
@@ -2049,7 +2063,7 @@ version-1 config/state and older IPC payloads remain readable.
 | C4 | `config.trash.retentionMs` (default **600000**) and a `RestoreTrash { entry }` request; the daemon delays the detached `rm -rf` by that long | `u` undo-last-delete (KEYMAP A6). The delete algorithm already renames to `trash/<epochms>-<slug>` first, so the safety net is nearly free. |
 | C5 | `config.jobs.warnBeforeQuit` (default **true**) and `config.jobs.keepFinishedFor` (default **600000**) | KEYMAP's `ctrl-q` clause is unimplementable without the first (§3.8.8); §3.7 retention needs the second. |
 | C6 | `Terminal { has_unseen_output: bool }`, cleared when the terminal becomes active | The tab activity dot (§3.6). |
-| C7 | `Snapshot { generated_at: Timestamp }` | The `stale · <age>` header stamp (§1.3, §3.12). |
+| C7 | `Snapshot { generated_at: Timestamp }` | The `Stale · <age>` header chip (§1.3, §3.12). |
 | C8 | `WorktreeStatus.session` must be set to `unknown` — **never `none`** — whenever the local status observation fails, matching the remote path | Directly retires the §9 defect. This is a daemon behavior requirement, not a type change. |
 | C9 | `PruneWorktrees { …, ids: Option<Vec<WorktreeId>> }`, defaulted and omitted when absent | `None` preserves legacy repo-scoped discovery; confirm commits `Some(exact displayed DELETE ids)`, and daemon reinspection may shrink but never expand that authority. |
 | C10 | `Snapshot { agent_threads: Vec<AgentThreadSummary> }` (`#[serde(default)]`), the capability-gated native-agent request family with its thread, window, body, account, checkpoint and acknowledgement answers, and the `Agent` / `AgentSummary` synchronization events | §3.6.0's tab marks, §2.3's agent chips and the session-header word are all one derived `Attention` carried in the summary, so the strip, the header and the chips cannot disagree. `AgentMarkSeen` is what clears a finished turn's amber dot. IPC is version 8; the defaulted snapshot field keeps version-4 payloads readable. |

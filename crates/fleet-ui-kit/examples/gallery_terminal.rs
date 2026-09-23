@@ -647,15 +647,24 @@ fn jobs_section(cx: &mut App) -> AnyElement {
         LAYOUT.labeled(
             "sticky error",
             &t,
-            StickyErrorSlot::new("gh: HTTP 502 upstream connect error").id("err-1"),
+            StickyErrorSlot::new("err-1", "gh: HTTP 502 upstream connect error")
+                .kbd(Some(gallery_kbd("!")))
+                .on_activate(|_, _| {})
+                .on_dismiss(|_, _| {}),
         ),
         LAYOUT.labeled(
             "sticky error \u{b7} repeated, prefixed key",
             &t,
-            StickyErrorSlot::new("gh: HTTP 502 upstream connect error")
-                .id("err-2")
+            StickyErrorSlot::new("err-2", "gh: HTTP 502 upstream connect error")
                 .count(7)
-                .key("^s !"),
+                .kbd(Some(gallery_kbd("ctrl-s !")))
+                .on_activate(|_, _| {})
+                .on_dismiss(|_, _| {}),
+        ),
+        LAYOUT.labeled(
+            "sticky error \u{b7} display only (no click, no \u{2715})",
+            &t,
+            StickyErrorSlot::new("err-3", "gh: HTTP 502 upstream connect error"),
         ),
     ];
     LAYOUT.section("jobs", &t, children)

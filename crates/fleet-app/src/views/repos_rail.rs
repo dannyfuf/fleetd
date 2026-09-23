@@ -268,8 +268,6 @@ pub struct RailProps<Rows = Vec<RailRow>> {
     pub context_name: SharedString,
     /// The live filter query, when one is set.
     pub filter: Option<SharedString>,
-    /// `stale · <age>` for the header when the snapshot is frozen (§1.3).
-    pub stale: Option<SharedString>,
 }
 
 /// Renders the rail: header, rows, and the §3.13 empty states.
@@ -287,7 +285,6 @@ pub fn render(
         collapsed,
         context_name,
         filter,
-        stale,
     } = props;
 
     let repo_rows = rows.as_ref().len().saturating_sub(1);
@@ -295,9 +292,8 @@ pub fn render(
     if let Some(query) = filter.clone() {
         header = header.filter_chip(query);
     }
-    if let Some(age) = stale {
-        header = header.stale(age);
-    }
+    // No stale chip here: while fleetd is gone the list header carries the one `Stale · <age>`
+    // chip for the whole screen (§3.12 C).
 
     let empty = match filter.clone() {
         Some(query) => EmptySurface::Filter.render(Some(&query)),

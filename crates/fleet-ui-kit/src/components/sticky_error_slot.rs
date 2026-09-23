@@ -5,48 +5,70 @@
 //!
 //! It is the reason Fleet has no error toasts. A toast that carries the only copy of "gh:
 //! HTTP 502" is a bug: the one message the user needs is also the one that disappears while
-//! they are reading something else. The slot keeps it, states the key that focuses it, and
+//! they are reading something else. The slot keeps it, shows the key that focuses it, and
 //! lets the user decide when it is over.
+//!
+//! ## Pointer and keyboard (ADR 0023)
+//!
+//! ```text
+//! [ ⚠ gh: HTTP 502  x3  ! ][ ✕ ]
+//! ```
+//!
+//! The error itself is one control: clicking it runs [`StickyErrorSlot::action`] (Fleet's `!`,
+//! which opens the failure in the Jobs panel), and the chip after the text is that action's key,
+//! read from the live keymap by the caller. The ✕ beside it is [`StickyErrorSlot::dismiss_action`]
+//! and paints `sticky_error.close`. The two are siblings, not nested, so a click on the ✕ never
+//! also opens the failure.
 
-use gpui::{App, ElementId, SharedString, Window, div, prelude::*};
+use gpui::{Action, App, ElementId, SharedString, Window, div, prelude::*};
 
+use super::{
+    Kbd, KbdSize,
+    button::ButtonSize,
+    dismiss::{Dismiss, dismiss_builders},
+};
 use crate::{
-    components::KeyHint,
+    harness::HarnessTargetExt as _,
     icons::{Icon, IconSize},
     text::Text,
     theme::ActiveTheme,
     tone::Tone,
 };
 
+type ActivateFn = Box<dyn Fn(&mut Window, &mut App) + 'static>;
+
 /// `⚠ gh: HTTP 502 · !`
 #[derive(IntoElement)]
 pub struct StickyErrorSlot {
-    id: Option<ElementId>,
+    id: ElementId,
     text: SharedString,
-    key: SharedString,
+    kbd: Option<Kbd>,
     count: usize,
-    #[allow(clippy::type_complexity)]
-    on_activate: Option<Box<dyn Fn(&mut Window, &mut App) + 'static>>,
+    action: Option<Box<dyn Action>>,
+    on_activate: Option<ActivateFn>,
+    dismiss: Option<Dismiss>,
 }
 
 impl StickyErrorSlot {
-    /// An error with the default `!` focus key.
-    pub fn new(text: impl Into<SharedString>) -> Self {
+    /// An error reading `text`. Give it an [`StickyErrorSlot::action`] to make it clickable.
+    pub fn new(id: impl Into<ElementId>, text: impl Into<SharedString>) -> Self {
         Self {
-            id: None,
+            id: id.into(),
             text: text.into(),
-            key: SharedString::new_static("!"),
+            kbd: None,
             count: 1,
+            action: None,
             on_activate: None,
+            dismiss: None,
         }
     }
 
-    /// Override the key that focuses the error.
+    /// The key that focuses the error, resolved by the caller from the live keymap.
     ///
-    /// Inside the Workspace this must carry its prefix (`^s !`, never `!`) — [D-8]: in
-    /// Terminal mode a bare `!` goes to the PTY.
-    pub fn key(mut self, key: impl Into<SharedString>) -> Self {
-        self.key = key.into();
+    /// Inside the Workspace this is the prefixed chord (`⌃S !`, never `!`) — [D-8]: over a
+    /// terminal a bare `!` goes to the PTY.
+    pub fn kbd(mut self, kbd: Option<Kbd>) -> Self {
+        self.kbd = kbd;
         self
     }
 
@@ -57,28 +79,43 @@ impl StickyErrorSlot {
         self
     }
 
-    /// Mouse parity for the focus key. Requires [`StickyErrorSlot::id`] to be set.
+    /// What a click on the error does: dispatch `action` to the focused element, exactly as the
+    /// key on the chip would.
+    pub fn action(mut self, action: Box<dyn Action>) -> Self {
+        self.action = Some(action);
+        self
+    }
+
+    /// What a click on the error does, for a caller whose activation is not an action.
     pub fn on_activate(mut self, on_activate: impl Fn(&mut Window, &mut App) + 'static) -> Self {
         self.on_activate = Some(Box::new(on_activate));
         self
     }
 
-    /// A stable id, needed for hover and [`StickyErrorSlot::on_activate`].
-    pub fn id(mut self, id: impl Into<ElementId>) -> Self {
-        self.id = Some(id.into());
-        self
-    }
+    dismiss_builders!();
 }
 
 impl RenderOnce for StickyErrorSlot {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
         let color = theme.colors.danger;
-        let on_activate = self.on_activate;
         let count = self.count;
         let hover_bg = color.opacity(theme.metrics.error_hover_opacity);
+        let activate: Option<ActivateFn> = match (self.action, self.on_activate) {
+            (Some(action), _) => Some(Box::new(move |window: &mut Window, cx: &mut App| {
+                window.dispatch_action(action.boxed_clone(), cx);
+            })),
+            (None, on_activate) => on_activate,
+        };
+        let close = self.dismiss.as_ref().map(|dismiss| {
+            dismiss
+                .close_button("sticky-error-close")
+                .size(ButtonSize::Compact)
+                .harness_target("sticky_error.close")
+        });
 
         let body = div()
+            .id(self.id)
             .flex()
             .items_center()
             .gap(theme.space.xs)
@@ -100,17 +137,24 @@ impl RenderOnce for StickyErrorSlot {
                     .tone(Tone::Danger)
                     .flex_none()
             }))
-            .child(div().flex_none().child(KeyHint::new(self.key)));
+            .children(
+                self.kbd
+                    .map(|kbd| div().flex_none().child(kbd.size(KbdSize::Small))),
+            )
+            .when_some(activate, |el, activate| {
+                super::control::on_activate(
+                    el.hover(move |s| s.bg(hover_bg)),
+                    "Show the failure",
+                    activate,
+                )
+            });
 
-        match self.id {
-            Some(id) => body
-                .id(id)
-                .hover(move |s| s.bg(hover_bg))
-                .when_some(on_activate, |el, on_activate| {
-                    super::control::on_activate(el, "dismiss error", on_activate)
-                })
-                .into_any_element(),
-            None => body.into_any_element(),
-        }
+        div()
+            .flex()
+            .items_center()
+            .gap(theme.space.xxs)
+            .min_w_0()
+            .child(body)
+            .children(close)
     }
 }

@@ -90,7 +90,7 @@ fn words_do_not_fake_protocol_mismatch() {
     let mismatch = DaemonFailure::classify(*protocol_mismatch, false);
     assert_eq!(mismatch, DaemonFailure::VersionMismatch);
     assert!(
-        !mismatch.hints().iter().any(|(key, _)| *key == "r"),
+        !mismatch.controls().contains(&FailureControl::Retry),
         "offering a retry that cannot work is worse than offering none"
     );
     assert!(failure_headline(mismatch).contains("protocol"));
@@ -132,4 +132,24 @@ fn an_unknown_daemon_protocol_is_amber_never_ok() {
         DoctorStatus::Warn,
         "absence of knowledge never renders as good news"
     );
+}
+
+#[test]
+fn every_failure_and_doctor_button_has_a_key_in_the_table() {
+    let keyed = |context: &str, action: &dyn Action| keymap::keystrokes_in(context, action);
+    for failure in [DaemonFailure::WontStart, DaemonFailure::VersionMismatch] {
+        for control in failure.controls() {
+            assert!(
+                keyed(control.context(), control.action().as_ref()).is_some(),
+                "{control:?} would show no key chip"
+            );
+        }
+    }
+    for action in [
+        Box::new(daemon_actions::RunDoctor) as Box<dyn Action>,
+        Box::new(daemon_actions::OpenLog),
+        Box::new(daemon_actions::DismissBanner),
+    ] {
+        assert!(keyed(DOCTOR_CONTEXT, action.as_ref()).is_some());
+    }
 }

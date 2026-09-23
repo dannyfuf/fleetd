@@ -337,3 +337,123 @@ fn an_advance_longer_than_the_clock_still_moves_every_instant_backwards() {
         now - Duration::from_secs(1)
     );
 }
+
+#[test]
+fn a_toast_under_the_pointer_holds_its_dwell_and_resumes_with_what_it_had_left() {
+    let now = Instant::now();
+    let mut toasts = Vec::new();
+    push_toast(
+        &mut toasts,
+        Toast::new("Path copied"),
+        now,
+        Duration::from_secs(3),
+    );
+    let id = toasts[0].id;
+
+    assert!(hold_toast(
+        &mut toasts,
+        id,
+        true,
+        now + Duration::from_secs(1)
+    ));
+    assert!(
+        !expire_toasts(&mut toasts, now + Duration::from_secs(60)),
+        "a held toast never decays"
+    );
+
+    let left_at = now + Duration::from_secs(60);
+    assert!(hold_toast(&mut toasts, id, false, left_at));
+    assert_eq!(toasts[0].expires_at, left_at + Duration::from_secs(2));
+    assert!(!expire_toasts(
+        &mut toasts,
+        left_at + Duration::from_millis(1_900)
+    ));
+    assert!(expire_toasts(&mut toasts, left_at + Duration::from_secs(2)));
+    assert!(!hold_toast(&mut toasts, id, true, left_at), "gone is gone");
+}
+
+#[test]
+fn a_toast_that_points_somewhere_gains_a_view_button_and_is_dismissed_by_id() {
+    let now = Instant::now();
+    let dwell = Duration::from_secs(3);
+    let mut toasts = Vec::new();
+    push_toast(&mut toasts, Toast::new("Path copied"), now, dwell);
+    push_toast_to(
+        &mut toasts,
+        Toast::new("Created acme/api#spike"),
+        Some(ToastTarget::Jobs),
+        now,
+        dwell,
+    );
+    assert_eq!(toasts[0].toast.action, None);
+    assert_eq!(toasts[1].toast.action.as_deref(), Some("View"));
+    assert_ne!(toasts[0].id, toasts[1].id);
+
+    let pointed = toasts[1].id;
+    let removed = remove_toast(&mut toasts, pointed).unwrap_or_else(|| panic!("toast is up"));
+    assert_eq!(removed.target, Some(ToastTarget::Jobs));
+    assert_eq!(toasts.len(), 1);
+    assert!(remove_toast(&mut toasts, pointed).is_none());
+}
+
+#[test]
+fn the_job_outcome_toast_points_at_the_jobs_panel_without_spelling_its_key() {
+    let now = Instant::now();
+    let mut state = AppState::new("/tmp/fleet", now);
+    let mut snapshot = snapshot();
+    let mut running = job("j-1", JobStatus::Running, None);
+    running.kind = fleet_proto::job::JobKind::Clone;
+    snapshot.jobs = vec![running.clone()];
+    state.apply_snapshot(snapshot, now);
+
+    let mut done = running;
+    done.status = JobStatus::Succeeded;
+    state.apply_job(done, now);
+
+    let live = state
+        .toasts
+        .last()
+        .unwrap_or_else(|| panic!("a background success toasts"));
+    assert_eq!(live.target, Some(ToastTarget::Jobs));
+    assert!(
+        !live.toast.text.contains(" \u{00b7} J"),
+        "{}",
+        live.toast.text
+    );
+}
+
+#[test]
+fn dismissing_the_sticky_error_leaves_the_failures_in_the_panel() {
+    let now = Instant::now();
+    let mut state = AppState::new("/tmp/fleet", now);
+    let mut snapshot = snapshot();
+    snapshot.jobs = vec![
+        job(
+            "j-1",
+            JobStatus::Failed {
+                error: "old".to_owned(),
+            },
+            Some("2026-09-04T12:00:00Z"),
+        ),
+        job(
+            "j-2",
+            JobStatus::Failed {
+                error: "new".to_owned(),
+            },
+            Some("2026-09-04T12:05:00Z"),
+        ),
+    ];
+    state.apply_snapshot(snapshot, now);
+    assert_eq!(
+        state.sticky_error.as_ref().map(|error| error.text.as_str()),
+        Some("new")
+    );
+
+    assert!(state.dismiss_sticky_error());
+    assert!(
+        state.sticky_error.is_none(),
+        "the older failure does not take the slot"
+    );
+    assert_eq!(state.snapshot.as_ref().map(|s| s.jobs.len()), Some(2));
+    assert!(!state.dismiss_sticky_error(), "nothing left to dismiss");
+}

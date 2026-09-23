@@ -13,7 +13,7 @@
 //!
 //! | Shape | Job | Surface |
 //! | --- | --- | --- |
-//! | [`Injected::Success`] | `CreateWorktree` | a `Created … · J` toast and a `succeeded` row |
+//! | [`Injected::Success`] | `CreateWorktree` | a `Created …` toast with a `View` button and a `succeeded` row |
 //! | [`Injected::Failure`] | `Clone` | the sticky error slot, which `!` focuses |
 //! | [`Injected::LongRunning`] | `PostCreateHooks` | a `running` row and the job ticker |
 //! | [`Injected::Repeated`] | `DeleteWorktree` ×N | one toast carrying a count |
@@ -185,7 +185,7 @@ async fn long_running(client: &Client, fixture: &Fixture) -> anyhow::Result<Inje
     })
 }
 
-/// `count` deletions of the same worktree, which produce `count` identical `Deleted … · J`
+/// `count` deletions of the same worktree, which produce `count` identical `Deleted …`
 /// toasts and therefore exactly one toast row carrying a count.
 async fn repeated(client: &Client, fixture: &Fixture, count: u8) -> anyhow::Result<Injection> {
     anyhow::ensure!(count > 0, "a repeated injection needs at least one job");

@@ -665,6 +665,13 @@ pub struct Metrics {
     pub dialog_footer_h: Pixels,
     /// 28 px banner.
     pub banner_h: Pixels,
+    /// 40 px banner under the title bar (§3.12 C): a sentence, its reassurance and the
+    /// compact buttons that act on it.
+    pub frame_banner_h: Pixels,
+    /// 28 px numbered badge that leads a `StepCard`.
+    pub step_badge: Pixels,
+    /// 560 px column the first-run page is set in.
+    pub first_run_w: Pixels,
     /// 22 px terminal exit strip and context-bar chip height.
     pub strip_h: Pixels,
     /// 22 px chip pill.
@@ -798,6 +805,9 @@ impl Default for Metrics {
             dialog_header_h: px(44.0),
             dialog_footer_h: px(44.0),
             banner_h: px(28.0),
+            frame_banner_h: px(40.0),
+            step_badge: px(28.0),
+            first_run_w: px(560.0),
             strip_h: px(22.0),
             chip_h: px(22.0),
             tile_chip_h: px(18.0),

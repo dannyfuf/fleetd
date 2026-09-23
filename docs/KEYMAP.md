@@ -103,6 +103,7 @@ behind it (`shell/root/focus.rs`, `focus_owner`).
 | `?` | help |
 | `J` | jobs panel |
 | `!` | focus the sticky error slot: the last failed job, offering `R retry` [A18] |
+| `X` | dismiss the sticky error slot (its ✕); the failed jobs stay in the Jobs panel |
 | `i` | toggle the detail panel (never focusable; it mirrors the cursor row) |
 | `H` | collapse / expand the repos rail (240 ↔ 44 px icon rail) [A22] |
 | `a` / `A` | open the floating Claude / Codex agent popup [A21] |
@@ -664,7 +665,7 @@ cards, `!` agent threads (UX-SPEC §3.9).
 | | `L` | open `~/.fleet/logs/fleetd.log` |
 | | `D` | run doctor |
 | | `ctrl-q` | quit |
-| **C. fleetd died while attached** (28 px banner) | `r` | reconnect now |
+| **C. fleetd died while attached** (40 px banner) | `r` | reconnect now |
 | | `l` | open the log |
 | | `Esc` | dismiss the banner (the daemon dot stays red) |
 | **Doctor report** (`Daemon > Doctor`, full window) | `r` | dismiss the report, then retry or reconnect if the daemon is down |
@@ -680,6 +681,10 @@ Case C's banner is a container, and `r` and `l` are bare letters, so it obeys th
 rule above: `Daemon > Banner` leaves the chain entirely — `Esc` with it — while a live input owns
 the keyboard, and comes straight back when the keyboard returns to a surface that is not typing.
 
+Every key in this table is also a button showing that key (ADR 0023): case B's `Retry`, `Open
+log`, `Run doctor` and `Quit`; case C's `Reconnect now`, `Open log` and ✕; the report's `Run
+again`, `Open log` and `Close`. Each dispatches the same action its key does.
+
 Case A (cold start) binds nothing: fleetd is auto-spawned. While disconnected, read-only keys
 (`j` / `k`, `y`, `b`, `/`, `i`, `:`) keep working; mutating keys flash the banner. Keys typed
 into a veiled terminal grid are dropped, not buffered.
@@ -693,6 +698,10 @@ into a veiled terminal grid are dropped, not buffered.
 | `n` | clone a repository |
 | `?` / `,` | help / settings |
 | `ctrl-q` | quit |
+
+The page's step cards and footer buttons dispatch these same actions and show these keys: step 1
+is `N`, step 2 `n`, the import card `i`, and the footer's `Keyboard shortcuts` and `Settings` are
+`?` and `,`.
 
 **Arbitration.** `i` means *import* only in the `FirstRun` context; in `Hub` it stays *toggle
 detail panel*. The first-run card is a full-window surface with its own key context, so the two

@@ -7,7 +7,7 @@ use gpui::{AnyElement, App, IntoElement, SharedString};
 use crate::{
     actions::{fleet, workspace},
     dialogs::Dialogs,
-    presentation::{terminal_label, workspace_keys},
+    presentation::{hub_sticky_error_key, terminal_label, workspace_keys},
     screens::hub::effective_context,
     shell::daemon::{dot_label, dot_state},
     state::{AppState, HubTab, Mode, Overlay, RepoScope, Screen, StickyError, breadcrumb},
@@ -118,8 +118,11 @@ pub(super) fn render(model: &StatusModel, _cx: &App) -> AnyElement {
 }
 
 fn error_slot(error: &StickyError, screen: Option<&Screen>) -> AnyElement {
-    let screen = screen.cloned().unwrap_or_else(Screen::hub);
-    sticky_error::render(error, &screen)
+    let kbd = match screen {
+        Some(Screen::Workspace { .. }) => workspace_keys().sticky_error.clone(),
+        Some(Screen::Hub { .. }) | None => hub_sticky_error_key(),
+    };
+    sticky_error::render(error, kbd)
 }
 
 /// `zsh · 164×42 · kept alive by fleetd`: the active PTY, its size, and who owns it. A

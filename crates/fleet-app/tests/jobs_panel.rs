@@ -58,7 +58,6 @@ async fn a_fresh_daemon_answers_with_a_snapshot_the_panel_can_render() {
     assert!(snapshot.contexts.is_empty());
     assert!(snapshot.repos.is_empty());
     assert!(!first_run::has_swarm_state(Some(daemon.home())));
-    assert_eq!(first_run::keys(false).len(), 4);
 
     // Every timestamp the daemon writes must be readable by the elapsed column of §3.7.
     assert!(

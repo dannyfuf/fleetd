@@ -177,7 +177,6 @@ impl HubScreen {
                 collapsed: state.rail_collapsed,
                 context_name: context_name.clone(),
                 filter: filter.clone().filter(|_| state.hub_pane == HubPane::Repos),
-                stale: stale.clone(),
             },
             &self.rail_scroll,
             cx,

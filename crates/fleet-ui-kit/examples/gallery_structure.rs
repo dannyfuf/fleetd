@@ -2,7 +2,7 @@
 //!
 //! Every structural component, in every state it can be in, in both themes:
 //! `AppFrame`, `SplitLayout`, `TitleBar`, `CommandField`, `StatusButton`, `SwitcherButton`,
-//! `StatusBar`, `Pane`, `PaneHeader`, `Sheet`, `Dialog`, `Overlay`, `ToastStack`, `Veil`,
+//! `StatusBar`, `Pane`, `PaneHeader`, `Sheet`, `Dialog`, `Overlay`, `ToastStack`, `StepCard`, `Veil`,
 //! `Banner`, `ModeWord` and `DaemonDot`.
 //!
 //! The floating layers are wired as **live layers of this window**, not as pictures of
@@ -278,16 +278,12 @@ fn app_frame_section(cx: &mut App) -> AnyElement {
                 false,
             ));
         if banner {
-            frame.banner(
-                Banner::warning("fleetd stopped")
-                    .icon(Icon::Dot)
-                    .countdown("reconnecting in 3s")
-                    .hints(
-                        KeyHintRow::new()
-                            .key("r", "reconnect")
-                            .key("esc", "dismiss"),
-                    ),
-            )
+            frame.banner(support::chrome::reconnect_banner(
+                Banner::warning("Lost connection to fleetd")
+                    .icon(Icon::Unplug)
+                    .countdown("\u{2014} reconnecting in 3s.")
+                    .detail("Your terminals and agents keep running."),
+            ))
         } else {
             frame
         }
@@ -536,7 +532,12 @@ fn status_bar_section(cx: &mut App) -> AnyElement {
                 bar_stage(
                     hub("sbar-error")
                         .ticker(JobTicker::new("clone", "nixos").percent(40))
-                        .error(StickyErrorSlot::new("prs failed: gh HTTP 502").key("!")),
+                        .error(
+                            StickyErrorSlot::new("sbar-error-slot", "prs failed: gh HTTP 502")
+                                .kbd(Kbd::parse("!").ok())
+                                .on_activate(|_, _| {})
+                                .on_dismiss(|_, _| {}),
+                        ),
                 ),
             ),
             specimen(
@@ -817,25 +818,20 @@ fn mode_and_daemon_section(cx: &mut App) -> AnyElement {
 
 fn banner_section(cx: &mut App) -> AnyElement {
     let t = cx.theme().clone();
-    let banner_stage = |banner: Banner| stage(&t, t.metrics.banner_h, banner);
+    let banner_stage = |banner: Banner| stage(&t, t.metrics.frame_banner_h, banner);
     LAYOUT.section(
         "Banner — §3.12 case C only",
         &t,
         vec![
             specimen(
-                "daemon died while attached · the countdown lives in its own slot so the sentence never reflows",
+                "daemon died while attached · the countdown lives in its own slot so the sentence never reflows; Reconnect now, Open log and ✕ run r, l and esc",
                 &t,
-                banner_stage(
-                    Banner::warning("fleetd stopped")
-                        .icon(Icon::Dot)
-                        .countdown("reconnecting in 3s")
-                        .hints(
-                            KeyHintRow::new()
-                                .key("r", "reconnect now")
-                                .key("l", "log")
-                                .key("esc", "dismiss"),
-                        ),
-                ),
+                banner_stage(support::chrome::reconnect_banner(
+                    Banner::warning("Lost connection to fleetd")
+                        .icon(Icon::Unplug)
+                        .countdown("\u{2014} reconnecting in 3s.")
+                        .detail("Your terminals and agents keep running."),
+                )),
             ),
             specimen(
                 "on reconnect · [D-17], verbatim: the sessions did not come back",
@@ -847,22 +843,18 @@ fn banner_section(cx: &mut App) -> AnyElement {
                 &t,
                 banner_stage(
                     Banner::danger("fleetd unreachable — the socket is gone")
-                        .hints(KeyHintRow::new().key("r", "retry").key("D", "doctor")),
+                        .button(Button::new("banner-retry", "Retry").kbd(gallery_kbd("r"))),
                 ),
             ),
             specimen(
-                "inside the Workspace every key carries its prefix (§3.6 [D-8])",
+                "stopped, mid-retry · narrow windows cut the reassurance first",
                 &t,
-                banner_stage(
+                banner_stage(support::chrome::reconnect_banner(
                     Banner::warning("fleetd stopped")
-                        .icon(Icon::Dot)
-                        .countdown("reconnecting…")
-                        .hints(
-                            KeyHintRow::new()
-                                .key("^s r", "reconnect")
-                                .key("^s l", "log"),
-                        ),
-                ),
+                        .icon(Icon::Unplug)
+                        .countdown("\u{2014} reconnecting\u{2026}")
+                        .detail("Your terminals and agents keep running."),
+                )),
             ),
         ],
     )
@@ -1346,6 +1338,88 @@ fn palette_card(t: &Theme) -> AnyElement {
         .into_any_element()
 }
 
+/// A stack wired as the app wires it: `View` shows `J`, every toast has a ✕, hover is reported.
+fn interactive_toasts(stack: ToastStack) -> ToastStack {
+    stack
+        .action_keys([None, Some(gallery_kbd("J")), None])
+        .on_activate(|_, _, _| {})
+        .on_dismiss(|_, _, _| {})
+        .on_hover(|_, _, _, _| {})
+}
+
+fn toast_section(cx: &mut App) -> AnyElement {
+    let t = cx.theme().clone();
+    let toast_stage = |stack: ToastStack| stage(&t, px(160.0), stack);
+    LAYOUT.section(
+        "ToastStack — §2.7, bottom-right",
+        &t,
+        vec![
+            specimen(
+                "a toast that points somewhere gets View and its key; every toast gets a ✕; hovering holds the dwell",
+                &t,
+                toast_stage(interactive_toasts(ToastStack::new(live_toasts()))),
+            ),
+            specimen(
+                "display only · no handlers, no buttons",
+                &t,
+                toast_stage(ToastStack::new(live_toasts())),
+            ),
+        ],
+    )
+}
+
+fn step_card_section(cx: &mut App) -> AnyElement {
+    let t = cx.theme().clone();
+    LAYOUT.section(
+        "StepCard — first run",
+        &t,
+        vec![specimen(
+            "current · pending · unavailable with its note · a dashed side path",
+            &t,
+            div()
+                .flex()
+                .flex_col()
+                .gap(t.space.sm)
+                .w(t.metrics.first_run_w)
+                .child(
+                    StepCard::new("step-1", StepMark::Number(1), "Create a context")
+                        .description("Group repositories by GitHub org or client.")
+                        .kbd(gallery_kbd("N"))
+                        .current(true)
+                        .on_click(|_, _| {}),
+                )
+                .child(
+                    StepCard::new("step-2", StepMark::Number(2), "Clone a repository")
+                        .description("Search your orgs on GitHub; it clones in the background.")
+                        .kbd(gallery_kbd("n"))
+                        .on_click(|_, _| {}),
+                )
+                .child(
+                    StepCard::new(
+                        "step-3",
+                        StepMark::Number(3),
+                        "Start a worktree and an agent",
+                    )
+                    .description("A branch copy with its own terminals and agent threads.")
+                    .unavailable("after step 2"),
+                )
+                .child(
+                    StepCard::new(
+                        "step-import",
+                        StepMark::Icon(Icon::Sailboat),
+                        "Import from ~/.swarm",
+                    )
+                    .description(
+                        "Brings over contexts, repos and worktrees. Nothing in ~/.swarm changes.",
+                    )
+                    .kbd(gallery_kbd("i"))
+                    .dashed(true)
+                    .on_click(|_, _| {}),
+                ),
+        )],
+    )
+}
+
 fn live_toasts() -> Vec<Toast> {
     let mut toasts = Vec::new();
     ToastStack::push_at(
@@ -1356,7 +1430,9 @@ fn live_toasts() -> Vec<Toast> {
     );
     ToastStack::push_at(
         &mut toasts,
-        Toast::new("Cloned buk/ledger · ⏎ opens").icon(Icon::CircleCheck),
+        Toast::new("Cloned buk/ledger")
+            .icon(Icon::CircleCheck)
+            .action("View"),
         ToastStack::MAX,
         10,
     );
@@ -1391,6 +1467,8 @@ impl Render for StructureGallery {
             pane_section(cx, focused_pane, filter_query),
             mode_and_daemon_section(cx),
             banner_section(cx),
+            toast_section(cx),
+            step_card_section(cx),
             veil_section(cx, veiled),
             sheet_section(cx),
             dialog_section(cx),
@@ -1445,17 +1523,12 @@ impl Render for StructureGallery {
             );
 
         if self.banner {
-            frame = frame.banner(
-                Banner::warning("fleetd stopped")
-                    .icon(Icon::Dot)
-                    .countdown("reconnecting in 3s")
-                    .hints(
-                        KeyHintRow::new()
-                            .key("r", "reconnect now")
-                            .key("l", "log")
-                            .key("esc", "dismiss"),
-                    ),
-            );
+            frame = frame.banner(support::chrome::reconnect_banner(
+                Banner::warning("Lost connection to fleetd")
+                    .icon(Icon::Unplug)
+                    .countdown("\u{2014} reconnecting in 3s.")
+                    .detail("Your terminals and agents keep running."),
+            ));
         }
         if self.sheet {
             frame = frame.body_overlay(
@@ -1467,7 +1540,7 @@ impl Render for StructureGallery {
             );
         }
         if self.toasts {
-            frame = frame.body_overlay(ToastStack::new(live_toasts()));
+            frame = frame.body_overlay(interactive_toasts(ToastStack::new(live_toasts())));
         }
         if self.palette {
             frame = frame.overlay(Overlay::new().content(palette_card(&t)));

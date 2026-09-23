@@ -1,12 +1,13 @@
 //! The daemon surfaces of UX-SPEC §3.12: the cold-start splash, the "will not start" window
-//! and the 28 px banner, plus the wording each of them is allowed to use.
+//! and the 40 px banner, plus the wording each of them is allowed to use.
 
 use std::time::Instant;
 
 use fleet_core::paths::FleetHome;
-use fleet_ui_kit::{Banner, DaemonSplash, DaemonState, Icon, KeyHintRow};
+use fleet_ui_kit::{Banner, Button, ButtonStyle, DaemonSplash, DaemonState, Icon};
 use gpui::{AnyElement, Entity, IntoElement, SharedString, prelude::*};
 
+use crate::actions::daemon as daemon_actions;
 use crate::state::{
     AppState, DaemonLink, DaemonLossReason, RECONNECT_BANNER_DWELL, RESTART_BANNER_DWELL,
     SPLASH_DETAIL_DELAY, reconnect_backoff,
@@ -34,15 +35,21 @@ fn restart_sentence(reattached: usize) -> SharedString {
 /// The connected process predates the fleetd binary currently on disk.
 const OUTDATED_SENTENCE: &str = "fleetd is outdated, restart with `fleet daemon restart`";
 
-/// What the 28 px banner under the context bar says right now.
+/// What a lost link promises: nothing the daemon owns went away with the window's connection.
+const LOST_REASSURANCE: &str = "Your terminals and agents keep running.";
+
+/// What the 40 px banner under the title bar says right now.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BannerSpec {
     /// The sentence. Owned because the restart sentence counts what actually came back.
     text: SharedString,
     /// The reconnect countdown, when one is running.
     countdown: Option<String>,
-    /// The keys this banner owns while it is showing.
-    hints: &'static [(&'static str, &'static str)],
+    /// The reassurance after the sentence.
+    detail: Option<&'static str>,
+    /// Whether the banner carries Reconnect now, Open log and its ✕: only while the link is
+    /// lost, which is when `Daemon > Banner` binds their keys.
+    actionable: bool,
 }
 
 /// The reconnect countdown of §3.12 C, derived from the absolute retry deadline.
@@ -74,23 +81,21 @@ fn banner_spec(
             reason,
         } => Some(BannerSpec {
             text: SharedString::from(match reason {
-                DaemonLossReason::ConnectionLost => "fleetd connection lost",
+                DaemonLossReason::ConnectionLost => "Lost connection to fleetd",
                 DaemonLossReason::Stopped => "fleetd stopped",
             }),
-            countdown: Some(countdown_label(
-                daemon_since + reconnect_backoff(*attempt),
-                now,
+            countdown: Some(format!(
+                "\u{2014} {}.",
+                countdown_label(daemon_since + reconnect_backoff(*attempt), now)
             )),
-            hints: &[
-                ("r", "reconnect now"),
-                ("l", "open the log"),
-                ("esc", "dismiss"),
-            ],
+            detail: Some(LOST_REASSURANCE),
+            actionable: true,
         }),
         DaemonLink::Connected if outdated => Some(BannerSpec {
             text: SharedString::from(OUTDATED_SENTENCE),
             countdown: None,
-            hints: &[],
+            detail: None,
+            actionable: false,
         }),
         DaemonLink::Reconnected {
             restarted,
@@ -112,7 +117,8 @@ fn banner_spec(
                     SharedString::from("reconnected")
                 },
                 countdown: None,
-                hints: &[],
+                detail: None,
+                actionable: false,
             })
         }
         DaemonLink::Lost {
@@ -161,12 +167,23 @@ pub(super) fn banner(
     if let Some(countdown) = spec.countdown {
         banner = banner.countdown(countdown);
     }
-    if !spec.hints.is_empty() {
-        let mut hints = KeyHintRow::new();
-        for (key, label) in spec.hints {
-            hints = hints.key(*key, *label);
-        }
-        banner = banner.hints(hints);
+    if let Some(detail) = spec.detail {
+        banner = banner.detail(detail);
+    }
+    if spec.actionable {
+        // Each button dispatches the action its key runs in `Daemon > Banner`, and shows that key
+        // from the live keymap; the ✕ is the banner's `Esc`.
+        banner = banner
+            .button(
+                Button::new("banner-reconnect", "Reconnect now")
+                    .action(Box::new(daemon_actions::Reconnect)),
+            )
+            .button(
+                Button::new("banner-open-log", "Open log")
+                    .style(ButtonStyle::Ghost)
+                    .action(Box::new(daemon_actions::OpenLog)),
+            )
+            .dismiss_action(Box::new(daemon_actions::DismissBanner));
     }
     Some(banner.into_any_element())
 }
@@ -245,7 +262,9 @@ mod tests {
         state.apply_bridge_event(BridgeEvent::Disconnected { attempt: 0 }, now);
         let connection_lost = banner_spec(&state.daemon, state.daemon_since, false, now)
             .unwrap_or_else(|| panic!("expected a connection-lost banner"));
-        assert_eq!(connection_lost.text, "fleetd connection lost");
+        assert_eq!(connection_lost.text, "Lost connection to fleetd");
+        assert_eq!(connection_lost.detail, Some(LOST_REASSURANCE));
+        assert!(connection_lost.actionable);
         assert_eq!(dot_label(&state.daemon), Some("connection lost"));
 
         state.apply_daemon_event(Event::DaemonShuttingDown, now);
@@ -317,6 +336,6 @@ mod tests {
         let spec = banner_spec(&DaemonLink::Connected, now, true, now)
             .unwrap_or_else(|| panic!("expected the existing banner"));
         assert_eq!(spec.text, OUTDATED_SENTENCE);
-        assert!(spec.hints.is_empty());
+        assert!(!spec.actionable);
     }
 }

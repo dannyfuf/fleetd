@@ -1211,7 +1211,7 @@ impl AgentThreads {
     ///
     /// Only the two states the design treats as signals — `needs you` and `failed` — fire, and
     /// each fires once per entry, so a thread that stays blocked does not notify on every event.
-    pub fn attention_edges(&mut self) -> Vec<(String, Attention)> {
+    pub fn attention_edges(&mut self) -> Vec<(String, Attention, ThreadId)> {
         let mut edges = Vec::new();
         for summary in self
             .summaries
@@ -1224,7 +1224,7 @@ impl AgentThreads {
                 continue;
             }
             if matches!(attention, Attention::NeedsYou(_) | Attention::Failed) {
-                edges.push((tab_title(summary), attention));
+                edges.push((tab_title(summary), attention, summary.thread));
             }
         }
         edges
@@ -1326,8 +1326,13 @@ impl AppState {
 
     /// Presents every fresh `needs you` / `failed` edge through the activity notification path.
     pub(crate) fn notify_agent_attention(&mut self, now: Instant) {
-        for (label, attention) in self.agents.attention_edges() {
-            self.notify_agent_thread(&label, attention, now);
+        for (label, attention, thread) in self.agents.attention_edges() {
+            self.notify_agent_thread(
+                &label,
+                attention,
+                Some(notifications::ToastTarget::AgentThread(thread)),
+                now,
+            );
         }
     }
 }

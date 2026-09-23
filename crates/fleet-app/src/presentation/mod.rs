@@ -30,4 +30,4 @@ pub use status::{
     KeepAliveStyle, inspection_badge, keep_alive_icon, pr_badge_state, row_glyph, session_glyph,
     terminal_label,
 };
-pub(crate) use workspace_keys::workspace_keys;
+pub(crate) use workspace_keys::{hub_jobs_key, hub_sticky_error_key, workspace_keys};

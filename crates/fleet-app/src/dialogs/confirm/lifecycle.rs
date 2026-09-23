@@ -153,12 +153,14 @@ pub(super) fn dry_run(
                 // §3.8.3: with nothing eligible the dialog is not a dialog, it is a toast.
                 state.update(cx, |app, cx| {
                     app.close_overlay();
-                    app.toast_short(
+                    // The reasons are in the prune job's log: `View` opens the Jobs panel, as `J`.
+                    app.toast_short_to(
                         format!(
-                            "Nothing to prune in {} \u{2014} {skipped} skipped \u{00b7} J for reasons",
+                            "Nothing to prune in {} \u{2014} {skipped} skipped",
                             repo.name()
                         ),
                         Icon::Scissors,
+                        crate::state::ToastTarget::Jobs,
                         Instant::now(),
                     );
                     cx.notify();

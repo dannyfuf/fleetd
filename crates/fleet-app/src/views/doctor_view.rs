@@ -2,10 +2,41 @@
 
 use fleet_proto::response::{DoctorCheck, DoctorStatus as WireDoctorStatus};
 use fleet_ui_kit::{
-    ActiveTheme, DoctorRow, DoctorStatus, DoctorTable, Icon, IconSize, KeyHintRow, Text, Tone,
-    prelude::*,
+    ActiveTheme, Button, ButtonSize, ButtonStyle, DoctorRow, DoctorStatus, DoctorTable, Icon,
+    IconSize, Text, Tone, prelude::*,
 };
-use gpui::{AnyElement, App, SharedString, div};
+use gpui::{Action, AnyElement, App, SharedString, div};
+
+use crate::{
+    actions::{daemon as daemon_actions, fleet},
+    keymap,
+};
+
+/// The key table's context for the §3.12 B surface.
+const DOWN_CONTEXT: &str = "Daemon > Down";
+/// The key table's context for the doctor report.
+const DOCTOR_CONTEXT: &str = "Daemon > Doctor";
+/// The key table's context for the global keys (`ctrl-q`).
+const GLOBAL_CONTEXT: &str = "Fleet";
+
+/// A button that runs `action` and shows the key `context` binds it to.
+///
+/// The chip is read from the key table rather than from focus: this view is cached, and its first
+/// paint can precede the focus moving onto the surface (the report replaces the Settings dialog it
+/// was raised from), which would leave a focus-resolved chip empty until something else repaints.
+fn keyed_button(
+    id: &'static str,
+    label: &'static str,
+    context: &str,
+    action: Box<dyn Action>,
+) -> Button {
+    let button = Button::new(id, label);
+    let button = match keymap::keystrokes_in(context, action.as_ref()) {
+        Some(strokes) => button.kbd(fleet_ui_kit::Kbd::new(&strokes)),
+        None => button,
+    };
+    button.action(action)
+}
 
 /// The wire protocol this build of the app speaks. A daemon that answers with anything else is
 /// a version mismatch, not a crash.
@@ -77,17 +108,69 @@ impl DaemonFailure {
         !matches!(self, Self::VersionMismatch)
     }
 
+    /// The buttons the surface offers, in order; the first is the primary one.
     #[must_use]
-    const fn hints(self) -> &'static [(&'static str, &'static str)] {
+    const fn controls(self) -> &'static [FailureControl] {
         if self.is_retryable() {
             &[
-                ("r", "retry"),
-                ("L", "open log"),
-                ("D", "run doctor"),
-                ("ctrl-q", "quit"),
+                FailureControl::Retry,
+                FailureControl::OpenLog,
+                FailureControl::RunDoctor,
+                FailureControl::Quit,
             ]
         } else {
-            &[("D", "run doctor"), ("L", "open log"), ("ctrl-q", "quit")]
+            &[
+                FailureControl::RunDoctor,
+                FailureControl::OpenLog,
+                FailureControl::Quit,
+            ]
+        }
+    }
+}
+
+/// One button of the §3.12 B surface, each the action its key runs in `Daemon > Down`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailureControl {
+    Retry,
+    OpenLog,
+    RunDoctor,
+    Quit,
+}
+
+impl FailureControl {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Retry => "Retry",
+            Self::OpenLog => "Open log",
+            Self::RunDoctor => "Run doctor",
+            Self::Quit => "Quit",
+        }
+    }
+
+    fn action(self) -> Box<dyn Action> {
+        match self {
+            Self::Retry => Box::new(daemon_actions::Retry),
+            Self::OpenLog => Box::new(daemon_actions::OpenLog),
+            Self::RunDoctor => Box::new(daemon_actions::RunDoctor),
+            Self::Quit => Box::new(fleet::Quit),
+        }
+    }
+
+    /// Where the key table binds this control's key: `ctrl-q` is global, the rest are the
+    /// surface's own.
+    const fn context(self) -> &'static str {
+        match self {
+            Self::Quit => GLOBAL_CONTEXT,
+            Self::Retry | Self::OpenLog | Self::RunDoctor => DOWN_CONTEXT,
+        }
+    }
+
+    const fn id(self) -> &'static str {
+        match self {
+            Self::Retry => "daemon-failure-retry",
+            Self::OpenLog => "daemon-failure-log",
+            Self::RunDoctor => "daemon-failure-doctor",
+            Self::Quit => "daemon-failure-quit",
         }
     }
 }
@@ -183,11 +266,35 @@ fn report_view(
                 .gap(theme.space.md)
                 .children(error.map(|error| Text::ui(error.clone()).tone(Tone::Danger).ellipsize()))
                 .child(div().flex_1())
+                // Each button runs the action its key runs in `Daemon > Doctor`, and shows that key.
                 .child(
-                    KeyHintRow::new()
-                        .key("D", "re-run")
-                        .key("L", "open log")
-                        .key("esc", "close"),
+                    keyed_button(
+                        "doctor-rerun",
+                        "Run again",
+                        DOCTOR_CONTEXT,
+                        Box::new(daemon_actions::RunDoctor),
+                    )
+                    .size(ButtonSize::Compact),
+                )
+                .child(
+                    keyed_button(
+                        "doctor-log",
+                        "Open log",
+                        DOCTOR_CONTEXT,
+                        Box::new(daemon_actions::OpenLog),
+                    )
+                    .style(ButtonStyle::Ghost)
+                    .size(ButtonSize::Compact),
+                )
+                .child(
+                    keyed_button(
+                        "doctor-close",
+                        "Close",
+                        DOCTOR_CONTEXT,
+                        Box::new(daemon_actions::DismissBanner),
+                    )
+                    .style(ButtonStyle::Ghost)
+                    .size(ButtonSize::Compact),
                 ),
         )
         .into_any_element()
@@ -202,10 +309,23 @@ fn failure_view(
     cx: &App,
 ) -> AnyElement {
     let theme = cx.theme();
-    let mut hints = KeyHintRow::new();
-    for (key, label) in failure.hints() {
-        hints = hints.key(*key, *label);
-    }
+    // The first control is the way out the surface recommends; the rest are secondary. Each
+    // runs the action its key runs in `Daemon > Down` (`ctrl-q` globally), and shows that key.
+    let buttons = div().flex().items_center().gap(theme.space.sm).children(
+        failure.controls().iter().enumerate().map(|(ix, control)| {
+            keyed_button(
+                control.id(),
+                control.label(),
+                control.context(),
+                control.action(),
+            )
+            .style(if ix == 0 {
+                ButtonStyle::Primary
+            } else {
+                ButtonStyle::Secondary
+            })
+        }),
+    );
     div()
         .id("daemon-failure-body")
         .size_full()
@@ -235,7 +355,7 @@ fn failure_view(
                             .map(|line| Text::data_small(line.clone()).faint().ellipsize()),
                     ),
                 )
-                .child(hints),
+                .child(buttons),
         )
         .into_any_element()
 }

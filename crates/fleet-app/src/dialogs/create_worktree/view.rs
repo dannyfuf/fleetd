@@ -371,9 +371,10 @@ pub(crate) fn render(
             // §3.8.1: closing the dialog never cancels a running base fetch; it says so.
             if with_host(&cancel_state, cx, |host| host.create.fetching) {
                 cancel_state.update(cx, |state, cx| {
-                    state.toast_short(
-                        "\u{27f3} base fetch still running \u{00b7} J",
+                    state.toast_short_to(
+                        "Base fetch still running",
                         Icon::LoaderCircle,
+                        crate::state::ToastTarget::Jobs,
                         Instant::now(),
                     );
                     cx.notify();

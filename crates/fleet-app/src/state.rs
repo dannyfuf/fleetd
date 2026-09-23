@@ -61,7 +61,7 @@ pub use navigation::{
     WORKSPACE_TAB_LIMIT_NOTICE, filter_escape, half_page, move_cursor,
 };
 pub use notifications::{
-    LiveToast, StickyError, dwell_for, expire_toasts, latest_failed_job, running_jobs,
+    LiveToast, StickyError, ToastTarget, dwell_for, expire_toasts, latest_failed_job, running_jobs,
 };
 pub use snapshot::{ChipCounts, breadcrumb};
 pub use terminal::MirrorGrid;

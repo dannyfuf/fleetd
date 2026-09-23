@@ -48,8 +48,8 @@ use crate::actions::{
     agent, board, board_settings, card_detail, confirm, context_dialog, create_worktree, daemon,
     dialog, filter, first_run,
     fleet::{
-        FocusStickyError, OpenAgentClaude, OpenAgentCodex, OpenHelp, OpenJobs, OpenPalette,
-        OpenSettings, Quit, QuitAndStopDaemon, Refresh, UpdateFleet,
+        DismissStickyError, FocusStickyError, OpenAgentClaude, OpenAgentCodex, OpenHelp, OpenJobs,
+        OpenPalette, OpenSettings, Quit, QuitAndStopDaemon, Refresh, UpdateFleet,
     },
     help, hub, jobs, native_agent, palette, prefix, prs, quit_daemon_dialog, quit_dialog, repos,
     scroll, settings, workspace, worktrees,
@@ -612,6 +612,7 @@ key_table! {
     "?",            "Hub" => OpenHelp;
     "J",            "Hub" => OpenJobs;
     "!",            "Hub" => FocusStickyError;
+    "X",            "Hub" => DismissStickyError;
     "i",            "Hub" => hub::ToggleDetail;
     "H",            "Hub" => hub::ToggleRepoRail;
     "a",            "Hub" => OpenAgentClaude;

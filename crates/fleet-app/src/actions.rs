@@ -25,6 +25,8 @@ pub mod fleet {
             OpenJobs,
             /// `!` — focus the sticky error slot.
             FocusStickyError,
+            /// `X` — dismiss the sticky error (its ✕). The failed jobs stay in the Jobs panel.
+            DismissStickyError,
             /// `r` — refresh status, PRs and discovery as a job.
             Refresh,
             /// `U` — update Fleet as a job.

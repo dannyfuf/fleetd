@@ -10,13 +10,15 @@
 //! already built (counts, scope), never assembled here. The toolbar holds the page's own
 //! controls — a [`super::FilterField`], secondary [`super::Button`]s and at most one primary
 //! one — right-aligned to the title's baseline. A frozen snapshot adds an amber
-//! `stale · <age>` after the subtitle (§1.3), the same stamp a [`super::PaneHeader`] carries.
+//! an amber `Stale · <age>` chip after the subtitle (§1.3), the same chip a [`super::PaneHeader`]
+//! carries.
 //!
 //! Not a [`super::PaneHeader`]: that is the 30 px label row of a dense pane. Not a
 //! [`super::SectionHeader`], which names a block inside a panel.
 
 use gpui::{AnyElement, App, SharedString, Window, div, prelude::*};
 
+use super::Chip;
 use crate::{text::Text, theme::ActiveTheme, tone::Tone};
 
 /// The top of a Hub page.
@@ -90,9 +92,10 @@ impl RenderOnce for PageHeader {
                             .map(|subtitle| Text::caption(subtitle).muted().ellipsize()),
                     )
                     .children(self.stale.map(|age| {
-                        Text::caption(format!("\u{b7} stale \u{b7} {age}"))
+                        Chip::new()
+                            .text(format!("Stale \u{b7} {age}"))
                             .tone(Tone::Warning)
-                            .flex_none()
+                            .filled(true)
                     }))
                     .children(self.facts)
             });

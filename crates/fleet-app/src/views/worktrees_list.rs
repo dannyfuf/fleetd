@@ -148,6 +148,9 @@ pub fn render(
         FilterSlot::Idle(query) => query.clone(),
         FilterSlot::Editing { query, .. } => Some(query.clone()).filter(|query| !query.is_empty()),
     };
+    // While fleetd is gone the rows are true but frozen: they stay navigable, drawn at the stale
+    // opacity under the header's one `Stale · <age>` chip (§3.12 C).
+    let frozen = stale.is_some();
     let header = page_header(summary, filter, stale);
     let columns = columns(pane_ch, scope_repo.is_none());
     let heads = columns.iter().fold(ListHeader::new(), |header, column| {
@@ -225,7 +228,14 @@ pub fn render(
                 .min_h_0()
                 .px(theme.space.md)
                 .child(heads)
-                .child(div().flex_1().min_h_0().pt(theme.space.xs).child(list)),
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .pt(theme.space.xs)
+                        .when(frozen, |el| el.opacity(theme.metrics.stale_opacity))
+                        .child(list),
+                ),
         );
 
     Pane::new()

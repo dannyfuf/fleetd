@@ -51,6 +51,14 @@ pub(super) const ENTRIES: &[Entry] = &[
     )
     .short("Last error"),
     e(
+        &["fleet::DismissStickyError"],
+        P::Everywhere,
+        G::Panels,
+        "Dismiss the last error",
+        "Clear the error from the status bar. The failed jobs stay in the jobs panel.",
+    )
+    .short("Dismiss error"),
+    e(
         &["fleet::Quit"],
         P::Everywhere,
         G::App,

@@ -308,7 +308,9 @@ The names Fleet paints today, by surface:
 | Sheets | `sheet.close` |
 | Jobs panel | `jobs.row[N].retry`, `jobs.row[N].cancel`, `jobs.row[N].log`, `jobs.filter[N]`, `jobs.clear`, `jobs.more`, `jobs.log.back`, `jobs.log.follow`, `jobs.log.end` |
 | Tabs | `tabs.tab[N]` for a process tab, `agents.tabs.tab[N]` for a conversation, sharing one numbering; `tabs.tab[N].close` / `agents.tabs.tab[N].close` (the tab's `✕`), `tabs.new` (the `+`), `tabs.fallback`, `tabs.watch`, `tabs.zoom` |
-| Toasts and errors | `toasts.toast[N]` (0 is the oldest, matching the `toasts` array), `sticky_error.retry` |
+| Toasts and errors | `toasts.toast[N]` (0 is the oldest, matching the `toasts` array), `toasts.toast[N].action`, `toasts.toast[N].close`, `sticky_error.retry`, `sticky_error.close` |
+| Daemon banner | `banner.button[N]` (`0` Reconnect now, `1` Open log), `banner.close` |
+| First run | `first_run.step[N]` (`0` Create a context, `1` Clone a repository, `2` Start a worktree and an agent), `first_run.import`, `first_run.help`, `first_run.settings` |
 | Menus | `menu.item[N]`: the items of the one open kit `Menu` (a ⋯, `+`, right-click or dropdown menu), numbered over the visible items in order, separators and headers skipped |
 | ⌃S command menu | `prefix_menu`, `prefix_menu.item[N]`, `prefix_menu.close` |
 | Native agents | `agents.popup`, `agents.popup.agent[N]` (the header's provider switch: 0 Claude, 1 Codex), `agents.popup.restart`, `agents.popup.hide`, `agents.transcript`, `agents.composer`, `agents.decision`, `agents.approval.allow_once`, `agents.approval.allow_always`, `agents.approval.deny`, `agents.approval.deny_and_stop`, `agents.approval.edit`, `agents.send`, `agents.tool[N]`, `agents.row[N]` |
@@ -396,6 +398,19 @@ the error callout and exists only while a fetch error is shown; `prs.more` is th
 painted on every visible row but visible only while it is hovered or selected, so a scenario
 clicks the row before them. A press on either first puts the cursor on that row; the menu's
 items are `menu.item[N]`, and a right click on `prs.row[N]` opens the same menu.
+
+`toasts.toast[N].action` is the toast's `View` button, painted only on a toast that points
+somewhere (a background success, a native agent that needs you); a click on it — or on the
+toast's line — goes there as the key would and retires the toast. `toasts.toast[N].close` is its
+✕, on every toast. `sticky_error.retry` is the whole error in the status bar: a click on it runs
+`!` (the Jobs panel, on the failure); `sticky_error.close` is the ✕ beside it, which runs `X` and
+clears the slot. `banner.button[N]` and `banner.close` are the §3.12 C banner's `Reconnect now`,
+`Open log` and ✕, each dispatching the banner's `r`, `l` and `Esc`; they are painted only while
+the link is lost, never on the `reconnected` or restart banner. `first_run.step[N]` are the
+first-run page's step cards: `0` and `1` run `N` and `n`, and `2` is drawn dimmed and does
+nothing until a repository exists. `first_run.import` is the import card, painted only when
+`~/.swarm/state.json` exists (so never in a hermetic run); `first_run.help` and
+`first_run.settings` are the footer's `?` and `,`.
 
 `dialog.close` is the close ✕ in every dialog's header; clicking it runs the action `Esc` runs in
 that dialog, and so does a click on the scrim outside the card. `sheet.close` is the same ✕ on a

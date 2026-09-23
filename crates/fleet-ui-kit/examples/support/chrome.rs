@@ -161,3 +161,20 @@ pub fn status_buttons(bar: StatusBar, id: &'static str, workspace: bool) -> Stat
         bar.trailing(button(1, "Shortcuts", "?"))
     }
 }
+
+/// The §3.12 C banner with the app's two buttons and its ✕. The app wires each button with
+/// `Button::action`, so its chip is the live key; the gallery spells the chips instead.
+pub fn reconnect_banner(banner: Banner) -> Banner {
+    let reconnect = Button::new("banner-reconnect", "Reconnect now");
+    let log = Button::new("banner-log", "Open log").style(ButtonStyle::Ghost);
+    banner
+        .button(match kbd("r") {
+            Some(chip) => reconnect.kbd(chip),
+            None => reconnect,
+        })
+        .button(match kbd("l") {
+            Some(chip) => log.kbd(chip),
+            None => log,
+        })
+        .on_dismiss(|_, _| {})
+}

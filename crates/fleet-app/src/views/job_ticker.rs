@@ -157,7 +157,7 @@ mod tests {
         let succeeded = job("job-a", JobStatus::Succeeded, "2026-09-04T12:00:00Z", None);
         assert_eq!(
             job_outcome_toast(&succeeded, false),
-            Some("Cloned nixos \u{00b7} J".to_owned())
+            Some("Cloned nixos".to_owned())
         );
         assert_eq!(
             job_outcome_toast(&succeeded, true),
@@ -215,7 +215,7 @@ mod tests {
             "acme/widgets#feature-one:762d2efa-4911-4a0e-8b1c-8f3e0d5b2a91".to_owned();
         assert_eq!(
             job_outcome_toast(&succeeded, false),
-            Some("Created acme/widgets#feature-one \u{00b7} J".to_owned())
+            Some("Created acme/widgets#feature-one".to_owned())
         );
     }
 }

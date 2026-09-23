@@ -5,7 +5,7 @@
 //! | Region | Height | Token |
 //! | --- | --- | --- |
 //! | title bar | 44 px | `metrics.title_bar_h` |
-//! | banner (§3.12 case C, optional) | 28 px | `metrics.banner_h` |
+//! | banner (§3.12 case C, optional) | 40 px | `metrics.frame_banner_h` |
 //! | body | flexible | — |
 //! | status bar | 28 px | `metrics.status_bar_h` |
 //!
@@ -63,7 +63,7 @@ impl AppFrame {
         self
     }
 
-    /// A 28 px banner directly under the title bar (§3.12 case C).
+    /// A 40 px banner directly under the title bar (§3.12 case C).
     ///
     /// The banner pushes the body down rather than floating over it: it is a *state* of the
     /// window, not a layer, and a terminal that keeps its rows under a floating strip would
@@ -137,7 +137,7 @@ impl RenderOnce for AppFrame {
                 div()
                     .flex()
                     .flex_none()
-                    .h(theme.metrics.banner_h)
+                    .h(theme.metrics.frame_banner_h)
                     .w_full()
                     .overflow_hidden()
                     .child(banner)

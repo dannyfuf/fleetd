@@ -279,10 +279,10 @@ list below is the complete inventory, in px unless marked `ch`; a unit test in
 
 | Group | Tokens |
 | --- | --- |
-| Window chrome | `title_bar_h 44` · `status_bar_h 28` · `traffic_light_inset 84` · `command_field_w 340` · `filter_field_w 220` · `monogram_size 18` · `mode_word_w 84` · `banner_h 28` · `strip_h 22` |
-| Layout columns | `sidebar_w 232` · `rail_w 240` · `detail_w 344` · `detail_overlay_w 320` · `sheet_w 440` · `sheet_expanded_w 640` · `sheet_w_detail 736` |
+| Window chrome | `title_bar_h 44` · `status_bar_h 28` · `traffic_light_inset 84` · `command_field_w 340` · `filter_field_w 220` · `monogram_size 18` · `mode_word_w 84` · `banner_h 28` · `frame_banner_h 40` · `strip_h 22` |
+| Layout columns | `sidebar_w 232` · `rail_w 240` · `detail_w 344` · `detail_overlay_w 320` · `sheet_w 440` · `sheet_expanded_w 640` · `sheet_w_detail 736` · `first_run_w 560` |
 | Rows and headers | `row_h 30` · `row_h_comfortable 44` · `pane_header_h 30` · `section_header_h 20` · `palette_row_h 34` · `palette_tile 22` · `job_row_h 44` · `progress_bar_h 4` |
-| Controls | `button_h 30` · `button_h_compact 26` · `kbd_h 18` · `kbd_h_small 16` · `chip_h 22` · `tile_chip_h 18` · `avatar_size 20` · `text_field_h 36` · `field_status_h 18` · `number_field_w 96` · `segment_h 24` · `switch_w 34` · `switch_h 20` · `checkbox_size 16` |
+| Controls | `button_h 30` · `button_h_compact 26` · `kbd_h 18` · `kbd_h_small 16` · `chip_h 22` · `tile_chip_h 18` · `avatar_size 20` · `text_field_h 36` · `field_status_h 18` · `number_field_w 96` · `segment_h 24` · `switch_w 34` · `switch_h 20` · `checkbox_size 16` · `step_badge 28` |
 | Dialogs and floating layers | `dialog_w 560` · `confirm_compact_w 480` · `dialog_header_h 44` · `dialog_footer_h 44` · `palette_w 640` · `palette_top 120` · `prefix_menu_w 900` · `palette_input_h 44` · `overlay_help_w 640` · `toast_w 320` · `toast_inset 12` · `scroll_pill_w 176` · `menu_min_w 240` · `alert_tile 34` |
 | Lines and marks | `hairline 1` · `focus_ring_w 2` · `scroll_thumb_w 3` · `dot_size 8` · `dot_size_small 6` |
 | Terminal | `cell_w 7.5` · `cell_h 18` · `terminal_tab_min_w 84` · `terminal_tab_max_w 200` · `tab_strip_h 40` · `terminal_tab_h 34` · `tab_close_size 18` |
@@ -489,7 +489,9 @@ end-to-end scenario can click a row by name. `HarnessTargetExt` is blanket-imple
 `IntoElement`, which is how `fleet-app` names the surfaces it builds itself; the whole cost with
 harness mode off is one flag read and one branch. Four components take typed items rather than
 elements, so their names live here instead of at the call site: `ToastStack` records
-`toasts.toast[N]`, `Palette` records `palette.input` and `palette.row[N]`,
+`toasts.toast[N]` with its `toasts.toast[N].action` button and `toasts.toast[N].close` ✕,
+`Banner` records `banner.button[N]` and `banner.close`, `StickyErrorSlot` records its ✕ as
+`sticky_error.close`, `Palette` records `palette.input` and `palette.row[N]`,
 `TerminalTabStrip` records `tabs.tab[N]` and — past `TerminalTabStrip::agents_from` —
 `agents.tabs.tab[N]`, the decision drawer records the approval controls, and an open `Menu`
 records `menu.item[N]` over its visible items, separators and headers skipped. Two more take the
@@ -634,9 +636,11 @@ the list, which must flex. Only one pane in a screen is `focused` at a time.
 **API.** `PaneHeader::new("worktrees").scope(..).shown(usize).total(usize).range(first, last)
 .stale(age).filter_chip(query).filter(impl IntoElement).trailing(..)`.
 **Variants.** normal · filtering (`.filter(FilterBar::..)` replaces the left side **in place**) ·
-filter retained (`.filter_chip("rut")`) · stale (`· stale · 2m`, amber).
+filter retained (`.filter_chip("rut")`) · stale (an amber `Stale · 2m` chip).
 **Usage rule.** Never swap the header element for a filter bar — pass the filter bar *through*
 the header, or the row shifts by a pixel and the illusion of "the list did not move" breaks.
+While the daemon is gone only the screen's main list header carries `.stale(age)`: one chip says
+the whole mirror is frozen, and a second one on the rail says nothing new.
 
 #### `PageHeader`
 **Purpose.** The top of a Hub page: an H1 in `page_title`, one summary line under it, and the
@@ -645,7 +649,7 @@ page's toolbar right-aligned to the title's baseline.
 .fact(impl IntoElement).action(impl IntoElement)`; `fact` and `action` append. The badge sits after
 the title on its line (a board's prefix); facts follow the subtitle on the summary line (the
 board's clickable `1 needs you`, its dirty and conflict counters, a spinner).
-**Variants.** normal · stale (`· stale · 2m`, amber, after the subtitle) · with badge and facts
+**Variants.** normal · stale (an amber `Stale · 2m` chip after the subtitle) · with badge and facts
 (the board header).
 **Usage rule.** The subtitle is a sentence the view model built in its update path
 (`4 across 2 repositories · 1 needs attention`); the header never counts anything. The toolbar
@@ -739,11 +743,20 @@ scrim click through `palette::Close`.
 
 #### `Toast` / `ToastStack`
 **Purpose.** Bottom-right transient acknowledgements, max 3.
-**API.** `Toast::new(text).icon(Icon).tone(Tone).short().raised_at(ms)`;
-`ToastStack::new(toasts).max(usize).bottom_inset(Pixels)`;
+**API.** `Toast::new(text).icon(Icon).tone(Tone).short().raised_at(ms).action(label)`;
+`ToastStack::new(toasts).max(usize).bottom_inset(Pixels).action_keys(iter of Option<Kbd>)
+.on_activate(Fn(usize, ..)).on_dismiss(Fn(usize, ..)).on_hover(Fn(usize, bool, ..))`;
 `ToastStack::{MAX, is_visible}`, `COALESCE_WINDOW_MS`, and
 `ToastStack::{push, push_at}` apply the coalescing law.
-**Variants.** 1.6 s short · 3.2 s normal · coalesced (`×n`).
+**Anatomy.** icon · one line · a compact ghost `View` button carrying the key that goes to the
+same place (only on a toast with an `action`) · a compact ✕ (only with `on_dismiss`). The line,
+the button and the ✕ are siblings, so one click never runs two of them; the line itself is
+clickable on a toast with an `action`. Handlers receive the toast's index in the list the stack
+was given.
+**Variants.** 1.6 s short · 3.2 s normal · coalesced (`×n`) · pointing somewhere (`View`) ·
+display only (no handlers).
+**Usage rule.** The dwell is the caller's timer: `on_hover(true)` asks it to hold the toast and
+`on_hover(false)` to resume, so a toast never vanishes under the pointer.
 **Usage rule — the toast law.** *A toast is allowed only when there is no row and no pill that
 already shows the outcome.* Never toast: job started, job succeeded with its row on screen,
 worktree created, PR refreshed, context switched, session opened, settings saved, update
@@ -1324,7 +1337,11 @@ present.
 
 #### `StickyErrorSlot`
 **Purpose.** Red, addressable with `!`, persists until dismissed.
-**API.** `StickyErrorSlot::new(text).id(ElementId).key(..).count(usize).on_activate(Fn(..))`.
+**API.** `StickyErrorSlot::new(id, text).kbd(Option<Kbd>).count(usize).action(Box<dyn Action>)
+.on_activate(Fn(..)).dismiss_action(Box<dyn Action>).on_dismiss(Fn(..))`.
+**Anatomy.** `⚠ text xN <key>` as one control, then a sibling ✕ (`sticky_error.close`). A click on
+the error runs its action — the same one its key chip names — and the ✕ its dismiss.
+**States.** clickable (with an action) · display only · repeated (`xN`) · dismissable.
 **Usage rule.** Errors go here, **never** into a toast. It owns the last failed job and holds
 the red jobs chip until the Jobs panel has been opened.
 
@@ -1482,8 +1499,15 @@ signal-killed process has no exit code and the strip must not invent `128 + sign
 chrome has no mode word (ADR 0023); do not add one to the status bar or the title bar.
 
 #### `Banner`
-**Purpose.** A 28 px full-width strip with a countdown and recovery keys.
-**API.** `Banner::{warning, danger}(text).icon(Icon).countdown(..).hints(KeyHintRow)`.
+**Purpose.** A 40 px (`frame_banner_h`) full-width strip: what is wrong, why it is safe, and the
+buttons that act on it.
+**API.** `Banner::{warning, danger}(text).icon(Icon).countdown(..).detail(..).button(Button)
+.dismiss_action(Box<dyn Action>).on_dismiss(Fn(..))`; `.hints(KeyHintRow)` only for the embedded Git
+UI, which keeps lazygit's hint vocabulary.
+**Anatomy.** icon · the sentence in the tone (strong) · the countdown in its own secondary slot ·
+the reassurance (`detail`, secondary, cut first when narrow) · compact buttons (`banner.button[N]`,
+`0` leftmost) · a ✕ (`banner.close`). Buttons are wired with `Button::action`, so each shows its
+live key and clicks the same path.
 **Usage rule.** After a daemon restart the banner must state what became of the terminals, from
 the first snapshot rather than from an assumption: *"fleetd restarted. `<n>` terminals were
 reattached; worktrees, jobs and state are intact."*, or *"fleetd restarted. No terminals survived;
@@ -1491,11 +1515,25 @@ worktrees, jobs and state are intact."* A banner that leaves the user guessing w
 each tab is still running — or that promises a reattach that did not happen — is the one thing this
 surface exists to prevent.
 
+#### `StepCard`
+**Purpose.** One clickable step of the first-run page: a number, a title, one muted line, and its
+key.
+**API.** `StepCard::new(id, StepMark::{Number(n), Icon(icon)}, title).description(..)
+.action(Box<dyn Action>).kbd(Kbd).on_click(Fn(..)).current(bool).unavailable(note).dashed(bool)`.
+**Anatomy.** A `radii.card` box with `lg`/`md` padding: a `step_badge` round number (accent fill
+when current, `control` otherwise) or a glyph, the title in `UiStrong` over a muted `caption`, and
+the action's live key chip at the end — or, when unavailable, the note that says when it becomes
+available.
+**States.** current (accent badge, accent-tinted hairline and fill) · pending · unavailable
+(dimmed, no click, a note instead of a key) · dashed (an optional side path, no fill) · hover.
+**Usage rule.** Only for the two-to-four steps of a first-time screen; the whole card is the
+control, so do not put a `Button` inside it.
+
 #### `DaemonSplash`
 **Purpose.** The two **full-window** daemon surfaces of §3.12, cases A and B.
 **API.** `DaemonSplash::{starting, failed}(title).detail(..).log_lines(..).hints(KeyHintRow)`;
 `DaemonSplashKind::{Starting, Failed}`.
-**Usage rule.** `Banner` covers case C only, because that one is a 28 px strip under the
+**Usage rule.** `Banner` covers case C only, because that one is a 40 px strip under the
 title bar. Cases A and B are chrome-less full-window surfaces and neither fits `EmptyState`,
 which is two lines and pane-scoped: A needs a spinner plus the socket path after 3 s, B needs a
 mono tail of `~/.fleet/logs/fleetd.log`. The keys here are **bare** (`r`, `L`, `D`, `ctrl-q`) —
@@ -1512,8 +1550,8 @@ lost grow a labelled pill, because bad news must be readable.
 **Purpose.** A 55 % scrim over **terminal grids only**, while the daemon is gone.
 **API.** `Veil::new(active).opacity(f32).content(..)`; `.drops_keys()`. Its default opacity comes
 from `Theme::metrics.veil_opacity`.
-**Usage rule.** Lists stay at 100 % and stay navigable — they are true, just frozen; only a live
-surface is veiled. Keys typed into a veiled grid are **dropped, not buffered**; the component
+**Usage rule.** Lists stay navigable, dimmed only to `stale_opacity` — they are true, just
+frozen; only a live surface is veiled. Keys typed into a veiled grid are **dropped, not buffered**; the component
 renders the scrim and `drops_keys()` states the contract the caller must honour.
 
 ### 6.6 Native agent transcript

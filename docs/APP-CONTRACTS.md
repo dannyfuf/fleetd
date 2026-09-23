@@ -512,7 +512,7 @@ is the single source of truth on the client. The parts a screen touches:
 | Field | Meaning |
 | --- | --- |
 | `snapshot: Option<Snapshot>` | the daemon's authoritative state; `None` until the first one lands |
-| `snapshot_at` / `snapshot_age(now)` | what the `stale · <age>` stamp ages (§1.3) |
+| `snapshot_at` / `snapshot_age(now)` | what the `Stale · <age>` chip ages (§1.3) |
 | `grids: HashMap<TerminalId, MirrorGrid>` | one mirror grid per terminal, diffs already applied |
 | `displayed_hub: DisplayedHub` | stable IDs and rows from the Hub's current scoped/sorted/filtered projection |
 | `board: BoardState` | active context’s `BoardView`, loading/error, `BoardFocus { column, row }`, filter and optional `GroupBy` |

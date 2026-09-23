@@ -95,6 +95,20 @@ impl Shell {
         self.open(Overlay::Jobs, cx);
     }
 
+    /// The sticky error's ✕: the slot clears; the failures stay in the Jobs panel.
+    pub(super) fn dismiss_sticky_error(
+        &mut self,
+        _: &fleet::DismissStickyError,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |state, cx| {
+            if state.dismiss_sticky_error() {
+                cx.notify();
+            }
+        });
+    }
+
     pub(super) fn open_filter(
         &mut self,
         _: &hub::OpenFilter,
@@ -258,6 +272,7 @@ impl Shell {
         .on_action(cx.listener(Self::open_agent_claude))
         .on_action(cx.listener(Self::open_agent_codex))
         .on_action(cx.listener(Self::focus_sticky_error))
+        .on_action(cx.listener(Self::dismiss_sticky_error))
         .on_action(cx.listener(Self::cancel))
         // First run (§3.13) — fallbacks for the three keys the card advertises
         .on_action(cx.listener(Self::first_run_import))

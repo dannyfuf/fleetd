@@ -1114,7 +1114,11 @@ fn rows_section(
                         .percent(40)
                         .extra(1)
                         .into_any_element(),
-                    StickyErrorSlot::new("gh: HTTP 502 upstream connect error").into_any_element(),
+                    StickyErrorSlot::new("kit-sticky", "gh: HTTP 502 upstream connect error")
+                        .kbd(Some(gallery_kbd("!")))
+                        .on_activate(|_, _| {})
+                        .on_dismiss(|_, _| {})
+                        .into_any_element(),
                 ],
             ),
         ),
@@ -1366,7 +1370,10 @@ fn structure_section(cx: &mut App, filter_query: Entity<TextInput>) -> AnyElemen
                 .daemon(DaemonState::Healthy, None)
                 .breadcrumb("buk › payroll › feat/payroll-fix")
                 .ticker(JobTicker::new("clone", "nixos"))
-                .error(StickyErrorSlot::new("clone failed: gh: HTTP 502")),
+                .error(StickyErrorSlot::new(
+                    "kit-status-sticky",
+                    "clone failed: gh: HTTP 502",
+                )),
             "kit-status-error",
             true,
         ),
@@ -1439,14 +1446,41 @@ fn structure_section(cx: &mut App, filter_query: Entity<TextInput>) -> AnyElemen
             ),
         ),
         LAYOUT.labeled(
+            "step card · current, unavailable",
+            &t,
+            div()
+                .flex()
+                .flex_col()
+                .gap(t.space.sm)
+                .w(t.metrics.first_run_w)
+                .child(
+                    StepCard::new("kit-step-1", StepMark::Number(1), "Create a context")
+                        .description("Group repositories by GitHub org or client.")
+                        .kbd(gallery_kbd("N"))
+                        .current(true)
+                        .on_click(|_, _| {}),
+                )
+                .child(
+                    StepCard::new(
+                        "kit-step-3",
+                        StepMark::Number(3),
+                        "Start a worktree and an agent",
+                    )
+                    .unavailable("after step 2"),
+                ),
+        ),
+        LAYOUT.labeled(
             "banner",
             &t,
             box_of(
                 &t,
-                t.metrics.banner_h,
-                Banner::danger("fleetd stopped")
-                    .countdown("reconnecting in 3s")
-                    .hints(KeyHintRow::new().key("r", "reconnect").key("l", "log")),
+                t.metrics.frame_banner_h,
+                support::chrome::reconnect_banner(
+                    Banner::warning("Lost connection to fleetd")
+                        .icon(Icon::Unplug)
+                        .countdown("\u{2014} reconnecting in 3s.")
+                        .detail("Your terminals and agents keep running."),
+                ),
             ),
         ),
     ];

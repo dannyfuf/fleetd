@@ -1,5 +1,5 @@
 # KEYMAP.md §Daemon-down surfaces (C) · UX-SPEC.md §3.12 C — `Esc` dismisses the reconnect
-# banner and the daemon dot stays red.
+# banner and the daemon dot stays red; its ✕ (`banner.close`) does the same by pointer.
 #
 # The banner is the only surface whose `Esc` hides a *problem* rather than an overlay, so the
 # thing worth pinning is that dismissing it changes the banner and nothing else: the link is
@@ -21,4 +21,19 @@ await daemon.dismissed == true 5000
 assert daemon.link == "lost" && key_contexts[0] == "Hub" && key_contexts[1] == "Worktrees"
 assert key_contexts[2] absent
 dump dismissed
+
+# The pointer path: bring fleetd back, lose it again, and dismiss the new banner with its ✕,
+# which dispatches the banner's own `Esc` action (ADR 0023).
+daemon restart
+await daemon.link == reconnected 60000
+advance 7000
+await daemon.link == connected 5000
+daemon kill
+await daemon.link == lost 30000
+assert daemon.dismissed == false && targets["banner.close"] exists
+click banner.close
+await daemon.dismissed == true 5000
+assert daemon.link == "lost" && key_contexts[0] == "Hub" && key_contexts[2] absent
+assert targets["banner.close"] absent
+dump dismissed-by-pointer
 quit

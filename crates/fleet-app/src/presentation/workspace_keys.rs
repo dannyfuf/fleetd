@@ -60,6 +60,27 @@ pub(crate) struct WorkspaceKeys {
     pub(crate) watch: Option<Kbd>,
     /// `⌃S z`: zoom.
     pub(crate) zoom: Option<Kbd>,
+    /// `⌃S !`: the sticky error, opened in the Jobs panel.
+    pub(crate) sticky_error: Option<Kbd>,
+}
+
+/// The Hub's `!`, for the status bar, which is drawn outside the focused element and so cannot
+/// resolve it from focus.
+pub(crate) fn hub_sticky_error_key() -> Option<Kbd> {
+    static KEY: OnceLock<Option<Kbd>> = OnceLock::new();
+    KEY.get_or_init(|| {
+        keymap::keystrokes_in("Hub", &fleet::FocusStickyError).map(|strokes| Kbd::new(&strokes))
+    })
+    .clone()
+}
+
+/// The Hub's `J`, for the toasts that point at the Jobs panel.
+pub(crate) fn hub_jobs_key() -> Option<Kbd> {
+    static KEY: OnceLock<Option<Kbd>> = OnceLock::new();
+    KEY.get_or_init(|| {
+        keymap::keystrokes_in("Hub", &fleet::OpenJobs).map(|strokes| Kbd::new(&strokes))
+    })
+    .clone()
 }
 
 pub(crate) fn workspace_keys() -> &'static WorkspaceKeys {
@@ -100,6 +121,7 @@ pub(crate) fn workspace_keys() -> &'static WorkspaceKeys {
             restart: prefixed(&prefix::RestartCommand),
             watch: prefixed(&prefix::ToggleWatchPane),
             zoom: prefixed(&prefix::ToggleZoom),
+            sticky_error: prefixed(&fleet::FocusStickyError),
         }
     })
 }
@@ -142,5 +164,8 @@ mod tests {
         assert_eq!(spelled(&keys.restart), "ctrl-s r");
         assert_eq!(spelled(&keys.watch), "ctrl-s v");
         assert_eq!(spelled(&keys.zoom), "ctrl-s z");
+        assert_eq!(spelled(&keys.sticky_error), "ctrl-s !");
+        assert_eq!(spelled(&hub_sticky_error_key()), "!");
+        assert_eq!(spelled(&hub_jobs_key()), "shift-j");
     }
 }

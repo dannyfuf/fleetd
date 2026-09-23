@@ -77,6 +77,7 @@ mod split_layout;
 mod status_bar;
 mod status_dot;
 mod status_glyph;
+mod step_card;
 mod sticky_error_slot;
 mod switch;
 mod terminal_grid;
@@ -184,6 +185,7 @@ pub use split_layout::{SplitAxis, SplitLayout};
 pub use status_bar::StatusBar;
 pub use status_dot::StatusDot;
 pub use status_glyph::{StatusGlyph, StatusKind};
+pub use step_card::{StepCard, StepMark};
 pub use sticky_error_slot::StickyErrorSlot;
 pub use switch::Switch;
 pub use terminal_grid::{

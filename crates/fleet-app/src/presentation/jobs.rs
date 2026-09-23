@@ -102,13 +102,11 @@ pub fn job_outcome_toast(job: &JobRecord, jobs_panel_open: bool) -> Option<Strin
     }
     let target = domain_target(&job.target);
     match &job.kind {
-        JobKind::Clone => Some(format!("Cloned {target} \u{00b7} J")),
-        JobKind::CreateWorktree => Some(format!("Created {target} \u{00b7} J")),
-        JobKind::DeleteRepo | JobKind::DeleteWorktree => {
-            Some(format!("Deleted {target} \u{00b7} J"))
-        }
-        JobKind::Import => Some("Imported from ~/.swarm \u{00b7} J".to_owned()),
-        JobKind::Update => Some("Fleet updated \u{00b7} J".to_owned()),
+        JobKind::Clone => Some(format!("Cloned {target}")),
+        JobKind::CreateWorktree => Some(format!("Created {target}")),
+        JobKind::DeleteRepo | JobKind::DeleteWorktree => Some(format!("Deleted {target}")),
+        JobKind::Import => Some("Imported from ~/.swarm".to_owned()),
+        JobKind::Update => Some("Fleet updated".to_owned()),
         // Background cadence: the ticker and the Jobs panel already say all there is to say.
         JobKind::PoolBuild
         | JobKind::PoolRefresh
