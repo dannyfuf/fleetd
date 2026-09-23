@@ -1923,8 +1923,9 @@ each component's full API. `Modal` is an alias of `Dialog` and `TabBar` an alias
 | `TextInput` | The one editor (ADR 0020): the whole editing vocabulary, selection, undo, IME and clipboard, in single-line and multi-line modes | every text surface — Create, Clone, Context, Rename, Hooks, Settings, board dialogs, Filter, Palette, agent composer, lazygit prompt |
 | `FuzzyList` | Debounced query → ranked rows, capped, `ctrl-n`/`ctrl-p` + arrows (and `j`/`k` **only** when no text input is present) | Clone results, Create base list, Palette, Assign |
 | `FilterBar` | In-place pane-header replacement with live `shown/total`, two-stage `Esc`, retained chip | every list (§3.10) |
-| `Cycler` | `◂ value ▸`, `←`/`→` | host selector, Settings choices |
-| `Toggle` | `[x]` / `[ ]`, `Space` | Settings |
+| `Cycler` | A closed choice, `←`/`→`; drawn as a `SegmentedControl` up to four options, a `Dropdown` field past that | host selector, Settings choices |
+| `Toggle` | A labelled row ending in a `Switch`, `Space` | Settings |
+| `SegmentedControl` | Two to four options side by side, the chosen one raised; a click runs the surface's own action | Hub screens, agent popup provider, Settings choices |
 | `NumberField` | Integer with a unit suffix and a clamp | Settings (grace, TTLs, intervals, pool) |
 | `SegmentedTabs` | Underlined tabs with counts, `Tab`/`S-Tab`/`h`/`l` | PR Mine/Review, Help columns |
 | `ConfirmDialog` | Compact/expanded switch driven by `FactList`; binds only `y`/`Y`/`Enter`/`n`/`Esc`/`q` (+ `I`, + `s` for prune) | §3.8.3, §3.8.8, §3.8.9 |

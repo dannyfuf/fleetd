@@ -1,7 +1,7 @@
 //! The visual and behavioural test bench for the **input** group of `fleet-ui-kit`.
 //!
 //! `TextInput` · `FuzzyList` · `FilterBar` · `Cycler` · `Toggle` · `NumberField` ·
-//! `SegmentedTabs` · `Select` · `ConfirmDialog` · `Palette`.
+//! `Switch` · `SegmentedControl` · `SegmentedTabs` · `Select` · `ConfirmDialog` · `Palette`.
 //!
 //! Every component appears in every state it can be in, in both themes, and the interactive
 //! ones are *live*: the inputs really edit, the palette really filters and highlights, the
@@ -21,7 +21,7 @@
 //! | `ctrl-n` `ctrl-p` `↓` `↑` | move the fuzzy / palette cursor (also while typing) |
 //! | `h` `l` | previous / next tab |
 //! | `←` `→` | cycle the host value |
-//! | `space` | toggle the focused checkbox |
+//! | `space` | toggle the focused switch |
 //! | `o` | open / close the select |
 //! | `+` `-` | change the focused number field |
 //! | `ctrl-q` / `cmd-q` | quit |
@@ -184,6 +184,7 @@ struct InputGallery {
     palette_open: bool,
     tab: usize,
     host: usize,
+    step: usize,
     checked: bool,
     grace: i64,
     select_open: bool,
@@ -192,6 +193,8 @@ struct InputGallery {
 }
 
 const HOSTS: &[&str] = &["local", "devbox", "ci-runner"];
+/// A five-step set: one more than a segmented control holds.
+const STEPS: &[&str] = &["1 min", "5 min", "10 min", "30 min", "1 h"];
 
 impl InputGallery {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -364,6 +367,7 @@ impl InputGallery {
             palette_open: false,
             tab: 0,
             host: 0,
+            step: 2,
             checked: true,
             grace: 2_000,
             select_open: true,
@@ -936,8 +940,27 @@ fn filter_section(gallery: &InputGallery, theme: &Theme, cx: &App) -> AnyElement
     )
 }
 
-fn choice_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
+fn choice_section(
+    gallery: &InputGallery,
+    this: WeakEntity<InputGallery>,
+    theme: &Theme,
+) -> AnyElement {
     let host = HOSTS[gallery.host];
+    // Every click below writes the same field its key does, so the pointer and the keyboard
+    // never disagree about the value.
+    let set = move |apply: fn(&mut InputGallery, usize)| {
+        let this = this.clone();
+        move |ix: usize, _: &mut Window, cx: &mut App| {
+            this.update(cx, |gallery, cx| {
+                apply(gallery, ix);
+                cx.notify();
+            })
+            .ok();
+        }
+    };
+    let set_host = set(|gallery, ix| gallery.host = ix);
+    let set_step = set(|gallery, ix| gallery.step = ix);
+    let set_checked = set(|gallery, on| gallery.checked = on == 1);
     LAYOUT.section(
         "cycler \u{b7} toggle \u{b7} number field",
         theme,
@@ -947,17 +970,30 @@ fn choice_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
                 theme,
                 card(
                     theme,
-                    px(420.0),
+                    px(460.0),
                     div()
                         .flex()
                         .flex_col()
+                        // Three listed options: side by side, clickable.
                         .child(
                             Cycler::labeled("host", host)
                                 .label_width(px(140.0))
+                                .options(HOSTS.iter().copied())
+                                .on_select(set_host)
                                 .focused(true)
                                 .has_prev(gallery.host > 0)
                                 .has_next(gallery.host + 1 < HOSTS.len()),
                         )
+                        // Five listed options: a dropdown whose list opens on a click.
+                        .child(
+                            Cycler::labeled("keep jobs for", STEPS[gallery.step])
+                                .label_width(px(140.0))
+                                .options(STEPS.iter().copied())
+                                .on_select(set_step)
+                                .has_prev(gallery.step > 0)
+                                .has_next(gallery.step + 1 < STEPS.len()),
+                        )
+                        // Options not listed by the caller: the field states the value only.
                         .child(
                             Cycler::labeled("on switch", "sleep")
                                 .label_width(px(140.0))
@@ -966,14 +1002,16 @@ fn choice_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
                         .child(
                             Cycler::labeled("theme", "system")
                                 .label_width(px(140.0))
+                                .options(["light", "dark", "system"])
                                 .disabled(true),
                         )
-                        // A persisted value that is no longer one of the configured steps:
-                        // both arrows stay live even though neither neighbour exists, so the
-                        // next move lands back on a known step.
+                        // A persisted value that is no longer one of the configured steps: it
+                        // is none of the segments, so it draws as a field that can show it, and
+                        // the next `\u{2190}` / `\u{2192}` lands back on a known step.
                         .child(
                             Cycler::labeled("host", "devbox (removed)")
                                 .label_width(px(140.0))
+                                .options(HOSTS.iter().copied())
                                 .off_grid(true)
                                 .has_prev(false)
                                 .has_next(false),
@@ -981,17 +1019,20 @@ fn choice_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
                 ),
             ),
             LAYOUT.labeled(
-                "toggles (space)",
+                "toggles (space, click)",
                 theme,
                 card(
                     theme,
-                    px(420.0),
+                    px(460.0),
                     div()
                         .flex()
                         .flex_col()
                         .child(
                             Toggle::labeled("Sleep on switch", gallery.checked)
                                 .label_width(px(200.0))
+                                .on_toggle(move |on, window, cx| {
+                                    set_checked(usize::from(on), window, cx)
+                                })
                                 .focused(true),
                         )
                         .child(
@@ -1008,6 +1049,18 @@ fn choice_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
                                 .disabled(true),
                         ),
                 ),
+            ),
+            LAYOUT.labeled(
+                "switch",
+                theme,
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(theme.space.md)
+                    .child(Switch::new("switch-on", true).name("on"))
+                    .child(Switch::new("switch-off", false).name("off"))
+                    .child(Switch::new("switch-disabled-on", true).disabled(true))
+                    .child(Switch::new("switch-disabled-off", false).disabled(true)),
             ),
             LAYOUT.labeled(
                 "number fields (+ \u{2212})",
@@ -1057,7 +1110,11 @@ fn choice_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
     )
 }
 
-fn tabs_and_select_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
+fn tabs_and_select_section(
+    gallery: &InputGallery,
+    this: WeakEntity<InputGallery>,
+    theme: &Theme,
+) -> AnyElement {
     let options = FuzzyList::new(
         "gallery-select-options",
         BRANCHES.iter().map(|(name, detail)| {
@@ -1073,7 +1130,7 @@ fn tabs_and_select_section(gallery: &InputGallery, theme: &Theme) -> AnyElement 
     .under_text_field(false);
 
     LAYOUT.section(
-        "segmented tabs \u{b7} select",
+        "segmented control \u{b7} tabs \u{b7} select",
         theme,
         vec![
             LAYOUT.labeled(
@@ -1093,17 +1150,80 @@ fn tabs_and_select_section(gallery: &InputGallery, theme: &Theme) -> AnyElement 
                     .active(1),
             ),
             LAYOUT.labeled(
-                // The parent Hub's treatment: a selected background instead of the accent
-                // underline (DESIGN-SYSTEM.md §6 `SegmentedTabs`).
-                "tabs \u{b7} not underlined",
+                "segmented control (h / l, click)",
                 theme,
-                SegmentedTabs::new([
-                    SegmentedTab::new("mine", 7),
-                    SegmentedTab::new("review", 4),
-                    SegmentedTab::bare("closed"),
-                ])
-                .active(gallery.tab)
-                .underlined(false),
+                SegmentedControl::new(
+                    "gallery-segmented",
+                    [
+                        Segment::new("Worktrees"),
+                        Segment::new("Pull requests").count(Some(4)),
+                        Segment::new("Board")
+                            .count(Some(0))
+                            .loading(gallery.tab == 2),
+                    ],
+                )
+                .active(Some(gallery.tab))
+                .on_select({
+                    let this = this.clone();
+                    move |ix, _, cx| {
+                        this.update(cx, |gallery, cx| {
+                            gallery.tab = ix;
+                            cx.notify();
+                        })
+                        .ok();
+                    }
+                }),
+            ),
+            LAYOUT.labeled(
+                "segmented \u{b7} icons",
+                theme,
+                SegmentedControl::new(
+                    "gallery-segmented-icons",
+                    [
+                        Segment::new("Claude").icon(Icon::Sparkles),
+                        Segment::new("Codex")
+                            .icon(Icon::SquareTerminal)
+                            .kbd(Kbd::parse("ctrl-s A").ok()),
+                    ],
+                ),
+            ),
+            LAYOUT.labeled(
+                "segmented \u{b7} none raised, disabled",
+                theme,
+                div()
+                    .flex()
+                    .gap(theme.space.md)
+                    .child(
+                        SegmentedControl::new(
+                            "gallery-segmented-none",
+                            [
+                                Segment::new("Low"),
+                                Segment::new("Medium"),
+                                Segment::new("High"),
+                                Segment::new("Max"),
+                            ],
+                        )
+                        .active(None),
+                    )
+                    .child(
+                        SegmentedControl::new(
+                            "gallery-segmented-disabled",
+                            [Segment::new("ssh"), Segment::new("https")],
+                        )
+                        .disabled(true),
+                    ),
+            ),
+            LAYOUT.labeled(
+                "segmented \u{b7} full width",
+                theme,
+                div().w(px(420.0)).child(
+                    SegmentedControl::new(
+                        "gallery-segmented-wide",
+                        [Segment::new("Claude"), Segment::new("Codex")],
+                    )
+                    .active(Some(1))
+                    .full_width(),
+                ),
             ),
             LAYOUT.labeled(
                 "select, open (o)",
@@ -1210,8 +1330,8 @@ impl Render for InputGallery {
             text_input_section(self, &theme),
             fuzzy_section(self, cx.entity().downgrade(), &theme, cx),
             filter_section(self, &theme, cx),
-            choice_section(self, &theme),
-            tabs_and_select_section(self, &theme),
+            choice_section(self, cx.entity().downgrade(), &theme),
+            tabs_and_select_section(self, cx.entity().downgrade(), &theme),
             confirm_hint_section(self, &theme),
         ];
 
@@ -1346,6 +1466,7 @@ fn main() {
         Quit,
         |cx| {
             cx.bind_keys(support::input::bindings());
+            cx.bind_keys(menu_key_bindings());
             cx.bind_keys([
                 // Always available, in both modes.
                 KeyBinding::new("ctrl-t", ToggleTheme, None),

@@ -1,6 +1,8 @@
 //! The pointer contract of the list primitives (ADR 0023, UX-SPEC §5.1), driven through real
 //! mouse events in a test window: a press selects, a double-click opens, a right click opens
-//! the menu, a fuzzy row runs on a press, and a fuzzy list scrolls past its old cap.
+//! the menu, a fuzzy row runs on a press, and a fuzzy list scrolls past its old cap. And of the
+//! form controls: a segment, a switch and a dropdown-drawn cycler's option each report a click
+//! with the value it asks for.
 
 use std::{cell::RefCell, rc::Rc};
 
@@ -11,7 +13,10 @@ use gpui::{
 };
 
 use crate::{
-    components::{FuzzyItem, FuzzyList, ListView, Row, RowColumn},
+    components::{
+        Cycler, FuzzyItem, FuzzyList, ListView, Row, RowColumn, Segment, SegmentedControl, Switch,
+        Toggle, menu_key_bindings,
+    },
     harness::{self, HarnessTargetExt as _},
     text::Text,
     theme::Theme,
@@ -290,4 +295,119 @@ fn hover_actions_show_only_on_the_hovered_or_selected_row(cx: &mut TestAppContex
         vec!["test.action[0]", "test.action[2]"],
         "the actions follow the pointer and never leave the selected row"
     );
+}
+
+/// One of each form control, every click recorded as the index or value it asks for.
+struct Controls {
+    log: Rc<RefCell<Vec<String>>>,
+    disabled: bool,
+}
+
+impl Render for Controls {
+    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        harness::begin_frame(window);
+        let (segment, switch, toggle, cycler) = (
+            self.log.clone(),
+            self.log.clone(),
+            self.log.clone(),
+            self.log.clone(),
+        );
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                SegmentedControl::new(
+                    "segments",
+                    [Segment::new("a"), Segment::new("b"), Segment::new("c")],
+                )
+                .disabled(self.disabled)
+                .harness_segments("test.segment")
+                .on_select(move |ix, _, _| segment.borrow_mut().push(format!("segment {ix}"))),
+            )
+            .child(
+                Switch::new("switch", false)
+                    .on_toggle(move |on, _, _| switch.borrow_mut().push(format!("switch {on}")))
+                    .harness_target("test.switch"),
+            )
+            .child(
+                div().w(px(300.0)).child(
+                    Toggle::labeled("toggle", true)
+                        .on_toggle(move |on, _, _| toggle.borrow_mut().push(format!("toggle {on}")))
+                        .harness_target("test.toggle"),
+                ),
+            )
+            .child(
+                div().w(px(300.0)).child(
+                    Cycler::labeled("steps", "c")
+                        .options(["a", "b", "c", "d", "e"])
+                        .on_select(move |ix, _, _| cycler.borrow_mut().push(format!("cycler {ix}")))
+                        .harness_target("test.cycler"),
+                ),
+            )
+    }
+}
+
+/// A point just inside the right edge of the painted target `name`, where a row's control sits.
+#[track_caller]
+fn right_edge(cx: &mut VisualTestContext, name: &str) -> Point<Pixels> {
+    let targets = cx.update(|window, _| harness::painted(window));
+    let target = targets
+        .iter()
+        .find(|target| target.name.as_ref() == name)
+        .unwrap_or_else(|| panic!("{name} was not painted"));
+    point(
+        px(target.rect.x + target.rect.w - 24.0),
+        px(target.rect.y + target.rect.h / 2.0),
+    )
+}
+
+fn open_controls(
+    cx: &mut TestAppContext,
+    disabled: bool,
+) -> (VisualTestContext, Rc<RefCell<Vec<String>>>) {
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let recorded = log.clone();
+    cx.update(|cx| cx.bind_keys(menu_key_bindings()));
+    let cx = open(cx, move || Controls { log, disabled });
+    (cx, recorded)
+}
+
+#[gpui::test]
+fn a_click_on_a_segment_asks_for_its_index(cx: &mut TestAppContext) {
+    let (mut cx, log) = open_controls(cx, false);
+    let at = centre(&mut cx, "test.segment[2]");
+    press(&mut cx, at, MouseButton::Left, 1);
+    assert_eq!(*log.borrow(), vec!["segment 2".to_owned()]);
+}
+
+#[gpui::test]
+fn a_disabled_segmented_control_ignores_the_pointer(cx: &mut TestAppContext) {
+    let (mut cx, log) = open_controls(cx, true);
+    let at = centre(&mut cx, "test.segment[1]");
+    press(&mut cx, at, MouseButton::Left, 1);
+    assert!(log.borrow().is_empty());
+}
+
+#[gpui::test]
+fn a_click_on_a_switch_asks_for_the_other_value(cx: &mut TestAppContext) {
+    let (mut cx, log) = open_controls(cx, false);
+    let at = centre(&mut cx, "test.switch");
+    press(&mut cx, at, MouseButton::Left, 1);
+    let at = right_edge(&mut cx, "test.toggle");
+    press(&mut cx, at, MouseButton::Left, 1);
+    assert_eq!(
+        *log.borrow(),
+        vec!["switch true".to_owned(), "toggle false".to_owned()]
+    );
+}
+
+#[gpui::test]
+fn a_long_cycler_lists_its_options_and_a_click_picks_one(cx: &mut TestAppContext) {
+    let (mut cx, log) = open_controls(cx, false);
+    let field = right_edge(&mut cx, "test.cycler");
+    press(&mut cx, field, MouseButton::Left, 1);
+    let option = centre(&mut cx, "menu.item[3]");
+    press(&mut cx, option, MouseButton::Left, 1);
+    assert_eq!(*log.borrow(), vec!["cycler 3".to_owned()]);
 }

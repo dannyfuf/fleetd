@@ -1627,11 +1627,21 @@ fn input_section(cx: &mut App, fields: &[(&'static str, Entity<TextInput>)]) -> 
                 .flex()
                 .flex_col()
                 .w(px(360.0))
-                .child(Cycler::labeled("host", "local").has_prev(false))
-                // Off grid: a persisted value outside the configured steps keeps both arrows
-                // live so the next move returns to a known one.
+                // Up to four listed options draw side by side, more as a dropdown field.
+                .child(
+                    Cycler::labeled("agent", "claude")
+                        .options(["claude", "codex"])
+                        .has_prev(false),
+                )
+                .child(
+                    Cycler::labeled("keep jobs for", "10 min")
+                        .options(["1 min", "5 min", "10 min", "30 min", "1 h"]),
+                )
+                // Off grid: a persisted value outside the configured steps is none of the
+                // segments, so it draws as a field, and the next move returns to a known step.
                 .child(
                     Cycler::labeled("host", "devbox (removed)")
+                        .options(["local", "devbox"])
                         .off_grid(true)
                         .has_prev(false)
                         .has_next(false),
@@ -1681,12 +1691,25 @@ fn input_section(cx: &mut App, fields: &[(&'static str, Entity<TextInput>)]) -> 
             .active(0),
         ),
         LAYOUT.labeled(
-            // The parent Hub's treatment: selected background, no accent underline.
-            "segmented tabs · not underlined",
+            "segmented control",
             &t,
-            SegmentedTabs::new([SegmentedTab::new("mine", 7), SegmentedTab::new("review", 4)])
-                .active(0)
-                .underlined(false),
+            SegmentedControl::new(
+                "kit-segmented",
+                [
+                    Segment::new("Worktrees"),
+                    Segment::new("Pull requests").count(Some(4)),
+                    Segment::new("Board").count(Some(0)),
+                ],
+            ),
+        ),
+        LAYOUT.labeled(
+            "switch",
+            &t,
+            div()
+                .flex()
+                .gap(t.space.md)
+                .child(Switch::new("kit-switch-on", true))
+                .child(Switch::new("kit-switch-off", false)),
         ),
         LAYOUT.labeled(
             "select + fuzzy list",

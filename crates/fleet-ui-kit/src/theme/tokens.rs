@@ -612,6 +612,14 @@ pub struct Metrics {
     pub button_h: Pixels,
     /// 26 px compact button: inside a row, a header or a toolbar.
     pub button_h_compact: Pixels,
+    /// 24 px segment of a `SegmentedControl`. With the control's `xxs` inset and hairline on
+    /// each side the whole control is exactly `row_h`, so it sits in a settings row or a pane
+    /// header without growing it.
+    pub segment_h: Pixels,
+    /// 34 px `Switch` track width.
+    pub switch_w: Pixels,
+    /// 20 px `Switch` track height. The knob is this less an `xxs` inset on each side.
+    pub switch_h: Pixels,
     /// 18 px key chip.
     pub kbd_h: Pixels,
     /// 16 px key chip inside a compact button or a menu item.
@@ -737,6 +745,9 @@ impl Default for Metrics {
             row_h_comfortable: px(44.0),
             button_h: px(30.0),
             button_h_compact: px(26.0),
+            segment_h: px(24.0),
+            switch_w: px(34.0),
+            switch_h: px(20.0),
             kbd_h: px(18.0),
             kbd_h_small: px(16.0),
             status_pane_h: px(62.0),

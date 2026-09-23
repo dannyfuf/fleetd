@@ -277,7 +277,7 @@ list below is the complete inventory, in px unless marked `ch`; a unit test in
 | Window chrome | `title_bar_h 44` · `context_bar_h 36` · `status_bar_h 28` · `traffic_light_inset 84` · `mode_word_w 84` · `banner_h 28` · `strip_h 22` |
 | Layout columns | `sidebar_w 232` · `rail_w 240` · `detail_w 344` · `detail_overlay_w 320` · `sheet_w 440` · `sheet_expanded_w 640` · `sheet_w_detail 736` |
 | Rows and headers | `row_h 30` · `row_h_comfortable 44` · `pane_header_h 30` · `section_header_h 20` · `palette_row_h 34` · `job_row_h 44` · `job_key_w 20` |
-| Controls | `button_h 30` · `button_h_compact 26` · `kbd_h 18` · `kbd_h_small 16` · `chip_h 22` · `text_field_h 36` · `field_status_h 18` · `number_field_w 96` |
+| Controls | `button_h 30` · `button_h_compact 26` · `kbd_h 18` · `kbd_h_small 16` · `chip_h 22` · `text_field_h 36` · `field_status_h 18` · `number_field_w 96` · `segment_h 24` · `switch_w 34` · `switch_h 20` |
 | Dialogs and floating layers | `dialog_w 560` · `confirm_compact_w 480` · `dialog_header_h 44` · `dialog_footer_h 44` · `palette_w 640` · `palette_top 120` · `prefix_menu_w 900` · `palette_input_h 44` · `overlay_help_w 640` · `toast_w 320` · `toast_inset 12` · `scroll_pill_w 176` · `menu_min_w 240` |
 | Lines and marks | `hairline 1` · `focus_ring_w 2` · `scroll_thumb_w 3` · `dot_size 8` · `dot_size_small 6` |
 | Terminal | `cell_w 7.5` · `cell_h 18` · `terminal_tab_min_w 84` · `terminal_tab_max_w 200` · `new_terminal_tab_w 36` |
@@ -287,7 +287,9 @@ list below is the complete inventory, in px unless marked `ch`; a unit test in
 `row_h` (30) is the dense row, for menus, pickers and terminal-side lists; `row_h_comfortable`
 (44) is the hub-list row. `title_bar_h` and `sidebar_w` are the redesigned chrome; `context_bar_h`
 and `rail_w` stay while the current context bar and repos rail are on screen. `kbd_h_small` is the
-key chip inside a compact button or a menu item.
+key chip inside a compact button or a menu item. `segment_h` plus a `SegmentedControl`'s `xxs`
+inset and hairline on each side is exactly `row_h`, so the control sits in a settings row or a pane
+header without growing it; a `Switch` knob is `switch_h` less an `xxs` inset on each side.
 
 The same token set owns the opacity ladder, and *that* list is complete — derive a variant
 with one of these rather than adding a near-duplicate token or a bare float:
@@ -1028,21 +1030,29 @@ row. A hidden active filter is the classic "where did my rows go" bug, so always
 retained chip afterwards.
 
 #### `Cycler`
-**Purpose.** `◂ value ▸` for a two-to-five option set.
-**API.** `Cycler::{new(value), labeled(label, value)}().has_prev(bool).has_next(bool).focused(bool)
-.disabled(bool).label_width(Pixels).off_grid(bool)`; `.is_visible()`.
-**Keyboard.** `←`/`→`.
-**Usage rule.** A cycler, not a dropdown, when the set is short: a dropdown costs a second key.
-Zero-suppress the whole control when the set has one member (the host cycler is hidden when no
-hosts are configured).
+**Purpose.** A closed choice in a settings row. The keyboard is the cycler's; the drawing picks
+the form that reads at a glance.
+**Anatomy.** The `row_h` cursor band (`control::cursor_row`): the label in `Ui`, then the control
+at the row's end. Given its `options`, a set of up to `SEGMENTED_MAX` (4) draws as a
+`SegmentedControl` with the value raised, a longer one as a compact `Dropdown`. A cycler whose
+caller lists no options, or whose value is off the configured steps (none of the segments), draws
+the compact dropdown field alone, stating the value.
+**API.** `Cycler::{new(value), labeled(label, value)}().options(iter).on_select(Fn(ix, window,
+app)).id(..).has_prev(bool).has_next(bool).focused(bool).disabled(bool).label_width(Pixels)
+.off_grid(bool)`; `.is_visible()`, `.form() -> CyclerForm::{Segmented(ix), Dropdown(listed)}`.
+**Keyboard.** `←`/`→` (`h`/`l`), bound by the surface. **Pointer.** Only with `on_select`: a click
+on a segment, or on a dropdown option, calls it with the option's index; point it at the update the
+keys make. Without it the control is drawn only and takes no click.
+**Usage rule.** Zero-suppress the whole control when the set has one member (the host cycler is
+hidden when no hosts are configured).
 
 #### `Toggle`
-**Purpose.** `[x]` / `[ ]`.
+**Purpose.** A boolean settings row: the label, an optional `Caption` detail, and a `Switch` at
+the row's end.
 **API.** `Toggle::{new(checked), labeled(label, checked)}().detail(..).focused(bool).disabled(bool)
-.label_width(Pixels)`.
-**Keyboard.** `Space`.
-**Usage rule.** Brackets, not a switch: the whole Settings dialog is a keyboard list, and a
-switch implies a pointer.
+.label_width(Pixels).id(..).on_toggle(Fn(bool, window, app))`; `.is_checked()`.
+**Keyboard.** `Space`, bound by the surface; the row carries the cursor band. **Pointer.** Only
+with `on_toggle`: a click on the switch asks for the other value.
 
 #### `NumberField`
 **Purpose.** An integer with a unit suffix and a clamp.
@@ -1798,12 +1808,43 @@ the card detail.
 **Anatomy.** `text_field_h` tall, `md` side padding, `radii.control`, `bg` fill in a `border`
 hairline (`border_strong` on hover, `focus_ring` while open); the value in `Ui`, a 12 px
 `chevron-down` in `text_secondary`. An optional `SentenceLabel` above it, `xxs` apart.
-**API.** `Dropdown::new(id, value).label(text).menu(|menu, window, cx| ..).full_width()`; the
-caller builds one `MenuItem` per option with `.checked(is_current)` and an `.on_select(..)` (or an
-action).
-**States.** closed · hover · open. The list opens with the chosen option highlighted.
+**API.** `Dropdown::new(id, value).label(text).menu(|menu, window, cx| ..).full_width()
+.compact()`; the caller builds one `MenuItem` per option with `.checked(is_current)` and an
+`.on_select(..)` (or an action). `compact()` is `button_h_compact` tall, to sit in a `row_h`
+settings row. With no `menu` the field is drawn only: no pointer, no hover, no list.
+**States.** closed · hover · open · compact · drawn only. The list opens with the chosen option
+highlighted.
 **Usage rule.** A dropdown for a set longer than a segmented control holds and short enough to
 read whole; a `FuzzyList` under a text field for a set to search.
+
+#### `SegmentedControl` / `Segment`
+**Purpose.** Two to four options side by side, the chosen one raised: the Hub's screens, the agent
+popup's provider, and (through `Cycler`) every short settings choice.
+**Anatomy.** A `chrome` trough in a `border` hairline, `radii.control`, `xxs` inset and gap. Each
+segment is `segment_h` tall, `md` side padding, `radii.md`: optional 14 px icon · label in `Ui` at
+the `UiStrong` weight, sentence case as given · optional count in `Caption` (`…` while loading, in
+`warning`) · optional small `Kbd`. The raised segment is the `control` fill in a `control_border`
+hairline with `text`; the others are clear with `text_secondary` and keep a clear hairline, so
+raising one never shifts its neighbours. `row_hover` on a clickable, unraised segment.
+**API.** `SegmentedControl::new(id, [Segment::new(label).icon(Icon).count(Option<usize>)
+.loading(bool).kbd(Option<Kbd>)]).active(Option<usize>).disabled(bool).full_width()
+.on_select(Fn(ix, window, app)).harness_segments(part)`; `Segment::count_text()`,
+`SegmentedControl::{len, is_empty}`.
+**States.** raised · none raised (`active(None)`) · hover · with icons · with counts and a
+loading count · with a key chip · disabled · full width.
+**Usage rule.** No keyboard of its own and not focusable (ADR 0023): the surface binds the keys,
+and `on_select` dispatches the action those keys dispatch. A key chip shows only on a segment a
+click would switch to. Past four options, or labels that no longer fit, use a `Dropdown`.
+
+#### `Switch`
+**Purpose.** A boolean at a glance: a pill track with a knob.
+**Anatomy.** `switch_w` × `switch_h`, `radii.pill`; on is `accent_fill` with the knob at the end,
+off is `text_muted` with the knob at the start; the knob is an `accent_fill_text` circle `xxs`
+inside the track. Hover deepens the track (`accent_fill_hover` / `text_secondary`).
+**API.** `Switch::new(id, on).name(label).disabled(bool).on_toggle(Fn(bool, window, app))`.
+**States.** on · off · hover · disabled on · disabled off.
+**Usage rule.** Inside a settings list, use `Toggle`, which owns the row, the label and `Space`.
+Not focusable; announced as `Role::Switch` with the setting's name.
 
 **Gallery.** `examples/gallery_buttons.rs` binds a keymap and wires every button with
 `.action(..)`, so each chip there is resolved live and clicking or pressing the key reports the
@@ -1814,7 +1855,9 @@ keymap, and shows a row with a ⋯ `PopoverMenu` (`BottomRight`), a `+ New tab` 
 (`BottomLeft`, with a header, icons and `⌃S` chips), a right-click area, a labelled and a
 full-width `Dropdown`, an item whose action nothing handles (left out of every menu), and an
 always-open `Menu` showing a header, icon, chip, check, separator and destructive item at once.
-`kit_gallery`'s `controls` section is the overview.
+`examples/gallery_input.rs` shows every `SegmentedControl`, `Switch`, `Cycler` form and `Toggle`
+state, with the host and step cyclers, the segmented control and the first toggle live under the
+pointer. `kit_gallery`'s `controls` section is the overview.
 
 ---
 
