@@ -2,15 +2,13 @@
 
 use fleet_core::{
     github::{PrChecks, PrReviewDecision, PullRequest, derive_pr_state, local_branch_for_pr},
-    inspection::WorktreeInspection,
     model::{CloneJob, CloneStatus, Repo, Worktree},
     sessions::{AgentActivity, SessionState, WorktreeStatus},
 };
 use fleet_proto::snapshot::PoolStatus;
 use fleet_ui_kit::{
-    ActiveTheme, FactRow, FactValue, FreshnessStamp, Icon, IconSize, KeyValueList, Pane,
-    PaneBorder, PrBadge, SectionHeader, Sheet, StatusGlyph, StatusKind, Text, Tone, Truncate,
-    format_age, truncate,
+    ActiveTheme, FactRow, FactValue, Icon, IconSize, KeyValueList, Pane, PaneBorder, PrBadge,
+    SectionHeader, Sheet, StatusKind, Text, Tone, Truncate, format_age, truncate,
 };
 use gpui::{AnyElement, App, IntoElement, SharedString, div, prelude::*};
 
@@ -24,7 +22,7 @@ mod worktree;
 pub use inspection::Inspected;
 pub use pull_request::{PrProps, pull_request, pull_request_with_status};
 pub use repo::{RepoProps, clone_job, repo};
-pub use worktree::{WorktreeProps, worktree, worktree_with_status};
+pub use worktree::{WorktreeProps, worktree};
 
 /// Resolves every worktree surface through the same health-first status precedence.
 pub(crate) fn resolved_worktree_status(

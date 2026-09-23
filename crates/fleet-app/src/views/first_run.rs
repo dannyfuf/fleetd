@@ -30,8 +30,8 @@ impl EmptySurface {
     pub(crate) fn copy(self, scope: Option<&str>) -> (SharedString, &'static str) {
         let (fact, action) = match self {
             Self::Repos => ("No repos in {}.", "n  clone one"),
-            Self::Worktrees => ("No worktrees yet.", "n  create one"),
-            Self::WorktreesRepo => ("No worktrees for {} yet.", "n  create one"),
+            Self::Worktrees => ("No worktrees yet", "n  create one"),
+            Self::WorktreesRepo => ("No worktrees for {} yet", "n  create one"),
             Self::Filter => ("Nothing matches \"{}\".", "esc  clear"),
             Self::PrsMine => ("No open PRs authored by you in {}.", "r  refresh"),
             Self::PrsReview => ("No PRs waiting for your review in {}.", "r  refresh"),
@@ -48,7 +48,14 @@ impl EmptySurface {
 
     pub(crate) fn render(self, scope: Option<&str>) -> AnyElement {
         let (fact, action) = self.copy(scope);
-        EmptyState::new(fact).action(action).into_any_element()
+        match self {
+            // The Worktrees page is redesigned: its one way forward is a button that shows its
+            // key, not a key line (ADR 0023).
+            Self::Worktrees | Self::WorktreesRepo => EmptyState::new(fact)
+                .button(crate::views::worktrees_list::new_worktree_button())
+                .into_any_element(),
+            _ => EmptyState::new(fact).action(action).into_any_element(),
+        }
     }
 }
 
@@ -215,7 +222,7 @@ mod tests {
     fn scoped_copy_substitutes_only_the_fact() {
         assert_eq!(
             EmptySurface::WorktreesRepo.copy(Some("payroll")),
-            ("No worktrees for payroll yet.".into(), "n  create one")
+            ("No worktrees for payroll yet".into(), "n  create one")
         );
         assert_eq!(
             EmptySurface::Filter.copy(Some("rut")),
@@ -223,7 +230,7 @@ mod tests {
         );
         assert_eq!(
             EmptySurface::Worktrees.copy(None),
-            ("No worktrees yet.".into(), "n  create one"),
+            ("No worktrees yet".into(), "n  create one"),
             "an unscoped fact is a static string, not a substitution"
         );
     }

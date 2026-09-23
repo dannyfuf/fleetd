@@ -27,14 +27,17 @@ impl HubScreen {
             let now = now_unix();
             let viewport = window.viewport_size();
             let width = f32::from(viewport.width);
-            let rows = visible_rows(f32::from(viewport.height), cx);
             let model = self.hub.read(cx).prepared.clone();
+            let handlers = ctx.row_handlers();
             self.body(
                 state.read(cx),
                 self.hub.read(cx),
                 &model,
-                Viewport { width, rows },
-                now,
+                Frame {
+                    width,
+                    now,
+                    handlers: &handlers,
+                },
                 cx,
             )
         };
@@ -131,14 +134,14 @@ impl HubScreen {
         state: &AppState,
         hub: &HubState,
         model: &HubModel,
-        viewport: Viewport,
-        now: i64,
+        frame: Frame<'_>,
         cx: &App,
     ) -> AnyElement {
-        let Viewport {
+        let Frame {
             width,
-            rows: visible_rows,
-        } = viewport;
+            now,
+            handlers,
+        } = frame;
         let stale = state
             .snapshot_age(Instant::now())
             .filter(|_| !state.daemon.is_connected())
@@ -180,10 +183,11 @@ impl HubScreen {
             cx,
         );
 
+        let detail_open = state.detail_visible(!detail_is_docked(width));
         let pane_ch = list_pane_ch(
             width,
             state.rail_collapsed,
-            state.detail_open,
+            detail_open,
             &cx.theme().metrics,
         );
         let scope_name = match &state.scope {
@@ -194,30 +198,41 @@ impl HubScreen {
         let list = match state.screen {
             Screen::Hub {
                 tab: HubTab::Worktrees,
-            } => worktrees_list::render(
-                ListProps {
-                    header_override: (state.hub_filter_owns_keys()
-                        && state.hub_pane == HubPane::List)
-                        .then(|| {
-                            dialogs::filter::bar(state, self.filter_input.clone())
-                                .harness_target("filter.input")
-                                .into_any_element()
-                        }),
-                    rows: model.worktrees.clone(),
-                    cursor: state.cursors.worktrees,
-                    focused: state.hub_pane == HubPane::List,
-                    pane_ch,
-                    scope: scope_name.clone(),
-                    scope_is_all: state.scope == RepoScope::All,
-                    total: model.worktree_total,
-                    filter: filter.clone().filter(|_| state.hub_pane == HubPane::List),
-                    stale,
-                    visible_rows,
-                    loading: state.snapshot.is_none(),
-                },
-                &self.list_scroll,
-                now.saturating_sub(model.prepared_at),
-            ),
+            } => {
+                let list_filter = state.hub_pane == HubPane::List;
+                let filter = if state.hub_filter_owns_keys() && list_filter {
+                    let (shown, total) = crate::presentation::filter_counts(state);
+                    worktrees_list::FilterSlot::Editing {
+                        input: self.filter_input.clone(),
+                        query: SharedString::from(state.filter.query.clone()),
+                        shown,
+                        total,
+                    }
+                } else {
+                    worktrees_list::FilterSlot::Idle(filter.clone().filter(|_| list_filter))
+                };
+                worktrees_list::render(
+                    ListProps {
+                        rows: model.worktrees.clone(),
+                        cursor: state.cursors.worktrees,
+                        focused: state.hub_pane == HubPane::List,
+                        pane_ch,
+                        scope_repo: match &state.scope {
+                            RepoScope::All => None,
+                            RepoScope::Repo(repo) => Some(SharedString::from(repo.to_string())),
+                        },
+                        summary: model.worktree_summary.clone(),
+                        filter,
+                        stale,
+                        loading: state.snapshot.is_none(),
+                        undo_available: state.last_trash_entry.is_some(),
+                        handlers: handlers.clone(),
+                    },
+                    &self.list_scroll,
+                    now.saturating_sub(model.prepared_at),
+                    cx,
+                )
+            }
             _ => {
                 let cache_key = cache::PrCacheKey::from_state(state);
                 let slice = hub.prs.slice_for(state.pr_tab, &cache_key);
@@ -274,7 +289,10 @@ impl HubScreen {
             split = split.leading_size(cx.theme().metrics.rail_w);
         }
 
-        let Some(detail) = self.detail(state, hub, model, now, cx) else {
+        let Some(detail) = detail_open
+            .then(|| self.detail(state, hub, model, now, cx))
+            .flatten()
+        else {
             return split.into_any_element();
         };
         if detail_is_docked(width) {
@@ -302,9 +320,6 @@ impl HubScreen {
         now: i64,
         cx: &App,
     ) -> Option<AnyElement> {
-        if !state.detail_open {
-            return None;
-        }
         let snapshot = state.snapshot.as_ref()?;
         let home = self
             .home
@@ -357,24 +372,12 @@ impl HubScreen {
             }
         ) {
             let row = model.worktrees.get(state.cursors.worktrees)?;
-            let worktree = snapshot
-                .worktrees
-                .iter()
-                .find(|worktree| worktree.id == row.id)?;
-            return Some(detail::worktree_with_status(
+            return Some(detail::worktree(
                 WorktreeProps {
-                    worktree,
-                    status: snapshot
-                        .statuses
-                        .iter()
-                        .find(|status| status.worktree_id == row.id),
-                    slept: row.glyph == StatusKind::Sleeping,
-                    host_unreachable: row.host_unreachable,
-                    inspected: hub.inspections.get(&row.id),
-                    home: &home,
-                    now,
+                    row,
+                    age_offset: now.saturating_sub(model.prepared_at),
+                    undo_available: state.last_trash_entry.is_some(),
                 },
-                row.glyph,
                 cx,
             ));
         }

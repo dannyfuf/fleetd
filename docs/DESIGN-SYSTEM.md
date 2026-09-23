@@ -825,8 +825,8 @@ and still reserves its width.
 **Usage rule.** Measure the **pane**, not the window. `ColumnLadder::worktrees()` and
 `::pull_requests_for()` are the §2.9 ladders verbatim, including the two-step author breakpoint
 (12 ch at 70 ch, 16 ch at 130 ch). The worktrees ladder is keyed `branch` (Name, flex 24) ·
-`repo` (16, from 110 ch or forced in `All`) · `session` (24 / 16 / 0 ch at 100 / 72 ch) · `pr`
-(18, from 60 ch) · `age` (6, from 52 ch) · `actions` (15, always, filled `hover_only`).
+`repo` (12, from 110 ch or forced in `All`) · `session` (18 / 14 / 0 ch at 100 / 72 ch) · `pr`
+(15, from 60 ch) · `age` (5, from 52 ch) · `actions` (13, always, filled `hover_only`).
 
 #### `StatusGlyph`
 **Purpose.** The §2.5 vocabulary, in one place. See §5.2 for the table.

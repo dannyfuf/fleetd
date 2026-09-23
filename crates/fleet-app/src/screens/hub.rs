@@ -20,8 +20,8 @@ use fleet_proto::{
     response::{PrSlice, ResponseBody},
 };
 use fleet_ui_kit::{
-    ActiveTheme, HarnessTargetExt, Icon, InputMode, SplitLayout, StatusKind, TextInput,
-    TextInputEvent, Toast, ToastDuration,
+    ActiveTheme, HarnessTargetExt, Icon, InputMode, SplitLayout, TextInput, TextInputEvent, Toast,
+    ToastDuration,
 };
 use gpui::{
     AnyElement, App, ClipboardItem, Entity, FocusHandle, IntoElement, ScrollHandle, SharedString,
@@ -83,13 +83,15 @@ pub const PR_TTL: Duration = Duration::from_secs(90);
 /// Below this window width the detail panel docks instead of insetting (§3.4).
 const DETAIL_INSET_MIN_WIDTH: f32 = 1120.0;
 
-/// The window geometry one frame is drawn against.
-#[derive(Debug, Clone, Copy)]
-struct Viewport {
+/// What one frame of the Hub body is drawn against: the window geometry, the clock and the
+/// pointer contract of the worktree rows.
+struct Frame<'a> {
     /// Logical window width in pixels.
     width: f32,
-    /// How many rows the list pane can show.
-    rows: usize,
+    /// The epoch second the frame is drawn at.
+    now: i64,
+    /// What a worktree row does when the pointer uses it.
+    handlers: &'a worktrees_list::RowHandlers,
 }
 
 /// Whether the detail panel docks over the list instead of being inset (§3.4).
@@ -150,6 +152,8 @@ pub struct HubState {
     pub creating: Vec<(RepoId, u64)>,
     creation_intents: HashMap<PrIdentity, PrCreateIntent>,
     restoring_trash: Option<String>,
+    /// `$HOME`, so the prepared worktree paths are tilde-collapsed once.
+    home: Option<std::path::PathBuf>,
 }
 
 impl HubState {
@@ -346,7 +350,10 @@ impl HubScreen {
             input
         });
         Self {
-            hub: cx.new(|_| HubState::default()),
+            hub: cx.new(|_| HubState {
+                home: crate::presentation::home_dir(),
+                ..HubState::default()
+            }),
             rail_scroll: UniformListScrollHandle::new(),
             list_scroll: UniformListScrollHandle::new(),
             pr_scroll: UniformListScrollHandle::new(),

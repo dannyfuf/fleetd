@@ -354,6 +354,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Clone a repository",
         "Search GitHub and clone a repository into this context, as a background job.",
     )
+    .short("Clone repo")
     .featured(20)
     .palette(),
     e(
@@ -431,7 +432,8 @@ pub(super) const ENTRIES: &[Entry] = &[
         G::Worktree,
         "Open it and keep the last one awake",
         "Open the selected worktree without putting the one you were in to sleep.",
-    ),
+    )
+    .short("Open, keep awake"),
     e(
         &["worktrees::Create"],
         P::Worktrees,
@@ -449,7 +451,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Remove it after showing what would be lost. Asks first, and you can undo it.",
     )
     .featured(60)
-    .short("Delete it safely")
+    .short("Delete")
     .destructive()
     .palette(),
     e(
@@ -485,6 +487,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "End its session",
         "Stop every terminal and agent running in this worktree. Asks first.",
     )
+    .short("Kill session")
     .destructive()
     .palette(),
     e(
@@ -494,6 +497,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Check what would be lost",
         "Look again for uncommitted changes, unpushed commits and running programs.",
     )
+    .short("Inspect")
     .palette(),
     e(
         &["worktrees::CopyPath"],

@@ -294,6 +294,8 @@ The names Fleet paints today, by surface:
 | --- | --- |
 | Repositories rail | `repos.rail`, `repos.row[N]`. The rail's own `w` is the collapse oracle — 240 expanded, 44 collapsed — because `H` is its only collapse affordance and Fleet has no control to name. |
 | Hub lists | `worktrees.row[N]`, `prs.row[N]`, `jobs.row[N]`, `hub.tab[N]`, `prs.tab[N]` |
+| Worktrees page | `worktrees.new`, `worktrees.clone`, `worktrees.filter`, `worktrees.row[N].open`, `worktrees.row[N].menu`, `worktrees.row[N].log` |
+| Detail panel | `detail.open`, `detail.sleep`, `detail.menu`, `detail.copy_path`, `detail.inspect` |
 | Title bar | `titlebar.context`, `titlebar.command`, `titlebar.needs_you`, `titlebar.jobs`, `titlebar.update`, `titlebar.daemon`, `titlebar.help`, `titlebar.settings`, `titlebar.back` |
 | Status bar | `statusbar.shortcuts`, `statusbar.commands` |
 | Board | `board.column[C]`, `board.column[C].card[R]`, `board.filter` |
@@ -308,6 +310,16 @@ The names Fleet paints today, by surface:
 | Menus | `menu.item[N]`: the items of the one open kit `Menu` (a ⋯, `+`, right-click or dropdown menu), numbered over the visible items in order, separators and headers skipped |
 | ⌃S command menu | `prefix_menu`, `prefix_menu.item[N]`, `prefix_menu.close` |
 | Native agents | `agents.popup`, `agents.popup.agent[N]` (the header's provider switch: 0 Claude, 1 Codex), `agents.popup.restart`, `agents.popup.hide`, `agents.transcript`, `agents.composer`, `agents.decision`, `agents.approval.allow_once`, `agents.approval.allow_always`, `agents.approval.deny`, `agents.approval.deny_and_stop`, `agents.approval.edit`, `agents.send`, `agents.tool[N]`, `agents.row[N]` |
+
+The Worktrees page's header paints `worktrees.filter` (the idle filter field; while the filter is
+being edited the same box is `filter.input`), `worktrees.clone` and `worktrees.new` (the primary
+*New worktree*). A row's hover actions, `worktrees.row[N].open` (*Open*) and
+`worktrees.row[N].menu` (the `⋯` trigger), are drawn only while that row is hovered or selected,
+so a scenario clicks the row first; `worktrees.row[N].log` is the *View log* button of a row whose
+hooks failed. Right-clicking `worktrees.row[N]` opens the same menu at the pointer. The detail
+panel's buttons are `detail.open`, `detail.sleep`, `detail.menu` (its `⋯`), `detail.copy_path` and
+`detail.inspect` (only while the worktree's safety is not known); the panel is open by default at
+the harness's 1440 px window.
 
 `hub.tab[N]` is the title bar's section nav — `0` Worktrees, `1` Pull requests, `2` Board — painted
 only on the Hub. The `titlebar.*` names are its other controls. `titlebar.context` is the context

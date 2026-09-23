@@ -52,6 +52,8 @@ pub struct HubModel {
     pub prs: Rc<[PrRow]>,
     /// How many worktrees the scope holds before the filter.
     pub worktree_total: usize,
+    /// The Worktrees page's subtitle: `4 across 2 repositories · 1 needs attention`.
+    pub worktree_summary: SharedString,
     /// How many PR rows exist before filtering, after the documented display cap.
     pub pr_total: usize,
     /// How many pull requests the §3.5 cap hid.
@@ -100,6 +102,32 @@ impl HubModel {
             pr_total: self.pr_total,
         }
     }
+}
+
+/// What the PR cache knows about each pull request — its full state and its title — so a
+/// worktree row can say more than its inspection does. `Mine` wins over `Review`.
+fn known_prs(hub: &HubState) -> HashMap<(RepoId, u64), worktrees_list::KnownPr> {
+    let mut known = HashMap::new();
+    for tab in [PrTab::Mine, PrTab::Review] {
+        let Some(slice) = hub.prs.slice(tab) else {
+            continue;
+        };
+        for pr in &slice.prs {
+            known
+                .entry((pr.repo_id.clone(), pr.number))
+                .or_insert_with(|| worktrees_list::KnownPr {
+                    state: crate::presentation::pr_badge_state(
+                        fleet_core::github::derive_pr_state(
+                            pr.is_draft,
+                            pr.checks,
+                            pr.review_decision,
+                        ),
+                    ),
+                    title: SharedString::from(pr.title.clone()),
+                });
+        }
+    }
+    known
 }
 
 /// Builds the whole Hub model from the snapshot and the caches.
@@ -170,26 +198,37 @@ fn model(state: &AppState, hub: &HubState, now: i64) -> HubModel {
         RepoScope::Repo(repo) => &worktree.repo_id == repo,
     });
     let worktree_total = scoped.len();
-    let worktrees = if matches!(
+    let (worktrees, worktree_summary) = if matches!(
         state.screen,
         Screen::Hub {
             tab: HubTab::Worktrees
         }
     ) {
         worktrees_list::sort_rows(&mut scoped);
-        worktrees_list::build_rows(
+        let known_prs = known_prs(hub);
+        let rows = worktrees_list::build_rows(
             &RowInputs {
                 worktrees: scoped,
                 inspections: &hub.inspections,
+                known_prs: &known_prs,
+                home: hub.home.as_deref(),
                 now,
             },
             &index,
+        );
+        let scope_repo = match &state.scope {
+            RepoScope::All => None,
+            RepoScope::Repo(repo) => Some(repo),
+        };
+        let summary = worktrees_list::summary(&rows, scope_repo);
+        (
+            rows.into_iter()
+                .filter(|row| worktrees_list::matches(row, list_query))
+                .collect(),
+            summary,
         )
-        .into_iter()
-        .filter(|row| worktrees_list::matches(row, list_query))
-        .collect()
     } else {
-        Rc::default()
+        (Rc::default(), SharedString::default())
     };
     let cache_key = cache::PrCacheKey::from_state(state);
     let slice = hub.prs.slice_for(state.pr_tab, &cache_key);
@@ -219,6 +258,7 @@ fn model(state: &AppState, hub: &HubState, now: i64) -> HubModel {
         worktrees,
         prs,
         worktree_total,
+        worktree_summary,
         pr_total,
         pr_hidden: prs_screen::hidden_rows(slice),
         prepared_at: now,

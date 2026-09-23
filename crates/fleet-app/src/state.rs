@@ -181,8 +181,10 @@ pub struct AppState {
     dialog_key_context: Option<(Dialogs, &'static str)>,
     /// The filter of the focused list.
     pub filter: FilterState,
-    /// Whether the detail panel is open (`i`). Never focusable.
-    pub detail_open: bool,
+    /// Whether the user opened (`Some(true)`) or closed (`Some(false)`) the detail panel with `i`;
+    /// `None` until they do, which means the width decides ([`AppState::detail_visible`]).
+    /// Never focusable.
+    pub detail_open: Option<bool>,
     /// Whether the repos rail is collapsed to its 44 px icon rail (`H`).
     pub rail_collapsed: bool,
     /// Whether the Workspace hides its header and tab strip (`ctrl-s z`).
@@ -293,7 +295,7 @@ impl AppState {
             overlay: None,
             dialog_key_context: None,
             filter: FilterState::default(),
-            detail_open: false,
+            detail_open: None,
             rail_collapsed: false,
             zoomed: false,
             session_mru: Mru::default(),
@@ -322,6 +324,13 @@ impl AppState {
             harness: HarnessState::default(),
             harness_cache: RefCell::new(None),
         }
+    }
+
+    /// Whether the detail panel is drawn: what the user chose with `i`, else `wide` — the
+    /// panel is on by default where it fits beside the list (UX-SPEC §3.4).
+    #[must_use]
+    pub fn detail_visible(&self, wide: bool) -> bool {
+        self.detail_open.unwrap_or(wide)
     }
 
     /// Mirrors the Jobs panel's own cursor and filter. Returns true if anything changed.

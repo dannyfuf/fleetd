@@ -107,9 +107,12 @@ Responsive ladders are expressed in **ch of the pane that owns the columns**, no
                                             └──────────────────────────────┘
 ```
 
-With the detail panel open (`i`) the worktrees list shrinks to **695 px (92 ch)** and a **344 px**
-panel is inserted at the right; the repos rail never moves. Below **1120 px** total width the
-detail panel becomes a right-edge overlay (320 px) so the list never drops below **72 ch**.
+The detail panel is **open by default** at 1120 px and wider (§3.4): the worktrees list shrinks by
+**344 px** and the panel is inserted at the right; the repos rail never moves. The Worktrees list
+itself is a page — H1, subtitle, toolbar, column heads, 44 px rows (§3.3); the frame above shows
+the dense pane anatomy the other Hub lists still use. Below **1120 px** total width the panel is
+closed by default and, opened with `i`, becomes a right-edge overlay (320 px) so the list never
+drops below **72 ch**.
 
 The Workspace replaces the rail + list + detail region entirely (full-bleed terminal) and keeps
 the title bar and the status bar at the same pixel positions — same chrome, same saccade. Only the
@@ -279,18 +282,19 @@ unchanged — they decide the key context, and the harness snapshot reports them
 
 ### 2.9 Column ladders (inventory §5 breakpoints, authoritative in ch)
 
-**Worktrees list**, measured in ch of the list pane (138 ch at default, 92 ch with detail open):
+**Worktrees list**, measured in ch of the list pane (114 ch at 1440 px with the detail panel
+open, 160 ch without):
 
-| # | Column | Width | Align | Shown when |
-| --- | --- | --- | --- | --- |
-| 1 | session / job glyph | 2 ch (16 px) | center | always |
-| 2 | branch + `✎` dirty + `☁host` | flex, **min 24 ch** | left | always |
-| 3 | repo `owner/name` | 14 ch (105 px), truncate-head | left | scope = `All`, **or** pane ≥ 110 ch |
-| 4 | keep-alive labels / degraded chip | **18 / 14 / 10 / 0 ch** (135 / 105 / 75 / 0 px) | left | ≥ 104 / 88 / 72 / < 72 ch |
-| 5 | PR badge `#n <state>` | 15 ch (113 px) | left | pane ≥ 60 ch and a PR matches |
-| 6 | age | 7 ch (53 px) | right | pane ≥ 52 ch |
+| # | Column | Head | Width | Align | Shown when |
+| --- | --- | --- | --- | --- | --- |
+| 1 | name: icon + branch + `↑n` / `uncommitted changes` / `☁host` / hooks chip | Name | flex, **min 24 ch** | left | always |
+| 2 | repo `owner/name` | Repository | 12 ch, truncate-head | left | scope = `All`, **or** pane ≥ 110 ch |
+| 3 | session in words, or a job's phase | Session | **18 / 14 / 0 ch** | left | ≥ 100 / 72 / < 72 ch |
+| 4 | PR chip `#n <state>` | Pull request | 15 ch | left | pane ≥ 60 ch |
+| 5 | age | Age | 5 ch | right | pane ≥ 52 ch |
+| 6 | hover actions `Open ⏎` `⋯` | — | 13 ch | right | always (reserved; drawn on hover or selection) |
 
-Below 72 ch only columns 1, 2, 5, 6 survive. Gaps are 12 px between columns, 16 px pane padding.
+Below 72 ch only columns 1, 4, 5, 6 survive. Gaps are 12 px between columns, 12 px row padding.
 
 **PR list**, measured in ch of the list pane:
 
@@ -424,58 +428,78 @@ to context · `i` detail · `ga` jump to `All` (KEYMAP A7) · `H` collapse/expan
 **Purpose:** *Which branch is alive, which needs attention, which can I throw away?*
 
 ```
- WORKTREES · payroll                                       8/12        1–8/12
- ───────────────────────────────────────────────────────────────────────────────
-▌◉ feat/payroll-fix ✎     buk/payroll    ⚡claude, :3000    #412 CI fail    2h
- ☾ fix/rut-validator      buk/payroll                       #408 Approved   1d
- · spike/gpui-vt ☁devbox  dannyfuf/fl…                                      3d
- ▲ chore/deps             buk/www        ⚠ hooks failed                     5d
- ? api-poc ☁devbox        buk/api        offline                            3d
- ⟳ new-slug               buk/payroll    copying files…                      –
+ Worktrees                                   [⌕ Filter  /] [Clone repo] [+ New worktree n]
+ 4 across 2 repositories · 1 needs attention
+ Name                          Repository  Session                   Pull request   Age
+ ─────────────────────────────────────────────────────────────────────────────────────────
+▌⑂ spike ↑2                     acme/web    ● claude working · 2 tabs  #4 In review    2d  [Open ⏎] [⋯]
+ ⚠ broken [Setup hook failed] View log  acme/api    No session           —              2d
+ ⑂ hotfix uncommitted changes   acme/api    ● 1 terminal               #13 Draft       5d
+ ⑂ feature                      acme/api    No session                 #12 Approved    1w
 ```
+
+**Page header.** An H1 `Worktrees` (`page_title`) over one subtitle the view model builds:
+`<n> across <r> repositories`, or `<n> in <owner/name>` when one repository is selected (or the
+scope holds only one), then `· <k> needs attention` when a row has failed hooks, an offline host
+or an inspection error (zero-suppressed). A frozen snapshot appends `· stale · <age>` in amber.
+The toolbar on the right: the **filter field** (`/`; a click opens the same filter mode, §3.10),
+`Clone repo` (`repos::Clone`) and the primary `New worktree  n` (`worktrees::Create`).
+
+**Column heads** (`ListHeader`, sentence case): Name, Repository, Session, Pull request, Age; the
+§2.9 ladder drops them with the pane exactly as it drops the cells.
 
 | Element | Content | Position | Why here | Why needed |
 | --- | --- | --- | --- | --- |
-| Session / job glyph | §2.5 | col 1 | leftmost = first read; it decides `Enter` vs `s` vs `d` | `WorktreeStatus.session` |
-| Branch | `Worktree.branch` (not slug, not id), ellipsis-middle | col 2 | the only string the user thinks in | `Worktree.branch` |
-| Dirty mark | `✎` `file-pen` 12 px amber, suffixed to the branch | inline | dirty is a property of the branch, so it rides with it instead of buying a column | `WorktreeInspection.dirty` |
-| Host chip | `cloud` + host id, `fg.muted`; `cloud-off` amber when unreachable | inline after dirty | absent for local (the 95 % case) | `Worktree.host` |
-| Repo prefix | `owner/name` | col 3 | disambiguates in `All` scope | §5 "optional repo prefix" |
-| Keep-alive labels | `⚡` + `keepAlive` labels joined `, `, max 3 then `+n` | col 4 | tells you *why* sleep will refuse to close windows, and what `K`/`d` would kill | §4 sleep policy; `WorktreeStatus.windows[].keepAlive` |
-| Degraded chip | `⚠ hooks failed` | **same slot, outranks keep-alive chips** | a worktree that looks ready but whose post-create hooks failed is a trap | §9 "Hook failures warn only; no persisted degraded fact despite ready" |
-| Job phase | `copying files…`, `checking out…`, `hooks 2/3`, `deleting` | replaces col 4 + age | phases are more honest than percentages | §6 create/delete jobs |
-| PR badge | `#412` + state word (§3.5) | col 5 | the single fact that decides "is this branch done?" | `InspectionPullRequest` |
-| Age | relative `lastOpenedAt ?? createdAt`, 1 unit | col 6 | recency is the sort you verify visually | §5 |
-| Sort | `lastOpenedAt` desc, then `createdAt` desc | — | MRU puts the right answer on row 0, so `Enter` alone is often the whole task | §3 open step 3 |
+| Name icon | `git-branch`, blue while a session is alive, muted otherwise; a failure or a job takes it over (`triangle-alert`, `cloud-off`, spinning `loader-circle`) | col 1 | health first, as the glyph it replaces | `WorktreeStatus`, `Worktree.degraded`, jobs |
+| Branch | `Worktree.branch` at weight 500, ellipsized | col 1 | the only string the user thinks in | `Worktree.branch` |
+| Ahead | mono `↑n`, only when ahead > 0 | after the branch | the one git fact that says "unpushed work" at a glance | `WorktreeInspection.ahead` |
+| Dirty | muted `uncommitted changes` | after the branch | dirty is a property of the branch, so it rides with it | `WorktreeInspection.dirty` |
+| Host chip | `cloud` + host id; `cloud-off` amber when unreachable | after the branch | absent for local (the 95 % case) | `Worktree.host` |
+| Hooks failed | amber `Setup hook failed` chip + `View log` ghost button, which opens Jobs on that hooks job | after the branch | a worktree that looks ready but whose post-create hooks failed is a trap | `Worktree.degraded` + the failed `PostCreateHooks` job |
+| Repository | `owner/name` | col 2 | disambiguates in `All` scope | — |
+| Session | in words behind a dot: `claude working · 2 tabs`, `claude waiting · 1 tab`, `1 terminal`, `Sleeping`, `No session`, `Host offline` | col 3 | says what `s`/`K`/`d` would stop without decoding a glyph | `WorktreeStatus` (session, windows, agent activity) |
+| Job phase | `copying files…`, `running hooks…`, `deleting` | replaces the session words and the age | phases are more honest than percentages | create/delete jobs |
+| PR chip | tinted `#n` + state words: `In review`, `Draft`, `Approved`, `CI failing`, `Needs changes`, `CI running`, `Merged`; `—` without a PR | col 4 | the single fact that decides "is this branch done?" | inspection PR, refined by the PR cache |
+| Age | relative `lastOpenedAt ?? createdAt`, 1 unit | col 5 | recency is the sort you verify visually | — |
+| Hover actions | `Open ⏎` and a `⋯` menu; drawn while the row is hovered or selected, width always reserved | col 6 | the pointer's way to the row's verbs | ADR 0023 |
+| Sort | `lastOpenedAt` desc, then `createdAt` desc | — | MRU puts the right answer on row 0, so `Enter` alone is often the whole task | — |
+
+**Row menu.** The `⋯` menu and the right-click menu are the same list, each item with its key
+from the live keymap: Open `⏎`, Open, keep awake `O`, Sleep `s`, Inspect `I` — Copy path `y`,
+Copy branch `Y` — Kill session `K` and Delete `d` (both red, both confirm), and Undo delete `u`
+only while there is a delete to undo.
+
+**Pointer (§5.1).** A click selects the row (and gives the list the keyboard), a double-click
+opens it like `⏎`, a right-click selects it and opens the row menu at the pointer. Every button on
+a row first selects that row, so the action it dispatches acts on the row under the pointer.
 
 **Cursor stability.** Background events (status polls, PR fetches, job completions, pool refills)
 never re-sort, re-scroll or re-focus the list. Sort order is recomputed only on explicit user
 action (`r`, filter change, repo change, screen change). A row that changes state changes its
-glyph **in place**.
+words **in place**.
 
 **Intentionally omitted:** `WorktreeId` (never typed in the GUI), `path` (`y` copies it, detail
-shows it), `baseRef`, session name string, window list, `ahead`/`behind`, `uniqueCommits`,
-`published`, `mergedIntoTarget`, absolute timestamps, PR title, PR author, additions/deletions,
-per-row action buttons. Every one of them appears in the detail panel or in the delete/prune
-confirm — i.e. exactly where it changes a decision.
+shows it), `baseRef`, session name string, window names, `behind`, `uniqueCommits`,
+`published`, `mergedIntoTarget`, absolute timestamps, PR title, PR author, additions/deletions.
+Every one of them appears in the detail panel or in the delete/prune confirm — i.e. exactly where
+it changes a decision.
 
 **States**
 
 | State | Rendering |
 | --- | --- |
-| Empty | `No worktrees yet.` / `No worktrees for <repo> yet.` + faint `n create one` |
+| Empty | `No worktrees yet` / `No worktrees for <repo> yet` over a primary `New worktree  n` button |
 | Filter-empty | `Nothing matches "<filter>".` + faint `esc clear` |
-| Loading (cold) | rows render from `state.json` immediately; the glyph column shows `circle-help` for at most one poll interval, then real states — **never blank** |
-| Job running on a row | glyph → `loader-circle` (amber), col 4 + age → phase text; the row stays selectable and `Enter` opens it as soon as the session exists (§3 create step 6) |
-| Deleting | row dims to 40 %, `⟳ deleting`, non-selectable, disappears on state commit |
-| Inspect error | glyph unchanged, `triangle-alert` amber prefixed to the age column; the detail panel shows `WorktreeInspection.error` verbatim; the row stays operable |
-| Host offline | `cloud-off` amber on the host chip, `offline` in col 4, session forced to `unknown` |
-| Degraded | `triangle-alert` amber glyph + `⚠ hooks failed` chip; cleared by a successful re-run of the hooks job or by `d` on the chip in the detail panel |
+| Loading (cold) | `Loading…` until the first snapshot; rows then render from `state.json` immediately — **never blank** |
+| Job running on a row | name icon → spinning `loader-circle` (amber), session + age → phase text; the row stays selectable and `Enter` opens it as soon as the session exists |
+| Deleting | row dims to 40 %, `deleting`, non-selectable, disappears on state commit |
+| Inspect error | `triangle-alert` amber prefixed to the age column; the detail panel shows `WorktreeInspection.error` verbatim; the row stays operable |
+| Host offline | `cloud-off` amber on the host chip and the name, `Host offline` in the session column |
+| Degraded | `triangle-alert` amber name icon + `Setup hook failed` chip + `View log` |
 
-**Icons:** `circle-dot`, `circle`, `moon`, `dot`, `circle-help`, `triangle-alert`, `file-pen`,
-`cloud`, `cloud-off`, `zap`, `bot` (Claude/Codex keep-alive), `server` (`:port` keep-alive),
-`loader-circle`, `git-pull-request`, `git-pull-request-draft`, `git-merge`, `circle-x`,
-`message-square-warning`, `clock`, `circle-check`, `eye`.
+**Icons:** `git-branch`, `triangle-alert`, `cloud`, `cloud-off`, `server`, `unplug`,
+`loader-circle`, `plus`, `search`, `ellipsis`, and the PR chip's `eye`, `git-pull-request-draft`,
+`circle-check`, `circle-x`, `message-square-warning`, `clock`, `git-merge`.
 
 **Keyboard:** `j`/`k`/`gg`/`G`/`ctrl-d`/`ctrl-u` · `Enter`/`o` open (sleeps previous) · `O` open
 keeping previous · `n` create · `d` delete · `x` prune repo · `s` sleep · `K` kill · `I` inspect ·
@@ -484,51 +508,49 @@ keeping previous · `n` create · `d` delete · `x` prune repo · `s` sleep · `
 
 ---
 
-### 3.4 Hub — Detail panel (`i`, closed by default, never focusable)
+### 3.4 Hub — Detail panel (`i`, on by default ≥ 1120 px, never focusable)
 
-**Purpose:** *Everything deliberately kept out of the row, on demand, in one 344 px column —
-with the age of every job-derived fact.*
+**Purpose:** *What I can do with the selected worktree first, then everything deliberately kept
+out of the row, in one 344 px column — with the age of every job-derived fact.*
+
+The panel is **on by default** when the window is at least 1120 px wide (inset beside the list)
+and off below that; `i` toggles it either way, and once toggled the user's choice sticks. Below
+1120 px an open panel docks over the list as a sheet.
 
 ```
 ┌──────────────────────────────────────┐
-│ ⑂ feat/payroll-fix                   │ 34  title
-│   buk/payroll · origin/main · local  │ 20  subtitle
-├──────────────────────────────────────┤
-│ path   ~/.fleet/worktrees/buk/…/feat…│      y copies
+│ ⑂ spike                              │  section_title
+│ acme/web · from origin/main · on this Mac
 │                                      │
-│ SESSION                   ◉ attached │ 20  section header
-│  1 nvim   ✎ unsaved changes          │
-│  2 cc     ⚡ claude                   │
-│  3 lg     —                          │
+│ [ Open workspace ⏎ ] [Sleep s] [⋯]   │  primary, secondary, row menu
 │                                      │
-│ SAFETY              checked 14s ago  │ 20  section header + stamp
-│  dirty           12 files            │
-│  ahead / behind  ⇡3 ⇣0               │
-│  unique commits  —                   │
-│  published       no                  │
-│  merged          no                  │
-│  PR              #412 open · CI fail │
-│  ⚠ unique commit count unavailable   │
-│  ⚠ gh unavailable                    │
+│ ╭ Session ───────────────────────╮   │  InfoCard
+│ │ ◌ claude is working         4m │   │
+│ │ 2 tabs: zsh, claude — kept by fleetd
+│ ╰────────────────────────────────╯   │
+│ Git                                  │
+│  Changes          Clean              │
+│  vs origin/main   2 ahead · 0 behind │
+│  Published        Yes, origin/spike  │
+│  Pull request     #4 Ship the…  [In review]
 │                                      │
-│ opened 2h ago · created 5d ago       │
-│ inspected 4m ago · I refresh         │
+│ Location                             │
+│ [ ~/worktrees/acme/web/spike    ⧉ ]  │  CopyField, y
+│ Created 2d ago · safety checked 1s ago
 └──────────────────────────────────────┘
-            344 px, 12 px padding
 ```
 
-| Element | Content | Position | Why here | Why needed |
-| --- | --- | --- | --- | --- |
-| Title | `git-branch` + branch | row 1 | echoes the cursor row so the eye does not re-search | — |
-| Subtitle | `repoId` · `baseRef` · `local` \| `@host` | row 2, `fg.muted` | provenance, read once | `Worktree.repoId/.baseRef/.host` |
-| `path` | tilde-collapsed, mono, middle-ellipsis | block 1 | `y` copies exactly this string; showing it makes the copy verifiable | §3 `path` |
-| SESSION section | one row per terminal: `index name` + keep-alive label or `—` | block 2 | the only place window names exist; needed before `s` / `K` / `x` | `WorktreeStatus.windows[]`, §4 |
-| SAFETY section | `dirty` (file count), `ahead`/`behind`, `uniqueCommits`, `published`, `merged`, `PR` | block 3 | the same facts the delete/prune confirm quotes, so the confirm is never a surprise | `WorktreeInspection`, §3 inspect |
-| **Null facts** | `—` in `fg.faint`, **never `0`** | value column | §1.3 | `ahead`/`behind`/`uniqueCommits` are nullable |
-| Warnings | amber `triangle-alert` + each `warnings[]` string **verbatim** | under SAFETY | swarm's 11 soft-warning strings are greppable diagnostics and must not be paraphrased | §3 inspect step 6 |
-| Freshness stamp | `checked <age> ago` in the SAFETY header, on the §1.3 ladder | right of the header | a fact without an age is not a fact | `inspectedAt` |
-| Times | `opened <rel> · created <rel>` | last block | low priority by definition | `lastOpenedAt`, `createdAt` |
-| Footer | `inspected <age> · I refresh` | last row, only when > 60 s | prevents trusting stale safety facts | §2.6 |
+| Element | Content | Why needed |
+| --- | --- | --- |
+| Title | the row's name icon + branch | echoes the cursor row so the eye does not re-search |
+| Subtitle | `repoId · from baseRef · on this Mac` \| `@host` | provenance, read once |
+| Action row | primary `Open workspace ⏎` (`worktrees::Open`), `Sleep s`, and `⋯` — the row menu of §3.3 | the panel leads with what you can do |
+| Session card | the session state in words (`claude is working`, `Open in a window`, `Running in the background`, `Sleeping`, `No session`) with its glyph and the age of the last change; then `n tabs: <names> — kept by fleetd` | the only place window names exist; needed before `s` / `K` |
+| Git | `Changes` (`Clean` / `n files`), `vs <base>` (`a ahead · b behind`), `Published` (`Yes, <upstream>` / `No`), `Pull request` (a link that opens it in the browser, `b`, plus its chip) and each `warnings[]` string **verbatim** | the same facts the delete/prune confirm quotes, so the confirm is never a surprise |
+| **Null facts** | `—` in `fg.faint`, **never `0`** | `ahead`/`behind` are nullable (§1.3) |
+| Location | the tilde-collapsed path in a `CopyField` whose button copies it (`y`), then `Created <age> ago · safety checked <age> ago` | `y` copies exactly this string; the stamp keeps stale facts from being trusted |
+
+Every string is built with the row in the Hub's projection; the panel only lays it out.
 
 **Variants**
 
@@ -542,17 +564,14 @@ with the age of every job-derived fact.*
 **Intentionally omitted:** `WorktreeId`, session name string, `host.ssh` / `swarmCommand`,
 absolute ISO timestamps, raw hook command lists for worktrees (a repo-level fact), full log tails.
 
-**States:** *never inspected* → SAFETY shows `not checked · I to check` and the delete confirm
-escalates to `Y` (§3.8.3). *inspect running* → the section header shows `⟳ checking…`, old values
-dim to 60 % but stay readable — **never blanked**. *inspect errored* → red `error: <message>` +
-`I retry`.
-
-**Icons:** `git-branch`, `clock` (freshness), `file-diff` (dirty), `git-commit-horizontal`
-(unique commits), `cloud-upload` (published), `git-merge` (merged), `triangle-alert`, `circle-x`,
-`zap`.
+**States:** *never inspected* → Git shows `Not checked` and an `Inspect I` button (absence of
+knowledge still renders, §1.3), and the delete confirm escalates to `Y` (§3.8.3). *inspect running*
+→ `Checking…` the first time; on a refresh the old values dim to 60 % but stay readable — **never
+blanked**. *inspect errored* → the error in red + `Inspect I`.
 
 **Keyboard:** `i` toggles. The panel is **never in the focus cycle** (KEYMAP A1); `j`/`k` always move
-the list cursor and the panel always mirrors it. `y` copies the path from anywhere in the Hub.
+the list cursor and the panel always mirrors it. `y` copies the path from anywhere in the Hub. Its
+buttons are pointer twins of those keys and act on the cursor row.
 
 ---
 
@@ -1888,8 +1907,8 @@ pane only**, never full-screen, so surrounding panes stay usable. Copy is swarm'
 | --- | --- | --- |
 | No contexts | `No contexts yet.` | `N  create your first context` |
 | No repos | `No repos in <context>.` | `n  clone one` |
-| No worktrees | `No worktrees yet.` | `n  create one` |
-| No worktrees for a repo | `No worktrees for <repo> yet.` | `n  create one` |
+| No worktrees | `No worktrees yet` | primary `New worktree  n` button |
+| No worktrees for a repo | `No worktrees for <repo> yet` | primary `New worktree  n` button |
 | Filter miss | `Nothing matches "<filter>".` | `esc  clear` |
 | PR mine | `No open PRs authored by you in <scope>.` | `r  refresh` |
 | PR review | `No PRs waiting for your review in <scope>.` | `r  refresh` |

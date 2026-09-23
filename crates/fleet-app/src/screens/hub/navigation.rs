@@ -421,6 +421,54 @@ impl HubCtx {
         });
     }
 
+    /// Put the cursor on worktree row `ix` and give the list the keyboard: what a click, a
+    /// right-click or the press before a row's button does (UX-SPEC §5.1).
+    pub(super) fn select_worktree(&self, ix: usize, cx: &mut App) {
+        self.state.update(cx, |state, cx| {
+            if matches!(state.screen, Screen::Hub { .. }) && state.hub_pane != HubPane::List {
+                state.hub_pane = HubPane::List;
+                cx.notify();
+            }
+        });
+        let model = self.model(cx);
+        let len = model.worktrees.len();
+        if ix >= len {
+            return;
+        }
+        let moving_down = ix >= self.state.read(cx).cursors.worktrees;
+        self.set_cursor(ix, len, moving_down, cx);
+    }
+
+    /// The worktrees page's pointer contract, bound to this Hub.
+    pub(super) fn row_handlers(&self) -> worktrees_list::RowHandlers {
+        let select = self.clone();
+        let open = self.clone();
+        let log = self.clone();
+        worktrees_list::RowHandlers {
+            select: Rc::new(move |ix, _, cx| select.select_worktree(ix, cx)),
+            open: Rc::new(move |ix, _, cx| {
+                open.select_worktree(ix, cx);
+                open.open_worktree(true, cx);
+            }),
+            view_log: Rc::new(move |ix, _, cx| {
+                log.select_worktree(ix, cx);
+                log.view_hook_log(cx);
+            }),
+        }
+    }
+
+    /// `View log`: the Jobs panel, on the failed hooks job of the selected worktree.
+    pub(super) fn view_hook_log(&self, cx: &mut App) {
+        let job = self.selected_worktree(cx).and_then(|row| row.hook_job);
+        self.state.update(cx, |state, cx| {
+            state.open_overlay(Overlay::Jobs);
+            if job.is_some() {
+                state.jobs_focus = job;
+            }
+            cx.notify();
+        });
+    }
+
     pub(super) fn selected_rail_row(&self, cx: &App) -> Option<RailRow> {
         let model = self.model(cx);
         model.rail.get(self.state.read(cx).cursors.repos).cloned()
