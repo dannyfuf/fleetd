@@ -280,7 +280,7 @@ list below is the complete inventory, in px unless marked `ch`; a unit test in
 | Controls | `button_h 30` · `button_h_compact 26` · `kbd_h 18` · `kbd_h_small 16` · `chip_h 22` · `text_field_h 36` · `field_status_h 18` · `number_field_w 96` · `segment_h 24` · `switch_w 34` · `switch_h 20` · `checkbox_size 16` |
 | Dialogs and floating layers | `dialog_w 560` · `confirm_compact_w 480` · `dialog_header_h 44` · `dialog_footer_h 44` · `palette_w 640` · `palette_top 120` · `prefix_menu_w 900` · `palette_input_h 44` · `overlay_help_w 640` · `toast_w 320` · `toast_inset 12` · `scroll_pill_w 176` · `menu_min_w 240` · `alert_tile 34` |
 | Lines and marks | `hairline 1` · `focus_ring_w 2` · `scroll_thumb_w 3` · `dot_size 8` · `dot_size_small 6` |
-| Terminal | `cell_w 7.5` · `cell_h 18` · `terminal_tab_min_w 84` · `terminal_tab_max_w 200` · `new_terminal_tab_w 36` |
+| Terminal | `cell_w 7.5` · `cell_h 18` · `terminal_tab_min_w 84` · `terminal_tab_max_w 200` · `tab_strip_h 40` · `terminal_tab_h 34` · `tab_close_size 18` |
 | Detail and doctor columns | `fact_label_w 104` · `doctor_check_w 120` · `doctor_status_w 64` |
 | Git UI | `status_pane_h 62` · `stash_pane_h 92` · `editor_box_h 160` · `diff_row_h 18` · `diff_caret_h 14` · `diff_scrollbar_w 5` · `diff_thumb_min_h 24` · `diff_horizontal_step 4ch` |
 
@@ -392,7 +392,7 @@ if let Some(bytes) = fleet_ui_kit::kit_asset(path) { return Ok(Some(Cow::Borrowe
 An absent asset must return `Ok(None)`, never `Err`: `svg()` logs nothing, so an erroring source
 turns an invisible icon into an invisible crash.
 
-### 5.1 The closed icon set (81 glyphs)
+### 5.1 The closed icon set (82 glyphs)
 
 | Purpose | Icons |
 | --- | --- |
@@ -402,7 +402,7 @@ turns an invisible icon into an invisible crash.
 | Git / PR | `git-branch` `git-branch-plus` `git-merge` `git-fork` `git-pull-request` `git-pull-request-draft` `git-commit-horizontal` `file-diff` `file-pen` `folder-git-2` `eye` |
 | Remote | `cloud` `cloud-off` `cloud-upload` `cloud-download` `globe` `lock` `unplug` `server` |
 | Keep-alive | `zap` `bot` `sparkles` `server` `file-pen` |
-| Terminal | `terminal` `square-terminal` `chevrons-up` `command` `maximize-2` `plus` |
+| Terminal | `terminal` `square-terminal` `square-kanban` `chevrons-up` `command` `maximize-2` `plus` |
 | Dialogs | `trash` `scissors` `power` `x` `boxes` `arrow-right-left` `settings-2` `hourglass` |
 | Chrome | `flag` `circle-arrow-up` `circle-arrow-down` `search` `clipboard-check` `delete` `ellipsis` `check` `minus` `chevron-left` `chevron-right` `chevron-down` `sailboat` |
 | Native agent | `brain` `wrench` `square-pen` `paperclip` `minimize-2` `undo-2` `copy` `external-link` `square` `square-check` `shield` `list-checks` |
@@ -1382,29 +1382,41 @@ Scroll mode and would otherwise look exactly like a live one — which is how "m
 printing" bug reports are born. Zero-suppressed at `offset == 0` and in alt-screen.
 
 #### `TerminalTabStrip`
-**Purpose.** Numbered tabs, 84–200 px, with activity, keep-alive, agent-status and exit marks.
-**API.** `TerminalTabStrip::new([TerminalTab::new(1, "nvim").activity(bool).starting(bool)
-.keep_alive(Icon).agent_status(TerminalAgentState).attention(bool).kind(TerminalTabKind)
-.unread(bool).exited(impl Into<Option<i32>>)]).id(ElementId).active(usize).show_plus(bool)
-.on_select(Fn(position, ..)).on_new(Fn(..))`.
-**States.** active (accent underline + `ui_strong`) · inactive · activity (6 px amber dot) ·
-unread (6 px neutral dot) · attention (6 px amber dot that survives selection) · starting
-(per-tab `loader-circle`) · agent working (`loader-circle`) · agent finished
-(`circle-check`) · native (`git-branch` glyph before the name) · exited (faint label +
-`circle-x` + code, or `—` when the process was killed by a signal and has no code).
+**Purpose.** The Workspace's tabs, 84–200 px each on a 40 px `chrome` strip: what each tab is,
+its state, and the pointer twins of the `^s` tab keys.
+**API.** `TerminalTabStrip::new([TerminalTab::new(1, "nvim").kind(TerminalTabKind).icon(Icon)
+.kbd(Option<Kbd>).activity(bool).unread(bool).attention(bool).starting(bool).keep_alive(Icon)
+.agent_status(TerminalAgentState).exited(impl Into<Option<i32>>)]).id(ElementId).active(usize)
+.agents_from(usize).show_plus(bool).on_select(Fn(position, ..)).on_close(Fn(position, ..))
+.close_kbd(Option<Kbd>).tab_menu(Fn(position, Menu, ..) -> Menu).new_menu(Fn(Menu, ..) -> Menu)
+.on_new(Fn(..)).trailing(impl IntoElement)`.
+**Anatomy.** Per tab: kind glyph (`terminal` for a PTY, `git-branch` for a native pane, or the
+caller's `icon`: `square-kanban` for the board, `bot` / `sparkles` for a Claude / Codex thread),
+the name, at most one state mark, then the `✕`. After the tabs, the `+` (a ghost `IconButton`
+opening `new_menu`, or running `on_new` when there is no menu); at the right end, the `trailing`
+controls. The index is not painted: it is in the tab's tooltip, `Tab 2` with the tab's `kbd`.
+**States.** active (the content ground, a hairline on three sides and none underneath, so it
+joins the content below; `ui_strong`) · inactive (`text_secondary`, `row_hover` on hover) ·
+unread (6 px blue dot, for `activity` or `unread`) · attention (amber `needs you` chip, which
+survives selection) · starting (`loader-circle`, also a working native agent) · agent working
+(`loader-circle`) · agent finished (`circle-check`) · keep-alive glyph · exited (faint name and
+`exited 1` in red, or `killed` when a signal left no code) · close `✕` (always on the active tab,
+on hover elsewhere; hidden, not removed, so hovering never reflows the strip).
 `TerminalTabKind::{Pty, Native}`, `TerminalAgentState::{Working, Finished}`.
+**Pointer.** A click selects (`on_select`). The `✕` and a middle-click close (`on_close`). A
+right-click selects the tab, then opens `tab_menu` at the pointer. Every one of them is the twin of
+a key the caller wires (`^s 1`–`9`, `^s x`, the menu's own keys), so each is optional and the
+strip still draws with none.
 **Usage rule (`starting`).** §3.6's "Waking a slept session" rebuilds the strip and spawns one
 PTY per tab; without a per-tab spinner the strip claims six live terminals that do not exist
 yet. **Usage rule (`exited`).** `.exited(1)` and `.exited(None)` both compile: exit codes are
 `Option<i32>` end-to-end (`fleet-core::TerminalStatus`, `Event::TerminalExited`), because a
 `SIGKILL` from `^s x` produces none.
-**Usage rule.** The index is the argument to `ctrl-s 1`–`9`, so the strip is the legend for that
-binding. Agent activity appears only on terminals with a recognized agent.
-**Usage rule (`unread` vs `activity`).** A tab draws **at most one** dot, and amber wins: amber
-means the tab is waiting on the user, neutral only that content arrived while they were
-elsewhere. A native agent tab uses both (`NATIVE-AGENTS.md` §3.3 maps `NeedsYou` to amber and
-`Unread` to neutral); an exited tab draws neither, and the active tab draws none *unless* it is
-blocked on the reader (`attention`) — the one mark that survives selection.
+**Usage rule (marks).** A tab draws **at most one** mark, and *needs you* wins: amber means the
+tab is waiting on the user, blue only that content arrived while they were elsewhere. An exited
+tab draws neither, and the active tab draws no dot — only the *needs you* chip survives
+selection (`NATIVE-AGENTS.md` §3.3). Agent activity appears only on terminals with a recognized
+agent. **Harness.** `tabs.tab[N]` / `agents.tabs.tab[N]`, their `.close`, and `tabs.new`.
 
 #### `ScrollPill`
 **Purpose.** `SCROLL <offset>/<len>` while in scroll mode.
@@ -1984,12 +1996,13 @@ menu, the context switcher, a dropdown's options. Never placed by hand: one of t
 below opens it.
 **Anatomy.** `elevated` fill, `border_strong` hairline, `radii.popover`, `popover_shadow()`, `xs`
 padding, at least `menu_min_w` wide. An item is `row_h` tall, `sm` side padding, `radii.control`:
-`[icon] label [✓] [Kbd]`, icon 14 px, label `Ui` in `text_secondary` (`text` when highlighted),
+`[icon] label [detail] [✓] [Kbd]`, icon 14 px, label `Ui` in `text_secondary` (`text` when highlighted),
+the detail a muted `Ui` word naming the choice's state,
 the chip small and right-aligned. The highlight is a `control_hover` fill. A header is a
 `SentenceLabel` in `text_muted`, `section_header_h` tall; a separator is a `border` hairline inset
 `sm` with `xs` above and below.
 **API.** `Menu::build(window, cx, |menu, window, cx| menu.header(..).item(..).separator())` (the
-wrappers call it); `MenuItem::new(label).icon(Icon).action(Box<dyn Action>)
+wrappers call it); `MenuItem::new(label).icon(Icon).detail(text).action(Box<dyn Action>)
 .on_select(Fn(&mut Window, &mut App)).kbd(Kbd).destructive(bool).checked(bool)`;
 `Menu::{item_labels, highlighted, is_empty, dismiss}`. Keys: `menu_actions::{SelectNext,
 SelectPrevious, Confirm, Cancel}` against `MENU_KEY_CONTEXT` (`FleetMenu`); `menu_key_bindings()`
@@ -1997,7 +2010,8 @@ binds them for a gallery or a test, and `fleet-app`'s key table binds the same k
 (`KEYMAP.md` § *Open menus*). `menu_holds_focus(window, cx)` says whether an open menu has the
 focus, for a shell that reconciles focus from its own state (`APP-CONTRACTS.md` §3).
 **States.** item: default · highlighted (hover or `↑`/`↓`) · destructive (icon and label in
-`danger`) · checked (a `✓`, announced as a radio item) · with or without icon and chip. No
+`danger`) · checked (a `✓`, announced as a radio item) · with a detail word (the worktree
+switcher's `sleeping`) · with or without icon and chip. No
 disabled item.
 **Behaviour.** Opening captures the focused element as the menu's origin and moves the focus into
 the menu. `↓`/`ctrl-n` and `↑`/`ctrl-p` move the highlight and stop at the ends; `⏎` activates;

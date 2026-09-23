@@ -1,8 +1,8 @@
 //! `StatusGlyph` — the §2.5 vocabulary, and the single source of truth for it.
 //!
 //! Every screen that renders a session, a job or a clone renders it through this component, so
-//! the shape a user learns in the worktrees list is the same shape in the palette, in a confirm
-//! and in the Workspace header. The rules that matter and are encoded here:
+//! the shape a user learns in the worktrees list is the same shape in the palette and in a
+//! confirm. The rules that matter and are encoded here:
 //!
 //! * `None` is a **dim dot at 30 %**, never a blank cell. A blank cell means "this column does
 //!   not apply to this row" (§2.5 [D-3]).

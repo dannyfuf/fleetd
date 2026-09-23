@@ -80,6 +80,12 @@ impl MenusGallery {
                         .checked(true)
                         .on_select(|_, _| {}),
                 )
+                .item(
+                    MenuItem::new("feat-payroll")
+                        .icon(Icon::GitBranch)
+                        .detail("sleeping")
+                        .on_select(|_, _| {}),
+                )
                 .separator()
                 .item(
                     MenuItem::new("Delete worktree")

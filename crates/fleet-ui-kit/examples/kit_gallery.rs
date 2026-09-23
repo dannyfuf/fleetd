@@ -1564,7 +1564,7 @@ fn terminal_section(cx: &mut App) -> AnyElement {
 
     let strip_el = box_of(
         &t,
-        t.metrics.pane_header_h,
+        t.metrics.tab_strip_h,
         // Tab 2 is the active one and carries the attention dot: NATIVE-AGENTS.md §3.3's amber
         // is the single mark that survives selection, so the overview has to show it selected.
         TerminalTabStrip::new([
@@ -1582,7 +1582,12 @@ fn terminal_section(cx: &mut App) -> AnyElement {
                 .unread(true),
             TerminalTab::new(9, "review").kind(TerminalTabKind::Native),
         ])
-        .active(1),
+        .active(1)
+        .on_select(|_, _, _| {})
+        .on_close(|_, _, _| {})
+        .close_kbd(Kbd::parse("ctrl-s x").ok())
+        .tab_menu(|_, menu, _, _| menu.item(MenuItem::new("Close").on_select(|_, _| {})))
+        .new_menu(|menu, _, _| menu.item(MenuItem::new("Terminal").on_select(|_, _| {}))),
     );
 
     let overlays = box_of(

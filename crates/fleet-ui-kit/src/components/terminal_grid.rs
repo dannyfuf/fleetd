@@ -131,10 +131,8 @@ impl TerminalGrid {
 
     /// The VT modes this frame reports.
     ///
-    /// Nothing is *drawn* for them here — the badges belong to the Workspace header
-    /// ([`crate::components::TerminalModes`]), because the grid is live content and a badge
-    /// over it hides
-    /// output. The grid only needs `AltScreen`, which suppresses the scroll overlays.
+    /// Nothing is *drawn* for them: the grid is live content and a badge over it hides output.
+    /// The grid only needs `AltScreen`, which suppresses the scroll overlays.
     pub fn modes(mut self, modes: impl IntoIterator<Item = TerminalMode>) -> Self {
         self.modes = modes.into_iter().collect();
         self

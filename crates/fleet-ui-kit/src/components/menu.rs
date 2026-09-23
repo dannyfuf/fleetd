@@ -116,9 +116,10 @@ type SelectHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 /// Builds a menu's entries each time it opens. Shared by the wrappers, which rebuild on open.
 pub(crate) type MenuBuilder = Rc<dyn Fn(Menu, &mut Window, &mut Context<Menu>) -> Menu>;
 
-/// One activatable row of a [`Menu`]: `[icon] label [✓] [Kbd]`.
+/// One activatable row of a [`Menu`]: `[icon] label [detail] [✓] [Kbd]`.
 pub struct MenuItem {
     label: SharedString,
+    detail: Option<SharedString>,
     icon: Option<Icon>,
     action: Option<Box<dyn Action>>,
     handler: Option<SelectHandler>,
@@ -132,6 +133,7 @@ impl MenuItem {
     pub fn new(label: impl Into<SharedString>) -> Self {
         Self {
             label: label.into(),
+            detail: None,
             icon: None,
             action: None,
             handler: None,
@@ -144,6 +146,14 @@ impl MenuItem {
     /// Lead the label with a glyph.
     pub fn icon(mut self, icon: Icon) -> Self {
         self.icon = Some(icon);
+        self
+    }
+
+    /// A muted word after the label that says what state the choice is in, such as a
+    /// worktree switcher's `sleeping`. It never replaces the label, which is what the item is
+    /// named by.
+    pub fn detail(mut self, detail: impl Into<SharedString>) -> Self {
+        self.detail = Some(detail.into());
         self
     }
 
@@ -523,6 +533,11 @@ impl Render for Menu {
                                 .flex_1()
                                 .min_w_0()
                                 .child(Text::ui(item.label.clone()).color(fg).ellipsize()),
+                        )
+                        .children(
+                            item.detail
+                                .clone()
+                                .map(|detail| Text::ui(detail).muted().flex_none()),
                         )
                         .children(check)
                         .children(kbd)

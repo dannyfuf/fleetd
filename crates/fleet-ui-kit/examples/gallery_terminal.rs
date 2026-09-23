@@ -446,6 +446,61 @@ fn tabs_section(cx: &mut App) -> AnyElement {
             ])
             .id("tabs-waking"),
         ),
+        // The pointer twins of the `^s` keys: hover a tab for its `✕` (the active one always
+        // shows it), middle-click to close, right-click for its menu, `+` for the new-tab menu.
+        LAYOUT.labeled(
+            "controls \u{b7} close, menus, trailing toggles",
+            &t,
+            TerminalTabStrip::new([
+                TerminalTab::new(1, "zsh").kbd(Kbd::parse("ctrl-s 1").ok()),
+                TerminalTab::new(2, "cargo watch")
+                    .activity(true)
+                    .kbd(Kbd::parse("ctrl-s 2").ok()),
+                TerminalTab::new(3, "Lazygit")
+                    .kind(TerminalTabKind::Native)
+                    .kbd(Kbd::parse("ctrl-s 3").ok()),
+                TerminalTab::new(4, "board")
+                    .kind(TerminalTabKind::Native)
+                    .icon(Icon::SquareKanban),
+                TerminalTab::new(5, "apply the README fix")
+                    .kind(TerminalTabKind::Native)
+                    .icon(Icon::Sparkles)
+                    .attention(true),
+            ])
+            .id("tabs-controls")
+            .agents_from(4)
+            .on_select(|_, _, _| {})
+            .on_close(|_, _, _| {})
+            .close_kbd(Kbd::parse("ctrl-s x").ok())
+            .tab_menu(|_, menu, _, _| {
+                menu.item(MenuItem::new("Rename").on_select(|_, _| {}))
+                    .item(MenuItem::new("Close").on_select(|_, _| {}))
+                    .item(MenuItem::new("Close others").on_select(|_, _| {}))
+            })
+            .new_menu(|menu, _, _| {
+                menu.item(
+                    MenuItem::new("Terminal")
+                        .icon(Icon::Terminal)
+                        .on_select(|_, _| {}),
+                )
+                .item(
+                    MenuItem::new("Codex thread")
+                        .icon(Icon::Sparkles)
+                        .on_select(|_, _| {}),
+                )
+            })
+            .trailing(
+                Button::new("tabs-controls-watch", "Watch")
+                    .style(ButtonStyle::Ghost)
+                    .size(ButtonSize::Compact)
+                    .selected(true),
+            )
+            .trailing(
+                Button::new("tabs-controls-zoom", "Zoom")
+                    .style(ButtonStyle::Ghost)
+                    .size(ButtonSize::Compact),
+            ),
+        ),
         LAYOUT.labeled(
             "no new-tab affordance",
             &t,

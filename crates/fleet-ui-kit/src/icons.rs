@@ -133,6 +133,7 @@ lucide_icons! {
     Sparkles => "sparkles",
     Square => "square",
     SquareCheck => "square-check",
+    SquareKanban => "square-kanban",
     SquarePen => "square-pen",
     SquareTerminal => "square-terminal",
     Terminal => "terminal",

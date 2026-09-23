@@ -118,7 +118,7 @@ impl PrBadge {
         }
     }
 
-    /// A badge with no number, for the Workspace header and detail panels.
+    /// A badge with no number, for detail panels.
     pub fn state_only(state: PrBadgeState) -> Self {
         Self {
             number: None,

@@ -564,8 +564,13 @@ pub struct Metrics {
     pub terminal_tab_min_w: Pixels,
     /// Maximum terminal tab width.
     pub terminal_tab_max_w: Pixels,
-    /// New-terminal control width.
-    pub new_terminal_tab_w: Pixels,
+    /// 40 px Workspace tab strip, on the `chrome` ground under the title bar.
+    pub tab_strip_h: Pixels,
+    /// 34 px tab inside [`Self::tab_strip_h`]: the strip's remaining 6 px sit above it, so the
+    /// active tab reads as a raised card that joins the content below.
+    pub terminal_tab_h: Pixels,
+    /// 18 px close `✕` hit square on a tab.
+    pub tab_close_size: Pixels,
     /// Scroll-mode pill width.
     pub scroll_pill_w: Pixels,
     /// macOS titlebar inset.
@@ -733,7 +738,9 @@ impl Default for Metrics {
             confirm_compact_w: px(480.0),
             terminal_tab_min_w: px(84.0),
             terminal_tab_max_w: px(200.0),
-            new_terminal_tab_w: px(36.0),
+            tab_strip_h: px(40.0),
+            terminal_tab_h: px(34.0),
+            tab_close_size: px(18.0),
             scroll_pill_w: px(176.0),
             traffic_light_inset: px(84.0),
             toast_inset: px(12.0),
