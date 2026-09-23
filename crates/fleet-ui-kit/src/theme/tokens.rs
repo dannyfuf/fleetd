@@ -654,6 +654,8 @@ pub struct Metrics {
     pub menu_min_w: Pixels,
     /// 640 px palette.
     pub palette_w: Pixels,
+    /// 900 px widest ⌃S command menu: five columns of commands, centred over the status bar.
+    pub prefix_menu_w: Pixels,
     /// y = 120 px: where the palette is anchored.
     pub palette_top: Pixels,
     /// 84 px fixed-width mode word.
@@ -756,6 +758,7 @@ impl Default for Metrics {
             toast_w: px(320.0),
             menu_min_w: px(240.0),
             palette_w: px(640.0),
+            prefix_menu_w: px(900.0),
             palette_top: px(120.0),
             mode_word_w: px(84.0),
             scroll_thumb_w: px(3.0),

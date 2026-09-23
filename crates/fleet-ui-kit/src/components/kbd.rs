@@ -26,6 +26,10 @@ pub enum KbdTone {
     OnAccent,
     /// On a `danger` fill: the same wash, in the danger button's label colour.
     OnDanger,
+    /// A held key that is waiting for the next one: a `warning` wash with `warning` text. Only
+    /// the ⌃S command menu's own prefix chip uses it, because the prefix is the one mode that
+    /// expires on its own.
+    Warning,
 }
 
 /// Chip height.
@@ -287,6 +291,10 @@ impl RenderOnce for Kbd {
             }
             KbdTone::OnDanger => {
                 let fg = colors.text_inverse;
+                (fg.opacity(wash), fg.opacity(wash), fg)
+            }
+            KbdTone::Warning => {
+                let fg = colors.warning;
                 (fg.opacity(wash), fg.opacity(wash), fg)
             }
         };

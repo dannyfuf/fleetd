@@ -325,6 +325,14 @@ fn kbd_section(cx: &App) -> AnyElement {
             ),
         ),
         LAYOUT.labeled(
+            "warning (a held prefix)",
+            t,
+            strip(
+                t,
+                vec![kbd("ctrl-s").tone(KbdTone::Warning).into_any_element()],
+            ),
+        ),
+        LAYOUT.labeled(
             "tooltip (static)",
             t,
             strip(

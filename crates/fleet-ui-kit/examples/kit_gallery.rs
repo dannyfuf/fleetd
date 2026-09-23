@@ -1483,21 +1483,18 @@ fn terminal_section(cx: &mut App) -> AnyElement {
 
     let overlays = box_of(
         &t,
-        px(120.0),
+        px(300.0),
         div()
             .relative()
             .size_full()
             .bg(t.terminal.background)
             .child(ScrollPill::new(412, 2000).selecting(true))
-            .child(
-                PrefixHint::new(true).hints(
-                    KeyHintRow::new()
-                        .key("s", "hub")
-                        .key("1-9", "tab")
-                        .key("c", "new")
-                        .key("x", "close"),
-                ),
-            ),
+            .child(support::prefix_menu::sample(
+                &t,
+                "overview-prefix-menu",
+                true,
+                2,
+            )),
     );
 
     let badge = box_of(

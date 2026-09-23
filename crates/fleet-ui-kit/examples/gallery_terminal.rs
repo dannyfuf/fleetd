@@ -1,6 +1,6 @@
 //! The visual test bench for the **jobs and terminal** half of `fleet-ui-kit`.
 //!
-//! `TerminalGrid`, `TerminalTabStrip`, `ScrollPill`, `ScrollbackBadge`, `PrefixHint`,
+//! `TerminalGrid`, `TerminalTabStrip`, `ScrollPill`, `ScrollbackBadge`, `PrefixMenu`,
 //! `ExitStrip`, `JobRow`, `JobTicker`, `StickyErrorSlot` and `LogView`, each in every state
 //! the design system names, in both themes.
 //!
@@ -21,7 +21,7 @@
 //! | `v` | selection |
 //! | `u` | focus the terminal / unfocus it (hollow cursor) |
 //! | `c` | cursor shape |
-//! | `p` | prefix hint |
+//! | `p` | prefix menu |
 //! | `L` | focus the log (then `f`, `j`, `k`, `G`); `esc` returns |
 //! | `q` | quit |
 
@@ -357,27 +357,21 @@ fn overlays_section(cx: &mut App) -> AnyElement {
             stage(&t, px(48.0), ScrollbackBadge::new(0, 2000)),
         ),
         LAYOUT.labeled(
-            "prefix hint \u{b7} hidden",
-            &t,
-            stage(&t, px(48.0), PrefixHint::new(false)),
-        ),
-        LAYOUT.labeled(
-            "prefix hint \u{b7} visible",
-            &t,
-            stage(&t, px(64.0), PrefixHint::new(true)),
-        ),
-        LAYOUT.labeled(
-            "prefix hint \u{b7} custom keys",
+            "prefix menu \u{b7} over a terminal",
             &t,
             stage(
                 &t,
-                px(64.0),
-                PrefixHint::new(true).prefix("^A").hints(
-                    KeyHintRow::new()
-                        .key("s", "hub")
-                        .key("]", "paste")
-                        .key("z", "zoom"),
-                ),
+                px(300.0),
+                support::prefix_menu::sample(&t, "prefix-menu-terminal", true, 5),
+            ),
+        ),
+        LAYOUT.labeled(
+            "prefix menu \u{b7} no literal (agent thread)",
+            &t,
+            stage(
+                &t,
+                px(300.0),
+                support::prefix_menu::sample(&t, "prefix-menu-thread", false, 3),
             ),
         ),
         LAYOUT.labeled("exit strip \u{b7} failure", &t, ExitStrip::new(1)),

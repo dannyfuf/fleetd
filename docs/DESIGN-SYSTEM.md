@@ -278,7 +278,7 @@ list below is the complete inventory, in px unless marked `ch`; a unit test in
 | Layout columns | `sidebar_w 232` · `rail_w 240` · `detail_w 344` · `detail_overlay_w 320` · `sheet_w 440` · `sheet_expanded_w 640` · `sheet_w_detail 736` |
 | Rows and headers | `row_h 30` · `row_h_comfortable 44` · `pane_header_h 30` · `section_header_h 20` · `palette_row_h 34` · `job_row_h 44` · `job_key_w 20` |
 | Controls | `button_h 30` · `button_h_compact 26` · `kbd_h 18` · `kbd_h_small 16` · `chip_h 22` · `text_field_h 36` · `field_status_h 18` · `number_field_w 96` |
-| Dialogs and floating layers | `dialog_w 560` · `confirm_compact_w 480` · `dialog_header_h 44` · `dialog_footer_h 44` · `palette_w 640` · `palette_top 120` · `palette_input_h 44` · `overlay_help_w 640` · `toast_w 320` · `toast_inset 12` · `scroll_pill_w 176` · `menu_min_w 240` |
+| Dialogs and floating layers | `dialog_w 560` · `confirm_compact_w 480` · `dialog_header_h 44` · `dialog_footer_h 44` · `palette_w 640` · `palette_top 120` · `prefix_menu_w 900` · `palette_input_h 44` · `overlay_help_w 640` · `toast_w 320` · `toast_inset 12` · `scroll_pill_w 176` · `menu_min_w 240` |
 | Lines and marks | `hairline 1` · `focus_ring_w 2` · `scroll_thumb_w 3` · `dot_size 8` · `dot_size_small 6` |
 | Terminal | `cell_w 7.5` · `cell_h 18` · `terminal_tab_min_w 84` · `terminal_tab_max_w 200` · `new_terminal_tab_w 36` |
 | Detail and doctor columns | `fact_label_w 104` · `doctor_check_w 120` · `doctor_status_w 64` |
@@ -1249,6 +1249,30 @@ default to the six §3.6 prefix keys rather than an empty row.
 expert types the second key in under 200 ms and never sees this; the returning user gets it
 exactly when they hesitate — 0 px and 0 frames of permanent cost.
 
+#### `PrefixMenu`
+**Purpose.** The ⌃S command menu: every command the held prefix reaches, grouped into columns,
+each a clickable row led by its second key.
+**Anatomy.** A floating `elevated` panel, `radii.popover`, `border_strong` hairline, popover
+shadow, `md` padding, at most `prefix_menu_w` wide, centred `md` above the bottom of its
+(`relative`) container. Header: the prefix as a `Kbd` in `KbdTone::Warning`, the title in
+`UiStrong`, the caller's note, and the caller's close control at the right edge. Below it, equal
+columns `md` apart, each headed in `SentenceLabel` (muted); a row is `button_h_compact` tall,
+`radii.control`, the `Small` key chip (or a `first`–`last` pair for a numbered range) then the
+label in `Ui`, ellipsized; `control_hover` / `control_active` under the pointer.
+**API.** `PrefixMenu::new(id, title).prefix(Kbd).note(impl IntoElement).close(impl IntoElement)
+.column(PrefixMenuColumn).harness(&'static str)`;
+`PrefixMenuColumn::new(title).item(impl IntoElement)`;
+`PrefixMenuItem::new(id, Kbd, label).range_end(Kbd).on_click(Fn(&ClickEvent, ..))`.
+**States.** hidden (the caller draws nothing) · shown · row hovered · row pressed · range row.
+**Usage rule.** The delay is the caller's timer (`theme.motion.prefix_hint_delay`): the expert
+types the second key first and never sees the menu; the returning user gets it exactly when they
+hesitate. The panel occludes what is under it and swallows a mouse press, so a click never starts
+a terminal selection, but it never takes focus: the held prefix keeps the keyboard. A row shows
+only the key *after* the prefix. `fleet-app` builds the rows from the action catalogue in the update
+pass after the delay runs out (`views/prefix_menu.rs`), never in render, so a fast second key
+never pays for them. Use a `Menu` for a list of commands opened
+by a click.
+
 #### `ExitStrip`
 **Purpose.** `⚠ process exited (<code>)` and the prefixed recovery keys.
 **API.** `ExitStrip::new(impl Into<Option<i32>>).hints(KeyHintRow)`.
@@ -1652,10 +1676,11 @@ key is the character typed (`g`). An uppercase key in the keymap is `shift` (`Y`
 `Kbd::for_action_in(&dyn Action, &FocusHandle, &Window) -> Option<Kbd>`,
 `Kbd::from_binding(&KeyBinding)`, `Kbd::new(&[Keystroke])`,
 `Kbd::parse("ctrl-s a") -> Result<Kbd, InvalidKeystrokeError>`; then
-`.tone(KbdTone::{Default, OnAccent, OnDanger}) .size(KbdSize::{Default, Small})`;
+`.tone(KbdTone::{Default, OnAccent, OnDanger, Warning}) .size(KbdSize::{Default, Small})`;
 `Kbd::{strokes, chip_labels, aria_shortcut}` for tests and accessibility.
-**States.** default · small · on accent · on danger. Not focusable, not disabled on its own (it
-dims with its button).
+**States.** default · small · on accent · on danger · warning (the held prefix in the ⌃S command
+menu's header, and nowhere else). Not focusable, not disabled on its own (it dims with its
+button).
 **Usage rule.** `fleet-app` resolves a chip with `for_action` / `for_action_in` and never types a
 key; `parse` is for galleries and tests. `pretty_keys` (the old `^s` / `S-⇥` text spelling)
 lives beside it only until the Help overlay, the palette and the prefix toast are rebuilt;
