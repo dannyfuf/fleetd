@@ -2501,6 +2501,18 @@ that column and open New card with its status chosen — the dialog's subtitle n
 In progress` — and its automation pill opens Board settings on that column. Every header control
 is the pointer twin of its key (above).
 
+**Drag and drop.** A card is dragged to move it, the pointer twin of `[` / `]` that can also aim.
+Mid-drag the card's own place stays as a faded, dashed tile, the preview under the pointer is the
+tile lifted (accent hairline, popover shadow), the column under the pointer takes an accent
+hairline, and a dashed slot opens where the card would land, saying what the drop does — `Drop to
+start FLT-3 · codex will pick it up` when entering the column starts a run, `Drop to move FLT-3 to
+Todo` otherwise, `Drop to put FLT-3 here` within its own column. Dropping moves the card there
+through exactly the path `[` / `]` take: a card with a live run raises the same *Move FLT-3?*
+confirm, a board whose tracker owns the status toasts the same read-only sentence (and never draws
+a slot), and an unreachable daemon refuses the same way. Within a column a drop reorders it. A
+drop back where the card stands does nothing. The keys stay: `[` / `]` and the status picker
+move a card without the mouse (`BOARD.md` §8).
+
 ### Card detail
 
 A **sheet** docked to the right of the board, `sheet_w_detail` (736 px) wide and full height

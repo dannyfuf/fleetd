@@ -317,7 +317,8 @@ fn child_elapsed(delegation: &Delegation, now: DateTime<Utc>) -> String {
     format_duration(u64::try_from(millis).unwrap_or_default()).to_string()
 }
 
-/// The confirm `[` / `]` must raise before it moves this card, or `None` for a plain move.
+/// The confirm a move (`[` / `]` or a drop) must raise before it moves this card, or `None` for
+/// a plain move.
 ///
 /// One question, asked of the mirror (§5.5): does this card have a live card-called child out?
 /// Whether the card's own `runs` has recorded it yet is not part of it — that row arrives a
@@ -342,8 +343,20 @@ pub(super) fn move_cancels_run(
     })
 }
 
-/// `[` / `]` — move the focused card one column left or right.
-fn move_card(state: &Entity<AppState>, bridge: &Bridge, delta: isize, cx: &mut App) {
+/// Where a move puts the focused card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Destination {
+    /// `[` / `]`: the end of the column this many columns away.
+    Step(isize),
+    /// A dropped card: this column, at this place among the cards it already holds — the
+    /// daemon's own `index` (`ops::move_card`), counted without the moving card.
+    At { column: usize, index: usize },
+}
+
+/// The one move path: `[` / `]` and a dropped card both land here, so the refusals, the
+/// read-only toast and the confirm over a live run are the same sentences whichever the user
+/// reached for.
+fn move_card(state: &Entity<AppState>, bridge: &Bridge, to: Destination, cx: &mut App) {
     if refuses(state, cx) {
         return;
     }
@@ -356,13 +369,31 @@ fn move_card(state: &Entity<AppState>, bridge: &Bridge, delta: isize, cx: &mut A
         toast_readonly(state, message, cx);
         return;
     }
-    let Some((status_id, index)) = adjacent_status(state.read(cx), delta) else {
+    let (resolved, index) = match to {
+        Destination::Step(delta) => (adjacent_status(state.read(cx), delta), None),
+        Destination::At { column, index } => (
+            state
+                .read(cx)
+                .board()
+                .and_then(|view| view.board.statuses.get(column))
+                .map(|status| (status.id.clone(), column)),
+            Some(index),
+        ),
+    };
+    let Some((status_id, column)) = resolved else {
         return;
     };
     // A child that is out there working is not stopped behind the user's back: the move and
     // the cancellation are one sentence, answered once (§5.5).
-    if let Some(request) = move_cancels_run(state.read(cx), index, Utc::now()) {
-        ConfirmRequest::stage_move_target(state, status_id, cx);
+    if let Some(request) = move_cancels_run(state.read(cx), column, Utc::now()) {
+        ConfirmRequest::stage_move_target(
+            state,
+            MoveTarget {
+                status: status_id,
+                index,
+            },
+            cx,
+        );
         dialogs::request_confirm(cx, request);
         state.update(cx, |app, cx| {
             app.open_overlay(Overlay::Dialog(Dialogs::Confirm));
@@ -376,11 +407,82 @@ fn move_card(state: &Entity<AppState>, bridge: &Bridge, delta: isize, cx: &mut A
         RequestBody::MoveCard {
             card_id: card,
             status_id,
-            index: None,
+            index,
             cancel_run: false,
         },
         cx,
     );
+}
+
+/// A card dropped on `column` at `slot`, a place among the tiles that column draws.
+///
+/// The card is selected first, exactly as a press on its tile does, and then it takes the
+/// path `[` / `]` take. A drop back where the card already stands asks for nothing.
+pub(super) fn drop_card(
+    state: &Entity<AppState>,
+    bridge: &Bridge,
+    card: &CardId,
+    column: usize,
+    slot: usize,
+    cx: &mut App,
+) {
+    state.update(cx, |app, cx| {
+        app.select_card(card);
+        cx.notify();
+    });
+    let destination = {
+        let app = state.read(cx);
+        let Some(view) = app.board() else {
+            return;
+        };
+        drop_destination(view, &app.board.filter, card, column, slot)
+    };
+    if let Some(destination) = destination {
+        move_card(state, bridge, destination, cx);
+    }
+}
+
+/// Where a card dropped on `column` at `slot` goes, or `None` for a drop that moves nothing.
+///
+/// `slot` counts the tiles the column *draws*, the dragged card among them when it is already
+/// there; the daemon's `index` counts the whole column without it. The two differ under a
+/// filter, so the drop lands before the drawn card it was dropped above — or after the last
+/// drawn card — wherever the hidden ones sit.
+#[must_use]
+pub(super) fn drop_destination(
+    view: &fleet_core::board::BoardView,
+    filter: &str,
+    card: &CardId,
+    column: usize,
+    slot: usize,
+) -> Option<Destination> {
+    let status = view.board.statuses.get(column)?;
+    let shown = crate::views::board_screen::visible_cards(view, &status.id, filter);
+    let from = shown.iter().position(|candidate| &candidate.id == card);
+    if from.is_some_and(|from| slot == from || slot == from + 1) {
+        return None;
+    }
+    let others: Vec<&Card> = shown
+        .into_iter()
+        .filter(|candidate| &candidate.id != card)
+        .collect();
+    let slot = match from {
+        Some(from) if slot > from => slot - 1,
+        _ => slot,
+    }
+    .min(others.len());
+    let whole: Vec<&CardId> = fleet_core::board::column_cards(&view.cards, &status.id)
+        .into_iter()
+        .map(|candidate| &candidate.id)
+        .filter(|candidate| *candidate != card)
+        .collect();
+    let rank = |target: &Card| whole.iter().position(|candidate| **candidate == target.id);
+    let index = match (others.get(slot), others.last()) {
+        (Some(before), _) => rank(before)?,
+        (None, Some(last)) => rank(last)? + 1,
+        (None, None) => whole.len(),
+    };
+    Some(Destination::At { column, index })
 }
 
 /// What `X` would stop on this card, or the sentence saying why it cannot.
@@ -445,12 +547,12 @@ pub(super) fn ask_cancel_run(state: &Entity<AppState>, card: &CardId, cx: &mut A
 
 /// `[` — move the card to the previous column.
 pub(crate) fn move_prev_column(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
-    move_card(state, bridge, -1, cx);
+    move_card(state, bridge, Destination::Step(-1), cx);
 }
 
 /// `]` — move the card to the next column.
 pub(crate) fn move_next_column(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
-    move_card(state, bridge, 1, cx);
+    move_card(state, bridge, Destination::Step(1), cx);
 }
 
 /// `w` — create a worktree from the focused card, asking for a repo only when nothing knows one.

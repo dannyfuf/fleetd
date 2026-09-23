@@ -1284,6 +1284,27 @@ Palette commands mirror every row above, under their action-catalogue labels (`N
   — tile strings, run and blocked words, the linked branch and its PR badge, the menu facts — is
   built by `screens/board/projection.rs`, keyed on the board revision, the marks revision, the
   filter, the linked branches and, only while a run is live, the minute.
+- **Drag and drop** (`views/board_screen/drag.rs`, `screens/board/actions.rs`): a tile carries a
+  `CardDrag` (card id, key, the column and row it was drawn at) through gpui's `on_drag`; every
+  column listens with `on_drag_move` and `on_drop`. While a drag is over a column the column wears
+  an accent hairline and a `DropSlot` sits at the insertion point, read off the column list's own
+  layout (before the first tile whose middle is below the pointer). The slot says what the drop
+  does: `Drop to start FLT-3 · codex will pick it up` into a column with an `on_enter` action,
+  `Drop to move FLT-3 to Todo` into another, `Drop to put FLT-3 here` inside its own; no slot is
+  drawn where the drop would move nothing — before or after the card itself, or anywhere on a
+  board whose backend owns `status_id`. The dragged tile stays as a faded, dashed place-holder
+  and the preview under the pointer is the same tile, lifted. The drop selects the card, exactly
+  as a press on its tile does, and then takes **the path `[` / `]` take** (`move_card` with a
+  `Destination`): the unreachable-daemon refusal, the read-only toast, the confirm over a live run
+  (`MoveCancelsRun`, which stages the index beside the column) and the daemon's own refusals are
+  the same sentences. The only difference is the request's `index`: the drawn slot is mapped onto
+  `ops::move_card`'s index over the *whole* column without the card, so under a filter the card
+  lands before the drawn card it was dropped above, wherever hidden cards sit. A drop back where
+  the card stands sends nothing. The answer carries only the moved card, so the app replays
+  `ops::move_card` over the shown cards with the same index (`AppState::apply_placed_card`) and the
+  column draws the daemon's order before the `BoardChanged` reload arrives. Reordering changes only
+  `position`, which is local ordering, so it dirties nothing and needs no backend support; a board whose
+  backend owns the status refuses every drop as it refuses `[` / `]`.
 
 ### Integrated implementation decisions
 

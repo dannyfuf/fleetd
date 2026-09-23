@@ -311,6 +311,7 @@ impl gpui::Render for BoardHarness {
                 focus: (1, 0),
                 syncing: false,
                 runs: false,
+                drag: &SharedDrag::default(),
             },
             &self.scroll,
             &self.lists,

@@ -307,6 +307,8 @@ impl HeaderFacts {
 /// rules 2, 7 and 13).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CardRow {
+    /// The card, which a drag carries to the column it is dropped on.
+    pub id: CardId,
     /// The tile's element id, stable across reorders because it is keyed on the card.
     pub element_id: SharedString,
     /// `FLT-12`.
@@ -450,6 +452,7 @@ impl CardRow {
             .cloned();
         let menu = CardMenu::of(board, card, mark.run);
         Self {
+            id: card.id.clone(),
             element_id: SharedString::from(format!("board-card-{}", card.id.as_str())),
             key: SharedString::from(card.display_key(board)),
             title: SharedString::from(card.title.clone()),
@@ -604,6 +607,17 @@ pub(super) fn automation_label(status: &Status) -> Option<SharedString> {
     }))
 }
 
+/// Who picks up a card dropped into a column with an `on_enter` action: `codex will pick it
+/// up`, the second half of the drop slot's `Drop to start FLT-3 · codex will pick it up`.
+#[must_use]
+pub(super) fn pickup_phrase(status: &Status) -> Option<SharedString> {
+    let action = status.automation.as_ref()?.on_enter.as_ref()?;
+    Some(SharedString::from(match action.agent.provider {
+        Some(provider) => format!("{} will pick it up", provider_word(provider)),
+        None => "an agent will pick it up".to_owned(),
+    }))
+}
+
 /// One status column, prepared for its [`KanbanColumn`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct ColumnRows {
@@ -622,6 +636,8 @@ pub struct ColumnRows {
     pub has_action: bool,
     /// The pill naming that action in words: `On enter: codex implements`.
     pub automation: Option<SharedString>,
+    /// Who picks up a card dropped here, when entering the column starts a run.
+    pub pickup: Option<SharedString>,
     /// The `+` button's name, its tooltip: `Add a card to Todo`.
     pub add_label: SharedString,
 }
@@ -688,6 +704,7 @@ pub fn build(
                 .as_ref()
                 .is_some_and(|automation| automation.on_enter.is_some()),
             automation: automation_label(status),
+            pickup: pickup_phrase(status),
             add_label: SharedString::from(format!("Add a card to {}", status.name)),
         })
         .collect();

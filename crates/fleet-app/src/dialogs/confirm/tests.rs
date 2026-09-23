@@ -452,7 +452,12 @@ fn a_confirmed_move_cancels_the_run_and_an_unstaged_column_moves_nothing(
         crate::dialogs::with_host(&state, cx, |host| {
             host.confirm = ConfirmState {
                 request: Some(request.clone()),
-                move_target: Some(status.clone()),
+                // A dropped card stages its place in the column too, and the confirmed move
+                // carries it: the dialog is the same one `[` raises, not a second path.
+                move_target: Some(MoveTarget {
+                    status: status.clone(),
+                    index: Some(1),
+                }),
                 ..ConfirmState::default()
             };
         });
@@ -468,7 +473,7 @@ fn a_confirmed_move_cancels_the_run_and_an_unstaged_column_moves_nothing(
         [RequestBody::MoveCard {
             card_id: card,
             status_id: status,
-            index: None,
+            index: Some(1),
             cancel_run: true,
         }]
     );
@@ -550,10 +555,14 @@ fn an_adopted_board_confirm_is_taken_out_of_the_staging_set(cx: &mut gpui::TestA
     let state = cx.new(|_| AppState::new("/tmp/fleet-board-confirm-staging", Instant::now()));
     let status = StatusId::try_from("done").unwrap_or_else(|error| panic!("{error}"));
     cx.update(|cx| {
-        ConfirmRequest::stage_move_target(&state, status.clone(), cx);
+        let target = MoveTarget {
+            status,
+            index: None,
+        };
+        ConfirmRequest::stage_move_target(&state, target.clone(), cx);
         adopt_staged_board_confirm(&state, cx);
         crate::dialogs::with_host(&state, cx, |host| {
-            assert_eq!(host.confirm.move_target, Some(status));
+            assert_eq!(host.confirm.move_target, Some(target));
             host.confirm = ConfirmState::default();
         });
         // The next confirm — a delete, say — must not inherit the column `[` staged.

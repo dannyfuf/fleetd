@@ -385,7 +385,7 @@ pub(super) fn commit<T: SessionTransport>(
             bridge.send(RequestBody::CloseTerminal { terminal });
         }
         // The column is not in the request — contracts §5.5 fixes its four fields — so `[` / `]`
-        // staged it beside the sentence and the dialog adopted it with the request.
+        // or the drop staged it beside the sentence and the dialog adopted it with the request.
         ConfirmRequest::MoveCancelsRun { card, .. } => {
             let staged = with_host(state, cx, |host| host.confirm.move_target.clone());
             if let Some(body) = move_cancels_run_request(card, staged) {
@@ -416,12 +416,13 @@ pub(super) fn commit<T: SessionTransport>(
 #[must_use]
 pub(super) fn move_cancels_run_request(
     card: CardId,
-    target: Option<StatusId>,
+    target: Option<super::MoveTarget>,
 ) -> Option<RequestBody> {
+    let target = target?;
     Some(RequestBody::MoveCard {
         card_id: card,
-        status_id: target?,
-        index: None,
+        status_id: target.status,
+        index: target.index,
         cancel_run: true,
     })
 }

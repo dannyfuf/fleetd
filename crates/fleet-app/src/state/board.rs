@@ -278,6 +278,31 @@ impl AppState {
         self.refresh_card_marks(Utc::now());
     }
 
+    /// Applies the daemon's answer to a move that named a place in the column.
+    ///
+    /// The answer is the moved card alone, but `ops::move_card` renumbered every card of the
+    /// destination column. Replaying that same function over the shown cards puts the
+    /// neighbours where the daemon did, so the column never draws a tie between the card and
+    /// the one it was dropped above while the `BoardChanged` reload is on its way.
+    pub fn apply_placed_card(&mut self, card: Card, index: usize) {
+        if let Some(view) = self.board.view.as_mut()
+            && view.board.id == card.board_id
+            && let Err(error) = fleet_core::board::move_card(
+                &view.board,
+                &mut view.cards,
+                &card.id,
+                &card.status_id,
+                Some(index),
+                &card.updated_at,
+            )
+        {
+            // The shown board disagrees with the daemon's; the reload it triggers settles it.
+            tracing::debug!(%error, "replaying a placed move over the shown board failed");
+            self.board_stale = true;
+        }
+        self.apply_card(card);
+    }
+
     /// Re-derives [`BoardState::marks`] from the shown board and the delegation mirror.
     ///
     /// Called after `apply_board_view`, after `apply_card`, after `apply_delegation` for a

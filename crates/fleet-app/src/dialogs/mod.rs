@@ -32,6 +32,7 @@ pub(crate) use crate::state::move_cursor as step;
 /// the section this app session last used.
 pub(crate) use board_settings::{BoardSection, open_on_section as open_board_section};
 pub use confirm::ConfirmRequest;
+pub(crate) use confirm::MoveTarget;
 pub use host::{ActiveDialog, request_confirm, request_edit_hooks};
 pub(crate) use host::{
     DialogHost, SessionTransport, dialog_fields, dialog_message, focused_input, notify,

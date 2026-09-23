@@ -31,9 +31,14 @@ use gpui::{
 
 use crate::{action_catalogue, actions::board as board_actions};
 
+mod drag;
 mod model;
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(crate) use drag::DropTarget;
+pub(crate) use drag::{CardDrag, DragState, SharedDrag};
 
 pub(crate) use model::category_accent;
 #[cfg(test)]
@@ -72,10 +77,12 @@ pub(crate) struct BoardProps<'a> {
     pub syncing: bool,
     /// Whether this surface carries the run keys (`A`, `X`, `>`): a worktree's board.
     pub runs: bool,
+    /// The card drag the columns and tiles share.
+    pub drag: &'a SharedDrag,
 }
 
-/// What a mouse click on the board asks for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What a mouse click, or a drop, on the board asks for.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BoardClick {
     /// Focus this column.
     Column(usize),
@@ -89,6 +96,12 @@ pub(crate) enum BoardClick {
     ColumnSettings(usize),
     /// Clear the filter query: the filter field's ✕.
     ClearFilter,
+    /// Move this card to this column, at this place among the tiles the column draws.
+    Drop {
+        card: CardId,
+        column: usize,
+        slot: usize,
+    },
 }
 
 /// What the header's filter field reads while it holds no query.
@@ -510,6 +523,7 @@ fn columns(
     let runs = props.runs;
     let readonly = model.readonly;
     let last_column = model.columns.len().saturating_sub(1);
+    let dragging = drag::frame(props.drag, cx);
     let columns: Vec<AnyElement> = model
         .columns
         .iter()
@@ -540,7 +554,18 @@ fn columns(
                     .focused(focused)
                     .empty_hint(empty_hint)
                     .add_button(add)
-                    .footer(footer);
+                    .footer(footer)
+                    .drop_target(
+                        dragging
+                            .target
+                            .as_ref()
+                            .is_some_and(|target| target.column == index),
+                    );
+            if let Some(target) = dragging.target.as_ref().filter(|at| at.column == index)
+                && let Some(label) = target.label.clone()
+            {
+                kanban = kanban.drop_slot(target.slot, label);
+            }
             if let Some(automation) = column.automation.clone() {
                 let click = on_click.clone();
                 kanban = kanban
@@ -549,10 +574,19 @@ fn columns(
                         click(BoardClick::ColumnSettings(index), cx);
                     });
             }
+            let over = Rc::new(drag::ColumnDrop {
+                column: index,
+                name: SharedString::from(column.status.name.clone()),
+                pickup: column.pickup.clone(),
+                readonly: readonly.status,
+            });
             if let Some(list) = column_lists.get(index) {
                 let rows = Rc::clone(&column.rows);
                 let click = on_click.clone();
                 let edges = (index == 0, index == last_column);
+                let shared = Rc::clone(props.drag);
+                let over = Rc::clone(&over);
+                let source = dragging.source.clone();
                 kanban = kanban.rows(list.clone(), rows.len(), move |row, _window, _cx| {
                     let Some(card) = rows.get(row) else {
                         return div().into_any_element();
@@ -564,12 +598,16 @@ fn columns(
                         runs,
                         readonly,
                         edges,
+                        left_behind: source.as_ref() == Some(&card.id),
                     };
-                    tile_with_menu(card, tile, &click)
+                    tile_with_menu(card, &rows, tile, &click, &shared, &over)
                 });
             }
 
             let click = on_click.clone();
+            let (moving, dropping) = (Rc::clone(props.drag), Rc::clone(props.drag));
+            let count = column.rows.len();
+            let drop_click = on_click.clone();
             div()
                 .id(column.hit_id.clone())
                 .flex()
@@ -577,6 +615,41 @@ fn columns(
                 .h_full()
                 .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                     click(BoardClick::Column(index), cx);
+                })
+                // The column answers for entering and leaving it; the tiles in it answer for
+                // the place (`tile_with_menu`). A pointer that enters over no tile aims at the end.
+                .on_drag_move::<CardDrag>(move |event, window, cx| {
+                    let inside = event.bounds.contains(&event.event.position);
+                    let aimed_here = moving
+                        .borrow()
+                        .target
+                        .as_ref()
+                        .is_some_and(|at| at.column == index);
+                    if inside && !aimed_here {
+                        drag::aim(&moving, event.drag(cx), &over, count, window);
+                    } else if !inside && aimed_here {
+                        moving.borrow_mut().target = None;
+                        window.refresh();
+                    }
+                })
+                .on_drop::<CardDrag>(move |dragged, _window, cx| {
+                    let target = dropping.take().target;
+                    let Some(card) = dragged.card().map(|card| card.id.clone()) else {
+                        return;
+                    };
+                    // The last motion named the slot; a drop with none (a release before any
+                    // motion reached this column) lands after its last tile.
+                    let slot = target
+                        .filter(|at| at.column == index)
+                        .map_or(count, |at| at.slot);
+                    drop_click(
+                        BoardClick::Drop {
+                            card,
+                            column: index,
+                            slot,
+                        },
+                        cx,
+                    );
                 })
                 .child(kanban)
                 .harness_target_indexed("board.column", index)
@@ -600,6 +673,8 @@ struct TileContext {
     readonly: ReadonlyFields,
     /// Whether the column is the first and the last: `[` and `]` have nowhere to go there.
     edges: (bool, bool),
+    /// Whether this is the card being dragged, drawn as the place it left.
+    left_behind: bool,
 }
 
 /// One prepared card as its tile, wrapped in its right-click menu, with the ⋯ that opens the
@@ -607,7 +682,14 @@ struct TileContext {
 ///
 /// Both menus act on the selected card like its keys do: a press on the tile selects it before
 /// either menu opens, and every entry dispatches the card action to the board.
-fn tile_with_menu(card: &CardRow, at: TileContext, on_click: &OnClick) -> AnyElement {
+fn tile_with_menu(
+    card: &CardRow,
+    rows: &Rc<[CardRow]>,
+    at: TileContext,
+    on_click: &OnClick,
+    drag: &SharedDrag,
+    over: &Rc<drag::ColumnDrop>,
+) -> AnyElement {
     let (column, row) = (at.column, at.row);
     let facts = card.menu;
     let builder =
@@ -633,9 +715,62 @@ fn tile_with_menu(card: &CardRow, at: TileContext, on_click: &OnClick) -> AnyEle
     let tile = tile(card, at, more, on_click).harness_target(crate::views::harness::name(|| {
         format!("board.column[{column}].card[{row}]")
     }));
-    ContextMenu::new(child("context"), tile)
-        .menu(builder)
+    let payload = CardDrag {
+        rows: Rc::clone(rows),
+        column,
+        row,
+    };
+    let (aiming, over) = (Rc::clone(drag), Rc::clone(over));
+    let drag = Rc::clone(drag);
+    // Pressing the tile selects the card, so the card a drag carries is already the one every
+    // key would act on; the drop then moves it down the path `[` / `]` take.
+    div()
+        .id(child("drag"))
+        .w_full()
+        .on_drag(payload, move |payload, _offset, _window, cx| {
+            let card = payload.card().cloned();
+            *drag.borrow_mut() = DragState {
+                source: card.as_ref().map(|card| card.id.clone()),
+                target: None,
+            };
+            cx.new(|_| drag::DragPreview::new(card))
+        })
+        .on_drag_move::<CardDrag>(move |event, window, cx| {
+            let (bounds, y) = (event.bounds, event.event.position.y);
+            if bounds.contains(&event.event.position) {
+                let slot = drag::slot_over(row, bounds.top(), bounds.bottom(), y);
+                drag::aim(&aiming, event.drag(cx), &over, slot, window);
+            }
+        })
+        .child(ContextMenu::new(child("context"), tile).menu(builder))
         .into_any_element()
+}
+
+/// The face of a prepared card: everything its tile shows, and nothing it does.
+///
+/// Shared by the tile on the board and the preview under the pointer, so a dragged card looks
+/// exactly like the card that was picked up.
+fn card_face(id: SharedString, card: &CardRow) -> CardTile {
+    CardTile::new(id, card.key.clone(), card.title.clone())
+        .priority(card.priority)
+        .labels(card.labels.clone())
+        .assignee(card.assignee.clone())
+        .estimate(card.estimate)
+        .due(card.due.clone())
+        .worktree(card.worktree)
+        .branch(card.link.as_ref().map(|link| link.branch.clone()))
+        .pr(card.link.as_ref().and_then(|link| link.pr))
+        .dirty(card.dirty)
+        .conflict(card.conflict)
+        // The tile decides nothing: which of the two the key line carries is the kit's own
+        // precedence rule, and what each of them says was folded once, in the update path.
+        .when_some(card.run, CardTile::run)
+        .when_some(card.run_label.clone(), CardTile::run_label)
+        .when_some(card.blocked, |tile, (count, tone)| {
+            tile.blocked(count, tone)
+        })
+        .when_some(card.blocked_label.clone(), CardTile::blocked_label)
+        .extras(card.extras.clone())
 }
 
 /// One prepared card as its tile.
@@ -654,35 +789,13 @@ fn tile(card: &CardRow, at: TileContext, more: impl IntoElement, on_click: &OnCl
             .on_click(move |_, _, cx| select(BoardClick::Card(column, row), cx))
             .action(Box::new(board_actions::AttachRun))
     });
-    CardTile::new(
-        card.element_id.clone(),
-        card.key.clone(),
-        card.title.clone(),
-    )
-    .priority(card.priority)
-    .labels(card.labels.clone())
-    .assignee(card.assignee.clone())
-    .estimate(card.estimate)
-    .due(card.due.clone())
-    .worktree(card.worktree)
-    .branch(card.link.as_ref().map(|link| link.branch.clone()))
-    .pr(card.link.as_ref().and_then(|link| link.pr))
-    .dirty(card.dirty)
-    .conflict(card.conflict)
-    // The tile decides nothing: which of the two the key line carries is the kit's own
-    // precedence rule, and what each of them says was folded once, in the update path.
-    .when_some(card.run, CardTile::run)
-    .when_some(card.run_label.clone(), CardTile::run_label)
-    .when_some(card.blocked, |tile, (count, tone)| {
-        tile.blocked(count, tone)
-    })
-    .when_some(card.blocked_label.clone(), CardTile::blocked_label)
-    .selected(at.selected)
-    .focused(at.selected)
-    .extras(card.extras.clone())
-    .when_some(answer, CardTile::action)
-    .menu(more)
-    .on_click(move |_, _, cx| select(BoardClick::Card(column, row), cx))
-    .on_double_click(move |_, _, cx| open(BoardClick::OpenCard(column, row), cx))
-    .on_secondary_click(move |_, _, cx| secondary(BoardClick::Card(column, row), cx))
+    card_face(card.element_id.clone(), card)
+        .selected(at.selected)
+        .focused(at.selected)
+        .left_behind(at.left_behind)
+        .when_some(answer, CardTile::action)
+        .menu(more)
+        .on_click(move |_, _, cx| select(BoardClick::Card(column, row), cx))
+        .on_double_click(move |_, _, cx| open(BoardClick::OpenCard(column, row), cx))
+        .on_secondary_click(move |_, _, cx| secondary(BoardClick::Card(column, row), cx))
 }

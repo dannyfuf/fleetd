@@ -388,6 +388,23 @@ impl Drop for InFlight {
     }
 }
 
+/// The requests a [`Bridge::recording`] bridge was handed, oldest first.
+#[cfg(test)]
+pub(crate) struct RecordedRequests(Receiver<Command>);
+
+#[cfg(test)]
+impl RecordedRequests {
+    /// Every request handed over since the last call.
+    pub(crate) fn take(&self) -> Vec<RequestBody> {
+        std::iter::from_fn(|| self.0.try_recv().ok())
+            .filter_map(|command| match command {
+                Command::Request { body, .. } => Some(*body),
+                Command::Reconnect | Command::Shutdown => None,
+            })
+            .collect()
+    }
+}
+
 enum Command {
     /// Send a request; the answer is forwarded when a channel was supplied.
     Request {
@@ -529,6 +546,19 @@ impl Bridge {
         command_rx.close();
         let (event_tx, events) = async_channel::bounded(EVENT_CAPACITY);
         Self::with_channels(commands, events, event_tx, Arc::new(AtomicBool::new(false)))
+    }
+
+    /// A bridge with no runtime behind it that keeps every request it is handed.
+    ///
+    /// Nothing answers: the requests wait in the returned [`RecordedRequests`], so a GPUI test
+    /// can assert exactly what a gesture asked the daemon for without a daemon to ask.
+    #[cfg(test)]
+    pub(crate) fn recording() -> (Self, RecordedRequests) {
+        let (commands, command_rx) = async_channel::unbounded();
+        let (event_tx, events) = async_channel::bounded(EVENT_CAPACITY);
+        let bridge =
+            Self::with_channels(commands, events, event_tx, Arc::new(AtomicBool::new(false)));
+        (bridge, RecordedRequests(command_rx))
     }
 
     /// Persisted native-agent cursors fetched for the current daemon connection.

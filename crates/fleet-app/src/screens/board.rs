@@ -21,9 +21,9 @@ use std::{cell::RefCell, rc::Rc, time::Instant};
 use crate::{
     actions::filter as filter_actions,
     bridge::Bridge,
-    dialogs::{self, ConfirmRequest, Dialogs, card_picker::PickerKind},
+    dialogs::{self, ConfirmRequest, Dialogs, MoveTarget, card_picker::PickerKind},
     state::{AppState, BoardScope, HubPane, HubTab, Overlay, Screen, StickyError},
-    views::board_screen::{self, BoardClick, BoardModel, BoardProps, CardRow},
+    views::board_screen::{self, BoardClick, BoardModel, BoardProps, CardRow, SharedDrag},
 };
 use fleet_core::{
     board::Card,
@@ -41,6 +41,8 @@ use gpui::{
 };
 
 mod actions;
+#[cfg(test)]
+mod drag_tests;
 mod lifecycle;
 mod navigation;
 mod projection;
@@ -96,6 +98,8 @@ pub(crate) struct BoardScreen {
     filter_input: Entity<TextInput>,
     /// Mirrors the editor into `BoardState.filter` for projections and harness dumps.
     filter_subscription: Option<Subscription>,
+    /// The card drag in flight, shared with the tile and column listeners that write it.
+    drag: SharedDrag,
 }
 
 impl BoardScreen {
@@ -120,6 +124,7 @@ impl BoardScreen {
             observation: None,
             filter_input,
             filter_subscription: None,
+            drag: SharedDrag::default(),
         }
     }
 
@@ -216,6 +221,7 @@ impl BoardScreen {
             focus: (app.board.focus.column, app.board.focus.row),
             syncing: syncing(app),
             runs: matches!(app.board.scope, Some(BoardScope::Worktree(_))),
+            drag: &self.drag,
         };
         // The focused card, not only its coordinates: a refresh that inserts a card above it
         // moves the same selection to a place the scroller has not revealed yet.

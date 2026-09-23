@@ -74,8 +74,16 @@ pub(crate) struct CardRunCancelDraft {
 struct PendingBoardConfirms {
     /// The run `X` staged, keyed by the window whose dialog will adopt it.
     cancels: HashMap<EntityId, CardRunCancelDraft>,
-    /// The column `[` / `]` would move the card into.
-    moves: HashMap<EntityId, StatusId>,
+    /// Where `[` / `]` or a dropped card would move the card to.
+    moves: HashMap<EntityId, MoveTarget>,
+}
+
+/// Where a confirmed [`ConfirmRequest::MoveCancelsRun`] puts the card: the column, and for a
+/// dropped card the place in it (`None` appends, which is what `[` / `]` ask for).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MoveTarget {
+    pub(crate) status: StatusId,
+    pub(crate) index: Option<usize>,
 }
 
 impl Global for PendingBoardConfirms {}
@@ -108,8 +116,8 @@ pub struct ConfirmState {
     pub(crate) delegation_cancel: Option<DelegationCancelDraft>,
     /// The card run this window is being asked to cancel, staged by the board's `X`.
     pub(crate) card_run_cancel: Option<CardRunCancelDraft>,
-    /// The column a confirmed `MoveCancelsRun` moves into, staged by `[` / `]`.
-    pub(crate) move_target: Option<StatusId>,
+    /// Where a confirmed `MoveCancelsRun` moves the card, staged by `[` / `]` or a drop.
+    pub(crate) move_target: Option<MoveTarget>,
 }
 
 impl ConfirmRequest {
@@ -149,11 +157,11 @@ impl ConfirmRequest {
             .insert(state.entity_id(), CardRunCancelDraft { card, key, fact });
     }
 
-    /// Stages the column a confirmed [`ConfirmRequest::MoveCancelsRun`] moves the card into.
-    pub(crate) fn stage_move_target(state: &Entity<AppState>, status: StatusId, cx: &mut App) {
+    /// Stages where a confirmed [`ConfirmRequest::MoveCancelsRun`] moves the card.
+    pub(crate) fn stage_move_target(state: &Entity<AppState>, target: MoveTarget, cx: &mut App) {
         cx.default_global::<PendingBoardConfirms>()
             .moves
-            .insert(state.entity_id(), status);
+            .insert(state.entity_id(), target);
     }
 }
 
