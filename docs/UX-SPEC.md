@@ -441,7 +441,7 @@ none of them changes which repo you select. Delegated child threads — their ca
 reaches them, and the caller's dot already carries a child that needs you. The stale stamp, which
 the Worktrees page header carries.
 
-**States:** *empty* → `No repos in <context>.` + faint `n clone one` (verbatim §5).
+**States:** *empty* → `No repos in <context>.` over a `Clone repo  n` button (§3.13).
 *filter-empty* → `Nothing matches "<filter>".` *loading* → the rail renders from `state.json`
 instantly, no skeleton; the reconcile shows only as the jobs chip. *no agents* → the Agents
 section is not drawn. *collapsed* → icons and dots only; no empty sentence.
@@ -1968,18 +1968,21 @@ successfully (`R` on that job in the Jobs panel) or the fact is dismissed from t
 
 ### 3.13 First run and empty states
 
-Every empty state is **two lines** — the fact, then the key — rendered centered **in the affected
-pane only**, never full-screen, so surrounding panes stay usable. Copy is swarm's, verbatim.
+Every empty state is **two lines** — the fact, then the way forward — rendered centered **in the
+affected pane only**, never full-screen, so surrounding panes stay usable. Copy is swarm's,
+verbatim. Where the way forward is an action it is a button showing its key (ADR 0023); a faint
+key line remains only where the control it names sits beside it (the filter's clear ✕) or there is
+no control to put it in (the terminal exit strip).
 
 | Surface | Line 1 | Line 2 (faint) |
 | --- | --- | --- |
 | No contexts | `No contexts yet.` | `N  create your first context` |
-| No repos | `No repos in <context>.` | `n  clone one` |
+| No repos | `No repos in <context>.` | `Clone repo  n` button |
 | No worktrees | `No worktrees yet` | primary `New worktree  n` button |
 | No worktrees for a repo | `No worktrees for <repo> yet` | primary `New worktree  n` button |
 | Filter miss | `Nothing matches "<filter>".` | `esc  clear` |
-| PR mine | `No open PRs authored by you in <scope>.` | `r  refresh` |
-| PR review | `No PRs waiting for your review in <scope>.` | `r  refresh` |
+| PR mine | `No open PRs authored by you in <scope>.` | `Refresh  r` button |
+| PR review | `No PRs waiting for your review in <scope>.` | `Refresh  r` button |
 | Jobs | `Nothing running.` | `Jobs and sessions live in fleetd, so they survive closing this window.` |
 | Terminal exited | `process exited (<code>)` | `^s x  close    ^s c  new    ^s r  restart` |
 

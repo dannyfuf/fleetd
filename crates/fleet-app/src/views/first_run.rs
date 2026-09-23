@@ -84,6 +84,18 @@ impl EmptySurface {
             Self::Worktrees | Self::WorktreesRepo => EmptyState::new(fact)
                 .button(crate::views::worktrees_list::new_worktree_button())
                 .into_any_element(),
+            // The sidebar says the same thing with a control: the button runs the key the old
+            // line named, and shows it. (The PR screen draws its own Refresh button.)
+            Self::Repos => EmptyState::new(fact)
+                .button(
+                    Button::new(
+                        "repos-empty-clone",
+                        crate::views::worktrees_list::label(&repos::Clone),
+                    )
+                    .action(Box::new(repos::Clone)),
+                )
+                .into_any_element(),
+            // A filter miss keeps its key line: the field it describes carries the clear ✕.
             _ => EmptyState::new(fact).action(action).into_any_element(),
         }
     }

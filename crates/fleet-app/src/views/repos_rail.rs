@@ -42,6 +42,8 @@ const ALL_LABEL: &str = "All repositories";
 const NEEDS_YOU: &str = "needs you";
 /// The accessible name of a row's `⋯` trigger.
 const MORE_ACTIONS: &str = "More actions";
+/// How many rows tall the Repositories section is while it has no repository to list.
+const EMPTY_ROWS: f32 = 3.0;
 
 /// What a rail row stands for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -423,6 +425,10 @@ pub fn render(
     // when the sidebar is shorter, so the Agents section sits right under the last repository.
     if row_count > 0 {
         repos_section = repos_section.body_height(row_h * row_count as f32);
+    } else if !collapsed {
+        // The empty state is a sentence over a Clone repo button: three rows hold both, where one
+        // would centre them over the section's own header.
+        repos_section = repos_section.body_height(row_h * EMPTY_ROWS);
     }
     if let Some(header) = header_override {
         repos_section = repos_section.header(header);
