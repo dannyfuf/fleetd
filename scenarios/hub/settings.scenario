@@ -17,6 +17,13 @@ assert focused == dialog
 shot settings
 dump settings
 
+# `Tab` moves to the next section, Sleep: its boolean rows draw as switches (DESIGN-SYSTEM §6.4
+# `Toggle`) and the dialog keeps the keyboard.
+key tab
+await idle 10000
+assert mode == Dialog && dialog.name == Settings && focused == dialog
+shot settings-sleep
+
 # `Esc` discards and restores the Hub exactly as it was.
 key escape
 await overlay absent
