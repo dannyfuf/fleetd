@@ -274,7 +274,7 @@ list below is the complete inventory, in px unless marked `ch`; a unit test in
 
 | Group | Tokens |
 | --- | --- |
-| Window chrome | `title_bar_h 44` · `status_bar_h 28` · `traffic_light_inset 84` · `command_field_w 340` · `monogram_size 18` · `mode_word_w 84` · `banner_h 28` · `strip_h 22` |
+| Window chrome | `title_bar_h 44` · `status_bar_h 28` · `traffic_light_inset 84` · `command_field_w 340` · `filter_field_w 220` · `monogram_size 18` · `mode_word_w 84` · `banner_h 28` · `strip_h 22` |
 | Layout columns | `sidebar_w 232` · `rail_w 240` · `detail_w 344` · `detail_overlay_w 320` · `sheet_w 440` · `sheet_expanded_w 640` · `sheet_w_detail 736` |
 | Rows and headers | `row_h 30` · `row_h_comfortable 44` · `pane_header_h 30` · `section_header_h 20` · `palette_row_h 34` · `palette_tile 22` · `job_row_h 44` · `progress_bar_h 4` |
 | Controls | `button_h 30` · `button_h_compact 26` · `kbd_h 18` · `kbd_h_small 16` · `chip_h 22` · `text_field_h 36` · `field_status_h 18` · `number_field_w 96` · `segment_h 24` · `switch_w 34` · `switch_h 20` · `checkbox_size 16` |
@@ -286,7 +286,7 @@ list below is the complete inventory, in px unless marked `ch`; a unit test in
 
 `row_h` (30) is the dense row, for menus, pickers and terminal-side lists; `row_h_comfortable`
 (44) is the hub-list row. `title_bar_h` is the one top row of every window; `command_field_w` is
-the palette field centred in it and `monogram_size` the context switcher's letter tile.
+the palette field centred in it and `monogram_size` the context switcher's letter tile. `filter_field_w` is the `FilterField` in a page header's toolbar.
 `mode_word_w` is the embedded Git UI's status word only — Fleet's own chrome draws no mode word.
 `sidebar_w` is the redesigned sidebar; `rail_w` stays while the repos rail is on screen. `kbd_h_small` is the
 key chip inside a compact button or a menu item. `segment_h` plus a `SegmentedControl`'s `xxs`
@@ -633,6 +633,30 @@ filter retained (`.filter_chip("rut")`) · stale (`· stale · 2m`, amber).
 **Usage rule.** Never swap the header element for a filter bar — pass the filter bar *through*
 the header, or the row shifts by a pixel and the illusion of "the list did not move" breaks.
 
+#### `PageHeader`
+**Purpose.** The top of a Hub page: an H1 in `page_title`, one summary line under it, and the
+page's toolbar right-aligned to the title's baseline.
+**API.** `PageHeader::new(title).subtitle(text).stale(age).action(impl IntoElement)`; `action`
+appends.
+**Variants.** normal · stale (`· stale · 2m`, amber, after the subtitle).
+**Usage rule.** The subtitle is a sentence the view model built in its update path
+(`4 across 2 repositories · 1 needs attention`); the header never counts anything. The toolbar
+holds the page's own controls — a `FilterField`, secondary `Button`s, at most one primary
+`Button` — each showing its key. Not a `PaneHeader` (the dense 30 px pane label row) and not a
+`SectionHeader` (a block inside a panel).
+
+#### `FilterField`
+**Purpose.** A page toolbar's filter box: magnifier, the query or `Filter`, and the key that
+opens it; while editing, the live editor and `shown/total`.
+**API.** `FilterField::new(id, placeholder).query(text).editor(Entity<TextInput>)
+.counts(shown, total).action(Box<dyn Action>).kbd(Kbd)`; `.is_editing()`, `.count_tone()`.
+**States.** idle (placeholder, key chip; a click dispatches `action`) · retained (the query in
+body text) · editing (the embedded editor, a `focus_ring` border, `shown/total`) · no match
+(the count turns amber).
+**Usage rule.** One box, two faces, so opening the filter moves nothing. The editing face owns no
+keys — the surface's filter mode does, as with `FilterBar`, which stays the in-place form for a
+dense pane header. `filter_field_w` wide, `button_h` tall.
+
 #### `Sheet`
 **Purpose.** A docked panel (the Jobs panel; the board card detail).
 **API.** `Sheet::new(open: bool).expanded(bool).width(Pixels).side(SheetSide).scrim(bool)
@@ -800,7 +824,9 @@ and still reserves its width.
 .align(..).shown_from(pane_ch).forced(bool)`.
 **Usage rule.** Measure the **pane**, not the window. `ColumnLadder::worktrees()` and
 `::pull_requests_for()` are the §2.9 ladders verbatim, including the two-step author breakpoint
-(12 ch at 70 ch, 16 ch at 130 ch).
+(12 ch at 70 ch, 16 ch at 130 ch). The worktrees ladder is keyed `branch` (Name, flex 24) ·
+`repo` (16, from 110 ch or forced in `All`) · `session` (24 / 16 / 0 ch at 100 / 72 ch) · `pr`
+(18, from 60 ch) · `age` (6, from 52 ch) · `actions` (15, always, filled `hover_only`).
 
 #### `StatusGlyph`
 **Purpose.** The §2.5 vocabulary, in one place. See §5.2 for the table.
@@ -847,9 +873,12 @@ chip persists until the hooks job succeeds or the fact is dismissed from the det
 
 #### `PrBadge`
 **Purpose.** `#n` + one icon + one word (≤ 8 characters), collapsing three GitHub fields.
-**API.** `PrBadge::{new(number, PrBadgeState), state_only(PrBadgeState)}().stale(bool)`.
+**API.** `PrBadge::{new(number, PrBadgeState), state_only(PrBadgeState)}().stale(bool).chip()`;
+`PrBadgeState::{icon, tone, word, chip_word, chip_tone}`.
 **Variants.** `Draft` faint · `CI fail` red · `Changes` amber · `CI ···` amber · `Approved`
-green · `Review` secondary · `Merged` green.
+green · `Review` secondary · `Merged` green. **Chip** (`.chip()`): a tinted pill reading `#n` and
+the chip word — `Draft` · `CI failing` · `Needs changes` · `CI running` · `Approved` ·
+`In review` (accent) · `Merged` — for a comfortable Hub row or a detail panel.
 **Usage rule.** The caller resolves the priority (draft → ci_fail → changes → ci_pending →
 approved → review, merged overrides all) so the kit stays free of GitHub types. `.stale(true)`
 is the §2.6 rendering for a mark derived from a fact older than 10 minutes.
@@ -897,13 +926,25 @@ reads in `text` beside an amber `triangle-alert`; a safe fact in `text_secondary
 any decisive fact is unknown or the facts are still loading, and `ConfirmKey::accepts_enter()`
 says whether `Enter` also confirms.
 
+#### `InfoCard`
+**Purpose.** A raised, rounded box grouping a few lines about one thing inside a detail panel:
+the worktree panel's *Session* card.
+**API.** `InfoCard::new().title(text).trailing(impl IntoElement).line(impl IntoElement)`;
+`line` appends.
+**Usage rule.** `surface_raised`, a hairline, `radii.card`, no shadow and no actions of its own —
+the panel's action row owns those. Not a `Callout` (a consequence inside a dialog) and not a
+`KeyValueList` (flat facts); leave facts flat when the panel already reads as sections.
+
 #### `SectionHeader`
 **Purpose.** A 20 px label row with an optional right-aligned stamp or action.
 **API.** `SectionHeader::new(label).trailing(..)`.
 
 #### `EmptyState`
-**Purpose.** Exactly two centered lines: the fact, then the key.
-**API.** `EmptyState::new(fact).action(key_line)`.
+**Purpose.** Exactly two centered lines: the fact, then the key — or, on a redesigned page, the
+fact and the one button that fixes it.
+**API.** `EmptyState::new(fact).action(key_line).button(impl IntoElement)`.
+**Variants.** key line · button (`No worktrees yet` over a primary `New worktree  n`; the button
+replaces the key line, so the key is taught where it is used).
 **Usage rule.** Rendered **in the affected pane only**, never full-screen, so neighbouring panes
 stay usable. Copy is swarm's, verbatim.
 

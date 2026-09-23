@@ -676,6 +676,8 @@ pub struct Metrics {
     pub mode_word_w: Pixels,
     /// 340 px command field centred in the title bar: the button that opens the palette.
     pub command_field_w: Pixels,
+    /// 220 px filter field in a page header's toolbar ([`crate::FilterField`]).
+    pub filter_field_w: Pixels,
     /// 18 px monogram tile: the letter of a context in the title bar's context switcher.
     pub monogram_size: Pixels,
     /// 3 px scroll thumb.
@@ -785,6 +787,7 @@ impl Default for Metrics {
             palette_top: px(120.0),
             mode_word_w: px(84.0),
             command_field_w: px(340.0),
+            filter_field_w: px(220.0),
             monogram_size: px(18.0),
             scroll_thumb_w: px(3.0),
             focus_ring_w: px(2.0),

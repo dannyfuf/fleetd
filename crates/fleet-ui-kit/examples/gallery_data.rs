@@ -653,78 +653,80 @@ fn worktree_row(t: &Theme, ix: usize, pane_ch: f32, cursor: bool) -> AnyElement 
     let kind = kinds[ix % kinds.len()];
 
     let mut row = Row::with_id(("wt", ix))
-        .leading(StatusGlyph::new(kind).id(("wt-glyph", ix)))
+        .comfortable()
         .selected(cursor)
         .cursor(cursor);
 
-    for column in ladder
-        .resolve(pane_ch)
-        .into_iter()
-        .filter(|column| column.key != "glyph")
-    {
-        let element: AnyElement = match column.key.as_ref() {
-            "branch" => div()
-                .flex()
-                .items_center()
-                .gap(t.space.xs)
-                .min_w_0()
-                .child(Text::data(branch).ellipsize())
-                // The dirty mark rides with the branch instead of buying a column (§3.3).
-                .when(ix.is_multiple_of(2), |el| {
-                    el.child(
-                        Icon::FilePen
-                            .el()
-                            .size(IconSize::Small)
-                            .color(t.colors.warning),
-                    )
-                })
-                .when(ix % 3 == 2, |el| {
-                    el.child(Chip::labeled(Icon::Cloud, "devbox"))
-                })
-                .into_any_element(),
-            "repo" => Text::ui(truncate("buk/payroll", 14, Truncate::Head))
-                .muted()
-                .into_any_element(),
-            "keepalive" => {
-                let budget = KeepAliveChips::from_pane_ch(pane_ch);
-                if kind == StatusKind::Degraded {
-                    DegradedChip::hooks_failed().into_any_element()
-                } else if ix.is_multiple_of(2) {
-                    KeepAliveChips::new(keep_alive())
-                        .width_ch(budget)
-                        .into_any_element()
-                } else {
-                    div().into_any_element()
-                }
-            }
-            "pr" => {
-                if ix % 3 == 2 {
-                    div().into_any_element()
-                } else {
+    for column in ladder.resolve(pane_ch) {
+        let cell = match column.key.as_ref() {
+            "branch" => RowColumn::resolved(
+                &column,
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(t.space.sm)
+                    .min_w_0()
+                    .child(Icon::GitBranch.el().size(IconSize::Medium).color(
+                        if kind == StatusKind::Attached {
+                            t.colors.accent
+                        } else {
+                            t.colors.text_muted
+                        },
+                    ))
+                    .child(Text::ui_strong(branch).ellipsize())
+                    // The dirty fact rides with the name instead of buying a column (§3.3).
+                    .when(ix.is_multiple_of(2), |el| {
+                        el.child(Text::caption("uncommitted changes").muted().flex_none())
+                    })
+                    .when(ix % 3 == 2, |el| {
+                        el.child(Chip::labeled(Icon::Cloud, "devbox"))
+                    }),
+            ),
+            "repo" => RowColumn::resolved(
+                &column,
+                Text::ui(truncate("buk/payroll", 16, Truncate::Head)).muted(),
+            ),
+            "session" => RowColumn::resolved(
+                &column,
+                Text::ui(SESSION_WORDS[ix % SESSION_WORDS.len()])
+                    .muted()
+                    .ellipsize(),
+            ),
+            "pr" => RowColumn::resolved(
+                &column,
+                div().children((ix % 3 != 2).then(|| {
                     PrBadge::new(400 + ix as u64, PR_STATES[ix % PR_STATES.len()])
+                        .chip()
                         .stale(ix % 4 == 3)
-                        .into_any_element()
-                }
-            }
-            "age" => AgeLabel::from_secs(3_600 * (ix as i64 + 1)).into_any_element(),
-            _ => div().into_any_element(),
+                })),
+            ),
+            "age" => RowColumn::resolved(&column, AgeLabel::from_secs(3_600 * (ix as i64 + 1))),
+            "actions" => RowColumn::resolved(&column, hover_actions(t)).hover_only(),
+            _ => continue,
         };
-        row = row.column(RowColumn::resolved(&column, element));
+        row = row.column(cell);
     }
     row.into_any_element()
 }
+
+/// The session column's words, as `fleet-app` builds them from the session state.
+const SESSION_WORDS: [&str; 4] = [
+    "claude working \u{b7} 2 tabs",
+    "Sleeping",
+    "No session",
+    "1 terminal",
+];
 
 /// The column heads of [`worktree_row`], from the same ladder resolution.
 fn worktree_header(pane_ch: f32) -> ListHeader {
     ColumnLadder::worktrees_in_scope(false)
         .resolve(pane_ch)
         .iter()
-        .filter(|column| column.key != "glyph")
-        .fold(ListHeader::new().reserve_leading(true), |header, column| {
+        .fold(ListHeader::new(), |header, column| {
             let label = match column.key.as_ref() {
                 "branch" => "Name",
                 "repo" => "Repository",
-                "keepalive" => "Keeps running",
+                "session" => "Session",
                 "pr" => "Pull request",
                 "age" => "Age",
                 _ => "",
@@ -733,19 +735,19 @@ fn worktree_header(pane_ch: f32) -> ListHeader {
         })
 }
 
-/// The hover actions of a row: stand-ins for the `Open ⏎` button and the `⋯` trigger, which
-/// the kit's button components will fill.
+/// The hover actions of a row: the `Open ⏎` button and the `⋯` trigger.
 fn hover_actions(t: &Theme) -> AnyElement {
     div()
         .flex()
         .items_center()
-        .gap(t.space.sm)
-        .child(KeyHint::labeled("enter", "open"))
+        .gap(t.space.xxs)
         .child(
-            Icon::Ellipsis
-                .el()
-                .size(IconSize::Medium)
-                .color(t.colors.text_secondary),
+            Button::new("row-open", "Open")
+                .size(ButtonSize::Compact)
+                .kbd(Kbd::parse("enter").unwrap_or_else(|error| panic!("{error}"))),
+        )
+        .child(
+            IconButton::new("row-more", Icon::Ellipsis, "More actions").size(ButtonSize::Compact),
         )
         .into_any_element()
 }

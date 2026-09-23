@@ -652,9 +652,15 @@ fn glyphs_section(cx: &mut App) -> AnyElement {
         .map(|state| PrBadge::new(412, *state).into_any_element())
         .collect();
 
+    let chips: Vec<AnyElement> = pr_states
+        .iter()
+        .map(|state| PrBadge::new(412, *state).chip().into_any_element())
+        .collect();
+
     let children = vec![
         LAYOUT.labeled("status glyphs", &t, strip(&t, glyphs)),
         LAYOUT.labeled("pr badges", &t, strip(&t, badges)),
+        LAYOUT.labeled("pr badges · chip", &t, strip(&t, chips)),
         LAYOUT.labeled(
             "pr badge, stale (>10 min)",
             &t,
@@ -880,6 +886,38 @@ fn facts_section(cx: &mut App) -> AnyElement {
                 &t,
                 px(72.0),
                 EmptyState::new("No worktrees yet.").action("n  create one"),
+            ),
+        ),
+        LAYOUT.labeled(
+            "empty state · button",
+            &t,
+            box_of(
+                &t,
+                px(96.0),
+                EmptyState::new("No worktrees yet").button(
+                    Button::new("kit-empty-new", "New worktree")
+                        .icon(Icon::Plus)
+                        .style(ButtonStyle::Primary)
+                        .kbd(gallery_kbd("n")),
+                ),
+            ),
+        ),
+        LAYOUT.labeled(
+            "info card",
+            &t,
+            div().w(px(304.0)).child(
+                InfoCard::new()
+                    .title("Session")
+                    .line(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(t.space.sm)
+                            .child(StatusGlyph::new(StatusKind::AgentWorking).id("kit-card-glyph"))
+                            .child(div().flex_1().child(Text::ui("claude is working")))
+                            .child(Text::caption("4m").muted()),
+                    )
+                    .line(Text::caption("2 tabs: zsh, claude \u{2014} kept by fleetd").muted()),
             ),
         ),
         LAYOUT.labeled(
@@ -1262,7 +1300,7 @@ fn structure_section(cx: &mut App, filter_query: Entity<TextInput>) -> AnyElemen
         PaneHeader::new("worktrees")
             .shown(2)
             .total(12)
-            .query_slot(FilterBar::new(filter_query, 2, 12).query_slot()),
+            .query_slot(FilterBar::new(filter_query.clone(), 2, 12).query_slot()),
     );
     let retained = box_of(
         &t,
@@ -1331,6 +1369,48 @@ fn structure_section(cx: &mut App, filter_query: Entity<TextInput>) -> AnyElemen
         LAYOUT.labeled("pane header · filtering", &t, filtered),
         LAYOUT.labeled("pane header · retained", &t, retained),
         LAYOUT.labeled("pane header · stale", &t, stale),
+        LAYOUT.labeled(
+            "page header",
+            &t,
+            PageHeader::new("Worktrees")
+                .subtitle("4 across 2 repositories \u{b7} 1 needs attention")
+                .action(FilterField::new("kit-filter-idle", "Filter").kbd(gallery_kbd("/")))
+                .action(Button::new("kit-page-clone", "Clone repo"))
+                .action(
+                    Button::new("kit-page-new", "New worktree")
+                        .icon(Icon::Plus)
+                        .style(ButtonStyle::Primary)
+                        .kbd(gallery_kbd("n")),
+                ),
+        ),
+        LAYOUT.labeled(
+            "page header · stale",
+            &t,
+            PageHeader::new("Worktrees")
+                .subtitle("2 in payroll")
+                .stale("2m"),
+        ),
+        LAYOUT.labeled(
+            "filter field · retained / editing / no match",
+            &t,
+            strip(
+                &t,
+                vec![
+                    FilterField::new("kit-filter-kept", "Filter")
+                        .query("rut")
+                        .kbd(gallery_kbd("/"))
+                        .into_any_element(),
+                    FilterField::new("kit-filter-edit", "Filter")
+                        .editor(filter_query.clone())
+                        .counts(2, 12)
+                        .into_any_element(),
+                    FilterField::new("kit-filter-none", "Filter")
+                        .editor(filter_query)
+                        .counts(0, 12)
+                        .into_any_element(),
+                ],
+            ),
+        ),
         LAYOUT.labeled(
             "banner",
             &t,
@@ -2223,7 +2303,7 @@ fn controls_section(cx: &mut App) -> AnyElement {
                         .into_any_element(),
                     IconButton::new("kit-search", Icon::Search, "Filter")
                         .style(ButtonStyle::Secondary)
-                        .kbd(kbd("/"))
+                        .kbd(gallery_kbd("/"))
                         .into_any_element(),
                     Tooltip::new("Refresh").kbd(kbd("r")).into_any_element(),
                 ],

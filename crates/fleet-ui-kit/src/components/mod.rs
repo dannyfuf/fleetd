@@ -31,8 +31,10 @@ mod exit_strip;
 mod fact_list;
 mod fact_row;
 mod filter_bar;
+mod filter_field;
 mod freshness_stamp;
 mod fuzzy_list;
+mod info_card;
 mod input;
 mod job_row;
 mod job_ticker;
@@ -52,6 +54,7 @@ mod multiline_input;
 mod navigation;
 mod number_field;
 mod overlay;
+mod page_header;
 mod palette;
 mod pane;
 mod pane_header;
@@ -115,9 +118,11 @@ pub use exit_strip::ExitStrip;
 pub use fact_list::{ConfirmKey, Fact, FactList};
 pub use fact_row::{FactRow, FactValue};
 pub use filter_bar::FilterBar;
+pub use filter_field::FilterField;
 pub use freshness_stamp::{AGING_SECS, FRESH_SECS};
 pub use freshness_stamp::{Freshness, FreshnessStamp};
 pub use fuzzy_list::{FuzzyItem, FuzzyList};
+pub use info_card::InfoCard;
 pub use input::actions as text_input;
 pub use input::{
     HISTORY_CAP, InputBuffer, InputMode, TEXT_INPUT_KEY_CONTEXT, TYPING_GROUP_WINDOW, TextInput,
@@ -156,6 +161,7 @@ pub use multiline_input::{
 };
 pub use number_field::NumberField;
 pub use overlay::{Overlay, OverlayLayer};
+pub use page_header::PageHeader;
 pub use palette::{Palette, PaletteRow, PaletteSection};
 pub use pane::{Pane, PaneBorder};
 pub use pane_header::PaneHeader;

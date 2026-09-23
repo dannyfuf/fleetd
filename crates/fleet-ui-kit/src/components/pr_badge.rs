@@ -4,8 +4,12 @@
 //! (§3.5): draft, ci_fail, changes, ci_pending, approved, review; a merged PR overrides all of
 //! them. The caller resolves the priority; this component only renders the chosen state, so
 //! the kit stays free of GitHub types.
+//!
+//! [`PrBadge::chip`] draws the same state as a tinted pill with the longer sentence word
+//! (`#4 In review`, `#9 CI failing`): the comfortable Hub rows and the detail panel, where the
+//! badge sits beside prose rather than in a dense column.
 
-use gpui::{App, Window, div, prelude::*};
+use gpui::{App, SharedString, Window, div, prelude::*};
 
 use crate::{
     icons::{Icon, IconSize},
@@ -70,6 +74,28 @@ impl PrBadgeState {
             PrBadgeState::Merged => "Merged",
         }
     }
+
+    /// The word a [`PrBadge::chip`] reads: a short phrase, not the ≤ 8-character column word.
+    pub fn chip_word(self) -> &'static str {
+        match self {
+            PrBadgeState::Draft => "Draft",
+            PrBadgeState::CiFail => "CI failing",
+            PrBadgeState::Changes => "Needs changes",
+            PrBadgeState::CiPending => "CI running",
+            PrBadgeState::Approved => "Approved",
+            PrBadgeState::Review => "In review",
+            PrBadgeState::Merged => "Merged",
+        }
+    }
+
+    /// The tone a [`PrBadge::chip`] tints with. A PR waiting for review is on its way, so the
+    /// chip reads it as information (`Accent`) rather than the column's quiet `Secondary`.
+    pub fn chip_tone(self) -> Tone {
+        match self {
+            PrBadgeState::Review => Tone::Accent,
+            other => other.tone(),
+        }
+    }
 }
 
 /// `#412  CI fail`
@@ -78,6 +104,7 @@ pub struct PrBadge {
     number: Option<u64>,
     state: PrBadgeState,
     stale: bool,
+    chip: bool,
 }
 
 impl PrBadge {
@@ -87,6 +114,7 @@ impl PrBadge {
             number: Some(number),
             state,
             stale: false,
+            chip: false,
         }
     }
 
@@ -96,6 +124,7 @@ impl PrBadge {
             number: None,
             state,
             stale: false,
+            chip: false,
         }
     }
 
@@ -104,11 +133,40 @@ impl PrBadge {
         self.stale = stale;
         self
     }
+
+    /// Draw as a tinted pill reading `#n` and [`PrBadgeState::chip_word`], for a comfortable
+    /// row or a detail panel. The bare badge stays the dense-column form.
+    pub fn chip(mut self) -> Self {
+        self.chip = true;
+        self
+    }
 }
 
 impl RenderOnce for PrBadge {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
+        if self.chip {
+            let tone = self.state.chip_tone();
+            let color = tone.color(theme);
+            let word = self.state.chip_word();
+            let label = match self.number {
+                Some(number) => SharedString::from(format!("#{number} {word}")),
+                None => SharedString::new_static(word),
+            };
+            return div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(theme.space.xxs)
+                .h(theme.metrics.chip_h)
+                .px(theme.space.sm)
+                .rounded(theme.radii.pill)
+                .bg(tone.fill(theme))
+                .when(self.stale, |el| el.opacity(theme.metrics.stale_opacity))
+                .child(self.state.icon().el().size(IconSize::Small).color(color))
+                .child(Text::caption(label).color(color))
+                .into_any_element();
+        }
         let color = self.state.tone().color(theme);
         div()
             .flex()
@@ -122,5 +180,6 @@ impl RenderOnce for PrBadge {
             )
             .child(self.state.icon().el().size(IconSize::Medium).color(color))
             .child(Text::ui(self.state.word()).color(color))
+            .into_any_element()
     }
 }

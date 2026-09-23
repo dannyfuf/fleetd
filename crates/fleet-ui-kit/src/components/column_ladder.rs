@@ -205,28 +205,30 @@ impl ColumnLadder {
     }
 
     /// The worktrees list ladder of §2.9, keyed
-    /// `glyph`, `branch`, `repo`, `keepalive`, `pr`, `age`.
+    /// `branch`, `repo`, `session`, `pr`, `age`, `actions`.
     pub fn worktrees() -> Self {
         Self::worktrees_in_scope(false)
     }
 
     /// The worktrees ladder, with the `repo` column forced on in `All` scope.
     ///
-    /// §2.9 column 3: `owner/name` is shown when the scope is `All` **or** the pane is at least
+    /// §2.9 column 2: `owner/name` is shown when the scope is `All` **or** the pane is at least
     /// 110 ch, because in `All` scope the repo is the only thing that disambiguates two
-    /// identically named branches.
+    /// identically named branches. The session column says the session in words and steps
+    /// 24 / 16 / 0 ch; `actions` is the hover-only `Open ⏎  ⋯` slot, headed by nothing, and
+    /// always reserved so revealing it never reflows a row.
     pub fn worktrees_in_scope(all_scope: bool) -> Self {
         Self::new([
-            ColumnSpec::fixed("glyph", 2.0).align(ColumnAlign::Center),
             ColumnSpec::flex("branch", 24.0),
-            ColumnSpec::fixed("repo", 14.0)
+            ColumnSpec::fixed("repo", 16.0)
                 .shown_from(110.0)
                 .forced(all_scope),
-            ColumnSpec::ladder("keepalive", KEEP_ALIVE_STEPS),
-            ColumnSpec::fixed("pr", 15.0).shown_from(60.0),
-            ColumnSpec::fixed("age", 7.0)
+            ColumnSpec::ladder("session", SESSION_STEPS),
+            ColumnSpec::fixed("pr", 18.0).shown_from(60.0),
+            ColumnSpec::fixed("age", 6.0)
                 .align(ColumnAlign::Right)
                 .shown_from(52.0),
+            ColumnSpec::fixed("actions", 15.0).align(ColumnAlign::Right),
         ])
     }
 
@@ -261,6 +263,9 @@ impl ColumnLadder {
     }
 }
 
+/// The worktrees list's session column: words such as `claude working · 2 tabs`.
+const SESSION_STEPS: &[(f32, f32)] = &[(100.0, 24.0), (72.0, 16.0), (0.0, 0.0)];
+
 pub(super) const KEEP_ALIVE_STEPS: &[(f32, f32)] =
     &[(104.0, 18.0), (88.0, 14.0), (72.0, 10.0), (0.0, 0.0)];
 
@@ -281,30 +286,31 @@ mod tests {
         let ladder = ColumnLadder::worktrees();
         assert!(ladder.shows("repo", 138.0));
         assert!(!ladder.shows("repo", 93.0));
-        assert!(ladder.shows("keepalive", 104.0));
-        assert!(!ladder.shows("keepalive", 71.0));
+        assert!(ladder.shows("session", 104.0));
+        assert!(!ladder.shows("session", 71.0));
         assert!(!ladder.shows("age", 40.0));
         assert!(ladder.shows("branch", 40.0));
+        assert!(ladder.shows("actions", 40.0));
     }
 
     #[test]
-    fn keep_alive_steps_18_14_10_0() {
+    fn session_steps_24_16_0() {
         let ladder = ColumnLadder::worktrees();
-        assert_eq!(ladder.width_ch("keepalive", 138.0), Some(18.0));
-        assert_eq!(ladder.width_ch("keepalive", 90.0), Some(14.0));
-        assert_eq!(ladder.width_ch("keepalive", 72.0), Some(10.0));
-        assert_eq!(ladder.width_ch("keepalive", 60.0), None);
+        assert_eq!(ladder.width_ch("session", 138.0), Some(24.0));
+        assert_eq!(ladder.width_ch("session", 90.0), Some(16.0));
+        assert_eq!(ladder.width_ch("session", 72.0), Some(16.0));
+        assert_eq!(ladder.width_ch("session", 60.0), None);
     }
 
     #[test]
-    fn narrow_pane_keeps_glyph_branch_pr_and_age() {
-        // §2.9: "below 72 ch only columns 1, 2, 5, 6 survive".
+    fn narrow_pane_keeps_name_pr_age_and_actions() {
+        // §2.9: "below 72 ch only the name, the pull request, the age and the actions survive".
         let keys: Vec<String> = ColumnLadder::worktrees()
             .resolve(70.0)
             .into_iter()
             .map(|c| c.key.to_string())
             .collect();
-        assert_eq!(keys, ["glyph", "branch", "pr", "age"]);
+        assert_eq!(keys, ["branch", "pr", "age", "actions"]);
     }
 
     #[test]
