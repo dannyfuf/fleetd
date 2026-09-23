@@ -1,0 +1,35 @@
+# UX-SPEC §3.8.3 — the confirm dialog, answered by the pointer.
+#
+# A clean worktree's delete is the compact confirm: a primary `Delete` whose chip is `y`, and
+# `Cancel` (`dialog.button[0]`) closes it with nothing sent. A repository delete cascades, so
+# it always requires `Y`: its action button is the red `Delete repository` with `⇧Y`, and a click
+# on it (`dialog.button[1]`) dispatches the same `AcceptStrong` the key does.
+fixture: one-repo
+await idle 30000
+assert screen == Hub && hub_pane == List && focused == worktrees.row[0]
+
+# The compact form: safe facts, the primary button, and Cancel.
+key d
+await dialog.name == Confirm 10000
+await dialog.message == "Moves the copy to trash, then removes it in the background." 20000
+assert targets["dialog.button[0]"] exists && targets["dialog.button[1]"] exists
+shot confirm-compact
+click dialog.button[0]
+await dialog absent 10000
+assert screen == Hub && focused == worktrees.row[0] && lists.worktrees.rows[0] exists
+
+# The strong form: a repository delete, confirmed by a click on the red button.
+key h
+await hub_pane == Repos
+key j
+await focused == repos.row[1]
+key d
+await dialog.name == Confirm 10000
+assert dialog.message ~= "^Also deletes 1 worktree and their sessions"
+shot confirm-danger
+click dialog.button[1]
+await dialog absent 10000
+await lists.repos.rows[1] absent 60000
+assert screen == Hub && overlay absent
+dump deleted
+quit
