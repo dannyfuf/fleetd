@@ -1030,6 +1030,67 @@ fn dialog_section(cx: &mut App) -> AnyElement {
                 ),
             ),
             specimen(
+                "header fill · flush body · Help: a search in place of the title, panes edge to edge",
+                &t,
+                stage(
+                    &t,
+                    px(230.0),
+                    div().relative().size_full().child(filler(&t, 5)).child(
+                        Dialog::new("Help")
+                            .width(px(640.0))
+                            .on_dismiss(|_, _| {})
+                            .header_fill(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(t.space.sm)
+                                    .h(t.metrics.text_field_h)
+                                    .px(t.space.md)
+                                    .rounded(t.radii.sm)
+                                    .border(t.metrics.hairline)
+                                    .border_color(t.colors.focus_ring)
+                                    .child(Icon::Search.el().size(IconSize::Medium))
+                                    .child(Text::ui("What do you want to do?").muted()),
+                            )
+                            .header_actions(
+                                SegmentedTabs::new([
+                                    SegmentedTab::bare("Guides"),
+                                    SegmentedTab::bare("All shortcuts"),
+                                ])
+                                .underlined(false),
+                            )
+                            .flush_body(true)
+                            .body(
+                                div()
+                                    .flex()
+                                    .size_full()
+                                    .child(
+                                        div()
+                                            .w(px(180.0))
+                                            .h_full()
+                                            .p(t.space.md)
+                                            .bg(t.colors.surface)
+                                            .border_r(t.metrics.hairline)
+                                            .border_color(t.colors.border)
+                                            .child(Text::sentence_label("Here in Worktrees")),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .p(t.space.lg)
+                                            .child(Text::section_title("Start work on a task")),
+                                    ),
+                            )
+                            .footer_start(Text::caption("Fleet 0.1.0 · fleetd up 3h · protocol 8"))
+                            .actions(vec![
+                                Button::new("gallery-help-doctor", "Run doctor")
+                                    .style(ButtonStyle::Ghost)
+                                    .size(ButtonSize::Compact),
+                            ]),
+                    ),
+                ),
+            ),
+            specimen(
                 "danger primary · the strong confirm",
                 &t,
                 stage(

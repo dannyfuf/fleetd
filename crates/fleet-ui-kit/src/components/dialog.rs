@@ -48,6 +48,8 @@ pub struct Dialog {
     hints: Option<AnyElement>,
     footer_start: Option<AnyElement>,
     header_actions: Option<AnyElement>,
+    header_fill: Option<AnyElement>,
+    flush_body: bool,
     actions: Vec<Button>,
     primary: Option<SharedString>,
     footer_note: Option<(SharedString, Tone)>,
@@ -68,6 +70,8 @@ impl Dialog {
             hints: None,
             footer_start: None,
             header_actions: None,
+            header_fill: None,
+            flush_body: false,
             actions: Vec::new(),
             primary: None,
             footer_note: None,
@@ -125,6 +129,21 @@ impl Dialog {
     /// segmented control (Help).
     pub fn header_actions(mut self, actions: impl IntoElement) -> Self {
         self.header_actions = Some(actions.into_any_element());
+        self
+    }
+
+    /// A control that takes the header's free width **in place of** the icon, title and
+    /// subtitle, e.g. Help's search field. The title is still the dialog's name; it is simply
+    /// not drawn, because the field says what the dialog is for.
+    pub fn header_fill(mut self, fill: impl IntoElement) -> Self {
+        self.header_fill = Some(fill.into_any_element());
+        self
+    }
+
+    /// Lay the body edge to edge, with no padding and no gap, for a dialog that draws its own
+    /// panes (Help's sidebar and content column).
+    pub fn flush_body(mut self, flush: bool) -> Self {
+        self.flush_body = flush;
         self
     }
 
@@ -209,18 +228,22 @@ impl RenderOnce for Dialog {
             })
             .border_b(theme.metrics.hairline)
             .border_color(theme.colors.border)
-            .children(
-                self.icon
-                    .map(|icon| icon.el().size(IconSize::Large).color(tone_color)),
-            )
-            .child(Text::title(self.title).color(tone_color))
-            .child(
-                div()
-                    .flex()
-                    .flex_1()
-                    .min_w_0()
-                    .children(self.subtitle.map(|s| Text::ui(s).muted().ellipsize())),
-            )
+            .map(|header| match self.header_fill {
+                Some(fill) => header.child(div().flex().flex_1().min_w_0().child(fill)),
+                None => header
+                    .children(
+                        self.icon
+                            .map(|icon| icon.el().size(IconSize::Large).color(tone_color)),
+                    )
+                    .child(Text::title(self.title).color(tone_color))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_1()
+                            .min_w_0()
+                            .children(self.subtitle.map(|s| Text::ui(s).muted().ellipsize())),
+                    ),
+            })
             .children(self.header_actions)
             .children(close);
 
@@ -330,8 +353,9 @@ impl RenderOnce for Dialog {
                                 .flex_1()
                                 .min_h_0()
                                 .overflow_hidden()
-                                .p(theme.space.lg)
-                                .gap(theme.space.md)
+                                .when(!self.flush_body, |body| {
+                                    body.p(theme.space.lg).gap(theme.space.md)
+                                })
                                 .children(self.body),
                         )
                         .child(footer),

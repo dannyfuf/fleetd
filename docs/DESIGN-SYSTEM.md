@@ -631,12 +631,16 @@ one path.
 
 #### `Dialog`
 **Purpose.** The shared modal frame: scrim + card + 44 px header + 44 px footer.
-**Anatomy.** header = icon + title + subtitle, then `header_actions` (a search field, a segmented
-control) and the close ✕ at the right; footer = `footer_start` (a link-like control such as "Open
-config.json", after any legacy hints) on the left, the `actions` buttons right-aligned —
+**Anatomy.** header = icon + title + subtitle — or, with `header_fill`, one control in their place
+that takes the free width (Help's search field) — then `header_actions` (a search field, a
+segmented control) and the close ✕ at the right; body = padded, or edge to edge with
+`flush_body(true)` for a dialog that lays out its own panes (Help's sidebar and content);
+footer = `footer_start` (a link-like control such as "Open config.json", after any legacy
+hints) on the left, the `actions` buttons right-aligned —
 secondary first, the one primary last, each with its key chip.
 **API.** `Dialog::new(title).icon(Icon).subtitle(..).width(Pixels).height(Pixels).tone(Tone)
-.dismiss_action(Box<dyn Action>).on_dismiss(handler).header_actions(..).body(..)
+.dismiss_action(Box<dyn Action>).on_dismiss(handler).header_fill(..).header_actions(..)
+.flush_body(bool).body(..)
 .footer_start(..).actions(Vec<Button>).error(..).warning(..)`. Deprecated while the dialogs
 migrate: `.hints(..)`, `.hint_row(KeyHintRow)` and `.primary("⏎ Create")`, the bold label drawn
 when there are no `actions`.
@@ -647,7 +651,7 @@ runs in that dialog; the pointer dispatches it to the focused element as the key
 `Dialogs::dismiss_action()`, which a test holds to the keymap's `escape` rows.
 **Harness.** The ✕ paints `dialog.close`; footer buttons paint `dialog.button[N]`, `0` leftmost.
 **Widths.** 460 context/assign · 480 compact confirm · 520 quit · 560 create/clone/expanded
-confirm · 720 settings/prune · 880 help.
+confirm · 720 settings/prune · 880 card detail · 1040 help (clamped to the window).
 **States.** default · error (red footer line, dialog stays open).
 **Keyboard.** `Esc` closes. Buttons are not focusable (ADR 0023): each shows the key that is
 its keyboard path.
