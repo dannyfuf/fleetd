@@ -1,0 +1,39 @@
+# UX-SPEC §3.2 · TESTING-HARNESS.md §3 (`agents.sidebar.row[N]`) — the sidebar's Agents section
+# lists the context's native threads with their state, and a click goes to one the way the
+# palette's `go` does.
+#
+# A scripted Codex edit approval leaves one thread blocked on a person. Back in the Hub, its row
+# is amber with a `needs you` chip, and a click on it lands on that thread's tab with the
+# approval still open.
+fixture: agents
+await idle
+assert targets["agents.sidebar.row[0]"] absent
+
+key o
+await screen == Workspace 20000
+key ctrl-s A
+await agents.threads[0].provider == codex 20000
+click agents.composer
+type apply the README fix
+key enter
+await agents.threads[0].pending_gate exists 30000
+
+key ctrl-s s
+await screen == Hub 10000
+await targets["agents.sidebar.row[0]"] exists 10000
+shot sidebar-agents
+
+# Collapsed, the section is dots with tooltips.
+key H
+await targets["repos.rail"].w == 44
+assert targets["agents.sidebar.row[0]"] exists
+shot sidebar-agents-collapsed
+key H
+await targets["repos.rail"].w == 232
+
+click agents.sidebar.row[0]
+await screen == Workspace 20000
+await mode == Agent 10000
+assert agents.threads[0].pending_gate exists && overlay absent
+shot sidebar-agent-opened
+quit

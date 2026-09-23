@@ -200,8 +200,11 @@ pub struct AppState {
     /// `None` until they do, which means the width decides ([`AppState::detail_visible`]).
     /// Never focusable.
     pub detail_open: Option<bool>,
-    /// Whether the repos rail is collapsed to its 44 px icon rail (`H`).
+    /// Whether the Hub sidebar is collapsed to its icon column (`H`).
     pub rail_collapsed: bool,
+    /// The width the Hub sidebar's edge was dragged to; `None` is `metrics.sidebar_w`. Kept while
+    /// Fleet runs, not across restarts.
+    pub sidebar_w: Option<gpui::Pixels>,
     /// Whether the Workspace hides its header and tab strip (`ctrl-s z`).
     pub zoomed: bool,
     /// Session MRU: `ctrl-s w` jumps to [`Mru::alternate`].
@@ -315,6 +318,7 @@ impl AppState {
             filter: FilterState::default(),
             detail_open: None,
             rail_collapsed: false,
+            sidebar_w: None,
             zoomed: false,
             session_mru: Mru::default(),
             terminal_mru: HashMap::new(),

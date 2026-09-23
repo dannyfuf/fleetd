@@ -120,21 +120,44 @@ fn inspection(dirty: bool, unique: Option<u64>, merged: bool) -> WorktreeInspect
 
 /// The default theme metrics, which is what the documented §2.1 frame is measured against.
 fn pane_ch(width: f32, rail_collapsed: bool, detail_open: bool) -> f32 {
-    list_pane_ch(
-        width,
-        rail_collapsed,
-        detail_open,
-        &fleet_ui_kit::theme::Metrics::default(),
-    )
+    let metrics = fleet_ui_kit::theme::Metrics::default();
+    let sidebar = if rail_collapsed {
+        metrics.sidebar_collapsed_w
+    } else {
+        metrics.sidebar_w
+    };
+    list_pane_ch(width, sidebar, detail_open, &metrics)
 }
 
 #[test]
 fn the_ladder_matches_the_documented_frame() {
-    // §2.1: 1280 px gives the list 138 ch, and 92 ch with the detail panel inset.
-    assert!((pane_ch(1280.0, false, false) - 138.6).abs() < 0.2);
+    // §2.1: 1280 px gives the list 139 ch beside the 232 px sidebar, and 93 ch with the detail
+    // panel inset.
+    assert!((pane_ch(1280.0, false, false) - 139.7).abs() < 0.2);
     assert!((pane_ch(1280.0, true, false) - 164.8).abs() < 0.2);
     let inset = pane_ch(1280.0, false, true);
-    assert!((inset - 92.8).abs() < 0.2, "{inset}");
+    assert!((inset - 93.9).abs() < 0.2, "{inset}");
+}
+
+#[test]
+fn a_dragged_sidebar_narrows_the_list_and_stays_in_its_range() {
+    let metrics = fleet_ui_kit::theme::Metrics::default();
+    let mut state = AppState::new("/tmp/fleet-test", Instant::now());
+    assert_eq!(sidebar_width(&state, &metrics), metrics.sidebar_w);
+
+    state.sidebar_w = Some(gpui::px(300.0));
+    assert_eq!(sidebar_width(&state, &metrics), gpui::px(300.0));
+    let dragged = list_pane_ch(1280.0, sidebar_width(&state, &metrics), false, &metrics);
+    assert!(dragged < pane_ch(1280.0, false, false), "{dragged}");
+
+    state.sidebar_w = Some(gpui::px(900.0));
+    assert_eq!(sidebar_width(&state, &metrics), metrics.sidebar_max_w);
+    state.rail_collapsed = true;
+    assert_eq!(
+        sidebar_width(&state, &metrics),
+        metrics.sidebar_collapsed_w,
+        "`H` wins over a dragged width, and the width comes back with it"
+    );
 }
 
 #[test]

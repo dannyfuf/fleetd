@@ -680,8 +680,6 @@ pub struct Metrics {
     pub tile_chip_h: Pixels,
     /// 20 px round initials avatar (a card's assignee).
     pub avatar_size: Pixels,
-    /// 240 px repos rail (drag range 200-320).
-    pub rail_w: Pixels,
     /// 232 px sidebar (repositories and agents): its width until the user drags its edge.
     pub sidebar_w: Pixels,
     /// 200 px: the narrowest a dragged sidebar goes.
@@ -822,7 +820,6 @@ impl Default for Metrics {
             chip_h: px(22.0),
             tile_chip_h: px(18.0),
             avatar_size: px(20.0),
-            rail_w: px(240.0),
             sidebar_w: px(232.0),
             sidebar_min_w: px(200.0),
             sidebar_max_w: px(320.0),

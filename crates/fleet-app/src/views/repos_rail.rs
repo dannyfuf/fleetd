@@ -1,6 +1,11 @@
-//! Repository and clone rows for the Hub rail.
+//! The Hub sidebar (UX-SPEC §3.2): the repositories the worktree list is scoped to, the agents
+//! one click away, a collapse control at its foot and an edge the pointer can drag.
+//!
+//! Rows answer the pointer the way their keys do: a click on a repository selects it like `⏎`,
+//! its `⋯` and its right-click menu list `n` `e` `m` `d` (and `x` on a failed clone), and a
+//! click on an agent goes to it like the palette's `go`.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, rc::Rc};
 
 use fleet_core::{
     ids::{ContextId, JobId, RepoId},
@@ -8,17 +13,35 @@ use fleet_core::{
 };
 use fleet_proto::job::{JobKind, JobRecord, JobStatus};
 use fleet_ui_kit::{
-    ActiveTheme, ColumnAlign, HarnessTargetExt, ListView, Pane, PaneBorder, PaneHeader, Row,
-    RowColumn, StatusGlyph, StatusKind, Text, Truncate, truncate,
+    ButtonSize, Chip, ContextMenu, HarnessTargetExt, Icon, IconButton, IconSize, ListPointer,
+    ListView, Menu, MenuAnchor, MenuItem, NavItem, PopoverMenu, Sidebar, SidebarSection, StatusDot,
+    StatusGlyph, StatusKind, Text, Tone,
 };
-use gpui::{AnyElement, App, IntoElement, SharedString, UniformListScrollHandle, px};
+use gpui::{
+    Action, AnyElement, App, IntoElement, Pixels, SharedString, UniformListScrollHandle, Window,
+    div, prelude::*,
+};
 
-use crate::{presentation::parse_percent, views::first_run::EmptySurface};
+use crate::{
+    actions::{hub, repos},
+    presentation::parse_percent,
+    views::{first_run::EmptySurface, harness, worktrees_list::label},
+};
 
-/// Width of the collapsed icon rail (`H`, KEYMAP A22).
-pub const COLLAPSED_WIDTH: f32 = 44.0;
-/// Character budget of the rail's name column at the full 240 px width.
-const NAME_BUDGET: usize = 18;
+mod agents;
+
+pub use agents::{AgentRow, AgentTarget, agent_rows};
+
+/// The repositories section's title.
+const REPOS_TITLE: &str = "Repositories";
+/// The agents section's title.
+const AGENTS_TITLE: &str = "Agents";
+/// What the pinned scope row reads.
+const ALL_LABEL: &str = "All repositories";
+/// The chip an agent that needs you carries.
+const NEEDS_YOU: &str = "needs you";
+/// The accessible name of a row's `⋯` trigger.
+const MORE_ACTIONS: &str = "More actions";
 
 /// What a rail row stands for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +73,10 @@ pub struct RailRow {
     pub percent: Option<u8>,
     /// The concrete failed clone attempt that `Enter` must reveal in Jobs.
     pub job: Option<JobId>,
+    /// `1 issue` / `3 issues`: worktrees whose hooks failed or whose host is unreachable.
+    pub issues: Option<SharedString>,
+    /// What a clone row says in its trailing slot: `cloning 40%`, `cloning…`, `failed`.
+    pub status: Option<SharedString>,
 }
 
 /// How loudly a glyph asks for attention (§3.2).
@@ -101,6 +128,7 @@ fn clone_target(target: &str) -> &str {
 #[derive(Default)]
 pub struct RepoGlyphs<'a> {
     worst: HashMap<&'a RepoId, StatusKind>,
+    issues: HashMap<&'a RepoId, usize>,
 }
 
 impl<'a> RepoGlyphs<'a> {
@@ -110,6 +138,14 @@ impl<'a> RepoGlyphs<'a> {
         if rank(glyph) > rank(*slot) {
             *slot = glyph;
         }
+        if matches!(glyph, StatusKind::Degraded | StatusKind::HostUnreachable) {
+            *self.issues.entry(repo).or_default() += 1;
+        }
+    }
+
+    /// How many of a repository's worktrees are degraded or on an unreachable host.
+    fn issues(&self, repo: &RepoId) -> usize {
+        self.issues.get(repo).copied().unwrap_or_default()
     }
 
     /// A repository with no worktrees aggregates to the quietest glyph.
@@ -184,6 +220,8 @@ pub fn rail_rows(
                 count: Some(count),
                 percent: None,
                 job: None,
+                issues: issue_label(glyphs.issues(&repo.id)),
+                status: None,
             }
         })
         .collect();
@@ -195,6 +233,10 @@ pub fn rail_rows(
             .map(|clone| {
                 let failed = clone.status == CloneStatus::Failed;
                 let attempt = clone_attempts.get(clone.id.as_str()).copied();
+                let percent = attempt
+                    .filter(|job| job_is_active(&job.status))
+                    .and_then(|job| job.progress.as_deref())
+                    .and_then(parse_percent);
                 RailRow {
                     kind: if failed {
                         RailKind::CloneFailed
@@ -216,11 +258,10 @@ pub fn rail_rows(
                         StatusKind::Cloning
                     },
                     count: None,
-                    percent: attempt
-                        .filter(|job| job_is_active(&job.status))
-                        .and_then(|job| job.progress.as_deref())
-                        .and_then(parse_percent),
+                    percent,
                     job: failed.then(|| attempt.map(|job| job.id.clone())).flatten(),
+                    issues: None,
+                    status: Some(clone_status(failed, percent)),
                 }
             }),
     );
@@ -238,9 +279,29 @@ pub fn rail_rows(
         count: Some(total),
         percent: None,
         job: None,
+        issues: None,
+        status: None,
     }];
     all.extend(rows);
     all
+}
+
+/// `1 issue`, `3 issues`, or nothing at zero (§1.2).
+fn issue_label(issues: usize) -> Option<SharedString> {
+    match issues {
+        0 => None,
+        1 => Some(SharedString::new_static("1 issue")),
+        many => Some(SharedString::from(format!("{many} issues"))),
+    }
+}
+
+/// A clone row's words: `failed`, `cloning 40%`, or `cloning…` until a percent is parseable.
+fn clone_status(failed: bool, percent: Option<u8>) -> SharedString {
+    match (failed, percent) {
+        (true, _) => SharedString::new_static("failed"),
+        (false, Some(percent)) => SharedString::from(format!("cloning {percent}%")),
+        (false, None) => SharedString::new_static("cloning\u{2026}"),
+    }
 }
 
 /// The filter query (§3.10) never hides the pinned `All` row, so the scope is never lost.
@@ -252,25 +313,48 @@ pub fn matches(row: &RailRow, query: &str) -> bool {
     row.name.to_lowercase().contains(&query.to_lowercase())
 }
 
-/// Everything the rail needs to draw itself.
-pub struct RailProps<Rows = Vec<RailRow>> {
-    /// A live filter editor that replaces the ordinary pane header.
+/// `(new width, window, cx)`: what a drag of the sidebar's edge reports.
+pub type ResizeHandler = Rc<dyn Fn(Pixels, &mut Window, &mut App)>;
+
+/// What the sidebar's rows and edge do when the pointer uses them. Built by the Hub, which owns
+/// the cursor, the scope and the bridge.
+#[derive(Clone)]
+pub struct SidebarHandlers {
+    /// A repository row: a click selects (like `⏎`), a double-click opens, a right-click selects
+    /// before its menu opens.
+    pub repos: ListPointer,
+    /// An agent row: a click goes to it.
+    pub agents: ListPointer,
+    /// A drag of the edge, with the new width.
+    pub resize: ResizeHandler,
+}
+
+/// Everything the sidebar needs to draw itself.
+pub struct RailProps<Rows = Rc<[RailRow]>> {
+    /// A live filter editor that replaces the repositories title.
     pub header_override: Option<AnyElement>,
-    /// The rows, already filtered.
+    /// The repository rows, already filtered.
     pub rows: Rows,
+    /// The Agents section's rows; the section is hidden when there are none.
+    pub agents: Rc<[AgentRow]>,
     /// The cursor index into `rows`.
     pub cursor: usize,
-    /// Whether the rail owns the keyboard (blue cursor bar and focus ring).
+    /// Whether the sidebar owns the keyboard (the cursor bar and the focus ring).
     pub focused: bool,
-    /// `H`: draw the 44 px icon rail instead of the 240 px rail.
+    /// `H`: draw the icon column instead of the full sidebar.
     pub collapsed: bool,
+    /// The width the edge was dragged to, if it was.
+    pub width: Option<Pixels>,
     /// The active context's display name, for the empty state.
     pub context_name: SharedString,
     /// The live filter query, when one is set.
     pub filter: Option<SharedString>,
+    /// What the pointer does.
+    pub handlers: SidebarHandlers,
 }
 
-/// Renders the rail: header, rows, and the §3.13 empty states.
+/// Renders the sidebar: the repositories, the agents, the collapse control and the §3.13 empty
+/// states.
 #[must_use]
 pub fn render(
     props: RailProps<impl AsRef<[RailRow]> + 'static>,
@@ -278,92 +362,267 @@ pub fn render(
     cx: &App,
 ) -> AnyElement {
     let RailProps {
-        rows,
         header_override,
+        rows,
+        agents,
         cursor,
         focused,
         collapsed,
+        width,
         context_name,
         filter,
+        handlers,
     } = props;
+    let row_h = fleet_ui_kit::ActiveTheme::theme(cx).metrics.row_h;
 
+    // Only the `All` row survived the filter: the rail has nothing to offer. A collapsed rail has
+    // no room for the sentence, so it shows nothing rather than a clipped one.
     let repo_rows = rows.as_ref().len().saturating_sub(1);
-    let mut header = PaneHeader::new("Repos").total(repo_rows);
-    if let Some(query) = filter.clone() {
-        header = header.filter_chip(query);
-    }
-    // No stale chip here: while fleetd is gone the list header carries the one `Stale · <age>`
-    // chip for the whole screen (§3.12 C).
-
-    let empty = match filter.clone() {
-        Some(query) => EmptySurface::Filter.render(Some(&query)),
-        None => EmptySurface::Repos.render(Some(&context_name)),
+    let empty = if collapsed {
+        div().into_any_element()
+    } else {
+        match filter.clone() {
+            Some(query) => EmptySurface::Filter.render(Some(&query)),
+            None => EmptySurface::Repos.render(Some(&context_name)),
+        }
     };
-
-    // Only the `All` row survived the filter: the rail has nothing to offer.
-    let row_count = rows.as_ref().len();
-    let body_rows = rows;
+    let row_count = if repo_rows == 0 {
+        0
+    } else {
+        rows.as_ref().len()
+    };
+    let pointer = handlers.repos.clone();
     let list = ListView::new(
         "hub-repos-rail",
-        if repo_rows == 0 { 0 } else { row_count },
-        move |index, is_cursor, _window, _cx| {
-            let Some(row) = body_rows.as_ref().get(index) else {
-                return gpui::div().into_any_element();
+        row_count,
+        move |ix, is_cursor, _window, _cx| {
+            let Some(row) = rows.as_ref().get(ix) else {
+                return div().into_any_element();
             };
-            rail_row(row, is_cursor, focused, collapsed)
-                .harness_target_indexed("repos.row", index)
-                .into_any_element()
+            repo_item(
+                row,
+                &ItemContext {
+                    ix,
+                    is_cursor,
+                    focused,
+                    collapsed,
+                    pointer: &pointer,
+                },
+            )
         },
     )
+    .row_height(row_h)
     .cursor(cursor)
     .track_scroll(scroll)
     .empty(empty);
 
-    let width = if collapsed {
-        px(COLLAPSED_WIDTH)
-    } else {
-        cx.theme().metrics.rail_w
-    };
-    let mut pane = Pane::fixed(width)
-        .border(PaneBorder::Right)
-        .focused(focused)
+    let mut repos_section = SidebarSection::new(REPOS_TITLE)
+        .action(repos_actions(filter))
         .body(list);
-    if !collapsed {
-        pane = pane.header(header_override.unwrap_or_else(|| header.into_any_element()));
+    // A virtualized list cannot measure itself: the section is its rows' height, and scrolls
+    // when the sidebar is shorter, so the Agents section sits right under the last repository.
+    if row_count > 0 {
+        repos_section = repos_section.body_height(row_h * row_count as f32);
     }
-    // `H` (KEYMAP A22) is the rail's only collapse affordance — Fleet draws no collapse button
-    // — so the rail's own rect is what a scenario reads to tell 44 px collapsed from the full
-    // rail, and what it clicks to give the rail the pointer.
-    pane.harness_target("repos.rail").into_any_element()
+    if let Some(header) = header_override {
+        repos_section = repos_section.header(header);
+    }
+    let mut sidebar = Sidebar::new("hub-sidebar")
+        .width(width)
+        .collapsed(collapsed)
+        .focused(focused)
+        .section(repos_section);
+    if !agents.is_empty() {
+        sidebar = sidebar.section(agents_section(&agents, collapsed, &handlers.agents));
+    }
+    let resize = handlers.resize;
+    // The sidebar's own rect stays the collapse oracle (TESTING-HARNESS §3): `sidebar_w` or the
+    // dragged width expanded, `sidebar_collapsed_w` collapsed.
+    sidebar
+        .footer(collapse_button(collapsed))
+        .on_resize(move |width, window, cx| resize(width, window, cx))
+        .handle_target("repos.resize")
+        .harness_target("repos.rail")
+        .into_any_element()
 }
 
-/// One rail row: `[glyph][name][count]`, or just the glyph when collapsed.
-fn rail_row(row: &RailRow, is_cursor: bool, focused: bool, collapsed: bool) -> AnyElement {
-    let glyph = StatusGlyph::new(row.glyph).id(rail_row_id(row));
-    let mut element = Row::new()
-        .leading(glyph)
-        .selected(is_cursor)
-        .cursor(is_cursor && focused);
-    if collapsed {
-        return element.into_any_element();
-    }
+/// The repositories title's controls: the retained filter, then `+` (Clone repo, `n`).
+fn repos_actions(filter: Option<SharedString>) -> AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .children(filter.map(|query| Chip::labeled(Icon::Search, query)))
+        .child(
+            IconButton::new("repos-clone", Icon::Plus, label(&repos::Clone))
+                .size(ButtonSize::Compact)
+                .action(Box::new(repos::Clone))
+                .harness_target("repos.clone"),
+        )
+        .into_any_element()
+}
 
-    element = element.column(RowColumn::flex(
-        Text::ui(truncate(row.name.as_ref(), NAME_BUDGET, Truncate::Middle))
-            .tone(row_tone(row.kind)),
-    ));
-    let trailing = match (row.kind, row.percent, row.count) {
-        (RailKind::CloneFailed, _, _) => Some(Text::ui("failed").faint()),
-        (RailKind::Cloning, Some(percent), _) => Some(Text::ui(format!("{percent}%")).muted()),
-        (_, _, Some(count)) => Some(Text::ui(count.to_string()).muted()),
-        _ => None,
+/// The foot of the sidebar: the pointer's `H`.
+fn collapse_button(collapsed: bool) -> impl IntoElement {
+    IconButton::new(
+        "repos-collapse",
+        if collapsed {
+            Icon::PanelLeftOpen
+        } else {
+            Icon::PanelLeftClose
+        },
+        label(&hub::ToggleRepoRail),
+    )
+    .size(ButtonSize::Compact)
+    .action(Box::new(hub::ToggleRepoRail))
+    .harness_target("repos.collapse")
+}
+
+/// Everything one repository item needs besides its row.
+struct ItemContext<'a> {
+    ix: usize,
+    is_cursor: bool,
+    focused: bool,
+    collapsed: bool,
+    pointer: &'a ListPointer,
+}
+
+/// One repository item: `[dot][name][issue chip][count]`, a clone's spinner and progress, or the
+/// pinned `All repositories`; every item but `All` carries its `⋯` and right-click menu.
+fn repo_item(row: &RailRow, ctx: &ItemContext<'_>) -> AnyElement {
+    let ix = ctx.ix;
+    let label = if row.kind == RailKind::All {
+        SharedString::new_static(ALL_LABEL)
+    } else {
+        row.name.clone()
     };
-    if let Some(trailing) = trailing {
-        element = element.column(
-            RowColumn::fixed(fleet_ui_kit::theme::ch(7.0), trailing).align(ColumnAlign::Right),
-        );
+    let item = NavItem::new(("repo-item", ix), label)
+        .leading(leading(row))
+        .selected(ctx.is_cursor)
+        .cursor(ctx.is_cursor && ctx.focused)
+        .collapsed(ctx.collapsed)
+        .pointer(ctx.pointer, ix)
+        .when(row.kind == RailKind::Cloning, |item| {
+            item.tone(Tone::Muted).progress(row.percent)
+        });
+    let item = with_trailing(item, row, ix);
+    if row.kind == RailKind::All {
+        return item
+            .harness_target_indexed("repos.row", ix)
+            .into_any_element();
     }
-    element.into_any_element()
+    let kind = row.kind;
+    ContextMenu::new(
+        ("repo-menu", ix),
+        item.hover_action(more_menu(ix, kind))
+            .harness_target_indexed("repos.row", ix),
+    )
+    .menu(move |menu, _, _| repo_menu(menu, kind))
+    .into_any_element()
+}
+
+/// The trailing facts of a repository item, in the order the mockup reads them: the issue chip,
+/// then the count or the clone's words.
+fn with_trailing(item: NavItem, row: &RailRow, ix: usize) -> NavItem {
+    let item = match &row.issues {
+        Some(issues) => item.trailing(
+            Chip::new()
+                .text(issues.clone())
+                .tone(Tone::Warning)
+                .filled(true)
+                .id(("repo-issues", ix)),
+        ),
+        None => item,
+    };
+    match (&row.status, row.count) {
+        (Some(status), _) if row.kind == RailKind::CloneFailed => {
+            item.trailing(Text::caption(status.clone()).faint())
+        }
+        (Some(status), _) => item.trailing(Text::caption(status.clone()).muted()),
+        (None, Some(count)) => item.trailing(Text::caption(count.to_string()).muted()),
+        (None, None) => item,
+    }
+}
+
+/// The leading mark: the grid for `All`, a dot for a repository, the clone's own glyph.
+fn leading(row: &RailRow) -> AnyElement {
+    match row.kind {
+        RailKind::All => Icon::LayoutGrid
+            .el()
+            .size(IconSize::Small)
+            .tone(Tone::Secondary)
+            .into_any_element(),
+        RailKind::Repo => StatusDot::small(dot_tone(row.glyph)).into_any_element(),
+        RailKind::Cloning | RailKind::CloneFailed => StatusGlyph::new(row.glyph)
+            .id(rail_row_id(row))
+            .into_any_element(),
+    }
+}
+
+/// A repository's dot, from the worst-of glyph of its worktrees: amber when a finished agent
+/// waits for you, green while one works, lighter while any session is alive, dim otherwise.
+/// Failures are the issue chip's to say, not the dot's.
+const fn dot_tone(glyph: StatusKind) -> Tone {
+    match glyph {
+        StatusKind::AgentFinished => Tone::Warning,
+        StatusKind::AgentWorking => Tone::Success,
+        StatusKind::Attached | StatusKind::DetachedAwake | StatusKind::JobRunning => {
+            Tone::Secondary
+        }
+        _ => Tone::Muted,
+    }
+}
+
+/// The `⋯` trigger drawn while the item is hovered: the same menu as its right-click.
+fn more_menu(ix: usize, kind: RailKind) -> impl IntoElement {
+    PopoverMenu::new(("repo-more", ix))
+        .anchor(MenuAnchor::BottomRight)
+        .trigger_with(move |open, _, _| {
+            IconButton::new(("repo-more-trigger", ix), Icon::Ellipsis, MORE_ACTIONS)
+                .size(ButtonSize::Compact)
+                .selected(open)
+        })
+        .menu(move |menu, _, _| repo_menu(menu, kind))
+        .harness_target(harness::name(|| format!("repos.row[{ix}].menu")))
+}
+
+/// Every action a repository row's keys run, each with its key from the live keymap. A clone in
+/// flight only offers another clone; a failed one offers `x` first, which is only bound there.
+pub(crate) fn repo_menu(menu: Menu, kind: RailKind) -> Menu {
+    let item = |action: Box<dyn Action>| MenuItem::new(label(action.as_ref())).action(action);
+    match kind {
+        RailKind::Repo => menu
+            .item(item(Box::new(repos::Clone)))
+            .item(item(Box::new(repos::EditHooks)))
+            .item(item(Box::new(repos::MoveToContext)))
+            .separator()
+            .item(item(Box::new(repos::Delete)).destructive(true)),
+        RailKind::CloneFailed => menu
+            .item(item(Box::new(repos::DismissClone)))
+            .item(item(Box::new(repos::Clone))),
+        RailKind::All | RailKind::Cloning => menu.item(item(Box::new(repos::Clone))),
+    }
+}
+
+/// The Agents section: one item per thread or window, a dot and, when it waits, a chip.
+fn agents_section(rows: &[AgentRow], collapsed: bool, pointer: &ListPointer) -> SidebarSection {
+    SidebarSection::new(AGENTS_TITLE).body(div().flex().flex_col().children(
+        rows.iter().enumerate().map(|(ix, row)| {
+            NavItem::new(("agent-item", ix), row.label.clone())
+                .leading(StatusDot::small(row.dot))
+                .when(row.needs_you, |item| {
+                    item.trailing(
+                        Chip::new()
+                            .text(NEEDS_YOU)
+                            .tone(Tone::Warning)
+                            .filled(true)
+                            .id(("agent-needs-you", ix)),
+                    )
+                })
+                .collapsed(collapsed)
+                .pointer(pointer, ix)
+                .harness_target_indexed("agents.sidebar.row", ix)
+        }),
+    ))
 }
 
 fn rail_row_id(row: &RailRow) -> SharedString {
@@ -373,325 +632,5 @@ fn rail_row_id(row: &RailRow) -> SharedString {
     )
 }
 
-/// A failed clone row states its failure in the name's contrast, never in a hue of its own.
-fn row_tone(kind: RailKind) -> fleet_ui_kit::Tone {
-    if kind == RailKind::Cloning {
-        fleet_ui_kit::Tone::Secondary
-    } else {
-        fleet_ui_kit::Tone::Default
-    }
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn repo(owner: &str, name: &str, context: &str) -> Repo {
-        Repo {
-            id: RepoId::try_from(format!("{owner}/{name}"))
-                .unwrap_or_else(|error| panic!("{error}")),
-            owner: owner.to_owned(),
-            name: name.to_owned(),
-            url: format!("git@github.com:{owner}/{name}.git"),
-            context_id: ContextId::try_from(context).unwrap_or_else(|error| panic!("{error}")),
-            default_branch: "main".to_owned(),
-            path: format!("/home/u/.fleet/repos/{owner}/{name}"),
-            cloned_at: "2026-09-01T10:00:00Z".to_owned(),
-            hooks: fleet_core::model::RepoHooks::default(),
-        }
-    }
-
-    fn worktree(repo_id: &str, slug: &str) -> Worktree {
-        Worktree {
-            id: fleet_core::ids::WorktreeId::try_from(format!("{repo_id}#{slug}"))
-                .unwrap_or_else(|error| panic!("{error}")),
-            repo_id: RepoId::try_from(repo_id).unwrap_or_else(|error| panic!("{error}")),
-            slug: slug.to_owned(),
-            branch: slug.to_owned(),
-            base_ref: "origin/main".to_owned(),
-            path: format!("/home/u/.fleet/worktrees/{slug}"),
-            session: format!("s/{slug}"),
-            host: None,
-            created_at: "2026-09-02T10:00:00Z".to_owned(),
-            last_opened_at: None,
-            degraded: None,
-        }
-    }
-
-    fn clone_job(owner: &str, name: &str, context: &str, status: CloneStatus) -> CloneJob {
-        CloneJob {
-            id: RepoId::try_from(format!("{owner}/{name}"))
-                .unwrap_or_else(|error| panic!("{error}")),
-            owner: owner.to_owned(),
-            name: name.to_owned(),
-            url: format!("git@github.com:{owner}/{name}.git"),
-            context_id: ContextId::try_from(context).unwrap_or_else(|error| panic!("{error}")),
-            default_branch: "main".to_owned(),
-            path: "/tmp/repo".to_owned(),
-            staging_path: "/tmp/staging".to_owned(),
-            log_path: "/tmp/clone.log".to_owned(),
-            pid: None,
-            started_at: "2026-09-04T10:00:00Z".to_owned(),
-            status,
-            error: None,
-        }
-    }
-
-    fn job(
-        id: &str,
-        kind: JobKind,
-        target: &str,
-        status: JobStatus,
-        started_at: &str,
-        progress: Option<&str>,
-    ) -> JobRecord {
-        JobRecord {
-            id: JobId::try_from(id).unwrap_or_else(|error| panic!("{error}")),
-            kind,
-            target: target.to_owned(),
-            title: id.to_owned(),
-            status,
-            progress: progress.map(str::to_owned),
-            log_path: "/tmp/job.log".to_owned(),
-            started_at: started_at.to_owned(),
-            finished_at: None,
-            cancellable: true,
-            retryable: true,
-        }
-    }
-
-    #[test]
-    fn unknown_outranks_every_other_session_state() {
-        assert_eq!(
-            aggregate_glyph([
-                StatusKind::NoSession,
-                StatusKind::Attached,
-                StatusKind::Unknown
-            ]),
-            StatusKind::Unknown
-        );
-        assert_eq!(
-            aggregate_glyph([StatusKind::NoSession, StatusKind::Attached]),
-            StatusKind::Attached
-        );
-        assert_eq!(
-            aggregate_glyph([StatusKind::Sleeping, StatusKind::NoSession]),
-            StatusKind::Sleeping
-        );
-        assert_eq!(aggregate_glyph([]), StatusKind::NoSession);
-    }
-
-    #[test]
-    fn an_unreachable_host_aggregates_like_unknown() {
-        assert_eq!(
-            aggregate_glyph([StatusKind::Attached, StatusKind::HostUnreachable]),
-            StatusKind::HostUnreachable
-        );
-    }
-
-    #[test]
-    fn finished_agents_aggregate_above_working_and_plain_sessions() {
-        assert_eq!(
-            aggregate_glyph([
-                StatusKind::Attached,
-                StatusKind::AgentWorking,
-                StatusKind::AgentFinished,
-            ]),
-            StatusKind::AgentFinished
-        );
-        assert_eq!(
-            aggregate_glyph([StatusKind::AgentFinished, StatusKind::Unknown]),
-            StatusKind::Unknown
-        );
-    }
-
-    #[test]
-    fn names_disambiguate_only_on_collision() {
-        let repos = vec![
-            repo("buk", "payroll", "buk"),
-            repo("acme", "payroll", "buk"),
-            repo("buk", "www", "buk"),
-        ];
-        let rows = rail_rows(None, &repos, &[], &[], &RepoGlyphs::default(), &[]);
-        assert_eq!(rows[2].name.as_ref(), "buk/payroll");
-        assert_eq!(rows[3].name.as_ref(), "www");
-    }
-
-    #[test]
-    fn all_is_pinned_first_and_counts_every_worktree_in_the_context() {
-        let repos = vec![repo("buk", "www", "buk"), repo("buk", "payroll", "buk")];
-        let worktrees = vec![
-            worktree("buk/payroll", "a"),
-            worktree("buk/payroll", "b"),
-            worktree("buk/www", "c"),
-        ];
-        let rows = rail_rows(
-            Some(&repos[0].context_id),
-            &repos,
-            &[],
-            &worktrees,
-            &RepoGlyphs::default(),
-            &[],
-        );
-        assert_eq!(rows[0].kind, RailKind::All);
-        assert_eq!(rows[0].count, Some(3));
-        assert_eq!(rows[1].name.as_ref(), "payroll");
-        assert_eq!(rows[1].count, Some(2));
-        assert_eq!(rows[2].name.as_ref(), "www");
-    }
-
-    #[test]
-    fn clones_sort_where_the_repo_will_live() {
-        let repos = vec![repo("buk", "aaa", "buk"), repo("buk", "zzz", "buk")];
-        let clones = vec![clone_job("buk", "mmm", "buk", CloneStatus::Cloning)];
-        let rows = rail_rows(
-            Some(&repos[0].context_id),
-            &repos,
-            &clones,
-            &[],
-            &RepoGlyphs::default(),
-            &[],
-        );
-        let names: Vec<&str> = rows.iter().map(|row| row.name.as_ref()).collect();
-        assert_eq!(names, vec!["All", "aaa", "mmm", "zzz"]);
-        assert_eq!(rows[2].kind, RailKind::Cloning);
-        assert_eq!(rows[2].glyph, StatusKind::Cloning);
-    }
-
-    #[test]
-    fn a_failed_clone_keeps_its_row_until_dismissed() {
-        let clones = vec![clone_job("buk", "old-api", "buk", CloneStatus::Failed)];
-        let context = ContextId::try_from("buk").unwrap_or_else(|error| panic!("{error}"));
-        let rows = rail_rows(
-            Some(&context),
-            &[],
-            &clones,
-            &[],
-            &RepoGlyphs::default(),
-            &[],
-        );
-        assert_eq!(rows[1].kind, RailKind::CloneFailed);
-        assert_eq!(rows[1].glyph, StatusKind::CloneFailed);
-    }
-
-    #[test]
-    fn failed_clone_opens_its_own_job() {
-        let clones = vec![clone_job("buk", "old-api", "buk", CloneStatus::Failed)];
-        let failed = job(
-            "job-clone-failed",
-            JobKind::Clone,
-            "buk/old-api:startup-reconcile",
-            JobStatus::Failed {
-                error: "network".to_owned(),
-            },
-            "2026-09-04T10:00:00Z",
-            None,
-        );
-        let context = ContextId::try_from("buk").unwrap_or_else(|error| panic!("{error}"));
-        let rows = rail_rows(
-            Some(&context),
-            &[],
-            &clones,
-            &[],
-            &RepoGlyphs::default(),
-            std::slice::from_ref(&failed),
-        );
-        assert_eq!(rows[1].job.as_ref(), Some(&failed.id));
-    }
-
-    #[test]
-    fn child_delete_does_not_mark_repo_deleting() {
-        let repos = vec![repo("buk", "payroll", "buk")];
-        let child_delete = job(
-            "job-delete-child",
-            JobKind::DeleteWorktree,
-            "buk/payroll#feature:attempt-1",
-            JobStatus::Running,
-            "2026-09-04T10:00:00Z",
-            None,
-        );
-        let rows = rail_rows(
-            Some(&repos[0].context_id),
-            &repos,
-            &[],
-            &[],
-            &RepoGlyphs::default(),
-            &[child_delete],
-        );
-        assert_eq!(rows[1].kind, RailKind::Repo);
-    }
-
-    #[test]
-    fn clone_progress_uses_current_attempt() {
-        let clones = vec![clone_job("buk", "api", "buk", CloneStatus::Cloning)];
-        let jobs = vec![
-            job(
-                "job-old",
-                JobKind::Clone,
-                "buk/api",
-                JobStatus::Failed {
-                    error: "network".to_owned(),
-                },
-                "2026-09-04T10:00:00Z",
-                Some("25%"),
-            ),
-            job(
-                "job-current",
-                JobKind::Clone,
-                "buk/api:startup-reconcile",
-                JobStatus::Running,
-                "2026-09-04T10:01:00Z",
-                Some("70%"),
-            ),
-        ];
-        let context = ContextId::try_from("buk").unwrap_or_else(|error| panic!("{error}"));
-        let rows = rail_rows(
-            Some(&context),
-            &[],
-            &clones,
-            &[],
-            &RepoGlyphs::default(),
-            &jobs,
-        );
-        assert_eq!(rows[1].percent, Some(70));
-    }
-
-    #[test]
-    fn same_name_clone_rows_have_distinct_identity() {
-        let clones = vec![
-            clone_job("buk", "api", "buk", CloneStatus::Cloning),
-            clone_job("acme", "api", "buk", CloneStatus::Cloning),
-        ];
-        let context = ContextId::try_from("buk").unwrap_or_else(|error| panic!("{error}"));
-        let rows = rail_rows(
-            Some(&context),
-            &[],
-            &clones,
-            &[],
-            &RepoGlyphs::default(),
-            &[],
-        );
-        assert_eq!(rows[1].name.as_ref(), "acme/api");
-        assert_eq!(rows[2].name.as_ref(), "buk/api");
-        assert_ne!(rail_row_id(&rows[1]), rail_row_id(&rows[2]));
-    }
-
-    #[test]
-    fn filtering_keeps_the_all_row() {
-        let repos = vec![repo("buk", "payroll", "buk"), repo("buk", "www", "buk")];
-        let context = repos[0].context_id.clone();
-        let rows = rail_rows(
-            Some(&context),
-            &repos,
-            &[],
-            &[],
-            &RepoGlyphs::default(),
-            &[],
-        );
-        let filtered: Vec<_> = rows.iter().filter(|row| matches(row, "pay")).collect();
-        assert_eq!(filtered.len(), 2);
-        assert_eq!(filtered[0].kind, RailKind::All);
-        assert_eq!(filtered[1].name.as_ref(), "payroll");
-        assert_eq!(rows.iter().filter(|row| matches(row, "nothing")).count(), 1);
-    }
-}
+mod tests;

@@ -3,7 +3,7 @@
 # The title bar's section nav is the Hub control with an `on_select`, so that is what the click
 # half of this scenario drives. Worktree rows answer the pointer too — click, double-click,
 # right-click, their hover buttons and ⋯ menu — and `hub/worktrees-pointer.scenario` drives them;
-# the rail and PR rows are named for the pointer but still opened from the keyboard.
+# `hub/sidebar-pointer.scenario` drives the sidebar's repositories, its menus, collapse and edge.
 fixture: one-repo
 await idle
 assert screen == Hub && hub_tab == Worktrees

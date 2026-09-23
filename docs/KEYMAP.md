@@ -105,7 +105,7 @@ behind it (`shell/root/focus.rs`, `focus_owner`).
 | `!` | focus the sticky error slot: the last failed job, offering `R retry` [A18] |
 | `X` | dismiss the sticky error slot (its ✕); the failed jobs stay in the Jobs panel |
 | `i` | toggle the detail panel (never focusable; it mirrors the cursor row) |
-| `H` | collapse / expand the repos rail (240 ↔ 44 px icon rail) [A22] |
+| `H` | collapse / expand the Hub sidebar (232 ↔ 44 px icon column; also its foot button) [A22] |
 | `a` / `A` | open the floating Claude / Codex agent popup [A21] |
 | `r` | refresh (status, PRs, discovery) — runs as a job, never blocks |
 | `U` | update Fleet (job) |

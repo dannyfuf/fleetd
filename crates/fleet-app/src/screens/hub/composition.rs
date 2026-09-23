@@ -29,6 +29,7 @@ impl HubScreen {
             let width = f32::from(viewport.width);
             let model = self.hub.read(cx).prepared.clone();
             let handlers = ctx.row_handlers();
+            let sidebar = ctx.sidebar_handlers(bridge);
             self.body(
                 state.read(cx),
                 self.hub.read(cx),
@@ -37,6 +38,7 @@ impl HubScreen {
                     width,
                     now,
                     handlers: &handlers,
+                    sidebar: &sidebar,
                 },
                 cx,
             )
@@ -141,6 +143,7 @@ impl HubScreen {
             width,
             now,
             handlers,
+            sidebar,
         } = frame;
         let stale = state
             .snapshot_age(Instant::now())
@@ -172,23 +175,22 @@ impl HubScreen {
                             .into_any_element()
                     }),
                 rows: model.rail.clone(),
+                agents: hub.agents.clone(),
                 cursor: state.cursors.repos,
                 focused: state.hub_pane == HubPane::Repos,
                 collapsed: state.rail_collapsed,
+                width: state.sidebar_w,
                 context_name: context_name.clone(),
                 filter: filter.clone().filter(|_| state.hub_pane == HubPane::Repos),
+                handlers: sidebar.clone(),
             },
             &self.rail_scroll,
             cx,
         );
 
         let detail_open = state.detail_visible(!detail_is_docked(width));
-        let pane_ch = list_pane_ch(
-            width,
-            state.rail_collapsed,
-            detail_open,
-            &cx.theme().metrics,
-        );
+        let sidebar_w = sidebar_width(state, &cx.theme().metrics);
+        let pane_ch = list_pane_ch(width, sidebar_w, detail_open, &cx.theme().metrics);
         let scope_name = match &state.scope {
             RepoScope::All => SharedString::new_static("All"),
             RepoScope::Repo(repo) => SharedString::from(repo.name().to_owned()),
@@ -295,15 +297,11 @@ impl HubScreen {
             }
         };
 
-        let mut split = SplitLayout::horizontal()
+        let split = SplitLayout::horizontal()
             .leading(rail)
             .trailing(list)
-            .divider(false);
-        if state.rail_collapsed {
-            split = split.leading_size(gpui::px(repos_rail::COLLAPSED_WIDTH));
-        } else {
-            split = split.leading_size(cx.theme().metrics.rail_w);
-        }
+            .divider(false)
+            .leading_size(sidebar_w);
 
         let Some(detail) = detail_open
             .then(|| self.detail(state, hub, model, now, cx))

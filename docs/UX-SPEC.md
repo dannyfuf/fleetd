@@ -92,15 +92,15 @@ Responsive ladders are expressed in **ch of the pane that owns the columns**, no
 ┌──────────────────────────────────────────────────────────────────────────────────┐
 │ ●●● [A] Acme ⌄ [Worktrees 4│Pull requests 3│Board 5] [⌕ Search or run a command :] ● 1 needs you ⟳ 2 jobs ? ⚙ │ 44  title bar
 ├──────────────┬───────────────────────────────────────────────────────────────────┤
-│ REPOS      6 │ WORKTREES · payroll                          8/12      1–8/12     │ 30  pane headers
+│ Repositories+│ WORKTREES · payroll                          8/12      1–8/12     │ 30  pane headers
 │──────────────│───────────────────────────────────────────────────────────────────│
-│▌◉ All     27 │ ◉ feat/payroll-fix ✎   buk/payroll  ⚡claude,:3000  #412 CI    2h ▏│ 30  rows
-│  ◉ payroll 8 │ ☾ fix/rut-validator    buk/payroll                 #408 Appr   1d ▏│
-│  · fleetd  3 │ · spike/gpui-vt ☁devbox dannyfuf/fleetd                       3d  │
+│▌▦ All     27 │ ◉ feat/payroll-fix ✎   buk/payroll  ⚡claude,:3000  #412 CI    2h ▏│ 30  rows
+│  • payroll 8 │ ☾ fix/rut-validator    buk/payroll                 #408 Appr   1d ▏│
+│  • fleetd  3 │ · spike/gpui-vt ☁devbox dannyfuf/fleetd                       3d  │
 │  ⟳ nixos     │ ▲ chore/deps           buk/www      ⚠ hooks failed             5d  │
 │  ✕ old-api   │ ? api-poc  ☁devbox     buk/api      offline                   3d  │
 │              │                                                                   │
-│    240 px    │                     flex — 1039 px (138 ch)                       │
+│    232 px    │                     flex — 1048 px (139 ch)                       │
 ├──────────────┴───────────────────────────────────────────────────────────────────┤
 │ ● fleetd  buk › payroll › feat/payroll-fix     ⟳ clone nixos 40%  +1   Shortcuts ? │ 28  status bar
 └──────────────────────────────────────────────────────────────────────────────────┘
@@ -110,7 +110,7 @@ Responsive ladders are expressed in **ch of the pane that owns the columns**, no
 ```
 
 The detail panel is **open by default** at 1120 px and wider (§3.4): the worktrees list shrinks by
-**344 px** and the panel is inserted at the right; the repos rail never moves. The Worktrees list
+**344 px** and the panel is inserted at the right; the sidebar never moves. The Worktrees list
 itself is a page — H1, subtitle, toolbar, column heads, 44 px rows (§3.3); the frame above shows
 the dense pane anatomy the other Hub lists still use. Below **1120 px** total width the panel is
 closed by default and, opened with `i`, becomes a right-edge overlay (320 px) so the list never
@@ -136,7 +136,7 @@ chrome — it is the pane's content, like a list header — and it stays.
 | Command field | Title bar, centred in the window | 340 × 30 | Looks like a search input — magnifier, *Search or run a command*, the palette key — and is a button: a click opens the palette. Nobody has to know a key to find a command. |
 | Status cluster (§2.3) | Title bar, right | compact ghost buttons | What needs you and what is running, each shown only while non-zero, each opening what it counts. Top-right is the OS status corner, far from the cursor. |
 | Help, Settings | Title bar, far right | 26 px icon buttons | `?` and `,` as controls; the tooltip names the key. |
-| Repos rail | Left, fixed **240 px** (drag 200–320, remembered) | full height | Second coordinate. Narrow and left because it is a *filter*, not content. |
+| Sidebar | Left, **232 px** on the `chrome` ground; its edge drags between 200 and 320 px, and the dragged width is kept while Fleet runs (not across restarts); `H` or its foot button collapses it to 44 px of icons | full height | Second coordinate. Narrow and left because it is a *filter*, not content — and the agents one click away from anywhere in the Hub (§3.2). |
 | Pane header | Top of each pane | 30 px, label type, `fg.faint` | Carries scope, filter state, count and scroll position (§2.5), and hosts the filter bar with zero layout shift. |
 | Status bar | Bottom, full width | 28 px, `chrome` ground | Where you are and what is running: daemon · breadcrumb · job ticker or sticky error · the buttons that teach the two keys everything else hangs off. |
 | Toast layer | Bottom-right, above the status bar, 320 px wide, 12 px insets | max 3 stacked | Only for events with no other home (§2.7). |
@@ -382,50 +382,78 @@ Hub keys) and Help / Settings stay; Help and Jobs show their `⌃S` chords.
 
 ---
 
-### 3.2 Hub — Repos rail
+### 3.2 Hub — Sidebar: repositories and agents
 
-**Purpose:** *Scope the worktree list; is any repo unhealthy or still cloning?*
+**Purpose:** *Scope the worktree list; is any repo unhealthy or still cloning; which agent needs
+me?*
 
 ```
-┌──────────────┐
-│ REPOS      6 │ 30
-├──────────────┤
-│▌◉ All     27 │ 30   ← pinned pseudo-repo, default cursor
-│  ◉ payroll 8 │
-│  · fleetd  3 │
-│  ☾ www     2 │
-│  ⟳ nixos     │      clone in flight, count slot shows 40%
-│  ✕ old-api   │      clone failed, stays until dismissed
-└──────────────┘
-     240 px
+┌────────────────────────────┐
+│ Repositories             + │ 26  section title · Clone repo (n)
+│▌▦ All repositories       4 │ 30  pinned scope row, default cursor
+│  • acme/api    [1 issue] 3 │     a worktree degraded or on an unreachable host
+│  • acme/web              1 │
+│  ⟳ nixos       cloning 40% │     clone in flight, thin bar along its foot
+│  ✕ old-api          failed │     clone failed, stays until dismissed
+│                            │
+│ Agents                     │     hidden while there are none
+│  • codex · REA… [needs you]│
+│  • claude · spike          │
+│  • claude · agent window   │
+│                            │
+│ ◧                          │     collapse (H)
+└────────────────────────────┘
+      232 px, drag 200–320
 ```
 
-Row internals: `[12 pad][glyph 16][8][name flex, truncate-middle][8][count 3 ch = 22 right][12 pad]`.
+The sidebar sits on the `chrome` ground with a hairline on its right edge. Items are `row_h` tall,
+rounded, secondary text; the item under the cursor is `row_selected` with the 2 px cursor bar while
+the sidebar owns the keyboard, and the sidebar draws the pane focus ring then.
 
 | Element | Content | Position | Why here | Why needed |
 | --- | --- | --- | --- | --- |
-| `All` pseudo-repo | literal `All` + total worktree count | row 0, pinned | swarm's default and the most common scope | §5 "All pseudo-repo default" |
-| Aggregate session glyph | worst-of the repo's worktrees, ordered `unknown` > `attached` > `detached` > `none` | left of name | one shape per repo tells you where live work is | §5 "aggregate session glyph" |
+| Section title | `Repositories` (sentence case), then a `+` icon button that opens Clone repo (`n`); a retained filter shows as a search chip before it, and the live filter bar replaces the title row in place (§3.10) | top | the add action lives where the list it adds to is | §5 clone |
+| `All repositories` | grid icon + literal label + total worktree count | row 0, pinned | swarm's default and the most common scope | §5 "All pseudo-repo default" |
+| Repository dot | small dot from the worst-of session state of its worktrees: amber while a finished agent waits for you, green while one works, lighter while any session is alive, dim otherwise | left of name | where live work is, at a glance | §5 "aggregate session glyph" |
 | Repo name | `Repo.name`; `owner/name` **only** on collision | flex | you think in repo names | §5 "disambiguated owner/name" |
-| Worktree count | integer, right, `fg.muted` | right | sizes the jump you are about to make | §5 "worktree count" |
-| Clone row | `loader-circle` + name; the count slot shows `40%` when parseable | sort position | a repo being born must be visible where it will live | §1 `CloneJob`, §6 |
+| Issue chip | amber `1 issue` / `n issues`: worktrees whose post-create hooks failed or whose host is unreachable; zero-suppressed | before the count | a repo that needs attention says so in words, not only in a glyph | `Worktree.degraded`, host reachability |
+| Worktree count | integer, right, muted | right | sizes the jump you are about to make | §5 "worktree count" |
+| Clone row | spinning `loader-circle` + name + `cloning 40%` (`cloning…` until a percent is parseable) + a thin progress bar along the item's foot | sort position | a repo being born must be visible where it will live | §1 `CloneJob`, §6 |
 | Clone failed row | `circle-x` red + name + faint `failed` | same | failure must not disappear silently; `Enter` opens the Jobs panel focused on that job, `x` dismisses (KEYMAP arbitrates `d` = delete repo, `x` = dismiss a failed clone) | `CloneJob.status`, `.error` |
-| Deleting row | dims to 40 %, `⟳ deleting`, non-selectable | in place | the rename-to-trash happens inside a state transaction | §3 delete |
+| Agents section | every top-level native agent thread whose worktree is in the active context, in the daemon's order, then every agent window (`a` / `A`) the daemon holds: a dot (amber needs you, green working, red failed, grey otherwise), `provider · title` (`provider · worktree` before the thread has a title, `provider · agent window` for a window) and an amber `needs you` chip | under the repositories | a running agent one click from anywhere in the Hub | the palette's `AGENTS` data, `Attention` |
+| Collapse | an icon button at the foot, the same as `H`; collapsed, the sidebar is 44 px of icons whose labels are tooltips | foot | the pointer's way to the room `H` makes | KEYMAP A22 |
+| Edge | drag the right edge between 200 and 320 px; the width is kept while Fleet runs and comes back when the sidebar is expanded again | right border | a long repo name can be given room | — |
+
+**Pointer (§5.1).** A click on a repository selects it: the cursor goes there, the list is scoped to
+it, and the sidebar keeps the keyboard, so the row's menu shows and runs the sidebar's own keys. A
+double-click opens it like `Enter`, handing the scoped list the keyboard. A failed clone has nothing
+to scope to: a click only puts the cursor on it, and a double-click opens its job like `Enter`. A repository's `⋯` (drawn while it is hovered) and its
+right-click menu are the same list, each item with its key from the live keymap: Clone repo `n`,
+Edit setup commands `e`, Move to another context `m` — Delete the repository `d` (red, confirms);
+a failed clone lists Dismiss the failed clone `x` and Clone repo `n`, a clone in flight Clone repo
+`n`. A click on an agent goes to it: a thread opens the way the palette's `go` does (its tab, its
+worktree's session first when needed), and an agent window is shown the way `a` / `A` shows it,
+never hidden by the click. Agent rows carry no menu: going to one is their only action.
 
 **Intentionally omitted:** `url`, `path`, `defaultBranch`, `clonedAt`, hook lists, prepared-pool
 state, private lock icon, owner avatar, a separate "live" count badge — all in the detail panel;
-none of them changes which repo you select.
+none of them changes which repo you select. Delegated child threads — their caller's transcript
+reaches them, and the caller's dot already carries a child that needs you. The stale stamp, which
+the Worktrees page header carries.
 
 **States:** *empty* → `No repos in <context>.` + faint `n clone one` (verbatim §5).
 *filter-empty* → `Nothing matches "<filter>".` *loading* → the rail renders from `state.json`
-instantly, no skeleton; the reconcile shows only as the jobs chip.
+instantly, no skeleton; the reconcile shows only as the jobs chip. *no agents* → the Agents
+section is not drawn. *collapsed* → icons and dots only; no empty sentence.
 
-**Icons:** `circle-dot`, `circle`, `moon`, `dot`, `circle-help`, `loader-circle`, `circle-x`,
-`folder-git-2` (detail header only), `zap` (prepared copies, detail only).
+**Icons:** `layout-grid`, `plus`, `ellipsis`, `loader-circle`, `circle-x`, `panel-left-close`,
+`panel-left-open`, `folder-git-2` (detail header only), `zap` (prepared copies, detail only).
 
 **Keyboard:** `j`/`k`, `gg`/`G`, `ctrl-d`/`ctrl-u` · `Enter`/`o`/`l` → focus worktrees · `n` clone
 · `d` delete (confirm, cascades) · `x` dismiss a failed clone · `e` edit hooks (KEYMAP A16) · `m` move
-to context · `i` detail · `ga` jump to `All` (KEYMAP A7) · `H` collapse/expand the rail.
+to context · `i` detail · `ga` jump to `All` (KEYMAP A7) · `H` collapse/expand the sidebar. The
+Agents section has no keys of its own: the palette's `AGENTS` rows and `^s <n>` reach the same
+threads.
 
 ---
 
@@ -2132,7 +2160,7 @@ each component's full API. `Modal` is an alias of `Dialog` and `TabBar` an alias
 | `AppFrame` | Title bar + body region + status bar; fixed heights 44 / flex / 28 | Hub, PR screen, Workspace |
 | `ContextBar` | Numbered context tabs, overflow chip, chip tray, daemon dot | all screens (§3.1) |
 | `StatusBar` | Breadcrumb · `ModeWord` · job ticker · sticky error slot | all screens (§2.2) |
-| `Pane` | Bordered region with a header slot, a body slot and a scroll thumb | repos rail, lists, detail panel |
+| `Pane` | Bordered region with a header slot, a body slot and a scroll thumb | lists, detail panel |
 | `PaneHeader` | Label · scope · `shown/total` · visible range · `stale` stamp; swaps in `FilterBar` in place | §2.10, every list |
 | `Sheet` | Right-docked panel, 440 / 640 px, no slide, focus-restoring on close; close ✕ and click-outside close | Jobs panel (§3.7) |
 | `Dialog` | The shared frame: scrim + card + 44 px header + 44 px footer; close ✕, scrim click and `Esc` close through one action; button footer | all of §3.8 |
@@ -2145,7 +2173,7 @@ each component's full API. `Modal` is an alias of `Dialog` and `TabBar` an alias
 
 | Component | Responsibility | Used by |
 | --- | --- | --- |
-| `ListView` | Virtualized 30 px rows, cursor, scrolloff 2, `gg`/`G`/`ctrl-d`/`ctrl-u`, cursor stability under background updates | repos rail, worktrees, PRs, palette, assign, base list, clone results |
+| `ListView` | Virtualized 30 px rows, cursor, scrolloff 2, `gg`/`G`/`ctrl-d`/`ctrl-u`, cursor stability under background updates | sidebar repositories, worktrees, PRs, palette, assign, base list, clone results |
 | `Row` | One row: leading glyph slot, flex content, trailing columns, selected/dimmed/disabled states | every list |
 | `ColumnLadder` | Resolves a ch-based responsive column set for the current pane width (§2.9) | worktrees list, PR list |
 | `StatusGlyph` | The §2.5 vocabulary — the single source of truth for session/job/clone state rendering | worktree rows, repo rows, PR presence, palette `GO`, confirms, quit dialogs |
@@ -2279,7 +2307,7 @@ The board has **two surfaces and one pane**. The Hub's third screen tab (`g b`, 
 §3.6) shows that worktree's. Both are drawn by the same `screens::board::BoardScreen` — the two
 are never on screen at once, so there is one of it, one filter editor and one mirror behind them.
 
-On the Hub the board replaces the worktrees list and the repos rail in place, and the title bar's
+On the Hub the board replaces the worktrees list and the sidebar in place, and the title bar's
 context switcher above it is what scopes it: the board shown is always `EnsureBoard(active_context)`. Switching
 context clears the board and re-ensures the new one.
 

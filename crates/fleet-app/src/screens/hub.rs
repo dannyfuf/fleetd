@@ -24,8 +24,8 @@ use fleet_ui_kit::{
     ToastDuration,
 };
 use gpui::{
-    AnyElement, App, ClipboardItem, Entity, FocusHandle, IntoElement, ScrollHandle, SharedString,
-    Subscription, Task, UniformListScrollHandle, Window, div, prelude::*,
+    AnyElement, App, ClipboardItem, Entity, FocusHandle, IntoElement, Pixels, ScrollHandle,
+    SharedString, Subscription, Task, UniformListScrollHandle, Window, div, prelude::*,
 };
 
 use crate::{
@@ -50,6 +50,7 @@ mod navigation;
 mod palette;
 mod pr_pointer;
 mod projection;
+mod sidebar;
 #[cfg(test)]
 pub(crate) mod tests;
 
@@ -93,6 +94,8 @@ struct Frame<'a> {
     now: i64,
     /// What a worktree row does when the pointer uses it.
     handlers: &'a worktrees_list::RowHandlers,
+    /// What the sidebar's rows and edge do when the pointer uses them.
+    sidebar: &'a repos_rail::SidebarHandlers,
 }
 
 /// Whether the detail panel docks over the list instead of being inset (§3.4).
@@ -101,28 +104,37 @@ pub fn detail_is_docked(window_width: f32) -> bool {
     window_width < DETAIL_INSET_MIN_WIDTH
 }
 
+/// The sidebar's width this frame: its icon column while collapsed (`H`), else the width its
+/// edge was dragged to, else `metrics.sidebar_w` — always within the drag range.
+#[must_use]
+pub(crate) fn sidebar_width(state: &AppState, metrics: &fleet_ui_kit::theme::Metrics) -> Pixels {
+    if state.rail_collapsed {
+        metrics.sidebar_collapsed_w
+    } else {
+        state
+            .sidebar_w
+            .unwrap_or(metrics.sidebar_w)
+            .clamp(metrics.sidebar_min_w, metrics.sidebar_max_w)
+    }
+}
+
 /// The list pane's width in `ch`, which is what resolves every §2.9 ladder.
 ///
-/// The rail never moves and the docked panel never steals width, so the only two variables are
-/// `H` (the 44 px icon rail) and an **inset** detail panel.
+/// The sidebar never moves and the docked panel never steals width, so the only variables are
+/// the sidebar's width (collapsed, default or dragged) and an **inset** detail panel.
 #[must_use]
 fn list_pane_ch(
     window_width: f32,
-    rail_collapsed: bool,
+    sidebar_width: Pixels,
     detail_open: bool,
     metrics: &fleet_ui_kit::theme::Metrics,
 ) -> f32 {
-    let rail = if rail_collapsed {
-        repos_rail::COLLAPSED_WIDTH
-    } else {
-        f32::from(metrics.rail_w)
-    };
     let detail = if detail_open && !detail_is_docked(window_width) {
         f32::from(metrics.detail_w)
     } else {
         0.0
     };
-    ((window_width - rail - detail) / fleet_ui_kit::theme::CH).max(1.0)
+    ((window_width - f32::from(sidebar_width) - detail) / fleet_ui_kit::theme::CH).max(1.0)
 }
 
 /// The Hub's own mutable state, held as an entity so `on_action` listeners can write it.
@@ -155,6 +167,8 @@ pub struct HubState {
     restoring_trash: Option<String>,
     /// `$HOME`, so the prepared worktree paths are tilde-collapsed once.
     home: Option<std::path::PathBuf>,
+    /// The sidebar's Agents rows, rebuilt when the Hub synchronizes and replaced only on change.
+    agents: Rc<[repos_rail::AgentRow]>,
 }
 
 impl HubState {

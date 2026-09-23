@@ -280,7 +280,7 @@ list below is the complete inventory, in px unless marked `ch`; a unit test in
 | Group | Tokens |
 | --- | --- |
 | Window chrome | `title_bar_h 44` · `status_bar_h 28` · `traffic_light_inset 84` · `command_field_w 340` · `filter_field_w 220` · `monogram_size 18` · `mode_word_w 84` · `banner_h 28` · `frame_banner_h 40` · `strip_h 22` |
-| Layout columns | `sidebar_w 232` · `rail_w 240` · `detail_w 344` · `detail_overlay_w 320` · `sheet_w 440` · `sheet_expanded_w 640` · `sheet_w_detail 736` · `sheet_detail_props_w 268` · `first_run_w 560` · `sidebar_min_w 200` · `sidebar_max_w 320` · `sidebar_collapsed_w 44` · `resize_handle_w 6` |
+| Layout columns | `sidebar_w 232` · `sidebar_min_w 200` · `sidebar_max_w 320` · `sidebar_collapsed_w 44` · `resize_handle_w 6` · `detail_w 344` · `detail_overlay_w 320` · `sheet_w 440` · `sheet_expanded_w 640` · `sheet_w_detail 736` · `sheet_detail_props_w 268` · `first_run_w 560` |
 | Rows and headers | `row_h 30` · `row_h_comfortable 44` · `pane_header_h 30` · `section_header_h 20` · `palette_row_h 34` · `palette_tile 22` · `job_row_h 44` · `progress_bar_h 4` |
 | Controls | `button_h 30` · `button_h_compact 26` · `kbd_h 18` · `kbd_h_small 16` · `chip_h 22` · `tile_chip_h 18` · `avatar_size 20` · `text_field_h 36` · `field_status_h 18` · `number_field_w 96` · `segment_h 24` · `switch_w 34` · `switch_h 20` · `checkbox_size 16` · `step_badge 28` |
 | Dialogs and floating layers | `dialog_w 560` · `confirm_compact_w 480` · `dialog_header_h 44` · `dialog_footer_h 44` · `palette_w 640` · `palette_top 120` · `prefix_menu_w 900` · `palette_input_h 44` · `overlay_help_w 640` · `toast_w 320` · `toast_inset 12` · `scroll_pill_w 176` · `menu_min_w 240` · `alert_tile 34` |
@@ -293,7 +293,7 @@ list below is the complete inventory, in px unless marked `ch`; a unit test in
 (44) is the hub-list row. `title_bar_h` is the one top row of every window; `command_field_w` is
 the palette field centred in it and `monogram_size` the context switcher's letter tile. `filter_field_w` is the `FilterField` in a page header's toolbar.
 `mode_word_w` is the embedded Git UI's status word only — Fleet's own chrome draws no mode word.
-`sidebar_w` is the Hub sidebar's width until its edge is dragged, within `sidebar_min_w`–`sidebar_max_w`; `sidebar_collapsed_w` is its icon column (`H`) and `resize_handle_w` the grab strip on a draggable edge; `rail_w` stays while the repos rail is on screen. `kbd_h_small` is the
+`sidebar_w` is the Hub sidebar's width until its edge is dragged, within `sidebar_min_w`–`sidebar_max_w`; `sidebar_collapsed_w` is its icon column (`H`) and `resize_handle_w` the grab strip on a draggable edge. `kbd_h_small` is the
 key chip inside a compact button or a menu item. `segment_h` plus a `SegmentedControl`'s `xxs`
 inset and hairline on each side is exactly `row_h`, so the control sits in a settings row or a pane
 header without growing it; a `Switch` knob is `switch_h` less an `xxs` inset on each side.
@@ -603,9 +603,11 @@ under the pointer during a drag, which holds nothing but which sidebar is being 
 **Purpose.** One group of a `Sidebar`: a sentence-case title (`Text::sentence_label`) with an
 optional control at its end — `Repositories  +` — over its items.
 **API.** `SidebarSection::new(title).action(impl IntoElement).header(impl IntoElement)
-.body(impl IntoElement).grow(bool)`.
-**Usage rule.** `grow` gives a section the height the others leave, so its list scrolls inside
-it (the repositories); the rest keep their natural height. `header` replaces the title row in
+.body(impl IntoElement).body_height(Pixels)`.
+**Usage rule.** Sections stack from the top at their natural height and the footer stays at the
+bottom. A virtualized list cannot measure itself, so its section passes `body_height` (rows ×
+`row_h`): the section takes that much and shrinks below it, its list scrolling, when the sidebar
+is shorter than its sections — which keeps the next section right under the last row. `header` replaces the title row in
 place for a live editor (the filter bar). Hide a section with nothing in it rather than drawing
 an empty title.
 
