@@ -1,0 +1,55 @@
+# ADR 0023 — every dialog and sheet closes by pointer, through the action `Esc` runs.
+#
+# The close ✕ (`dialog.close`, `sheet.close`) and a click outside the card each dispatch the
+# dialog's own cancel action, so the Hub comes back exactly as `Esc` leaves it: same screen,
+# same mode, focus back on the row it came from. Settings and Help cover the two cancel actions
+# (`dialog::Cancel`, `help::Close`); the Jobs panel covers a sheet. The outside click lands in the
+# top-left corner of the body, which no dialog card or right-docked sheet reaches.
+fixture: one-repo
+await idle 30000
+assert screen == Hub && mode == Normal && overlay absent
+
+# Settings: the ✕ in the header.
+key ,
+await overlay == Dialog 10000
+assert dialog.name == Settings && targets["dialog.close"] exists
+shot settings-close
+click dialog.close
+await overlay absent
+assert screen == Hub && mode == Normal && focused == worktrees.row[0] && dialog absent
+
+# Settings again: a click on the scrim, outside the card.
+key ,
+await overlay == Dialog 10000
+click 24 64
+await overlay absent
+assert screen == Hub && mode == Normal && focused == worktrees.row[0] && dialog absent
+
+# Help: its `Esc` is `help::Close`, and the ✕ and the scrim reach it too.
+key ?
+await overlay == Dialog 10000
+assert dialog.name == Help
+shot help-close
+click dialog.close
+await overlay absent
+key ?
+await overlay == Dialog 10000
+click 24 64
+await overlay absent
+assert screen == Hub && mode == Normal && focused == worktrees.row[0]
+
+# The Jobs panel: the ✕ at the top of the sheet, then a click in the band outside it.
+key J
+await overlay == Jobs
+assert targets["sheet.close"] exists
+shot jobs-close
+click sheet.close
+await overlay absent
+assert screen == Hub && mode == Normal && focused == worktrees.row[0]
+key J
+await overlay == Jobs
+click 24 64
+await overlay absent
+assert screen == Hub && mode == Normal && focused == worktrees.row[0]
+dump closed
+quit

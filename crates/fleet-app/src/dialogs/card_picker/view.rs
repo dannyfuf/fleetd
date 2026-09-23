@@ -70,6 +70,7 @@ pub(crate) fn render(
     };
 
     let mut card = Dialog::new("Card property")
+        .dismiss_action(crate::dialogs::Dialogs::CardPicker.dismiss_action())
         .icon(Icon::ArrowRightLeft)
         .width(Dialogs::CardPicker.width(cx))
         .subtitle(format!("\u{00b7} {label}"))

@@ -145,6 +145,32 @@ impl Dialogs {
         }
     }
 
+    /// The action `esc` dispatches in this dialog, which its close ✕ and a click on its scrim
+    /// dispatch too (ADR 0023: one path for key and pointer). The keymap test below holds this
+    /// table to the `escape` rows of `keymap::table()`.
+    #[must_use]
+    pub(crate) fn dismiss_action(&self) -> Box<dyn gpui::Action> {
+        use crate::actions;
+        match self {
+            Self::CardDetail => Box::new(actions::card_detail::Close),
+            Self::Confirm => Box::new(actions::confirm::Reject),
+            Self::Help => Box::new(actions::help::Close),
+            Self::Quit => Box::new(actions::quit_dialog::Reject),
+            Self::QuitDaemon => Box::new(actions::quit_daemon_dialog::Reject),
+            Self::BoardSettings
+            | Self::CardPicker
+            | Self::CardCreate
+            | Self::CreateWorktree
+            | Self::CloneRepo
+            | Self::NewContext
+            | Self::EditContext
+            | Self::AssignRepo
+            | Self::EditHooks
+            | Self::Settings
+            | Self::RenameTerminal => Box::new(actions::dialog::Cancel),
+        }
+    }
+
     /// The card height §3.8 fixes for this dialog, if it fixes one. The rest size to their
     /// content and stop at 90 % of the window, which is what [`Dialog::height`] omitted means.
     #[must_use]
@@ -262,6 +288,46 @@ mod tests {
             Dialogs::QuitDaemon,
         ] {
             assert!(!dialog.context_name().is_empty());
+        }
+    }
+
+    /// The ✕ and the scrim dispatch what `esc` does, so the table cannot drift from the keymap.
+    #[test]
+    fn every_dialog_dismisses_through_its_escape_binding() {
+        let table = crate::keymap::table();
+        let escape_in = |context: &str| {
+            table
+                .iter()
+                .find(|spec| spec.keys == "escape" && spec.context == context)
+                .map(|spec| spec.action)
+        };
+        for dialog in [
+            Dialogs::BoardSettings,
+            Dialogs::CardPicker,
+            Dialogs::CardCreate,
+            Dialogs::CardDetail,
+            Dialogs::CreateWorktree,
+            Dialogs::CloneRepo,
+            Dialogs::Confirm,
+            Dialogs::NewContext,
+            Dialogs::EditContext,
+            Dialogs::AssignRepo,
+            Dialogs::EditHooks,
+            Dialogs::Settings,
+            Dialogs::RenameTerminal,
+            Dialogs::Help,
+            Dialogs::Quit,
+            Dialogs::QuitDaemon,
+        ] {
+            let own = format!("Dialog > {}", dialog.context_name());
+            let expected = escape_in(&own)
+                .or_else(|| escape_in("Dialog"))
+                .unwrap_or_else(|| panic!("no escape binding reaches {dialog:?}"));
+            assert_eq!(
+                dialog.dismiss_action().name(),
+                expected,
+                "{dialog:?}'s ✕ must dispatch what esc does"
+            );
         }
     }
 

@@ -130,6 +130,7 @@ pub(crate) fn render(
     };
 
     let mut dialog_card = Dialog::new("Card detail")
+        .dismiss_action(crate::dialogs::Dialogs::CardDetail.dismiss_action())
         .icon(Icon::FilePen)
         .width(Dialogs::CardDetail.width(cx))
         .height(px(DETAIL_HEIGHT))
@@ -301,6 +302,7 @@ pub(super) fn missing(state: &Entity<AppState>, focus: &FocusHandle, cx: &App) -
         })
         .child(
             Dialog::new("Card detail")
+                .dismiss_action(crate::dialogs::Dialogs::CardDetail.dismiss_action())
                 .icon(Icon::FilePen)
                 .width(Dialogs::CardDetail.width(cx))
                 .body(EmptyState::new("That card is no longer on this board."))

@@ -178,6 +178,7 @@ pub(crate) fn render(
         );
 
     let mut card = Dialog::new("New card")
+        .dismiss_action(crate::dialogs::Dialogs::CardCreate.dismiss_action())
         .icon(Icon::Plus)
         .width(Dialogs::CardCreate.width(cx))
         .body(body)

@@ -135,6 +135,7 @@ pub(crate) fn render_quit(
     root(focus)
         .child(
             Dialog::new("Quit Fleet?")
+                .dismiss_action(crate::dialogs::Dialogs::Quit.dismiss_action())
                 .icon(Icon::CircleQuestionMark)
                 .width(super::Dialogs::Quit.width(cx))
                 .body(body)
@@ -219,6 +220,7 @@ pub(crate) fn render_quit_daemon(
     root(focus)
         .child(
             Dialog::new("Stop fleetd and quit?")
+                .dismiss_action(crate::dialogs::Dialogs::QuitDaemon.dismiss_action())
                 .icon(Icon::Power)
                 .width(super::Dialogs::QuitDaemon.width(cx))
                 .tone(Tone::Warning)

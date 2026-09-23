@@ -509,6 +509,7 @@ pub(crate) fn render(
     let body = body.child(list);
 
     let card = Dialog::new("Clone repo")
+        .dismiss_action(crate::dialogs::Dialogs::CloneRepo.dismiss_action())
         .icon(Icon::CloudDownload)
         .width(super::Dialogs::CloneRepo.width(cx))
         .when_some(super::Dialogs::CloneRepo.height(), Dialog::height)

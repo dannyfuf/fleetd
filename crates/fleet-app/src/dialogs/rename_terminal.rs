@@ -164,6 +164,7 @@ fn render_with_request(
         })
         .child({
             let mut dialog = Dialog::new("Rename terminal")
+                .dismiss_action(crate::dialogs::Dialogs::RenameTerminal.dismiss_action())
                 .icon(Icon::FilePen)
                 .body(input.clone().harness_target_indexed("dialog.field", 0))
                 .hint_row(KeyHintRow::new().key("esc", "cancel"))
@@ -395,8 +396,8 @@ mod tests {
 
         assert_eq!(
             names,
-            vec!["dialog.field[0]"],
-            "the rename dialog's only input is `dialog.field[0]`"
+            vec!["dialog.close", "dialog.field[0]"],
+            "the rename dialog's only input is `dialog.field[0]`, beside the frame's close ✕"
         );
     }
 }

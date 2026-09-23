@@ -8,6 +8,7 @@ use fleet_ui_kit::prelude::*;
 use fleet_ui_kit::{ConfirmDialog, Dialog, Fact, FactList, FuzzyItem, FuzzyList, KeyHintRow};
 use gpui::{AnyElement, Context, SharedString, div};
 
+use crate::actions;
 use crate::keymap;
 use crate::root::Lazygit;
 use crate::state::{Buffer, Overlay};
@@ -44,6 +45,7 @@ pub(crate) fn render(view: &Lazygit, cx: &mut Context<Lazygit>) -> Option<AnyEle
                 }
             }));
             let mut dialog = ConfirmDialog::new(confirm.title.clone(), facts)
+                .dismiss_action(Box::new(actions::lg_confirm::Cancel))
                 .target(confirm.target.clone())
                 .action_label(confirm.title.clone())
                 .hints(KeyHintRow::new().key("y", "yes"));
@@ -75,6 +77,7 @@ pub(crate) fn render(view: &Lazygit, cx: &mut Context<Lazygit>) -> Option<AnyEle
                     .key("esc", "cancel")
             };
             let mut dialog = Dialog::new(prompt.title.clone())
+                .dismiss_action(Box::new(actions::prompt::Cancel))
                 .icon(Icon::FilePen)
                 .body(body)
                 .hint_row(hints)
@@ -117,6 +120,7 @@ pub(crate) fn render(view: &Lazygit, cx: &mut Context<Lazygit>) -> Option<AnyEle
             };
             Some(
                 Dialog::new(menu.title.clone())
+                    .dismiss_action(Box::new(actions::menu::Cancel))
                     .icon(Icon::Ellipsis)
                     .body(body)
                     .hint_row(hints)
@@ -264,6 +268,7 @@ fn help_dialog(view: &Lazygit, top: usize, cx: &mut Context<Lazygit>) -> AnyElem
         );
     }
     Dialog::new("Keybindings")
+        .dismiss_action(Box::new(actions::lg_help::Close))
         .icon(Icon::Command)
         .width(theme.metrics.overlay_help_w)
         .body(column)

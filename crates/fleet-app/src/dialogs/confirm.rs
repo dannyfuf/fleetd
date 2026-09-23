@@ -258,6 +258,7 @@ fn card_run_cancel_card(
                 format!("Cancel {}'s run?", pending.key),
                 FactList::new().fact(Fact::risk(pending.fact)),
             )
+            .dismiss_action(crate::dialogs::Dialogs::Confirm.dismiss_action())
             .consequence(CARD_RUN_CANCEL_CONSEQUENCE)
             .icon(Icon::CircleX)
             .action_label("Cancel run")
@@ -300,6 +301,7 @@ fn delegation_cancel_card(
                     pending.child
                 ))),
             )
+            .dismiss_action(crate::dialogs::Dialogs::Confirm.dismiss_action())
             .target(pending.id.to_string())
             .consequence(DELEGATION_CANCEL_CONSEQUENCE)
             .icon(Icon::CircleX)

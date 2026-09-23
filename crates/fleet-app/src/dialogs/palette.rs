@@ -1264,6 +1264,7 @@ pub(super) fn render(
                 .top(top)
                 .width(width)
                 .scrim(true)
+                .dismiss_action(Box::new(palette_actions::Close))
                 .content(card),
         )
         .into_any_element()

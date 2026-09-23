@@ -605,6 +605,7 @@ pub(crate) fn render(
         })
         .child(
             Dialog::new("Keymap")
+                .dismiss_action(crate::dialogs::Dialogs::Help.dismiss_action())
                 .icon(Icon::CircleQuestionMark)
                 .width(super::Dialogs::Help.width(cx))
                 .when_some(super::Dialogs::Help.height(), Dialog::height)

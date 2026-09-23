@@ -165,6 +165,7 @@ pub(crate) fn render(
         .child(expectation(draft, cx));
 
     let mut card = Dialog::new("New worktree")
+        .dismiss_action(crate::dialogs::Dialogs::CreateWorktree.dismiss_action())
         .icon(Icon::GitBranchPlus)
         .width(crate::dialogs::Dialogs::CreateWorktree.width(cx))
         .body(body)

@@ -15,6 +15,7 @@ pub(crate) fn render(
         return root(focus)
             .child(
                 Dialog::new("Nothing to confirm")
+                    .dismiss_action(crate::dialogs::Dialogs::Confirm.dismiss_action())
                     .icon(Icon::CircleQuestionMark)
                     .width(crate::dialogs::Dialogs::Confirm.width(cx))
                     .body(Text::ui("This confirm was opened without a target.").muted())
@@ -78,6 +79,7 @@ pub(super) fn facts_card(request: &ConfirmRequest, draft: &ConfirmState) -> AnyE
     let show_target = !title.contains(&target);
     let consequence = request.consequence(&facts);
     let mut card = ConfirmDialog::new(title, facts.list)
+        .dismiss_action(crate::dialogs::Dialogs::Confirm.dismiss_action())
         .consequence(consequence)
         .icon(request.icon(compact))
         .hints(hints)
@@ -218,6 +220,7 @@ pub(super) fn prune_card(
         body = body.child(Text::ui(error.clone()).tone(Tone::Danger));
     }
     Dialog::new(format!("{} — {deleted} of {total}", request.title(true)))
+        .dismiss_action(crate::dialogs::Dialogs::Confirm.dismiss_action())
         .icon(Icon::Scissors)
         .width(crate::dialogs::Dialogs::Settings.width(cx))
         .tone(Tone::Warning)

@@ -136,6 +136,7 @@ pub(crate) fn render(
     );
 
     let card = Dialog::new("Move repo")
+        .dismiss_action(crate::dialogs::Dialogs::AssignRepo.dismiss_action())
         .icon(Icon::ArrowRightLeft)
         .width(super::Dialogs::AssignRepo.width(cx))
         .subtitle(

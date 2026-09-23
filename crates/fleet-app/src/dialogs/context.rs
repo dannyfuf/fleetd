@@ -314,6 +314,7 @@ pub(crate) fn render(
     } else {
         "New context"
     })
+    .dismiss_action(dialog_kind.dismiss_action())
     .icon(Icon::Boxes)
     .width(dialog_kind.width(cx))
     .body(body)

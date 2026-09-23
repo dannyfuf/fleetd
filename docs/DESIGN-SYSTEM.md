@@ -665,8 +665,9 @@ for anything destructive so the `y`/`Y` escalation is computed, not typed.
 **Usage rule.** Default `top` is 120 px — the thinking position, not screen center. Leave
 `scrim` off and use `OverlayLayer::Anchored` for the palette: it is a jump, not a decision. The
 Agent popup is a modal floating surface, so it opts into the scrim and `OverlayLayer::Dialog`,
-and into the popover elevation so the floating terminal reads as a window above the app. The
-palette closes on a scrim click through `palette::Close`.
+and into the popover elevation so the floating terminal reads as a window above the app. It sets
+no dismiss: its card hides it on a scrim press itself, as `ctrl-q` does. The palette closes on a
+scrim click through `palette::Close`.
 
 #### `Toast` / `ToastStack`
 **Purpose.** Bottom-right transient acknowledgements, max 3.

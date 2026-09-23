@@ -248,6 +248,7 @@ pub(crate) fn render(
         })
         .child(
             Dialog::new("Repository hooks")
+                .dismiss_action(crate::dialogs::Dialogs::EditHooks.dismiss_action())
                 .icon(Icon::FilePen)
                 .body(
                     div().flex().flex_col().gap(cx.theme().space.md).children(

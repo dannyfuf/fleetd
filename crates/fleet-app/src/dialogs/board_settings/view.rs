@@ -89,6 +89,7 @@ pub(crate) fn render(
         .child(pane);
 
     let mut card = Dialog::new("Board settings")
+        .dismiss_action(crate::dialogs::Dialogs::BoardSettings.dismiss_action())
         .icon(Icon::Settings2)
         .width(Dialogs::BoardSettings.width(cx))
         .when_some(Dialogs::BoardSettings.height(), Dialog::height)

@@ -982,7 +982,9 @@ Agent Scroll mode matches Workspace Scroll mode.
 Right-docked sheet, **440 px** wide (**640 px** when a log is expanded), full height between the
 context bar and the status bar, `bg.raised`, 1 px left border. It appears and disappears in
 place — nothing slides (DESIGN-SYSTEM §2.7). The list behind stays fully visible and readable —
-a centered modal would hide exactly the rows the jobs are about.
+a centered modal would hide exactly the rows the jobs are about. A close ✕ sits at the top right of
+the header, and a click anywhere in the band outside the sheet closes it; both dispatch `jobs::Close`,
+the action `Esc` runs when no log is expanded (ADR 0023).
 
 ```
                               ┌──────────────────────────────────────────────┐
@@ -1052,9 +1054,13 @@ prior focus** (pane, row, terminal and mode).
 
 Every dialog: centered, `bg.raised`, 12 px radius, 1 px `border`, shadow `0 16px 48px rgba(0,0,0,.45)`,
 backdrop = the base screen at 45 % opacity with an 8 px blur ("ghosts base", §5). **Header 44 px**:
-icon + title, no close button (`Esc`). **Footer 44 px**: left = contextual key hints in `fg.faint`
-mono 11 px, right = the primary action label only (`⏎ Create`). **No OK/Cancel button pair
-anywhere** — the hint row states the keys, and this is a keyboard app.
+icon + title, then a close ✕ at the right. **Footer 44 px**: left = contextual key hints in
+`fg.faint` mono 11 px, right = the primary action label (`⏎ Create`). The ✕ and a click on the
+scrim outside the card both dispatch the action `Esc` runs in that dialog (`dialog::Cancel`, or the
+dialog's own `Reject` / `Close`), so a dialog whose `Esc` steps back in stages steps the same way
+under the pointer (ADR 0023). The kit frame also draws a right-aligned button footer — `Cancel`,
+then the one primary, each with its key chip — and each dialog moves its footer onto it when that
+dialog is rebuilt; until then its footer is the hint row and label described here.
 
 | Dialog | Width × height | Icon |
 | --- | --- | --- |
@@ -1515,7 +1521,8 @@ alternative instead of only threatening. With nothing running, `ctrl-shift-q` do
 **Purpose:** *Jump to anything by name, or do the thing whose key I do not remember.*
 
 **640 px** wide, top-anchored at **y = 120** (thinking position, not screen center), 44 px input,
-up to **10** rows × 34 px, sections in the fixed order `GO` → `DO` → `CONTEXT`.
+up to **10** rows × 34 px, sections in the fixed order `GO` → `DO` → `CONTEXT`. A click on the scrim outside the card
+closes it through `palette::Close`, the action `Esc` runs.
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
@@ -1873,8 +1880,8 @@ each component's full API. `Modal` is an alias of `Dialog` and `TabBar` an alias
 | `StatusBar` | Breadcrumb · `ModeWord` · job ticker · sticky error slot | all screens (§2.2) |
 | `Pane` | Bordered region with a header slot, a body slot and a scroll thumb | repos rail, lists, detail panel |
 | `PaneHeader` | Label · scope · `shown/total` · visible range · `stale` stamp; swaps in `FilterBar` in place | §2.10, every list |
-| `Sheet` | Right-docked panel, 440 / 640 px, no slide, non-blocking, focus-restoring on close | Jobs panel (§3.7) |
-| `Dialog` | The shared frame: scrim + card + 44 px header + 44 px footer, `Esc` close, no button pair | all of §3.8 |
+| `Sheet` | Right-docked panel, 440 / 640 px, no slide, focus-restoring on close; close ✕ and click-outside close | Jobs panel (§3.7) |
+| `Dialog` | The shared frame: scrim + card + 44 px header + 44 px footer; close ✕, scrim click and `Esc` close through one action; button footer | all of §3.8 |
 | `Overlay` | Centered floating layer with optional scrim and explicit paint layer | Palette (§3.9), Agent popup (§3.6.1) |
 | `ToastStack` | Bottom-right stack, max 3, 3.2 / 1.6 s, 1 s identical-text coalescing into `×n` | §2.7 |
 | `SplitLayout` | Two panes with a fixed side and a flex side, on either axis | Hub body, Workspace body |

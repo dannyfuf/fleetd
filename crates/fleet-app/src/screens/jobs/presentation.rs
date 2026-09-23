@@ -91,6 +91,7 @@ impl JobsPanel {
             .when(expanded.is_some(), |el| el.key_context("Log"))
             .child(
                 Sheet::new(true)
+                    .dismiss_action(Box::new(jobs_actions::Close))
                     .expanded(expanded.is_some())
                     .header(header)
                     .body(body)
