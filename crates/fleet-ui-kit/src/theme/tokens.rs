@@ -572,8 +572,6 @@ pub struct Metrics {
     pub traffic_light_inset: Pixels,
     /// Toast inset from the overlay edges.
     pub toast_inset: Pixels,
-    /// Job row trailing shortcut width.
-    pub job_key_w: Pixels,
     /// Diff row height.
     pub diff_row_h: Pixels,
     /// Diff position scrollbar width.
@@ -632,6 +630,8 @@ pub struct Metrics {
     pub palette_row_h: Pixels,
     /// 44 px two-line job row.
     pub job_row_h: Pixels,
+    /// 4 px track of a running job's progress bar.
+    pub progress_bar_h: Pixels,
     /// 20 px section header.
     pub section_header_h: Pixels,
     /// 44 px dialog header.
@@ -725,7 +725,6 @@ impl Default for Metrics {
             scroll_pill_w: px(176.0),
             traffic_light_inset: px(84.0),
             toast_inset: px(12.0),
-            job_key_w: px(20.0),
             diff_row_h: px(18.0),
             diff_scrollbar_w: px(5.0),
             diff_thumb_min_h: px(24.0),
@@ -754,6 +753,7 @@ impl Default for Metrics {
             stash_pane_h: px(92.0),
             palette_row_h: px(34.0),
             job_row_h: px(44.0),
+            progress_bar_h: px(4.0),
             section_header_h: px(20.0),
             dialog_header_h: px(44.0),
             dialog_footer_h: px(44.0),

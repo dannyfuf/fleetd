@@ -469,40 +469,84 @@ fn jobs_section(cx: &mut App) -> AnyElement {
         .border_color(t.colors.border)
         .overflow_hidden()
         .child(
-            JobRow::new(JobStatus::Running, "clone", "nixos")
-                .id("job-running")
+            JobRow::new("job-running", JobStatus::Running, "Clone")
+                .subject("acme/infra")
                 .elapsed("0:42")
-                .percent(40)
-                .progress("Receiving objects: 40% (81/202)")
+                .percent(64)
+                .progress("Receiving objects: 64% (5121/8002), 18.2 MiB")
+                .hover_action(
+                    Button::new("job-running-cancel", "Cancel")
+                        .size(ButtonSize::Compact)
+                        .kbd(gallery_kbd("c")),
+                )
                 .selected(true)
                 .cursor(true),
         )
         .child(
-            JobRow::new(JobStatus::Running, "hooks", "buk/payroll#feat-rut")
-                .id("job-hooks")
+            JobRow::new("job-hooks", JobStatus::Running, "Run hooks for")
+                .subject("buk/payroll#feat-rut")
                 .elapsed("0:08")
-                .progress("pnpm install (2/3)"),
+                .progress("pnpm install (2/3)")
+                .hover_action(
+                    Button::new("job-hooks-cancel", "Cancel")
+                        .size(ButtonSize::Compact)
+                        .kbd(gallery_kbd("c")),
+                ),
         )
         .child(
-            JobRow::new(JobStatus::Cancelling, "pool", "dannyfuf/fleetd")
-                .id("job-cancelling")
-                .elapsed("1:03")
-                .progress("waiting for the current copy to finish"),
+            JobRow::new(
+                "job-cancelling",
+                JobStatus::Cancelling,
+                "Prepare copies for",
+            )
+            .subject("dannyfuf/fleetd")
+            .elapsed("1:03")
+            .progress("waiting for the current copy to finish"),
         )
-        .child(JobRow::new(JobStatus::Queued, "prune", "buk/www").id("job-queued"))
+        .child(JobRow::new(
+            "job-queued",
+            JobStatus::Queued,
+            "Prune worktrees",
+        ))
         .child(
-            JobRow::new(JobStatus::Failed, "prs", "review")
-                .id("job-failed")
-                .elapsed("1m")
-                .trailing_key("R")
-                .progress("gh: HTTP 502 upstream connect error"),
+            JobRow::new("job-failed", JobStatus::Failed, "Run hooks for")
+                .subject("acme/api#broken")
+                .elapsed("0:07")
+                .error("npm install exited with code 1")
+                .error_detail("ERR! peer dep react@18 conflicts with react@19")
+                .actions(
+                    div()
+                        .flex()
+                        .gap(t.space.xs)
+                        .child(
+                            Button::new("job-failed-retry", "Retry")
+                                .style(ButtonStyle::Primary)
+                                .size(ButtonSize::Compact)
+                                .kbd(gallery_kbd("R")),
+                        )
+                        .child(
+                            Button::new("job-failed-log", "Show log")
+                                .size(ButtonSize::Compact)
+                                .kbd(gallery_kbd("enter")),
+                        )
+                        .child(
+                            Button::new("job-failed-copy", "Copy log path")
+                                .style(ButtonStyle::Ghost)
+                                .size(ButtonSize::Compact)
+                                .kbd(gallery_kbd("y")),
+                        ),
+                ),
         )
         .child(
-            JobRow::new(JobStatus::Done, "prune", "buk/www")
-                .id("job-done")
-                .elapsed("12s"),
+            JobRow::new("job-done", JobStatus::Done, "Create")
+                .subject("acme/api#injected-1")
+                .elapsed("2s \u{b7} 1m ago"),
         )
-        .child(JobRow::new(JobStatus::Cancelled, "fetch", "dannyfuf/fleetd").id("job-cancelled"));
+        .child(
+            JobRow::new("job-cancelled", JobStatus::Cancelled, "Fetch")
+                .subject("dannyfuf/fleetd")
+                .elapsed("\u{2013}"),
+        );
 
     let confirm_rows = div()
         .flex()
@@ -514,18 +558,22 @@ fn jobs_section(cx: &mut App) -> AnyElement {
         .border_color(t.colors.border)
         .overflow_hidden()
         .child(
-            JobRow::new(JobStatus::Running, "clone", "nixos")
-                .id("confirm-1")
+            JobRow::new("confirm-1", JobStatus::Running, "Clone")
+                .subject("nixos")
                 .retryable(true),
         )
         .child(
-            JobRow::new(JobStatus::Running, "hooks", "buk/payroll")
-                .id("confirm-2")
+            JobRow::new("confirm-2", JobStatus::Running, "Run hooks for")
+                .subject("buk/payroll")
                 .retryable(false),
         );
 
     let children = vec![
-        LAYOUT.labeled("every status", &t, rows),
+        LAYOUT.labeled(
+            "every status \u{b7} hover a running row for Cancel",
+            &t,
+            rows,
+        ),
         LAYOUT.labeled("quit-and-stop confirm", &t, confirm_rows),
         LAYOUT.labeled(
             "ticker",
@@ -708,4 +756,9 @@ fn main() {
         },
         Gallery::new,
     );
+}
+
+/// A key chip for a gallery button whose action is not bound in the gallery's keymap.
+fn gallery_kbd(key: &str) -> Kbd {
+    Kbd::parse(key).unwrap_or_else(|error| panic!("gallery key {key}: {error}"))
 }

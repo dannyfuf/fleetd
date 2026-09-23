@@ -276,7 +276,7 @@ list below is the complete inventory, in px unless marked `ch`; a unit test in
 | --- | --- |
 | Window chrome | `title_bar_h 44` · `context_bar_h 36` · `status_bar_h 28` · `traffic_light_inset 84` · `mode_word_w 84` · `banner_h 28` · `strip_h 22` |
 | Layout columns | `sidebar_w 232` · `rail_w 240` · `detail_w 344` · `detail_overlay_w 320` · `sheet_w 440` · `sheet_expanded_w 640` · `sheet_w_detail 736` |
-| Rows and headers | `row_h 30` · `row_h_comfortable 44` · `pane_header_h 30` · `section_header_h 20` · `palette_row_h 34` · `job_row_h 44` · `job_key_w 20` |
+| Rows and headers | `row_h 30` · `row_h_comfortable 44` · `pane_header_h 30` · `section_header_h 20` · `palette_row_h 34` · `job_row_h 44` · `progress_bar_h 4` |
 | Controls | `button_h 30` · `button_h_compact 26` · `kbd_h 18` · `kbd_h_small 16` · `chip_h 22` · `text_field_h 36` · `field_status_h 18` · `number_field_w 96` · `segment_h 24` · `switch_w 34` · `switch_h 20` |
 | Dialogs and floating layers | `dialog_w 560` · `confirm_compact_w 480` · `dialog_header_h 44` · `dialog_footer_h 44` · `palette_w 640` · `palette_top 120` · `prefix_menu_w 900` · `palette_input_h 44` · `overlay_help_w 640` · `toast_w 320` · `toast_inset 12` · `scroll_pill_w 176` · `menu_min_w 240` |
 | Lines and marks | `hairline 1` · `focus_ring_w 2` · `scroll_thumb_w 3` · `dot_size 8` · `dot_size_small 6` |
@@ -727,13 +727,16 @@ per item, which is far too much overhead per terminal row.
 #### `Row` / `RowColumn`
 **Purpose.** One list row: leading glyph slot, flex content, trailing columns.
 **API.** `Row::{new, with_id}().leading(..).column(RowColumn).columns(..).second_line(..)
-.height(Pixels).comfortable().selected(bool).cursor(bool).dimmed(bool).disabled(bool)
+.details(..).height(Pixels).comfortable().selected(bool).cursor(bool).dimmed(bool).disabled(bool)
 .hoverable(bool).hover_actions(..).on_click(..).on_double_click(..).on_secondary_click(..)`;
 `RowColumn::{fixed(Pixels, ..), fixed_ch(f32, ..), flex(..), auto(..), resolved(..)}
 .align(ColumnAlign).min_width(Pixels).min_width_ch(f32).hover_only()`.
 **Variants.** 30 px one-line · 44 px two-line (`second_line`) · 44 px comfortable
 (`comfortable()`, `row_h_comfortable`: the Hub lists; primary cell `Text::ui_strong`, secondary
-cells `Text::ui(..).muted()`) · 34 px palette row.
+cells `Text::ui(..).muted()`) · 34 px palette row · grown (`details`: the line keeps its
+height and a block — a job's progress bar, inline error and buttons — sits under it, starting at
+the first text column; the row is then of variable height, so its list must be a measured
+`gpui::list`, never `ListView`).
 **States.** the table in §3.
 **Pointer.** Handlers take `(&MouseDownEvent, &mut Window, &mut App)`, so a view can pass a
 `cx.listener(..)`. They fire on the **press**, as native lists select, and need no id: `on_click`
@@ -1124,20 +1127,31 @@ commands are prefixed with `triangle-alert` and still routed through their confi
 ### 6.5 Jobs and terminal
 
 #### `JobRow`
-**Purpose.** glyph · kind (7 ch) · target · elapsed · percent, plus a progress sub-line.
-**API.** `JobRow::new(JobStatus, kind, target).id(..).elapsed(..).percent(u8).progress(..)
-.retryable(bool).trailing_key(..).selected(bool).cursor(bool)`;
-`JobStatus::{Queued, Running, Cancelling, Cancelled, Done, Failed}` with `.icon()` and `.tone()`.
+**Purpose.** One background job written as a sentence — `glyph · lead subject · elapsed` —
+with only what its state earns underneath: a progress bar and the last stdout line while it runs,
+the error inline (and the buttons that act on it) once it failed, nothing once it is done.
+**API.** `JobRow::new(ElementId, JobStatus, lead).subject(..).elapsed(..).percent(u8)
+.progress(..).error(..).error_detail(..).actions(..).hover_action(..).retryable(bool)
+.selected(bool).cursor(bool).pointer(&ListPointer, ix)`;
+`JobStatus::{Queued, Running, Cancelling, Cancelled, Done, Failed}` with `.icon()`, `.tone()`
+and `.is_finished()`. Built on `Row` (`details`), so hover, selection, the cursor bar and the
+click / double-click / right-click contract are `Row`'s.
+**Variants.** running (30 px line + `progress_bar_h` bar with its percent + last output line;
+no bar without a parseable percent) · failed (line + danger-wash error block, `error_detail` as
+its quieter second line, + `actions`) · finished (one 30 px line, sentence stepped down to
+`text_secondary`, `elapsed` reads `2s · 1m ago`) · queued / cancelling.
+**Usage rule.** `lead` is the verb phrase in the interface face ("Clone", "Run hooks for",
+"Inspect worktrees"); `subject` is the real domain id in mono (`RepoId` / `WorktreeId`) —
+swarm's footer showed `hot-copy:<repo>`, which matched no row anywhere in the app. `hover_action`
+is the one pointer control of a live row (Cancel `c`); it is also drawn on the selected row, so
+its key chip is visible wherever the key acts. Every button in `actions` or `hover_action` is
+also reachable by its key and from the row's context menu. Failed jobs are **never**
+auto-dismissed.
 **Usage rule (`retryable`).** Renders §3.8.9's `(restartable)` / `(not restartable)` label in
 the quit-and-stop confirm. Leave it **unset** when retryability is unknown: a job that claims
 either is worse than one that says nothing. `JobStatus::Cancelling` mirrors
 `fleet_proto::job::JobStatus::Cancelling`: cancellation was requested and shutdown is still in
 progress, which is not the same row as `Cancelled`.
-**Variants.** 30 px one-line (finished) · 44 px two-line (running, with the last stdout line).
-**Usage rule.** `kind` is a fixed 7-character slug (`clone`, `pool`, `hooks`, `prune`, `create`,
-`delete`, `fetch`, `prs`, `inspect`, `update`, `import`) so the column scans as a shape.
-`target` is the real domain id — swarm's footer showed `hot-copy:<repo>`, which matched no row
-anywhere in the app. Failed jobs are **never** auto-dismissed.
 
 #### `JobTicker`
 **Purpose.** The newest running job as one status-bar line.

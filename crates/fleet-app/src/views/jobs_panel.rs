@@ -158,8 +158,8 @@ pub fn log_path_row(path: Option<SharedString>, cx: &App) -> AnyElement {
 
 /// Only the elapsed label changes between job updates.
 pub(crate) fn prepared_job_row(job: &JobDisplay, cursor: bool, now: i64) -> AnyElement {
-    let mut row = JobRow::new(job.status, job.kind.clone(), job.target.clone())
-        .id(job.element_id.clone())
+    let mut row = JobRow::new(job.element_id.clone(), job.status, job.kind.clone())
+        .subject(job.target.clone())
         .selected(cursor)
         .cursor(cursor);
     if let Some(elapsed) = job.elapsed_label(now) {
@@ -170,9 +170,6 @@ pub(crate) fn prepared_job_row(job: &JobDisplay, cursor: bool, now: i64) -> AnyE
     }
     if let Some(line) = &job.progress {
         row = row.progress(line.clone());
-    }
-    if job.retryable {
-        row = row.trailing_key("R");
     }
     row.into_any_element()
 }

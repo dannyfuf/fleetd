@@ -147,6 +147,7 @@ pub struct Row {
     reserve_leading: bool,
     columns: Vec<RowColumn>,
     second_line: Option<AnyElement>,
+    details: Option<AnyElement>,
     height: Option<Pixels>,
     selected: bool,
     cursor: bool,
@@ -168,6 +169,7 @@ impl Row {
             reserve_leading: false,
             columns: Vec::new(),
             second_line: None,
+            details: None,
             height: None,
             selected: false,
             cursor: false,
@@ -228,6 +230,16 @@ impl Row {
     /// grows to the 44 px two-line height unless [`Row::height`] says otherwise.
     pub fn second_line(mut self, line: impl IntoElement) -> Self {
         self.second_line = Some(line.into_any_element());
+        self
+    }
+
+    /// A block under the row's line (or lines), aligned with the first text column: a job's
+    /// progress bar, its inline error, the buttons that act on it.
+    ///
+    /// The row's line keeps its height and the row grows to fit the block, so a list holding
+    /// such rows must measure each one (`gpui::list`), not assume a uniform height.
+    pub fn details(mut self, details: impl IntoElement) -> Self {
+        self.details = Some(details.into_any_element());
         self
     }
 
@@ -368,6 +380,7 @@ impl RenderOnce for Row {
         let gap = theme.space.md;
         let pad = theme.space.md;
         let has_hover_only = self.columns.iter().any(|column| column.hover_only);
+        let has_leading = self.reserve_leading || self.leading.is_some();
 
         let content = div()
             .flex()
@@ -376,7 +389,7 @@ impl RenderOnce for Row {
             .w_full()
             .gap(gap)
             .px(pad)
-            .children((self.reserve_leading || self.leading.is_some()).then(|| {
+            .children(has_leading.then(|| {
                 div()
                     .flex_none()
                     .w(ch(GLYPH_COLUMN_CH))
@@ -426,6 +439,34 @@ impl RenderOnce for Row {
                 .into_any_element(),
             None => content.into_any_element(),
         };
+        // With a details block the line keeps its height and the row grows under it; the block
+        // starts where the first text column starts, so it reads as part of the same item.
+        let details_indent = if has_leading {
+            pad + ch(GLYPH_COLUMN_CH) + gap
+        } else {
+            pad
+        };
+        let details = self.details.map(|details| {
+            div()
+                .flex()
+                .flex_col()
+                .w_full()
+                .pl(details_indent)
+                .pr(pad)
+                .pb(theme.space.sm)
+                .child(details)
+        });
+        let grows = details.is_some();
+        let body = match details {
+            Some(details) => div()
+                .flex()
+                .flex_col()
+                .w_full()
+                .child(div().w_full().h(height).child(body))
+                .child(details)
+                .into_any_element(),
+            None => body,
+        };
 
         let (on_click, on_double_click, on_secondary_click) = if live {
             (self.on_click, self.on_double_click, self.on_secondary_click)
@@ -437,7 +478,7 @@ impl RenderOnce for Row {
 
         let base = div()
             .w_full()
-            .h(height)
+            .when(!grows, |el| el.h(height))
             .when(selected, |el| el.bg(theme.colors.row_selected))
             .when(self.dimmed || self.disabled, |el| {
                 el.opacity(theme.metrics.dimmed_opacity)

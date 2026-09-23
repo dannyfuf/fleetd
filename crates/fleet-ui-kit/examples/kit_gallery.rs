@@ -995,49 +995,61 @@ fn rows_section(
             .flex_col()
             .w_full()
             .child(
-                JobRow::new(JobStatus::Running, "clone", "nixos")
-                    .id("job-0")
+                JobRow::new("job-0", JobStatus::Running, "Clone")
+                    .subject("acme/infra")
                     .elapsed("0:42")
-                    .percent(40)
-                    .progress("Receiving objects: 40% (81/202)")
+                    .percent(64)
+                    .progress("Receiving objects: 64% (5121/8002)")
+                    .hover_action(
+                        Button::new("job-0-cancel", "Cancel")
+                            .size(ButtonSize::Compact)
+                            .kbd(gallery_kbd("c")),
+                    )
                     .selected(true)
                     .cursor(true),
             )
             .child(
-                JobRow::new(JobStatus::Running, "hooks", "buk/payroll#feat-rut")
-                    .id("job-1")
+                JobRow::new("job-1", JobStatus::Running, "Run hooks for")
+                    .subject("buk/payroll#feat-rut")
                     .elapsed("0:08")
                     .progress("pnpm install (2/3)"),
             )
             .child(
-                JobRow::new(JobStatus::Failed, "prs", "review")
-                    .id("job-2")
+                JobRow::new("job-2", JobStatus::Failed, "Fetch review pull requests for")
+                    .subject("acme/api")
                     .elapsed("1m")
-                    .trailing_key("R"),
+                    .error("gh: HTTP 502 upstream connect error")
+                    .actions(
+                        Button::new("job-2-retry", "Retry")
+                            .style(ButtonStyle::Primary)
+                            .size(ButtonSize::Compact)
+                            .kbd(gallery_kbd("R")),
+                    ),
             )
             .child(
-                JobRow::new(JobStatus::Done, "prune", "buk/www")
-                    .id("job-3")
-                    .elapsed("12s"),
+                JobRow::new("job-3", JobStatus::Done, "Prune worktrees")
+                    .elapsed("12s \u{b7} 1m ago"),
             )
-            .child(JobRow::new(JobStatus::Cancelled, "fetch", "dannyfuf/fleetd").id("job-4"))
-            .child(JobRow::new(JobStatus::Queued, "pool", "buk/payroll").id("job-5"))
+            .child(JobRow::new("job-4", JobStatus::Cancelled, "Fetch").subject("dannyfuf/fleetd"))
             .child(
-                JobRow::new(JobStatus::Cancelling, "delete", "buk/www#chore-deps")
-                    .id("job-6")
+                JobRow::new("job-5", JobStatus::Queued, "Prepare copies for")
+                    .subject("buk/payroll"),
+            )
+            .child(
+                JobRow::new("job-6", JobStatus::Cancelling, "Delete")
+                    .subject("buk/www#chore-deps")
                     .elapsed("0:03")
                     .progress("waiting for the worker to stop"),
             )
             // The quit-and-stop confirm (§3.8.9) labels every cancellable job.
             .child(
-                JobRow::new(JobStatus::Running, "clone", "nixos")
-                    .id("job-7")
-                    .percent(40)
+                JobRow::new("job-7", JobStatus::Running, "Clone")
+                    .subject("nixos")
                     .retryable(true),
             )
             .child(
-                JobRow::new(JobStatus::Running, "hooks", "payroll#feat-rut")
-                    .id("job-8")
+                JobRow::new("job-8", JobStatus::Running, "Run hooks for")
+                    .subject("payroll#feat-rut")
                     .retryable(false),
             ),
     );
@@ -1867,51 +1879,43 @@ fn overlays_section(
         ),
     );
 
-    let sheet = box_of(
-        &t,
-        px(260.0),
-        Sheet::new(true)
-            .on_dismiss(|_, _| {})
-            .header(
-                div()
-                    .flex()
-                    .flex_col()
-                    .p(t.space.md)
-                    .child(
-                        SectionHeader::new("jobs")
-                            .trailing(Text::hint("⟳2 running · ✕1 failed").faint()),
-                    )
-                    .child(Text::data_small("~/.fleet/logs/jobs/j-8f3c.log").faint()),
-            )
-            .body(
-                div()
-                    .flex()
-                    .flex_col()
-                    .child(
-                        JobRow::new(JobStatus::Running, "clone", "nixos")
-                            .id("sheet-job-0")
-                            .elapsed("0:42")
-                            .percent(40)
-                            .progress("Receiving objects: 40% (81/202)")
-                            .selected(true)
-                            .cursor(true),
-                    )
-                    .child(
-                        JobRow::new(JobStatus::Failed, "prs", "review")
-                            .id("sheet-job-1")
-                            .trailing_key("R"),
-                    ),
-            )
-            .footer(
-                div().p(t.space.md).child(
-                    KeyHintRow::new()
-                        .key("⏎", "log")
-                        .key("c", "cancel")
-                        .key("R", "retry")
-                        .key("esc", "close"),
-                ),
-            ),
-    );
+    let sheet =
+        box_of(
+            &t,
+            px(260.0),
+            Sheet::new(true)
+                .on_dismiss(|_, _| {})
+                .header(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .p(t.space.md)
+                        .child(Text::section_title("Jobs"))
+                        .child(Text::ui("1 running \u{b7} 1 failed").muted()),
+                )
+                .body(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            JobRow::new("sheet-job-0", JobStatus::Running, "Clone")
+                                .subject("acme/infra")
+                                .elapsed("0:42")
+                                .percent(40)
+                                .progress("Receiving objects: 40% (81/202)")
+                                .selected(true)
+                                .cursor(true),
+                        )
+                        .child(
+                            JobRow::new("sheet-job-1", JobStatus::Failed, "Fetch")
+                                .subject("acme/api")
+                                .error("gh: HTTP 502 upstream connect error"),
+                        ),
+                )
+                .footer(div().p(t.space.md).child(
+                    Text::ui("Jobs run in fleetd and survive closing this window.").muted(),
+                )),
+        );
 
     let toasts = box_of(
         &t,
