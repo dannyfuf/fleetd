@@ -73,6 +73,7 @@ struct ButtonBase {
     style: ButtonStyle,
     size: ButtonSize,
     kbd: Option<Kbd>,
+    preferred_key: Option<&'static str>,
     action: Option<Box<dyn Action>>,
     on_click: Option<ClickHandler>,
     disabled: bool,
@@ -96,6 +97,7 @@ impl ButtonBase {
             style,
             size: ButtonSize::Default,
             kbd: None,
+            preferred_key: None,
             action: None,
             on_click: None,
             disabled: false,
@@ -162,9 +164,11 @@ impl ButtonBase {
     /// The chip: the one the caller gave, else the live binding of the action, else none.
     fn resolve_kbd(&mut self, window: &Window, cx: &App) -> Option<Kbd> {
         self.kbd.take().or_else(|| {
-            self.action
-                .as_deref()
-                .and_then(|action| Kbd::for_action(action, window, cx))
+            let action = self.action.as_deref()?;
+            match self.preferred_key {
+                Some(keys) => Kbd::for_action_preferring(action, keys, window, cx),
+                None => Kbd::for_action(action, window, cx),
+            }
         })
     }
 
@@ -244,6 +248,13 @@ macro_rules! button_builders {
         /// is not an action binding; never a hand-typed string for a key the keymap owns.
         pub fn kbd(mut self, kbd: Kbd) -> Self {
             self.base.kbd = Some(kbd);
+            self
+        }
+
+        /// Of [`Self::action`]'s live bindings, show `keys` when it is one of them; see
+        /// [`Kbd::for_action_preferring`].
+        pub fn prefer_key(mut self, keys: &'static str) -> Self {
+            self.base.preferred_key = Some(keys);
             self
         }
 

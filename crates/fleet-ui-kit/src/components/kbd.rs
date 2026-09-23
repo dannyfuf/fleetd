@@ -113,6 +113,26 @@ impl Kbd {
         Self::for_action_in(action, &focused, window)
     }
 
+    /// [`Kbd::for_action`], but show `preferred` when the focused context binds `action` to it:
+    /// for an action with several keys where the surface teaches one of them (`Open ⏎` rather
+    /// than `o`). The choice is still read from the live keymap — an unbound `preferred` falls
+    /// back to the highest-precedence binding — so the chip never names a key that does nothing.
+    pub fn for_action_preferring(
+        action: &dyn Action,
+        preferred: &str,
+        window: &Window,
+        cx: &App,
+    ) -> Option<Self> {
+        let focused = window.focused(cx)?;
+        let wanted = Self::parse(preferred).ok();
+        window
+            .bindings_for_action_in(action, &focused)
+            .iter()
+            .map(Self::from_binding)
+            .find(|kbd| Some(kbd) == wanted.as_ref())
+            .or_else(|| Self::for_action_in(action, &focused, window))
+    }
+
     /// The binding `action` would have if `focus` held the focus: for a control that belongs to
     /// a pane other than the focused one.
     pub fn for_action_in(
@@ -400,5 +420,58 @@ mod tests {
         );
         assert_eq!(pretty_keys("space"), "␣");
         assert_eq!(pretty_keys("cmd-c"), "cmd-c");
+    }
+
+    gpui::actions!(kbd_test, [Go]);
+
+    struct Focused(gpui::FocusHandle);
+
+    impl gpui::Render for Focused {
+        fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+            div()
+                .key_context("KbdTest")
+                .track_focus(&self.0)
+                .on_action(|_: &Go, _, _| {})
+                .size_full()
+        }
+    }
+
+    #[gpui::test]
+    fn a_preferred_key_wins_only_while_the_keymap_binds_it(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::Theme::dark());
+            cx.bind_keys([
+                KeyBinding::new("enter", Go, Some("KbdTest")),
+                KeyBinding::new("o", Go, Some("KbdTest")),
+            ]);
+        });
+        let window = cx.update(|cx| {
+            cx.open_window(Default::default(), |window, cx| {
+                cx.new(|cx| {
+                    let focus = cx.focus_handle();
+                    window.focus(&focus, cx);
+                    Focused(focus)
+                })
+            })
+            .unwrap_or_else(|error| panic!("{error}"))
+        });
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let chips = |kbd: Option<Kbd>| kbd.map(|kbd| kbd.labels_in(Spelling::Mac));
+        cx.update(|window, cx| {
+            assert_eq!(
+                chips(Kbd::for_action(&Go, window, cx)),
+                Some(vec!["o".into()])
+            );
+            assert_eq!(
+                chips(Kbd::for_action_preferring(&Go, "enter", window, cx)),
+                Some(vec!["\u{23ce}".into()])
+            );
+            assert_eq!(
+                chips(Kbd::for_action_preferring(&Go, "x", window, cx)),
+                Some(vec!["o".into()]),
+                "an unbound preference falls back to the keymap's own choice"
+            );
+        });
     }
 }

@@ -1878,6 +1878,8 @@ joined by `+` elsewhere (`Ctrl+Alt+Shift+Super+K`). Named keys: `⏎ esc ⇥ ␣
 key is the character typed (`g`). An uppercase key in the keymap is `shift` (`Y` → `⇧Y`).
 **API.** `Kbd::for_action(&dyn Action, &Window, &App) -> Option<Kbd>`,
 `Kbd::for_action_in(&dyn Action, &FocusHandle, &Window) -> Option<Kbd>`,
+`Kbd::for_action_preferring(&dyn Action, keys, &Window, &App) -> Option<Kbd>` (show `keys` when
+the focused context binds the action to it, else the highest-precedence binding),
 `Kbd::from_binding(&KeyBinding)`, `Kbd::new(&[Keystroke])`,
 `Kbd::parse("ctrl-s a") -> Result<Kbd, InvalidKeystrokeError>`; then
 `.tone(KbdTone::{Default, OnAccent, OnDanger, Warning}) .size(KbdSize::{Default, Small})`;
@@ -1899,7 +1901,7 @@ longer uses it); `fleet_app::presentation::pretty_keys` re-exports it.
 `button_h_compact`) tall, `radii.control`, a hairline. Label in `UiStrong`; icon 14 px (12
 compact); the chip `kbd_h` (`kbd_h_small` compact) and toned for the fill.
 **API.** `Button::new(id, label)` then `.style(ButtonStyle::{Primary, Secondary, Ghost, Danger, GhostDanger})
-.size(ButtonSize::{Default, Compact}) .icon(Icon) .kbd(Kbd) .action(Box<dyn Action>)
+.size(ButtonSize::{Default, Compact}) .icon(Icon) .kbd(Kbd) .action(Box<dyn Action>) .prefer_key(keys)
 .on_click(Fn(&ClickEvent, &mut Window, &mut App)) .disabled(bool) .selected(bool) .full_width()
 .tooltip(text)`.
 **Styles.** `Primary`: `accent_fill` / `accent_fill_hover` / `accent_fill_active`, label and chip
