@@ -24,6 +24,13 @@
 # `needs you` **mark** is pinned by `state::board`'s unit tests, which feed the reducer the
 # delegation the face is supposed to read.
 #
+# The two cards need two different children, and the provider is the *card's* to choose: In
+# Progress is a prompt column with no provider of its own, so a card that names none runs on the
+# daemon's default, Claude (`board::automation::resolve_prefs`, `DEFAULT_PROVIDER`). AGE-1 keeps
+# that default and parks; AGE-2 is given Codex with `m` before it moves, so its child reports and
+# completes once it is handed the slot. Without that gesture both children are Claude's, AGE-2's
+# parks exactly as AGE-1's did, and nothing ever reaches In review.
+#
 # `done` and `stalled` are the two marks this board cannot show, and each for a reason rather
 # than an omission. `done`: both action columns carry an `on_success`, so a run that succeeds is
 # announced by the card *moving*, not by a check beside its key
@@ -122,6 +129,17 @@ await lists.board.selected.label == "Todo" 10000
 assert lists.board.rows[1].badges[0] == "3" && lists.board.rows[3].badges[0] == "1"
 assert lists["board.cards"].rows[1].badges[0] == "AGE-3" && lists["board.cards"].rows[1].marks[0] == "blocked:1"
 assert lists["board.cards"].rows[2].badges[0] == "AGE-4" && lists["board.cards"].rows[2].marks[0] == "blocked:2"
+
+# AGE-2 is the card whose run has to finish, so it asks for Codex before it moves: the provider
+# has to be on the card before the card reaches the column that reads it.
+assert lists["board.cards"].rows[0].badges[0] == "AGE-2"
+key m
+await dialog.name == CardPicker 10000
+type codex
+assert dialog.fields[0].value == "codex"
+key enter
+await dialog absent 20000
+await idle 20000
 
 # AGE-2 the same way, while AGE-1's child still holds the board's one slot: this card is *owed* a
 # run rather than given one, and the header's numerator counts the owed run beside the live one.
