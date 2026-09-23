@@ -963,7 +963,7 @@ fn filter_section(gallery: &InputGallery, theme: &Theme, cx: &App) -> AnyElement
         theme,
         vec![
             LAYOUT.labeled(
-                "live (/ to focus)",
+                "live, with its clear \u{2715} (/ to focus; clear it to see the empty bar)",
                 theme,
                 card(
                     theme,

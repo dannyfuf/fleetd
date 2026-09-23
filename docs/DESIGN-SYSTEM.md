@@ -1066,7 +1066,10 @@ domain's fields. Where a surface keeps a cap, the footer says `9 of 63`.
 **API.** `FilterBar::new(input: Entity<TextInput>, shown, total)`; `.query_slot()`,
 `.is_empty_result()`, `.count_tone()`. The owner builds the editor **embedded**
 (`set_embedded(true, cx)`) so it fits the 30 px header row, and sets its placeholder.
-**States.** typing (caret, `esc` hint) · no match (`shown/total` turns amber). "Exited but
+**States.** typing (caret, `esc` hint) · with a query, a compact clear ✕ at the end of the field
+(painted `filter.clear`) that empties the editor — the same edit `ctrl-u` makes, so the owner hears
+an ordinary change and the input keeps the keyboard · empty (no ✕: nothing to clear) · no match
+(`shown/total` turns amber). "Exited but
 retained" is a state of `PaneHeader::filter_chip`, not of this component: the bar is drawn only
 while the editor owns the keyboard.
 **Keyboard.** editing is the `FleetTextInput` table; `ctrl-n`/`↓` and `ctrl-p`/`↑` move the

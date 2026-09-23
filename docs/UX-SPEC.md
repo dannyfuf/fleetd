@@ -1796,6 +1796,7 @@ Rendering: bottom-right, above the status bar, **320 px** wide, 12 px insets, ma
 it does not slide or fade (DESIGN-SYSTEM §2.7). One line, one icon, no title, no close button.
 Contents and the governing law: **§2.7**.
 
+| Clear ✕ | compact icon button at the end of the query, only while it holds text | inline | empties the query as `ctrl-u` would; the input keeps the keyboard, so `Esc` still leaves it first |
 ---
 
 ### 3.12 Daemon states, degraded states and Doctor
