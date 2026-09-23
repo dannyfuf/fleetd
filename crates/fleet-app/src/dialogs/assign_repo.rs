@@ -8,7 +8,7 @@ use gpui::{AnyElement, App, Entity, FocusHandle, Window, div};
 use crate::{
     actions::dialog,
     bridge::Bridge,
-    dialogs::{DialogHost, notify, root, step, with_host},
+    dialogs::{DialogHost, Dialogs, footer, notify, root, step, with_host},
     state::AppState,
 };
 
@@ -113,9 +113,7 @@ pub(crate) fn render(
                     ))
                 })
                 .when(row.current, |item| {
-                    item.column(
-                        RowColumn::auto(Text::ui("current").faint()).align(ColumnAlign::Right),
-                    )
+                    item.column(RowColumn::auto(Badge::new("current")).align(ColumnAlign::Right))
                 })
                 .harness_target_indexed("dialog.row", index)
                 .into_any_element()
@@ -123,6 +121,16 @@ pub(crate) fn render(
     )
     .cursor(draft.cursor)
     .track_scroll(&draft.scroll)
+    // A click picks the context and a double-click moves the repo there, as `⏎` does.
+    .on_select({
+        let state = state.clone();
+        move |index, _window, cx| select(&state, index, cx)
+    })
+    .on_open({
+        let state = state.clone();
+        let bridge = bridge.clone();
+        move |_, _window, cx| submit(&state, &bridge, cx)
+    })
     .empty(Text::ui("No contexts yet.").muted());
     let list = div()
         .h(cx.theme().metrics.row_h * draft.rows.len().clamp(1, 10) as f32)
@@ -136,23 +144,22 @@ pub(crate) fn render(
     );
 
     let card = Dialog::new("Move repo")
-        .dismiss_action(crate::dialogs::Dialogs::AssignRepo.dismiss_action())
+        .dismiss_action(Dialogs::AssignRepo.dismiss_action())
         .icon(Icon::ArrowRightLeft)
-        .width(super::Dialogs::AssignRepo.width(cx))
+        .width(Dialogs::AssignRepo.width(cx))
         .subtitle(
             draft
                 .repo
                 .as_ref()
-                .map_or_else(String::new, |repo| format!("\u{00b7} {}", repo.as_str())),
+                .map_or_else(String::new, |repo| repo.as_str().to_owned()),
         )
         .body(body)
-        .hint_row(
-            KeyHintRow::new()
-                .key("j/k", "move")
-                .key("\u{2303}n/\u{2303}p", "move")
-                .key("esc", "cancel"),
-        )
-        .primary("\u{23ce} Move");
+        .actions(vec![
+            footer::cancel(&Dialogs::AssignRepo),
+            // Moving to the context it is already in is a no-op close, so it is not offered.
+            footer::primary("assign-submit", "Move", Box::new(dialog::Confirm))
+                .disabled(draft.selected().is_none_or(|row| row.current)),
+        ]);
 
     let confirm_state = state.clone();
     let confirm_bridge = bridge.clone();
@@ -180,6 +187,16 @@ fn move_cursor(state: &Entity<AppState>, delta: isize, cx: &mut App) {
         host.assign
             .scroll
             .scroll_to_item(host.assign.cursor, gpui::ScrollStrategy::Nearest);
+    });
+    notify(state, cx);
+}
+
+/// A click on row `index`: the cursor moves there, as `j` / `k` would move it.
+fn select(state: &Entity<AppState>, index: usize, cx: &mut App) {
+    with_host(state, cx, |host| {
+        if index < host.assign.rows.len() {
+            host.assign.cursor = index;
+        }
     });
     notify(state, cx);
 }

@@ -331,7 +331,8 @@ comment and checks what it did. `prefix_menu.close` is the header's Close button
 `2` host (absent on a single-host daemon); new and edit context `0` name / `1` owners;
 rename-terminal `0`; clone-repo `0` search; help `0` search; edit-hooks `0..` prepare commands then post-create;
 new-card `0` title / `1` description; card-property `0` query. `dialog.row[N]` is a dialog's
-result list — the assign-repo contexts, the clone-repo matches, the create-worktree base refs.
+result list — the assign-repo contexts, the clone-repo matches, the create-worktree base refs, the
+card-property values (painted while on screen: the list scrolls past eight rows).
 
 Two names in the table are real but conditional, and a scenario that assumes them unconditionally
 will fail on an unknown target rather than on the thing it meant to check. `dialog.row[N]` exists
@@ -396,6 +397,26 @@ every confirm's `Re-check` are footer and body buttons with no name of their own
 `dialog.checkbox` is create-worktree's "Open after creating" box, and `dialog.segment[N]` its host
 choices while they sit side by side (`0` is `local`), absent on a local-only daemon or when the
 hosts draw as a dropdown, whose options are `menu.item[N]`.
+
+These dialogs paint `dialog.button[N]`, `0` leftmost; a click dispatches exactly the action its
+chip names, so it is the key under the pointer. `0` is always `Cancel`, which runs what `Esc` runs.
+
+| Dialog | `dialog.button[N]` |
+| --- | --- |
+| Clone repo | `0` Cancel · `1` Clone |
+| New / Edit context | `0` Cancel · `1` Create (Save when editing) |
+| Assign repo | `0` Cancel · `1` Move |
+| Quit | `0` Cancel · `1` Quit |
+| Quit and stop the daemon | `0` Cancel · `1` Stop and quit |
+| Rename terminal | `0` Cancel · `1` Rename |
+| Repository hooks | `0` Cancel · `1` Save |
+| New card | `0` Cancel · `1` Create & open · `2` Create |
+| Card property | `0` Cancel · `1` Apply |
+| Board settings | `0` Cancel · `1` Save |
+
+The buttons on the left of a footer — Edit context's *Delete context*, Quit's *Show jobs* and
+*Never warn again*, the Board settings Columns list's *New column*, *Delete* and *Apply preset* —
+and the rows' own controls (a hook row's ✕, a column's ↑ / ↓) carry no names of their own.
 
 ## 4. Lanes and fixtures
 

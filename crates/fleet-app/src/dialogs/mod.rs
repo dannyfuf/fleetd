@@ -11,6 +11,7 @@ mod context;
 mod create_worktree;
 mod edit_hooks;
 pub mod filter;
+mod footer;
 mod help;
 mod host;
 mod palette;

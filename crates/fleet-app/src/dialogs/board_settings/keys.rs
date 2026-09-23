@@ -404,7 +404,7 @@ pub(super) fn arm_delete(state: &Entity<AppState>, cx: &mut App) {
         let name = draft.columns[index].status.name.clone();
         draft.pending_delete = Some(index);
         draft.notice = Some(format!(
-            "{name} holds {cards} card{} \u{2014} j/k to the column they move to, \u{23ce} to delete, esc to cancel",
+            "{name} holds {cards} card{} \u{2014} choose the column they move to",
             if cards == 1 { "" } else { "s" }
         ));
     });

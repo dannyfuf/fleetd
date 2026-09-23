@@ -23,7 +23,7 @@ use gpui::{AnyElement, App, Entity, FocusHandle, Window, div};
 use crate::{
     actions::{dialog, settings as settings_actions},
     bridge::Bridge,
-    dialogs::{DialogHost, Dialogs, notify, read_host, root, step, with_host},
+    dialogs::{DialogHost, Dialogs, footer, notify, read_host, root, step, with_host},
     screens::board,
     state::AppState,
 };

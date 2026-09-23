@@ -13,7 +13,9 @@ use gpui::{AnyElement, App, Entity, FocusHandle, Window, div};
 use crate::{
     actions::{board as board_actions, dialog},
     bridge::Bridge,
-    dialogs::{DialogHost, Dialogs, host::complete_request, notify, read_host, root, with_host},
+    dialogs::{
+        DialogHost, Dialogs, footer, host::complete_request, notify, read_host, root, with_host,
+    },
     screens::board,
     state::AppState,
 };
@@ -159,12 +161,9 @@ pub(crate) fn render(
         return root(focus).into_any_element();
     };
     // The marker mirrors focus (`claim_field`), so it is the one answer to "which field owns
-    // the keyboard" — the hint row and the shell's reconciliation read the same value.
+    // the keyboard" — the footer and the shell's reconciliation read the same value.
     let field = draft.field;
-    let board_name = state
-        .read(cx)
-        .board()
-        .map(|view| format!("\u{00b7} {}", view.board.name));
+    let board_name = state.read(cx).board().map(|view| view.board.name.clone());
 
     let body = div()
         .flex()
@@ -177,37 +176,33 @@ pub(crate) fn render(
                 .harness_target_indexed("dialog.field", 1),
         );
 
+    // `⏎` creates from the title; in the description it is a newline, so the button there
+    // dispatches the same `Confirm` without claiming a key the field has taken.
+    let create = Button::new("card-create-submit", "Create")
+        .style(ButtonStyle::Primary)
+        .disabled(draft.saving)
+        .map(|create| {
+            if field == Field::Description {
+                create.on_click(|_, window, cx| {
+                    window.dispatch_action(Box::new(dialog::Confirm), cx);
+                })
+            } else {
+                create.action(Box::new(dialog::Confirm))
+            }
+        });
+
     let mut card = Dialog::new("New card")
         .dismiss_action(crate::dialogs::Dialogs::CardCreate.dismiss_action())
         .icon(Icon::Plus)
         .width(Dialogs::CardCreate.width(cx))
         .body(body)
-        .hint_row(
-            KeyHintRow::new()
-                .key(
-                    "\u{21e5}",
-                    if field == Field::Description {
-                        "title"
-                    } else {
-                        "description"
-                    },
-                )
-                .key(
-                    "\u{21e7}tab",
-                    if field == Field::Description {
-                        "title"
-                    } else {
-                        "description"
-                    },
-                )
-                .key("\u{2303}\u{23ce}", "create & open")
-                .key("esc", "cancel"),
-        )
-        .primary(if field == Field::Description {
-            "\u{2303}\u{21b5} Create & open"
-        } else {
-            "\u{21b5} Create"
-        });
+        .actions(vec![
+            footer::cancel(&Dialogs::CardCreate),
+            Button::new("card-create-open", "Create & open")
+                .action(Box::new(board_actions::CreateAndOpen))
+                .disabled(draft.saving),
+            create,
+        ]);
     if let Some(name) = board_name {
         card = card.subtitle(name);
     }

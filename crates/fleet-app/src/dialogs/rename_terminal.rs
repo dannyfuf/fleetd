@@ -2,7 +2,7 @@
 
 use fleet_core::ids::TerminalId;
 use fleet_proto::{request::RequestBody, response::ResponseBody};
-use fleet_ui_kit::{Dialog, HarnessTargetExt, Icon, InputMode, KeyHintRow, TextInput};
+use fleet_ui_kit::{Dialog, HarnessTargetExt, Icon, InputMode, TextInput};
 use gpui::{
     AnyElement, App, AppContext, Entity, FocusHandle, InteractiveElement, IntoElement,
     ParentElement, Window,
@@ -11,7 +11,7 @@ use gpui::{
 use crate::{
     actions::dialog,
     bridge::Bridge,
-    dialogs::{DialogHost, notify, read_host, root, with_host},
+    dialogs::{DialogHost, Dialogs, footer, notify, read_host, root, with_host},
     state::AppState,
 };
 
@@ -163,16 +163,26 @@ fn render_with_request(
             crate::dialogs::retain_task(&confirm_state, cx, "rename-terminal", task);
         })
         .child({
+            // §3.8 fixes this card at the narrow width; without `.width()` it drew at the
+            // default 560 and the declared 460 was never used.
             let mut dialog = Dialog::new("Rename terminal")
-                .dismiss_action(crate::dialogs::Dialogs::RenameTerminal.dismiss_action())
+                .dismiss_action(Dialogs::RenameTerminal.dismiss_action())
                 .icon(Icon::FilePen)
+                .width(Dialogs::RenameTerminal.width(cx))
                 .body(input.clone().harness_target_indexed("dialog.field", 0))
-                .hint_row(KeyHintRow::new().key("esc", "cancel"))
-                .primary(if in_flight {
-                    "renaming…"
-                } else {
-                    "enter  rename"
-                });
+                .actions(vec![
+                    footer::cancel(&Dialogs::RenameTerminal),
+                    footer::primary(
+                        "rename-submit",
+                        if in_flight {
+                            "Renaming\u{2026}"
+                        } else {
+                            "Rename"
+                        },
+                        Box::new(dialog::Confirm),
+                    )
+                    .disabled(in_flight),
+                ]);
             if let Some(error) = error {
                 dialog = dialog.error(error);
             }
@@ -199,7 +209,7 @@ mod tests {
 
     use fleet_core::sessions::{Terminal, TerminalKind, TerminalStatus};
     use fleet_proto::error::{ErrorKind, ProtoError};
-    use gpui::{Context, Render, div};
+    use gpui::{Context, Render, Styled, div};
 
     use super::*;
 
@@ -214,7 +224,7 @@ mod tests {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             // `AppFrame` is the harness target table's frame boundary, and it is what the shell
             // puts above every dialog, so the fixture wears it too.
-            fleet_ui_kit::AppFrame::new().body(div().key_context("Dialog").child(
+            fleet_ui_kit::AppFrame::new().body(div().key_context("Dialog").size_full().child(
                 render_with_request(
                     &self.state,
                     self.request.clone(),
@@ -367,14 +377,21 @@ mod tests {
             state
         });
         let host = cx.update(|cx| seed_named(&state, terminal, cx));
-        let request: RenameRequest = Rc::new(|_body| async_channel::bounded(1).1);
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let request: RenameRequest = Rc::new({
+            let seen = seen.clone();
+            move |body| {
+                seen.borrow_mut().push(body);
+                async_channel::bounded(1).1
+            }
+        });
 
         cx.update(|cx| {
             cx.set_global(fleet_ui_kit::Theme::dark());
             crate::keymap::init(cx);
         });
         let window = cx.add_window(|_, cx| RenameFixture {
-            state,
+            state: state.clone(),
             host,
             focus: cx.focus_handle(),
             request,
@@ -387,17 +404,46 @@ mod tests {
             .unwrap_or_else(|error| panic!("focus rename: {error}"));
         visual.run_until_parked();
 
-        let names: Vec<String> = visual
-            .update(|window, _| fleet_ui_kit::harness::painted(window))
-            .into_iter()
+        let painted = visual.update(|window, _| fleet_ui_kit::harness::painted(window));
+        fleet_ui_kit::harness::set_recording(false);
+        let names: Vec<String> = painted
+            .iter()
             .map(|target| target.name.to_string())
             .collect();
-        fleet_ui_kit::harness::set_recording(false);
 
         assert_eq!(
             names,
-            vec!["dialog.close", "dialog.field[0]"],
-            "the rename dialog's only input is `dialog.field[0]`, beside the frame's close ✕"
+            vec![
+                "dialog.close",
+                "dialog.field[0]",
+                "dialog.button[0]",
+                "dialog.button[1]"
+            ],
+            "the rename dialog's only input is `dialog.field[0]`, beside the frame's close ✕ \
+             and its Cancel / Rename footer"
+        );
+
+        // `Rename` is `⏎` under the pointer: a click sends the one request the key sends.
+        let rename = painted
+            .iter()
+            .find(|target| target.name.as_ref() == "dialog.button[1]")
+            .unwrap_or_else(|| panic!("Rename was not painted"))
+            .rect;
+        let centre = gpui::point(
+            gpui::px(rename.x + rename.w / 2.0),
+            gpui::px(rename.y + rename.h / 2.0),
+        );
+        // The pointer arrives before it presses, as a real one does: gpui resolves what is
+        // under it from the last move.
+        visual.simulate_mouse_move(centre, None, gpui::Modifiers::none());
+        visual.simulate_click(centre, gpui::Modifiers::none());
+        visual.run_until_parked();
+        assert!(
+            matches!(
+                seen.borrow().as_slice(),
+                [RequestBody::RenameTerminal { name, .. }] if name == "renamed"
+            ),
+            "a click on Rename sends the typed name once"
         );
     }
 }

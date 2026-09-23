@@ -103,6 +103,8 @@ pub(crate) fn seed(state: &Entity<AppState>, cx: &mut App) {
             ..Default::default()
         };
         host.card_picker_input = Some(input.clone());
+        // The held value can sit past the fold of a long list; open with it in view.
+        FuzzyList::reveal(&host.card_picker.scroll, host.card_picker.cursor);
     });
     let weak_host = host.downgrade();
     let weak_state = state.downgrade();

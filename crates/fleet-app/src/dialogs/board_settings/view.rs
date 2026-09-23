@@ -1,5 +1,46 @@
 use super::*;
 
+/// Everything a click on this dialog needs, cloned into each handler that needs it.
+#[derive(Clone)]
+struct Wire {
+    state: Entity<AppState>,
+    bridge: Bridge,
+    focus: FocusHandle,
+}
+
+impl Wire {
+    /// Row `row` of the open pane, made clickable: a press puts the cursor there.
+    fn row(&self, row: usize, element: impl IntoElement) -> AnyElement {
+        let wire = self.clone();
+        div()
+            .id(("board-settings-row", row))
+            .w_full()
+            .on_click(move |_, window, cx| {
+                select_row(&wire.state, row, &wire.focus, window, cx);
+            })
+            .child(element)
+            .into_any_element()
+    }
+
+    /// A closed choice's click, for the row showing option `current`.
+    fn pick(
+        &self,
+        row: usize,
+        current: Option<usize>,
+    ) -> impl Fn(usize, &mut Window, &mut App) + 'static {
+        let wire = self.clone();
+        move |option, window, cx| {
+            pick(&wire.state, row, option, current, &wire.focus, window, cx);
+        }
+    }
+
+    /// A flag's switch.
+    fn switch(&self, row: usize) -> impl Fn(bool, &mut Window, &mut App) + 'static {
+        let wire = self.clone();
+        move |on, window, cx| switch(&wire.state, row, on, &wire.focus, window, cx)
+    }
+}
+
 /// Renders the rail, the divider and whichever pane the rail has selected (§5.4).
 pub(crate) fn render(
     state: &Entity<AppState>,
@@ -21,6 +62,11 @@ pub(crate) fn render(
         )
     });
     let focused = draft.focused();
+    let wire = Wire {
+        state: state.clone(),
+        bridge: bridge.clone(),
+        focus: focus.clone(),
+    };
 
     // The focused row is brought into view when it *changes*: `j` past the fold has to land
     // somewhere the user can see, and the card tops out at 90 % of the window however many
@@ -42,18 +88,27 @@ pub(crate) fn render(
         .flex_none()
         .w(px(RAIL_WIDTH))
         .gap(tight)
-        .children(BoardSection::ALL.iter().map(|section| {
-            let selected = *section == draft.section;
-            Row::new()
-                .selected(selected)
-                .cursor(selected)
-                .column(RowColumn::flex(Text::ui(section.title())))
-        }));
+        .children(
+            BoardSection::ALL
+                .iter()
+                .enumerate()
+                .map(|(index, section)| {
+                    let selected = *section == draft.section;
+                    let wire = wire.clone();
+                    Row::with_id(("board-settings-section", index))
+                        .selected(selected)
+                        .cursor(selected)
+                        .column(RowColumn::flex(Text::ui(section.title())))
+                        .on_click(move |_, window, cx| {
+                            select_section(&wire.state, index, &wire.focus, window, cx);
+                        })
+                }),
+        );
 
     let rows = match draft.section {
-        BoardSection::General => general_rows(state, &draft, input.as_ref(), focused, cx),
-        BoardSection::Backend => backend_pane(state, &draft, input.as_ref(), focused, cx),
-        BoardSection::Columns => columns_pane(&draft, input.as_ref(), tight),
+        BoardSection::General => general_rows(&wire, &draft, input.as_ref(), focused, cx),
+        BoardSection::Backend => backend_pane(&wire, &draft, input.as_ref(), focused, cx),
+        BoardSection::Columns => columns_pane(&wire, &draft, input.as_ref(), tight),
     };
     let pane = div()
         .id("board-settings-pane")
@@ -89,13 +144,21 @@ pub(crate) fn render(
         .child(pane);
 
     let mut card = Dialog::new("Board settings")
-        .dismiss_action(crate::dialogs::Dialogs::BoardSettings.dismiss_action())
+        .dismiss_action(Dialogs::BoardSettings.dismiss_action())
         .icon(Icon::Settings2)
         .width(Dialogs::BoardSettings.width(cx))
         .when_some(Dialogs::BoardSettings.height(), Dialog::height)
         .body(body)
-        .hint_row(hints(&draft))
-        .primary("^s Save");
+        .when_some(footer_start(&draft), Dialog::footer_start)
+        .actions(vec![
+            footer::cancel(&Dialogs::BoardSettings),
+            footer::primary(
+                "board-settings-save",
+                "Save",
+                Box::new(board_settings_actions::Save),
+            )
+            .disabled(draft.saving || !draft.dirty()),
+        ]);
     if let Some(message) = draft.error.clone().or_else(|| draft.validate()) {
         card = card.error(message);
     }
@@ -105,46 +168,69 @@ pub(crate) fn render(
         .into_any_element()
 }
 
-/// The hint row of the open pane.
+/// The footer's left side: the Columns list's own verbs, or the way back out of a column.
 ///
-/// The Columns list states its own five keys verbatim (§5.4); every other pane states the
-/// vocabulary the global Settings dialog states, plus the save this one moved to `^s`.
-#[must_use]
-fn hints(draft: &BoardSettingsState) -> KeyHintRow {
-    if draft.in_column_list() {
-        return KeyHintRow::new()
-            .key("n", "new")
-            .key("d", "delete")
-            .key("J/K", "reorder")
-            .key("P", "preset")
-            .key("\u{23ce}", "open");
+/// Each button dispatches the action its key runs, so its chip is that key; outside the list
+/// the verbs are not offered at all, as their keys do nothing there.
+fn footer_start(draft: &BoardSettingsState) -> Option<AnyElement> {
+    let ghost =
+        |id: &'static str, label: &'static str, icon: Icon, action: Box<dyn gpui::Action>| {
+            Button::new(id, label)
+                .style(ButtonStyle::Ghost)
+                .icon(icon)
+                .action(action)
+        };
+    if draft.in_column_list() && draft.pending_delete.is_none() {
+        return Some(
+            div()
+                .flex()
+                .items_center()
+                .children([
+                    ghost(
+                        "board-settings-new-column",
+                        "New column",
+                        Icon::Plus,
+                        Box::new(board_settings_actions::NewColumn),
+                    ),
+                    ghost(
+                        "board-settings-delete-column",
+                        "Delete",
+                        Icon::Trash2,
+                        Box::new(board_settings_actions::DeleteColumn),
+                    ),
+                    ghost(
+                        "board-settings-preset",
+                        "Apply preset",
+                        Icon::Sparkles,
+                        Box::new(board_settings_actions::ApplyPreset),
+                    ),
+                ])
+                .into_any_element(),
+        );
     }
-    if draft.opened_column.is_some() {
-        return KeyHintRow::new()
-            .key("j/k", "row")
-            .key("h/l", "cycle")
-            .key("\u{23ce}", "edit")
-            .key("^s", "save")
-            .key("esc", "back");
-    }
-    KeyHintRow::new()
-        .key("\u{21e5}", "section")
-        .key("j/k", "row")
-        .key("space", "toggle")
-        .key("h/l", "cycle")
-        .key("^s", "save")
+    // `esc` leaves an open column for the list; while an editor is open it leaves the editor
+    // first, which is not what this button says, so it waits until the editor is closed.
+    (draft.opened_column.is_some() && !draft.editing).then(|| {
+        ghost(
+            "board-settings-back",
+            "Columns",
+            Icon::ChevronLeft,
+            Box::new(dialog::Cancel),
+        )
+        .into_any_element()
+    })
 }
 
 /// The General pane: the board's own facts, and the throttle its runs share.
 fn general_rows(
-    state: &Entity<AppState>,
+    wire: &Wire,
     draft: &BoardSettingsState,
     input: Option<&Entity<TextInput>>,
     focused: SettingRow,
     cx: &mut App,
 ) -> AnyElement {
     let gap = cx.theme().space.sm;
-    let repos = repo_choices(state.read(cx));
+    let repos = repo_choices(wire.state.read(cx));
     let repo_index = repo_position(&repos, draft.default_repo_id.as_ref());
     let repo_off_grid = !repo_listed(&repos, draft.default_repo_id.as_ref());
     let policy_index = POLICIES
@@ -152,131 +238,190 @@ fn general_rows(
         .position(|policy| *policy == draft.conflict_policy)
         .unwrap_or(0);
     let limit = draft.live_run_limit();
+    let at = |row: SettingRow| {
+        GENERAL_ROWS
+            .iter()
+            .position(|general| *general == row)
+            .unwrap_or(0)
+    };
+    let (name, prefix, repo, start, push, policy, runs) = (
+        at(SettingRow::Name),
+        at(SettingRow::Prefix),
+        at(SettingRow::DefaultRepo),
+        at(SettingRow::StartOnWorktree),
+        at(SettingRow::PushNewCards),
+        at(SettingRow::ConflictPolicy),
+        at(SettingRow::MaxLiveRuns),
+    );
     div()
         .flex()
         .flex_col()
         .gap(gap)
-        .child(if focused == SettingRow::Name {
-            editor(input)
-        } else {
-            // §6.4: a value nobody is editing is a read-only fact, not an empty box. The
-            // editor `Enter` opens carries the placeholder and the label.
-            FactRow::new(
-                SettingRow::Name.label(),
-                FactValue::from_option((!draft.name.is_empty()).then(|| draft.name.clone())),
-            )
-            .label_width(px(LABEL_WIDTH))
-            .into_any_element()
-        })
-        .child(if focused == SettingRow::Prefix {
-            editor(input)
-        } else {
-            FactRow::new(
-                SettingRow::Prefix.label(),
-                FactValue::from_option((!draft.prefix.is_empty()).then(|| draft.prefix.clone())),
-            )
-            .label_width(px(LABEL_WIDTH))
-            .mono(true)
-            .into_any_element()
-        })
+        .child(wire.row(
+            name,
+            if focused == SettingRow::Name {
+                editor(input)
+            } else {
+                // §6.4: a value nobody is editing is a read-only fact, not an empty box. The
+                // editor a click or `j` / `k` opens carries the placeholder and the label.
+                FactRow::new(
+                    SettingRow::Name.label(),
+                    FactValue::from_option((!draft.name.is_empty()).then(|| draft.name.clone())),
+                )
+                .label_width(px(LABEL_WIDTH))
+                .into_any_element()
+            },
+        ))
+        .child(wire.row(
+            prefix,
+            if focused == SettingRow::Prefix {
+                editor(input)
+            } else {
+                FactRow::new(
+                    SettingRow::Prefix.label(),
+                    FactValue::from_option(
+                        (!draft.prefix.is_empty()).then(|| draft.prefix.clone()),
+                    ),
+                )
+                .label_width(px(LABEL_WIDTH))
+                .mono(true)
+                .into_any_element()
+            },
+        ))
         .child(
-            Cycler::labeled(
-                SettingRow::DefaultRepo.label(),
-                draft
-                    .default_repo_id
-                    .as_ref()
-                    .map_or_else(|| "none".to_owned(), |repo| repo.as_str().to_owned()),
-            )
-            .label_width(px(LABEL_WIDTH))
-            .has_prev(repo_off_grid || repo_index > 0)
-            .has_next(repo_off_grid || repo_index < repos.len())
-            // A stored repository this context no longer lists sits on no position of the
-            // cycler: drawn as if it were "none" the row said `h` would do nothing and `l`
-            // would move one step, while the value on screen was the repository id itself.
-            .off_grid(repo_off_grid)
-            .focused(focused == SettingRow::DefaultRepo),
+            wire.row(
+                repo,
+                Cycler::labeled(
+                    SettingRow::DefaultRepo.label(),
+                    draft
+                        .default_repo_id
+                        .as_ref()
+                        .map_or_else(|| "none".to_owned(), |repo| repo.as_str().to_owned()),
+                )
+                .id("board-settings-default-repo")
+                .options(
+                    std::iter::once("none".to_owned())
+                        .chain(repos.iter().map(|repo| repo.as_str().to_owned())),
+                )
+                .on_select(wire.pick(repo, (!repo_off_grid).then_some(repo_index)))
+                .label_width(px(LABEL_WIDTH))
+                .has_prev(repo_off_grid || repo_index > 0)
+                .has_next(repo_off_grid || repo_index < repos.len())
+                // A stored repository this context no longer lists sits on no position of the
+                // cycler: drawn as if it were "none" the row said `h` would do nothing and `l`
+                // would move one step, while the value on screen was the repository id itself.
+                .off_grid(repo_off_grid)
+                .focused(focused == SettingRow::DefaultRepo),
+            ),
         )
         .child(
-            Toggle::labeled(SettingRow::StartOnWorktree.label(), draft.start_on_worktree)
-                .label_width(px(LABEL_WIDTH))
-                .detail("moves a backlog card to the first started column")
-                .focused(focused == SettingRow::StartOnWorktree),
+            wire.row(
+                start,
+                Toggle::labeled(SettingRow::StartOnWorktree.label(), draft.start_on_worktree)
+                    .id("board-settings-start-on-worktree")
+                    .label_width(px(LABEL_WIDTH))
+                    .detail("moves a backlog card to the first started column")
+                    .on_toggle(wire.switch(start))
+                    .focused(focused == SettingRow::StartOnWorktree),
+            ),
         )
         .child(
-            Toggle::labeled(SettingRow::PushNewCards.label(), draft.push_new_cards)
+            wire.row(
+                push,
+                Toggle::labeled(SettingRow::PushNewCards.label(), draft.push_new_cards)
+                    .id("board-settings-push-new-cards")
+                    .label_width(px(LABEL_WIDTH))
+                    .detail("files a card made here as a new issue on the backend")
+                    .disabled(draft.backend_kind == BackendRef::LOCAL)
+                    .on_toggle(wire.switch(push))
+                    .focused(focused == SettingRow::PushNewCards),
+            ),
+        )
+        .child(
+            wire.row(
+                policy,
+                Cycler::labeled(
+                    SettingRow::ConflictPolicy.label(),
+                    policy_label(draft.conflict_policy),
+                )
+                .id("board-settings-conflict-policy")
+                .options(POLICIES.iter().map(|policy| policy_label(*policy)))
+                .on_select(wire.pick(policy, Some(policy_index)))
                 .label_width(px(LABEL_WIDTH))
-                .detail("files a card made here as a new issue on the backend")
+                .has_prev(policy_index > 0)
+                .has_next(policy_index + 1 < POLICIES.len())
                 .disabled(draft.backend_kind == BackendRef::LOCAL)
-                .focused(focused == SettingRow::PushNewCards),
-        )
-        .child(
-            Cycler::labeled(
-                SettingRow::ConflictPolicy.label(),
-                policy_label(draft.conflict_policy),
-            )
-            .label_width(px(LABEL_WIDTH))
-            .has_prev(policy_index > 0)
-            .has_next(policy_index + 1 < POLICIES.len())
-            .disabled(draft.backend_kind == BackendRef::LOCAL)
-            .focused(focused == SettingRow::ConflictPolicy),
+                .focused(focused == SettingRow::ConflictPolicy),
+            ),
         )
         .child(
             // The hint is its own line rather than a `detail`, which the cycler has no slot
             // for: it explains the *consequence* of the number, and the number is what the
             // row states.
-            div()
-                .flex()
-                .flex_col()
-                .child(
-                    Cycler::labeled(SettingRow::MaxLiveRuns.label(), limit.to_string())
-                        .label_width(px(LABEL_WIDTH))
-                        .has_prev(limit > 1)
-                        .has_next(limit < MAX_LIVE_RUNS_PER_BOARD)
-                        .focused(focused == SettingRow::MaxLiveRuns),
-                )
-                .child(Text::hint("runs share one checkout").muted()),
+            wire.row(
+                runs,
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        Cycler::labeled(SettingRow::MaxLiveRuns.label(), limit.to_string())
+                            .id("board-settings-max-live-runs")
+                            .options((1..=MAX_LIVE_RUNS_PER_BOARD).map(|runs| runs.to_string()))
+                            .on_select(wire.pick(runs, Some(limit.saturating_sub(1) as usize)))
+                            .label_width(px(LABEL_WIDTH))
+                            .has_prev(limit > 1)
+                            .has_next(limit < MAX_LIVE_RUNS_PER_BOARD)
+                            .focused(focused == SettingRow::MaxLiveRuns),
+                    )
+                    .child(Text::hint("runs share one checkout").muted()),
+            ),
         )
         .into_any_element()
 }
 
 /// The Backend pane: which backend mirrors the board, and that backend's own rows.
 fn backend_pane(
-    state: &Entity<AppState>,
+    wire: &Wire,
     draft: &BoardSettingsState,
     input: Option<&Entity<TextInput>>,
     focused: SettingRow,
     cx: &mut App,
 ) -> AnyElement {
     let gap = cx.theme().space.sm;
-    let kinds = backend_kinds(state.read(cx), &draft.backend_kind);
+    let app = wire.state.read(cx);
+    let kinds = backend_kinds(app, &draft.backend_kind);
     let kind_index = kinds
         .iter()
         .position(|kind| *kind == draft.backend_kind)
         .unwrap_or(0);
-    let backend_label = state.read(cx).backend_label(&draft.backend_kind);
+    let backend_label = app.backend_label(&draft.backend_kind);
+    let kind_labels: Vec<String> = kinds.iter().map(|kind| app.backend_label(kind)).collect();
     div()
         .flex()
         .flex_col()
         .gap(gap)
         .child(
-            Cycler::labeled(SettingRow::Backend.label(), backend_label)
-                .label_width(px(LABEL_WIDTH))
-                .has_prev(kind_index > 0)
-                .has_next(kind_index + 1 < kinds.len())
-                .focused(focused == SettingRow::Backend),
+            wire.row(
+                0,
+                Cycler::labeled(SettingRow::Backend.label(), backend_label)
+                    .id("board-settings-backend")
+                    .options(kind_labels)
+                    .on_select(wire.pick(0, Some(kind_index)))
+                    .label_width(px(LABEL_WIDTH))
+                    .has_prev(kind_index > 0)
+                    .has_next(kind_index + 1 < kinds.len())
+                    .focused(focused == SettingRow::Backend),
+            ),
         )
-        .children(
-            draft
-                .rows
-                .iter()
-                .enumerate()
-                .map(|(index, row)| backend_element(row, draft, input, index)),
-        )
+        .children(draft.rows.iter().enumerate().map(|(index, row)| {
+            wire.row(index + 1, backend_element(wire, row, draft, input, index))
+        }))
         .into_any_element()
 }
 
 /// The Columns pane: the column list, or the column the list drilled into.
 fn columns_pane(
+    wire: &Wire,
     draft: &BoardSettingsState,
     input: Option<&Entity<TextInput>>,
     gap: gpui::Pixels,
@@ -292,39 +437,71 @@ fn columns_pane(
                 .map(|column| Text::hint(format!("Columns \u{203a} {}", column.status.name))),
         )
         .children(
-            draft
-                .prepared
-                .iter()
-                .enumerate()
-                .map(|(index, row)| column_element(row, index == focused, input)),
+            draft.prepared.iter().enumerate().map(|(index, row)| {
+                column_element(wire, draft, row, index, index == focused, input)
+            }),
         )
         .into_any_element()
 }
 
 /// Draws one prepared Columns row as the control its value calls for.
-fn column_element(row: &ColumnRow, focused: bool, input: Option<&Entity<TextInput>>) -> AnyElement {
+fn column_element(
+    wire: &Wire,
+    draft: &BoardSettingsState,
+    row: &ColumnRow,
+    index: usize,
+    focused: bool,
+    input: Option<&Entity<TextInput>>,
+) -> AnyElement {
     match &row.value {
-        ColumnValue::Column { name, has_action } => {
-            Row::new()
-                .selected(focused)
-                .cursor(focused)
-                .column(RowColumn::flex(Text::ui(name.clone())))
-                .columns(has_action.then(|| {
-                    RowColumn::auto(Icon::Zap.el().size(IconSize::Small).tone(Tone::Muted))
-                }))
-                .into_any_element()
-        }
+        ColumnValue::Column { name, has_action } => column_list_row(
+            wire,
+            draft.pending_delete,
+            name,
+            *has_action,
+            index,
+            focused,
+        ),
         ColumnValue::Choice {
             value,
+            options,
+            at,
             has_prev,
             has_next,
-        } => Cycler::labeled(row.label.clone(), value.clone())
-            .label_width(px(LABEL_WIDTH))
-            .has_prev(*has_prev)
-            .has_next(*has_next)
-            .disabled(row.disabled)
-            .focused(focused)
-            .into_any_element(),
+        } => wire.row(
+            index,
+            Cycler::labeled(row.label.clone(), value.clone())
+                .id(("board-settings-column-field", index))
+                .options(options.iter().cloned())
+                .on_select(wire.pick(index, Some(*at)))
+                .label_width(px(LABEL_WIDTH))
+                .has_prev(*has_prev)
+                .has_next(*has_next)
+                .disabled(row.disabled)
+                .focused(focused),
+        ),
+        ColumnValue::Action { value, options, at } => {
+            if focused
+                && draft.editing
+                && !row.disabled
+                && let Some(input) = input
+            {
+                return input.clone().into_any_element();
+            }
+            wire.row(
+                index,
+                Cycler::labeled(row.label.clone(), value.clone())
+                    .id(("board-settings-column-field", index))
+                    .options(options.iter().cloned())
+                    .on_select(wire.pick(index, Some(*at)))
+                    .label_width(px(LABEL_WIDTH))
+                    // Three options, so both arrows are live somewhere; the cycle clamps.
+                    .has_prev(*at > 0)
+                    .has_next(*at + 1 < options.len())
+                    .disabled(row.disabled)
+                    .focused(focused),
+            )
+        }
         ColumnValue::Text { value, mono } => {
             if focused
                 && !row.disabled
@@ -345,15 +522,98 @@ fn column_element(row: &ColumnRow, focused: bool, input: Option<&Entity<TextInpu
                     .column(RowColumn::flex(Text::ui(value.clone())))
                     .into_any_element();
             }
-            FactRow::new(
-                row.label.clone(),
-                FactValue::from_option((!value.is_empty()).then(|| value.clone())),
+            wire.row(
+                index,
+                FactRow::new(
+                    row.label.clone(),
+                    FactValue::from_option((!value.is_empty()).then(|| value.clone())),
+                )
+                .label_width(px(LABEL_WIDTH))
+                .mono(*mono),
             )
-            .label_width(px(LABEL_WIDTH))
-            .mono(*mono)
-            .into_any_element()
         }
     }
+}
+
+/// One column of the list: a click selects it, a double-click opens it, and ↑ / ↓ on hover
+/// move it past its neighbour (`K` / `J`).
+///
+/// While a delete waits for a target the list *is* the choice: the doomed column says so, and a
+/// click on any other column moves the cards there, as `⏎` on it would.
+fn column_list_row(
+    wire: &Wire,
+    pending_delete: Option<usize>,
+    name: &str,
+    has_action: bool,
+    index: usize,
+    focused: bool,
+) -> AnyElement {
+    let doomed = pending_delete == Some(index);
+    let select = wire.clone();
+    let open = wire.clone();
+    let row = Row::with_id(("board-settings-column", index))
+        .selected(focused)
+        .cursor(focused)
+        .column(RowColumn::flex(Text::ui(name.to_owned())))
+        .columns(
+            has_action
+                .then(|| RowColumn::auto(Icon::Zap.el().size(IconSize::Small).tone(Tone::Muted))),
+        );
+    if pending_delete.is_some() {
+        if doomed {
+            return row
+                .dimmed(true)
+                .column(RowColumn::auto(Badge::new("deleting")))
+                .into_any_element();
+        }
+        return row
+            .column(RowColumn::auto(Text::hint("Move cards here").muted()).hover_only())
+            .on_click(move |_, window, cx| {
+                choose_target(
+                    &select.state,
+                    &select.bridge,
+                    index,
+                    &select.focus,
+                    window,
+                    cx,
+                );
+            })
+            .into_any_element();
+    }
+    let arrow =
+        |id: &'static str, icon: Icon, label: &'static str, action: Box<dyn gpui::Action>| {
+            let wire = wire.clone();
+            IconButton::new((id, index), icon, label)
+                .size(ButtonSize::Compact)
+                .on_click(move |_, window, cx| {
+                    select_row(&wire.state, index, &wire.focus, window, cx);
+                })
+                .action(action)
+        };
+    row.hover_actions(
+        div()
+            .flex()
+            .items_center()
+            .child(arrow(
+                "board-settings-column-up",
+                Icon::CircleArrowUp,
+                "Move up",
+                Box::new(board_settings_actions::MoveColumnUp),
+            ))
+            .child(arrow(
+                "board-settings-column-down",
+                Icon::CircleArrowDown,
+                "Move down",
+                Box::new(board_settings_actions::MoveColumnDown),
+            )),
+    )
+    .on_click(move |_, window, cx| {
+        select_row(&select.state, index, &select.focus, window, cx);
+    })
+    .on_double_click(move |_, window, cx| {
+        open_column(&open.state, index, &open.focus, window, cx);
+    })
+    .into_any_element()
 }
 
 /// The one row-scoped editor, or nothing when it has not been built yet.
@@ -393,6 +653,7 @@ fn adopt_late_schema(state: &Entity<AppState>, cx: &mut App) {
 
 /// Draws one backend settings row as the control its `PropertyKind` names.
 fn backend_element(
+    wire: &Wire,
     row: &BackendRow,
     draft: &BoardSettingsState,
     input: Option<&Entity<TextInput>>,
@@ -409,7 +670,9 @@ fn backend_element(
     }
     match row.kind {
         PropertyKind::Bool => Toggle::labeled(label, row.flag())
+            .id(("board-settings-backend-row", index))
             .label_width(px(LABEL_WIDTH))
+            .on_toggle(wire.switch(index + 1))
             .focused(focused)
             .into_any_element(),
         PropertyKind::Select => {
@@ -427,6 +690,9 @@ fn backend_element(
                     shown
                 },
             )
+            .id(("board-settings-backend-row", index))
+            .options(row.options.iter().map(|option| option.label.clone()))
+            .on_select(wire.pick(index + 1, position))
             .label_width(px(LABEL_WIDTH))
             .has_prev(position.is_some_and(|at| at > 0) || position.is_none())
             .has_next(position.is_none_or(|at| at + 1 < row.options.len()))

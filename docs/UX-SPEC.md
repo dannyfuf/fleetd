@@ -1112,7 +1112,11 @@ then the one primary, each with its key chip — and each dialog moves its foote
 dialog is rebuilt; until then its footer is the hint row and label described here. Create worktree
 and every Confirm are on the button footer. A Confirm draws the kit's **alert** header instead of
 the 44 px bar: its icon in a tinted tile, the title question beside it and the target under the
-title, with no ✕ — `Cancel` and a click outside close it.
+title, with no ✕ — `Cancel` and a click outside close it. Clone repo, New / Edit context, Assign
+repo, both Quit dialogs, Rename terminal, Repository hooks, and the board's New card, Card property
+and Board settings are on the button footer too: no legend, `Cancel` running what `Esc` runs, the
+primary running what its key runs, and every other verb a button of its own with its key chip.
+Their lists and controls answer a click as the keys would.
 
 | Dialog | Width × height | Icon |
 | --- | --- | --- |
@@ -1229,7 +1233,7 @@ open. *closed while a base fetch is running* → the fetch **keeps running** and
 │    Archived import pipeline                              │
 │ 🌐 acme/payrolls                                     3w  │
 ├──────────────────────────────────────────────────────────┤
-│ ⌃n/⌃p · esc cancel · ssh · clones in the background  ⏎ Clone │
+│ Clones over ssh in the background    [Cancel esc] [Clone ⏎] │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -1239,7 +1243,8 @@ open. *closed while a base fetch is running* → the fetch **keeps running** and
 | Search input | 150 ms debounce, auto-focused | top | search is the whole dialog | §5 Clone |
 | Results | **8** rows max, 2 lines: `lock`/`globe` + `fullName` + relative `updatedAt`; description `fg.muted` 11 px | list | 8 is swarm's cap; `updatedAt` disambiguates forks and dead mirrors | §5, `RemoteRepo` |
 | Empty description | row collapses to a 22 px single line | — | zero-suppression (`description` null → `""`) | §1 |
-| Protocol + background note | `ssh · clones in the background` | footer | tells the user `Enter` frees them immediately | `github.cloneProtocol`; §6 "survives popup" |
+| Protocol + background note | `Clones over ssh in the background` | footer, left of the buttons | tells the user `Enter` frees them immediately | `github.cloneProtocol`; §6 "survives popup" |
+| Buttons | `Cancel` · `Clone` (primary, `⏎`) | footer | a click on a result row is `⏎` on that row, so the list is the whole choice | ADR 0023 |
 
 **Intentionally omitted:** stars / forks / language, a clone-protocol picker (Settings), the full
 SSH URL, avatars, a manual URL field (an `owner/name` or a pasted URL typed into the query is
@@ -1247,7 +1252,8 @@ detected and offered as the first row), a destination-path field (`reposDir` by 
 
 **States:** *idle* → faint `Type to search GitHub repos in buk's owners.` *searching* →
 `loader-circle` replaces the magnifier in place, previous results kept. *no results* →
-`Nothing matches "<query>".` *gh failure* → a red one-line row with the gh error + `r retry`;
+`Nothing matches "<query>".` *gh failure* → a red one-line row with the gh error and a `Retry ⏎`
+button (`⏎` retries a failed search);
 the input stays live. *offline* → the last cache is shown with `cached <age>` in amber.
 *submitted* → the dialog closes instantly and a `⟳` row appears in the rail from the moment the
 `CloneJob` is persisted, before the child process starts (§6).
@@ -1401,7 +1407,7 @@ prior cursor is restored.
 │         └────────────────────────────────┘ │
 │         GitHub orgs/users used to scope PRs │ faint, one line
 ├────────────────────────────────────────────┤
-│ ⇥ field · esc cancel               ⏎ Create │
+│                   [Cancel esc] [Create ⏎]  │
 └────────────────────────────────────────────┘
 ```
 
@@ -1411,13 +1417,15 @@ field whose purpose is not guessable.
 
 **Edit variant** (`E`, KEYMAP A15): title `⬚ Edit context "buk"`, the id shown read-only and faint
 (read-only outright once repos exist), and **context delete lives here** as `ctrl-shift-d` → the
-expanded confirm. **[D-11]** `D` therefore keeps its KEYMAP-defined meaning as *delete active
+expanded confirm; the footer shows it as a red ghost `Delete context ⌃⇧D` button on the left, and
+the primary reads `Save`. **[D-11]** `D` therefore keeps its KEYMAP-defined meaning as *delete active
 context* but is **routed through the same expanded confirm with `Y`**; `E` + `ctrl-shift-d` is the
 discoverable path. Rationale for not unbinding `D`: KEYMAP is authoritative and a spec must not
 silently retire a documented binding; the risk is handled by `Y` escalation, the fact list and
 the trash undo (`u`), not by hiding the key.
 
-**States:** duplicate id → `A context with id "buk-hr" already exists.` and `Enter` inert. Empty
+**States:** duplicate id → `A context with id "buk-hr" already exists.` inline under the name, and
+`Enter` inert (the primary is drawn disabled until the name can be saved). Empty
 owners → allowed; the footer warns `Without owners, GitHub repo search and PR "mine" are empty.`
 
 **Omitted:** `createdAt`, the repo list, a color/emoji picker, a description, context reordering
@@ -1437,11 +1445,13 @@ owners → allowed; the footer warns `Without owners, GitHub repo search and PR 
 ├────────────────────────────────────────────┤
 │ Moves the repo record only — nothing on    │
 │ disk changes, sessions keep running.       │
-│ j/k · ⌃n/⌃p · esc cancel           ⏎ Move  │
+│                     [Cancel esc] [Move ⏎]  │
 └────────────────────────────────────────────┘
 ```
 
-Rows: `Context.name` (`fg`) + `owners` joined (`fg.muted`, truncate) + faint `current` tag.
+Rows: `Context.name` (`fg`) + `owners` joined (`fg.muted`, truncate) + a `current` badge. A click
+selects a row and a double-click moves the repo there (`⏎`); `Move` is disabled on the current
+context, where it would change nothing.
 Owners are shown here specifically because they are the reason a repo belongs to a context.
 
 **[D-12]** This dialog has **no text field**, so KEYMAP's "never `j`/`k` under a text field" rule
@@ -1634,7 +1644,7 @@ against that sentence, so:
 │   ◉ 3 sessions · 7 terminals                          │
 │ They will be here when you come back.                 │
 ├───────────────────────────────────────────────────────┤
-│ J jobs · W never warn again          y quit · n cancel│
+│ [Show jobs J] [Never warn W]  [Cancel esc] [Quit y]   │
 └───────────────────────────────────────────────────────┘
 ```
 
@@ -1660,9 +1670,9 @@ listed dies:
 │ 1 job keeps running: post-create hooks (detached)     │
 │                                                       │
 │ Worktrees, repos and state on disk are untouched.     │
-│ ctrl-q quits Fleet and leaves all of this running.    │
+│ [⌃Q] quits Fleet and leaves all of this running.      │
 ├───────────────────────────────────────────────────────┤
-│ n cancel                            Y  Stop and quit  │
+│                 [Cancel esc] [Stop and quit ⇧Y] (red) │
 └───────────────────────────────────────────────────────┘
 ```
 
@@ -1670,7 +1680,20 @@ Cancellable vs. not comes from the job's cancel token; a detached post-create ru
 cancel") is listed under a fourth group `n job(s) keep running`. Its restartability label is
 derived from `JobRecord.retryable`, just like every other job, rather than inferred from its
 detached execution. The `ctrl-q` line is the important one: the confirm teaches the safe
-alternative instead of only threatening. With nothing running, `ctrl-shift-q` does not confirm.
+alternative instead of only threatening, with the key drawn as a chip from the live keymap. With nothing running, `ctrl-shift-q` does not confirm.
+
+#### 3.8.10 Rename terminal and Repository hooks
+
+**Rename terminal** (`ctrl-s ,`, 460 px, `file-pen`) is one `Name` field over `Cancel` and
+`Rename ⏎`; while the request is in flight the primary reads `Renaming…` and is disabled, and a
+refusal is the dialog's error line.
+
+**Repository hooks** (`e`, 560 px, `file-pen`) is two lists, *Prepare* and *After a worktree is
+created*, each a column of command fields ending in a blank one where the next command is typed
+(typing into it grows the next). Every filled row has a remove ✕ at its end; the trailing blank has
+none to offer and draws it disabled. *Add command* under each list puts the keyboard in that
+blank row. The footer is `Cancel` and `Save ⏎`; `Tab` / `S-Tab` still walk every row of both lists
+in order.
 
 ---
 
@@ -1773,6 +1796,7 @@ The filter **replaces the pane header in place** — 30 px, same row, no overlay
 | Query | live text, blue caret | inline | — |
 | Match count | `<shown>/<total>` | right | tells you whether to keep typing |
 | `esc` hint | faint, right of the count | right | the two-stage `Esc` is non-obvious |
+| Clear ✕ | compact icon button at the end of the query, only while it holds text | inline | empties the query as `ctrl-u` would; the input keeps the keyboard, so `Esc` still leaves it first |
 | Retained chip | `⌕rut` in accent inside the restored header, with a blue dot | same row | a hidden active filter is the classic "where did my rows go" bug |
 
 **Keyboard:** the query is a live `TextInput`, so editing is the whole `FleetTextInput` table
@@ -1796,7 +1820,6 @@ Rendering: bottom-right, above the status bar, **320 px** wide, 12 px insets, ma
 it does not slide or fade (DESIGN-SYSTEM §2.7). One line, one icon, no title, no close button.
 Contents and the governing law: **§2.7**.
 
-| Clear ✕ | compact icon button at the end of the query, only while it holds text | inline | empties the query as `ctrl-u` would; the input keeps the keyboard, so `Esc` still leaves it first |
 ---
 
 ### 3.12 Daemon states, degraded states and Doctor
@@ -2418,13 +2441,18 @@ change the user believes happened.
 
 * **New card** (560 px) — a single-line title `TextInput` and an optional multi-line one for
   the description. `Enter` creates and closes; `ctrl-Enter` creates and opens the card it made. Nothing else is asked for,
-  because every other field has a one-letter picker on the board.
+  because every other field has a one-letter picker on the board. The footer is `Cancel`,
+  `Create & open ⌃⏎` and the primary `Create ⏎`; in the description, where `⏎` is a newline,
+  `Create` still creates but shows no key.
 * **Card property** (560 px) — one surface for every field: a query input over a `FuzzyList` of
   the values that field can take. The open-ended kinds (assignee, estimate, due date, and `Text` /
   `Number` / `Url` / `User` properties) offer the typed query itself as the first row. Estimates
   must parse as numbers and dates as real `YYYY-MM-DD` days, and the field says which rule failed.
   `Labels` and custom `MultiSelect` properties are the multi-selects: `space` toggles, `Enter`
-  applies the whole set.
+  applies the whole set. The list shows eight rows and scrolls past them, keeping the cursor in
+  view. A click on a row is that row's key: it toggles a multi-select row (the check marks the
+  chosen set) and applies a single-select one, so the clear rows and the typed-value row are
+  clicked like any other. The footer is `Cancel` and `Apply ⏎`.
 
   The workflow kinds follow those two rules and add one. `Blocked by` and `Blocks` are
   multi-selects over every non-archived card but this one, each opening with a clear row
@@ -2446,7 +2474,9 @@ change the user believes happened.
   **Backend**, **Columns**. `,` opens it on the section last used in this app session (General on
   the first open of a session) and `C` opens it on Columns. While it is open the status bar's
   breadcrumb drops its row: the dialog edits the board, and the focused card is the one thing it
-  cannot change.
+  cannot change. The rail's sections and every row take a click that puts the cursor there, a
+  closed choice draws its options (side by side, or a dropdown when they are many or long) and
+  a click on one lands where `h` / `l` would, and a flag's switch flips as `space` does.
 
   **General** — name, prefix, default repository, start-on-worktree, push-new-cards, conflict
   policy, then `Max live runs` with the hint `runs share one checkout`, last because it is the
@@ -2458,20 +2488,25 @@ change the user believes happened.
 
   **Columns** is the board's `statuses` vector as a draft. The list shows one row per column with
   a muted `⚡` when entering it runs something, and its keys are `n new · d delete · J/K reorder ·
-  P preset · ⏎ open`. `⏎` drills into a column and the pane becomes that column's form, in this
+  P preset · ⏎ open`. The footer carries `New column n`, `Delete d` and `Apply preset P` while
+  the list is showing, and each row shows ↑ / ↓ buttons on hover (`K` / `J`); a click selects a
+  column and a double-click opens it. Inside a column the footer offers `Columns` to go back. `⏎` drills into a column and the pane becomes that column's form, in this
   order: Name, Category, On enter, then — only while On enter is not `none` — Provider, Model,
   Effort, Mode, Instructions, Expect, Env, then On success and When unblocked. `On enter` is
   spelled exactly as `fleet board columns edit --on-enter` spells it (`none`, `prompt`,
-  `skill:<name>[:<args>]`); it both cycles the three spellings and takes typing, and refuses
+  `skill:<name>[:<args>]`); it is drawn as a choice of the three (a click picks one), `⏎` opens
+  it for typing a skill name, and it refuses
   anything else with `on enter must be none, prompt, or skill:<name>[:<args>]`. `P` adds the
   workflow preset's **missing** columns by id and never rewrites one the board already has,
   reporting which of the two happened on the notice line. `d` on a column holding cards does not
-  delete it: it arms, naming the count, and the next `⏎` on another column is where those cards
-  go — one `MoveCard` each in column order, and a refusal stops the sequence there, keeps the
+  delete it: it arms, naming the count (`In review holds 3 cards — choose the column they move
+  to`), marks the column `deleting`, and the next `⏎` on — or click on — another column is where
+  those cards go — one `MoveCard` each in column order, and a refusal stops the sequence there, keeps the
   column and leaves the cards already moved where they are. A board needs at least one column, and
   says so.
 
-  Nothing is sent until `^s`, which is the primary button (`^s Save`) and saves from any section;
+  Nothing is sent until `^s`, which is the primary button (`Save ⌃S`, disabled until something
+  changed) beside `Cancel`, and saves from any section;
   `⏎` still saves from General and Backend, as §3.8.6's dialog does, and inside a column it opens
   the focused row's editor and commits it. A save is
   one `UpdateBoard` carrying the whole vector, so reordering three columns, renaming one and
