@@ -29,7 +29,7 @@ use crate::{
     dialogs,
     screens::hub::{context_board_summary, effective_context},
     shell::daemon::dot_state,
-    state::{AppState, ChipCounts, DaemonLink, DaemonLossReason, HubTab, Mode, Screen},
+    state::{AppState, ChipCounts, DaemonLink, DaemonLossReason, HubTab, Mode, Overlay, Screen},
 };
 
 /// One context in the switcher's menu.
@@ -100,6 +100,8 @@ pub(in crate::shell) struct TitleModel {
     /// The thread `1 needs you` opens; `None` with two or more waiting opens the agents picker.
     waiting: Option<ThreadId>,
     jobs: Option<JobsLabel>,
+    /// The Jobs sheet is open, so the jobs button stays pressed.
+    jobs_open: bool,
     /// `3 sleeping`, while any session is detached.
     sleeping: Option<SharedString>,
     /// `Update 0.2.0`, while an update is available.
@@ -138,6 +140,7 @@ impl TitleModel {
                     })
                     .map(JobsLabel::Running)
                 }),
+            jobs_open: matches!(state.overlay, Some(Overlay::Jobs)),
             sleeping: counted(counts.sleeping, |count| format!("{count} sleeping")),
             update: state
                 .update_version
@@ -471,6 +474,7 @@ fn trailing(
         };
         let mut button = button
             .tooltip("Open jobs")
+            .selected(model.jobs_open)
             .action(Box::new(fleet::OpenJobs));
         if let Some(kbd) = keys.and_then(|keys| keys.jobs.clone()) {
             button = button.kbd(kbd);
