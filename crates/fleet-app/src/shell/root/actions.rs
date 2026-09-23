@@ -46,6 +46,11 @@ impl Shell {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The palette lists the PRs the PR screen already holds; the Hub owns that cache, so
+        // the shell lends them here, the one place that holds both.
+        let prs = self.hub.palette_prs(self.state.read(cx), cx);
+        self.state
+            .update(cx, |state, _| state.palette_prs = Some(prs.into()));
         self.open(Overlay::Palette, cx);
     }
 

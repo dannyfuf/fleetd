@@ -1,17 +1,24 @@
-//! §3.9 Command palette (`:`) — *jump to anything by name, or do the thing whose key I do not
+//! §3.9 Command palette (`:`, ⌘K / `ctrl-k`) — *jump to anything by name, or do the thing whose
+//! key I do not remember.*
+//!
+//! One ranked list over commands, worktrees and sessions, cards, pull requests and agent
+//! threads. A leading `>` narrows it to commands, `@` to worktrees and sessions, `#` to cards and
+//! `!` to agent threads. The rows are prepared in the update path (`refresh`), memoised on
+//! [`PreparedKey`]; `render` only maps them onto the kit's [`fleet_ui_kit::Palette`].
 
 #[cfg(test)]
 use fleet_core::agents::Seq;
 use fleet_core::{
     agents::{AgentThreadSummary, Attention, AttentionKind, ThreadId},
+    github::PrTab,
     ids::{CardId, ContextId, JobId, RepoId, SessionId, WorktreeId},
     sessions::{AgentActivity, SessionKind, SessionState},
 };
 use fleet_proto::{request::RequestBody, snapshot::Snapshot};
 use fleet_ui_kit::{
-    Icon, IconSize, InputMode, Spinner, StatusDot, TextInput, TextInputEvent, Tone, prelude::*,
+    Icon, IconSize, InputMode, Kbd, Spinner, StatusDot, TextInput, TextInputEvent, Tone, prelude::*,
 };
-use gpui::{AnyElement, App, Entity, FocusHandle, Window, div};
+use gpui::{AnyElement, App, Entity, FocusHandle, Keystroke, ScrollHandle, Window, div};
 
 use crate::{
     action_catalogue::{self, ActionInfo, Place},
@@ -22,19 +29,28 @@ use crate::{
         open_agent_thread, open_worktree, request_confirm, step, with_host,
     },
     keymap,
-    presentation::{FuzzyQuery, SnapshotIndex, pretty_keys, selected_worktree_id},
+    presentation::{FuzzyQuery, SnapshotIndex, selected_worktree_id},
     screens::agent_thread::presentation::tab_title,
     screens::workspace::status_kind,
     state::{
-        AppState, Cursors, HubPane, HubTab, Overlay, RepoScope, Screen, latest_failed_job,
-        running_jobs,
+        AppState, Cursors, FilterState, HubPane, HubTab, Overlay, RepoScope, Screen,
+        latest_failed_job, running_jobs,
     },
 };
 
-/// The palette's total row cap (§3.9).
-pub const ROW_CAP: usize = 10;
-/// How many rows each section shows on an empty query (§3.9 "States").
-pub const IDLE_ROWS: usize = 5;
+/// How many rows the results show before they scroll (§3.9).
+pub const VISIBLE_ROWS: usize = 10;
+/// How many recently used sessions an empty query lists.
+pub const RECENT_ROWS: usize = 5;
+/// How many suggested commands an empty query lists after them.
+pub const SUGGESTED_ROWS: usize = 6;
+/// The most rows one query lists. Not a per-section cap: the ranked list is cut once, far
+/// below the fold, so a one-letter query cannot build thousands of rows every keystroke.
+pub const RESULT_CAP: usize = 200;
+/// What a destructive command says in place of its place.
+const ASKS_FIRST: &str = "asks first";
+/// The prefix legend shown while the query is empty.
+const PREFIX_HINT: [(&str, &str); 3] = [(">", "commands"), ("@", "worktrees"), ("#", "cards")];
 const ATTENTION_MARK_SIZE: f32 = 16.0;
 
 /// The palette's draft.
@@ -45,10 +61,145 @@ pub struct PaletteState {
     /// The flat cursor across all sections.
     pub(crate) cursor: usize,
     rows: std::rc::Rc<[Entry]>,
-    total: usize,
+    /// The results' scroll position, so a cursor move can keep its row in view.
+    scroll: ScrollHandle,
+    /// The pull requests the PR screen had loaded when the palette opened.
+    prs: std::rc::Rc<[PalettePr]>,
     /// Every input [`candidates`] read to build [`Self::rows`], so a notification that changed
     /// none of them does not rebuild them.
     prepared: Option<PreparedKey>,
+}
+
+/// One pull request the palette can go to, as the PR screen lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PalettePr {
+    /// The PR screen's tab that lists it.
+    pub tab: PrTab,
+    /// Its repository.
+    pub repo: RepoId,
+    /// `#number`.
+    pub number: u64,
+    /// The single-line title.
+    pub title: String,
+    /// The local worktree already checked out for it, which `Enter` opens.
+    pub local: Option<WorktreeId>,
+}
+
+/// The sections of the list. On a typed query they are ordered by their best row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Section {
+    /// The empty query's most recently used sessions.
+    Recent,
+    /// The empty query's highest-ranked commands for where you are.
+    Suggested,
+    /// Sessions, worktrees, repositories and contexts.
+    GoTo,
+    /// Valid commands and the jobs worth cancelling.
+    Commands,
+    /// Cards of the board the app holds.
+    Cards,
+    /// Pull requests the PR screen has loaded.
+    PullRequests,
+    /// Native agent threads.
+    Agents,
+}
+
+impl Section {
+    /// The heading a person reads.
+    #[must_use]
+    pub const fn title(self) -> &'static str {
+        match self {
+            Self::Recent => "Recent",
+            Self::Suggested => "Suggested",
+            Self::GoTo => "Go to",
+            Self::Commands => "Commands",
+            Self::Cards => "Cards",
+            Self::PullRequests => "Pull requests",
+            Self::Agents => "Agents",
+        }
+    }
+}
+
+/// What a query's leading character narrowed the palette to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    /// No prefix: everything, ranked together.
+    All,
+    /// `>`: commands only.
+    Commands,
+    /// `@`: worktrees and sessions (with repositories and contexts).
+    GoTo,
+    /// `#`: cards.
+    Cards,
+    /// `!`: agent threads.
+    Agents,
+}
+
+impl Scope {
+    /// The scope chip's word.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Commands => "Commands",
+            Self::GoTo => "Worktrees",
+            Self::Cards => "Cards",
+            Self::Agents => "Agents",
+        }
+    }
+}
+
+/// A query split into its scope and the text that is matched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ParsedQuery<'a> {
+    pub(crate) scope: Scope,
+    pub(crate) needle: &'a str,
+    /// `^s W`'s session switcher: running sessions only, most recent first.
+    pub(crate) sessions_only: bool,
+}
+
+/// Reads the scope prefix off a query.
+///
+/// `>`, `@`, `#` and `!` are the prefixes. The words `sessions` and `agents <filter>` are what
+/// `^s W` and `^s d` used to seed, and stay accepted so a hand that learned them keeps working.
+pub(crate) fn parse_query(query: &str) -> ParsedQuery<'_> {
+    let trimmed = query.trim_start();
+    let mut chars = trimmed.chars();
+    let scope = match chars.next() {
+        Some('>') => Some(Scope::Commands),
+        Some('@') => Some(Scope::GoTo),
+        Some('#') => Some(Scope::Cards),
+        Some('!') => Some(Scope::Agents),
+        _ => None,
+    };
+    if let Some(scope) = scope {
+        return ParsedQuery {
+            scope,
+            needle: chars.as_str().trim(),
+            sessions_only: false,
+        };
+    }
+    if trimmed.trim_end() == "sessions" {
+        return ParsedQuery {
+            scope: Scope::GoTo,
+            needle: "",
+            sessions_only: true,
+        };
+    }
+    if let Some(rest) = trimmed.strip_prefix("agents")
+        && (rest.is_empty() || rest.starts_with(char::is_whitespace))
+    {
+        return ParsedQuery {
+            scope: Scope::Agents,
+            needle: rest.trim(),
+            sessions_only: false,
+        };
+    }
+    ParsedQuery {
+        scope: Scope::All,
+        needle: query.trim(),
+        sessions_only: false,
+    }
 }
 
 /// Every input the prepared rows are derived from, as revisions and cheap values.
@@ -142,37 +293,74 @@ pub enum Run {
     Command(Command),
     /// Cancel a background job.
     CancelJob(JobId),
+    /// Select a card on its board and open its detail.
+    OpenCard(CardId),
+    /// Open a pull request's worktree, or show it on the PR screen when it has none.
+    GoToPr {
+        tab: PrTab,
+        repo: RepoId,
+        number: u64,
+        local: Option<WorktreeId>,
+    },
 }
 
 /// One palette row, already resolved against the snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     /// Which section it belongs to.
-    pub(crate) section: PaletteSectionKind,
+    pub(crate) section: Section,
     /// The row label, which is also what the query matches against.
     pub(crate) label: String,
-    /// The muted right-hand description.
+    /// More text the query may match that the row does not show (a provider name, a repo).
+    pub(crate) search: Option<String>,
+    /// The muted right-hand description: a place, a state, or `asks first`.
     pub(crate) detail: Option<String>,
     /// The muted second line.
     pub(crate) secondary: Option<String>,
     /// The right-aligned row verb.
     pub(crate) trailing: Option<String>,
-    /// The bound key, right-aligned.
-    pub(crate) key: Option<String>,
-    /// Whether the row is prefixed with `triangle-alert`.
+    /// A status word after the label (a card's column).
+    pub(crate) badge: Option<String>,
+    /// The row's own key, from the key table.
+    pub(crate) key: Option<Vec<Keystroke>>,
+    /// The label characters the query matched.
+    pub(crate) matches: Vec<usize>,
+    /// Whether the row wears the danger tile.
     pub(crate) destructive: bool,
     /// The glyph, when it is not derived from a session state.
     pub(crate) icon: Icon,
-    /// The §2.5 glyph this row wears, for `GO` rows.
+    /// The §2.5 glyph this row wears, for session and worktree rows.
     ///
     /// It is a resolved [`StatusKind`] and not a raw [`SessionState`] on purpose: `detached`
     /// alone cannot tell `circle` from `moon`, and §5 invariant 1 requires the palette to
     /// draw exactly the glyph the Hub draws for the same worktree.
     pub(crate) status: Option<StatusKind>,
-    /// The native-thread attention mark, when this is an `AGENTS` row.
+    /// The native-thread attention mark, when this is an agent row.
     pub(crate) attention: Option<Attention>,
     /// What `Enter` does.
     pub(crate) run: Run,
+}
+
+impl Entry {
+    /// A bare row: a label in a section that runs `run`.
+    pub(crate) fn new(section: Section, label: String, run: Run) -> Self {
+        Self {
+            section,
+            label,
+            search: None,
+            detail: None,
+            secondary: None,
+            trailing: None,
+            badge: None,
+            key: None,
+            matches: Vec::new(),
+            destructive: false,
+            icon: Icon::Command,
+            status: None,
+            attention: None,
+            run,
+        }
+    }
 }
 
 mod command;
@@ -194,13 +382,13 @@ pub(super) fn render(
     _window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let (query, cursor, rows, total, input) = {
+    let (query, cursor, rows, scroll, input) = {
         let host = host.read(cx);
         (
             host.palette.query.clone(),
             host.palette.cursor,
             host.palette.rows.clone(),
-            host.palette.total,
+            host.palette.scroll.clone(),
             host.palette_input.clone(),
         )
     };
@@ -210,52 +398,39 @@ pub(super) fn render(
         return div().track_focus(focus).size_full().into_any_element();
     };
 
-    let windowed = is_session_switcher(&query) || is_agents_picker(&query);
-    let (visible_rows, visible_cursor) = visible_rows(&rows, cursor, windowed);
+    let click_state = state.clone();
+    let click_bridge = bridge.clone();
     let mut card = fleet_ui_kit::Palette::new(input)
-        .cursor(visible_cursor)
-        .cap(ROW_CAP)
-        .total(total)
-        .empty(format!("Nothing matches \"{query}\"."));
-    for kind in [
-        PaletteSectionKind::Go,
-        PaletteSectionKind::Do,
-        PaletteSectionKind::Context,
-        PaletteSectionKind::Agents,
-    ] {
-        let section: Vec<PaletteRow> = visible_rows
+        .cursor(cursor)
+        .visible_rows(VISIBLE_ROWS)
+        .track_scroll(&scroll)
+        .scope(parse_query(&query).scope.label())
+        .run_action(Box::new(palette_actions::Run))
+        .empty(format!("Nothing matches \"{query}\"."))
+        .on_click(move |index, window, cx| {
+            // A press is `Enter` on that row: move the cursor there, then run what it runs.
+            with_host(&click_state, cx, |host| host.palette.cursor = index);
+            run_selected(&click_state, &click_bridge, window, cx);
+        });
+    if query.is_empty() {
+        card = card.prefix_hint(PREFIX_HINT);
+    }
+    if let Some(entry) = rows.get(cursor) {
+        card = card.selected_label(entry.label.clone());
+    }
+    // The rows arrive ranked and grouped; each run of one section becomes one kit section.
+    let mut start = 0;
+    while let Some(first) = rows.get(start) {
+        let len = rows[start..]
             .iter()
-            .filter(|entry| entry.section == kind)
+            .take_while(|entry| entry.section == first.section)
+            .count();
+        let section = rows[start..start + len]
+            .iter()
             .enumerate()
-            .map(|(index, entry)| {
-                let mut row = PaletteRow::new(entry.label.clone())
-                    .destructive(entry.destructive)
-                    .icon(entry.icon);
-                if let Some(status) = entry.status {
-                    row = row.leading(StatusGlyph::new(status).id(gpui::SharedString::from(
-                        format!("palette-glyph-{}", entry.label),
-                    )));
-                } else if let Some(attention) = entry.attention {
-                    row = row.leading(attention_mark(index, attention));
-                }
-                if let Some(detail) = entry.detail.clone() {
-                    row = row.detail(detail);
-                }
-                if let Some(secondary) = entry.secondary.clone() {
-                    row = row.secondary(secondary);
-                }
-                if let Some(trailing) = entry.trailing.clone() {
-                    row = row.trailing(trailing);
-                }
-                if let Some(key) = entry.key.clone() {
-                    row = row.key(key);
-                }
-                row
-            })
-            .collect();
-        if !section.is_empty() {
-            card = card.section(PaletteSection::new(kind, section));
-        }
+            .map(|(offset, entry)| palette_row(start + offset, entry));
+        card = card.section(PaletteSection::new(first.section.title(), section));
+        start += len;
     }
 
     let (top, width) = {
@@ -290,6 +465,35 @@ pub(super) fn render(
         .into_any_element()
 }
 
+/// One prepared entry as a kit row. Composes only: every string was built in `refresh`.
+fn palette_row(index: usize, entry: &Entry) -> PaletteRow {
+    let mut row = PaletteRow::new(entry.label.clone())
+        .destructive(entry.destructive)
+        .icon(entry.icon)
+        .matches(entry.matches.iter().copied());
+    if let Some(status) = entry.status {
+        row = row.leading(StatusGlyph::new(status).id(("palette-glyph", index)));
+    } else if let Some(attention) = entry.attention {
+        row = row.leading(attention_mark(index, attention));
+    }
+    if let Some(detail) = entry.detail.clone() {
+        row = row.detail(detail);
+    }
+    if let Some(secondary) = entry.secondary.clone() {
+        row = row.secondary(secondary);
+    }
+    if let Some(trailing) = entry.trailing.clone() {
+        row = row.trailing(trailing);
+    }
+    if let Some(badge) = entry.badge.clone() {
+        row = row.badge(badge);
+    }
+    if let Some(keys) = entry.key.as_deref() {
+        row = row.kbd(Kbd::new(keys));
+    }
+    row
+}
+
 fn attention_mark(index: usize, attention: Attention) -> AnyElement {
     if !attention_has_visible_mark(attention) {
         return div()
@@ -320,22 +524,15 @@ const fn attention_has_visible_mark(attention: Attention) -> bool {
     !matches!(attention, Attention::Idle)
 }
 
-fn visible_rows(rows: &[Entry], cursor: usize, windowed: bool) -> (&[Entry], usize) {
-    if !windowed || rows.len() <= ROW_CAP {
-        return (rows, cursor);
-    }
-    let cursor = cursor.min(rows.len() - 1);
-    let start = cursor.saturating_sub(ROW_CAP - 1).min(rows.len() - ROW_CAP);
-    (&rows[start..start + ROW_CAP], cursor - start)
-}
-
 /// Builds the query editor and resets the draft when the palette opens.
 ///
 /// The editor lives exactly as long as the palette: `host::close_with` drops it with the rest
 /// of the drafts, so a reopened palette never inherits the last one's text, selection or undo
 /// history.
 pub(super) fn seed(state: &Entity<AppState>, cx: &mut App) {
-    let seed = state.update(cx, |app, _| app.palette_seed.take());
+    let (seed, prs) = state.update(cx, |app, _| {
+        (app.palette_seed.take(), app.palette_prs.take())
+    });
     if with_host(state, cx, |host| host.palette_open) {
         refresh(state, cx);
         return;
@@ -343,9 +540,9 @@ pub(super) fn seed(state: &Entity<AppState>, cx: &mut App) {
     let query = seed.unwrap_or_default();
     let input = cx.new(|cx| {
         let mut input = TextInput::new(InputMode::SingleLine, cx);
-        // §3.9's query row is the palette's own 44 px chrome, so the editor brings no box.
+        // §3.9's query row is the palette's own chrome, so the editor brings no box.
         input.set_embedded(true, cx);
-        input.set_placeholder("go to, or do", cx);
+        input.set_placeholder("Search or run a command", cx);
         input.set_text(query.clone(), cx);
         input
     });
@@ -365,14 +562,16 @@ pub(super) fn seed(state: &Entity<AppState>, cx: &mut App) {
                 return;
             }
             host.palette.query = query;
-            // A re-ranked palette must never keep a cursor past the end of its new rows.
+            // A re-ranked palette starts on its best match, at the top of the list.
             host.palette.cursor = 0;
+            fleet_ui_kit::Palette::reveal(&host.palette.scroll, 0);
         });
         notify(&watched, cx);
     });
     with_host(state, cx, |host| {
         host.palette = PaletteState {
             query,
+            prs: prs.unwrap_or_default(),
             ..PaletteState::default()
         };
         host.palette_input = Some(input);
@@ -385,11 +584,12 @@ pub(super) fn seed(state: &Entity<AppState>, cx: &mut App) {
 pub(super) fn refresh(state: &Entity<AppState>, cx: &mut App) {
     // The backdrop and the card the detail is holding decide which `Board:` and `Card detail:`
     // rows exist at all, so they are read with the query the rows are prepared from.
-    let (query, behind, detail_card) = with_host(state, cx, |host| {
+    let (query, behind, detail_card, prs) = with_host(state, cx, |host| {
         (
             host.palette.query.clone(),
             host.behind_palette.clone(),
             host.card_detail.card_id.clone(),
+            host.palette.prs.clone(),
         )
     });
     let key = PreparedKey::new(state.read(cx), query, behind, detail_card);
@@ -406,21 +606,14 @@ pub(super) fn refresh(state: &Entity<AppState>, cx: &mut App) {
         &key.query,
         key.behind.clone(),
         key.detail_card.as_ref(),
+        &prs,
     );
-    let total = rows.len();
-    let cap = if is_session_switcher(&key.query) || is_agents_picker(&key.query) {
-        usize::MAX
-    } else {
-        ROW_CAP
-    };
-    let rows: Vec<Entry> = rows.into_iter().take(cap).collect();
     with_host(state, cx, |host| {
         // A revision moves for changes the palette does not list, so rows that came out the
         // same keep the `Rc` the card already drew instead of a fresh one.
         if host.palette.rows.as_ref() != rows.as_slice() {
             host.palette.rows = rows.into();
         }
-        host.palette.total = total;
         host.palette.prepared = Some(key);
         // A snapshot can lose rows under an open palette; an unclamped cursor would point past
         // the end and make `Enter` a silent no-op (§3.9).
@@ -439,6 +632,7 @@ pub(super) fn refresh_query(state: &Entity<AppState>, cx: &mut App) {
 fn move_cursor(state: &Entity<AppState>, delta: isize, cx: &mut App) {
     with_host(state, cx, |host| {
         host.palette.cursor = step(host.palette.cursor, delta, host.palette.rows.len());
+        fleet_ui_kit::Palette::reveal(&host.palette.scroll, host.palette.cursor);
     });
     notify(state, cx);
 }
@@ -478,7 +672,45 @@ fn run_selected<T: SessionTransport>(
         }
         Run::CancelJob(job) => transport.send(RequestBody::CancelJob { job }),
         Run::Command(command) => run_command(command, behind, state, transport, window, cx),
+        Run::OpenCard(card) => open_card(&card, state, cx),
+        Run::GoToPr {
+            tab,
+            repo,
+            number,
+            local,
+        } => match local {
+            // What `Enter` on the PR screen does with a checked-out PR.
+            Some(worktree) => open_worktree(worktree, state, transport, cx),
+            None => state.update(cx, |app, cx| {
+                app.screen = Screen::Hub { tab: HubTab::Prs };
+                app.pr_tab = tab;
+                app.hub_pane = HubPane::List;
+                app.filter = FilterState::default();
+                // The Hub anchors its PR cursor by identity, so the row is named, not indexed.
+                app.pending_pr_focus = Some((repo, number));
+                cx.notify();
+            }),
+        },
     }
+}
+
+/// Selects `card` on the board and opens its detail: over the Workspace when the palette was
+/// opened there (its board tab holds the mirror), on the Hub's board tab otherwise.
+fn open_card(card: &CardId, state: &Entity<AppState>, cx: &mut App) {
+    state.update(cx, |app, cx| {
+        if !matches!(app.screen, Screen::Workspace { .. }) {
+            app.screen = Screen::Hub { tab: HubTab::Board };
+        }
+        app.select_card(card);
+        // A filter that hides the card would leave the selection somewhere else.
+        let selected = crate::screens::board::selected_card(app).map(|found| found.id.clone());
+        if selected.as_ref() != Some(card) {
+            app.board.filter.clear();
+            app.select_card(card);
+        }
+        cx.notify();
+    });
+    crate::screens::board::open_dialog(state, Dialogs::CardDetail, cx);
 }
 
 /// Runs one command. Destructive rows open their confirm rather than acting (§3.9).
@@ -724,18 +956,4 @@ fn kill_request(state: &AppState) -> Option<ConfirmRequest> {
             .collect(),
         unsaved: false,
     })
-}
-
-fn is_session_switcher(query: &str) -> bool {
-    query.trim() == "sessions"
-}
-
-fn is_agents_picker(query: &str) -> bool {
-    agents_picker_filter(query).is_some()
-}
-
-fn agents_picker_filter(query: &str) -> Option<&str> {
-    let query = query.trim();
-    let rest = query.strip_prefix("agents")?;
-    (rest.is_empty() || rest.chars().next().is_some_and(char::is_whitespace)).then(|| rest.trim())
 }

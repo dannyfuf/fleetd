@@ -1851,9 +1851,12 @@ fn overlays_section(
         px(320.0),
         Overlay::new().top(px(12.0)).width(px(560.0)).content(
             Palette::new(palette_query)
-                .total(63)
+                .scope("All")
+                .prefix_hint([(">", "commands"), ("@", "worktrees"), ("#", "cards")])
+                .selected_label("payroll#feat-payroll-fix")
+                .visible_rows(6)
                 .section(PaletteSection::new(
-                    PaletteSectionKind::Go,
+                    "Go to",
                     [
                         PaletteRow::new("payroll#feat-payroll-fix")
                             .leading(StatusGlyph::new(StatusKind::Attached).id("pal-0"))
@@ -1864,23 +1867,28 @@ fn overlays_section(
                     ],
                 ))
                 .section(PaletteSection::new(
-                    PaletteSectionKind::Do,
+                    "Commands",
                     [
-                        PaletteRow::new("Prune worktrees · buk/payroll")
+                        PaletteRow::new("Prune worktrees")
+                            .qualifier("· buk/payroll")
                             .icon(Icon::Scissors)
-                            .key("x")
+                            .detail("asks first")
+                            .kbd(gallery_kbd("x"))
                             .destructive(true),
                         PaletteRow::new("Clone repo")
                             .icon(Icon::CloudDownload)
-                            .key("n"),
+                            .detail("Hub")
+                            .kbd(gallery_kbd("n")),
                     ],
                 ))
                 .section(PaletteSection::new(
-                    PaletteSectionKind::Context,
-                    [PaletteRow::new("personal").icon(Icon::Boxes).key("2")],
+                    "Cards",
+                    [PaletteRow::new("FLT-7 Model delivery windows")
+                        .icon(Icon::SquareCheck)
+                        .badge("Todo")],
                 ))
                 .section(PaletteSection::new(
-                    PaletteSectionKind::Agents,
+                    "Agents",
                     [
                         PaletteRow::new("↳ codex — verify payroll")
                             .leading(StatusGlyph::new(StatusKind::Unknown).id("pal-agent-0"))

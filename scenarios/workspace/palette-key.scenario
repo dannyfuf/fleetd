@@ -1,0 +1,21 @@
+# KEYMAP.md § Palette mode — the Workspace's palette key. `ctrl-k` belongs to the shell inside a
+# terminal, so on Linux the palette is `ctrl-s k` there (⌘K on macOS), and `ctrl-k` itself still
+# reaches the PTY instead of opening anything.
+fixture: one-repo
+await idle
+key o
+await screen == Workspace 20000
+assert mode == Terminal
+
+key ctrl-k
+await idle
+assert overlay absent && mode == Terminal
+
+key ctrl-s k
+await overlay == Palette 10000
+assert mode == Palette && focused == palette.input
+shot workspace-palette
+key escape
+await overlay absent 10000
+assert mode == Terminal
+quit

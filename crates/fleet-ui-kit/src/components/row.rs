@@ -145,6 +145,7 @@ pub struct Row {
     id: Option<ElementId>,
     leading: Option<AnyElement>,
     reserve_leading: bool,
+    leading_width: Option<Pixels>,
     columns: Vec<RowColumn>,
     second_line: Option<AnyElement>,
     details: Option<AnyElement>,
@@ -167,6 +168,7 @@ impl Row {
             id: None,
             leading: None,
             reserve_leading: false,
+            leading_width: None,
             columns: Vec::new(),
             second_line: None,
             details: None,
@@ -211,6 +213,14 @@ impl Row {
     /// no row ever carries a glyph must not pay for the column.
     pub fn reserve_leading(mut self, reserve: bool) -> Self {
         self.reserve_leading = reserve;
+        self
+    }
+
+    /// Widen the leading slot past its 2 ch glyph width, for a leading element that is not a
+    /// glyph: the palette's icon tile. Every row of one list passes the same width, or the text
+    /// columns stop lining up.
+    pub fn leading_width(mut self, width: Pixels) -> Self {
+        self.leading_width = Some(width);
         self
     }
 
@@ -381,6 +391,7 @@ impl RenderOnce for Row {
         let pad = theme.space.md;
         let has_hover_only = self.columns.iter().any(|column| column.hover_only);
         let has_leading = self.reserve_leading || self.leading.is_some();
+        let leading_w = self.leading_width.unwrap_or(ch(GLYPH_COLUMN_CH));
 
         let content = div()
             .flex()
@@ -392,7 +403,7 @@ impl RenderOnce for Row {
             .children(has_leading.then(|| {
                 div()
                     .flex_none()
-                    .w(ch(GLYPH_COLUMN_CH))
+                    .w(leading_w)
                     .flex()
                     .items_center()
                     .justify_center()
@@ -442,7 +453,7 @@ impl RenderOnce for Row {
         // With a details block the line keeps its height and the row grows under it; the block
         // starts where the first text column starts, so it reads as part of the same item.
         let details_indent = if has_leading {
-            pad + ch(GLYPH_COLUMN_CH) + gap
+            pad + leading_w + gap
         } else {
             pad
         };

@@ -245,7 +245,7 @@ pub(crate) fn open_session(session: SessionId, state: &Entity<AppState>, cx: &mu
 pub(crate) fn open_agents_picker(state: &Entity<AppState>, cx: &mut App) {
     state.update(cx, |app, cx| {
         app.leave_prefix();
-        app.palette_seed = Some("agents".to_owned());
+        app.palette_seed = Some("!".to_owned());
         app.open_overlay(Overlay::Palette);
         cx.notify();
     });

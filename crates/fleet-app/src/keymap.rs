@@ -308,6 +308,7 @@ const AGENT_SESSION_ROWS: &[SharedRow] = &[
     ("ctrl-s !", || Box::new(FocusStickyError)),
     ("ctrl-s J", || Box::new(OpenJobs)),
     ("ctrl-s ?", || Box::new(OpenHelp)),
+    ("ctrl-s k", || Box::new(OpenPalette)),
     ("ctrl-s escape", || Box::new(prefix::Cancel)),
 ];
 
@@ -327,12 +328,50 @@ const AGENT_CONTROL_ROWS: &[SharedRow] = &[
     ("ctrl-s F", || Box::new(native_agent::TerminalFallback)),
 ];
 
+/// The palette's second key beside `:`: ⌘K on macOS, `ctrl-k` everywhere else (KEYMAP.md
+/// § Palette mode). It is bound only where `:` is, so a focused text field keeps its own
+/// `ctrl-k` (delete to the line end): `FleetTextInput` sits deeper on the chain and wins.
+const PALETTE_KEY: &str = if cfg!(target_os = "macos") {
+    "cmd-k"
+} else {
+    "ctrl-k"
+};
+
+/// Every context where `:` opens the palette, and so where [`PALETTE_KEY`] does too.
+const PALETTE_KEY_CONTEXTS: &[&str] = &["Hub", "Dialog > CardDetail"];
+
+/// [`PALETTE_KEY`] as a row.
+const PALETTE_KEY_ROWS: &[SharedRow] = &[(PALETTE_KEY, || Box::new(OpenPalette))];
+
+/// The Workspace's terminal and native tabs and the agent thread: `ctrl-k` belongs to the
+/// shell and the composer there, so only macOS, whose ⌘K no terminal program sees, binds it.
+/// Every platform also has `ctrl-s k` (the prefix table and [`AGENT_SESSION_ROWS`]).
+const WORKSPACE_PALETTE_CONTEXTS: &[&str] = &[
+    "Workspace > Terminal",
+    "Workspace > Native",
+    "Agent > AgentIdle",
+    "Agent > AgentWorking",
+    "Agent > AgentNativeScroll",
+    "Agent > AgentDecision > AgentPermission",
+    "Agent > AgentDecision > AgentQuestion",
+    "Agent > AgentDecision > AgentPlan",
+];
+
+/// ⌘K on macOS; nothing elsewhere.
+const WORKSPACE_PALETTE_ROWS: &[SharedRow] = if cfg!(target_os = "macos") {
+    PALETTE_KEY_ROWS
+} else {
+    &[]
+};
+
 /// The context × row products the table registers after its literal rows, in that order: every
 /// row of a family is registered under each context of that family.
 const SHARED_TABLES: &[(&[&str], &[SharedRow])] = &[
     (AGENT_THREAD_CONTEXTS, AGENT_SELECTION_ROWS),
     (AGENT_THREAD_CONTEXTS, AGENT_SESSION_ROWS),
     (AGENT_CONTROL_CONTEXTS, AGENT_CONTROL_ROWS),
+    (PALETTE_KEY_CONTEXTS, PALETTE_KEY_ROWS),
+    (WORKSPACE_PALETTE_CONTEXTS, WORKSPACE_PALETTE_ROWS),
 ];
 
 /// Every `(spec, action)` pair [`SHARED_TABLES`] stands for, built once per consumer.
@@ -675,6 +714,8 @@ key_table! {
     "!",            "Workspace > Prefix" => FocusStickyError;
     "J",            "Workspace > Prefix" => OpenJobs;
     "?",            "Workspace > Prefix" => OpenHelp;
+    // The palette's Workspace key: `ctrl-k` is the shell's here (KEYMAP.md § Palette mode).
+    "k",            "Workspace > Prefix" => OpenPalette;
     "escape",       "Workspace > Prefix" => prefix::Cancel;
 
     "shift-pageup",   "Workspace > Terminal" => scroll::TerminalPageUp;

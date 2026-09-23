@@ -47,6 +47,7 @@ mod actions;
 mod cache;
 mod composition;
 mod navigation;
+mod palette;
 mod projection;
 #[cfg(test)]
 pub(crate) mod tests;

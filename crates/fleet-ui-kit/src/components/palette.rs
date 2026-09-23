@@ -1,68 +1,46 @@
-//! `Palette` — sectioned `GO` / `DO` / `CONTEXT` results with right-aligned key hints.
+//! `Palette` — one ranked, scrolling list of commands and objects under a live query.
 //!
-//! §3.9. The palette is a live query editor over a stack of [`FuzzyList`]s, one per section,
-//! sharing a single flat cursor. Three rules are structural rather than stylistic:
+//! §3.9. The palette is a query row over a single [`FuzzyList`] that carries section headings,
+//! and a footer naming what `⏎` runs. What is structural rather than stylistic:
 //!
-//! * `GO` (objects) always comes **first**, so a session is reachable from inside another
-//!   session with `ctrl-s s : pay fix ⏎` and no list scan. The order is normalised on render,
-//!   so a caller cannot get it wrong by pushing sections in the order it computed them;
-//! * every `DO` row shows its bound key, right-aligned, so the palette trains itself out of
-//!   the loop;
-//! * the total cap is **10 rows across all sections**, so the top match never moves below the
-//!   fold and `Enter` stays predictable. A command that is invalid here is **not listed at
-//!   all** — never greyed, because a greyed row costs a `j`.
+//! * the owner ranks, the palette draws: sections arrive in the order the ranker put them, and
+//!   the rows inside each one are already sorted, so the top row is always the best match and
+//!   the flat cursor starts on it;
+//! * the list scrolls past [`Palette::visible_rows`] instead of dropping rows, and a heading
+//!   rides above its first row inside the same list item, so the cursor, the scroll position
+//!   ([`Palette::reveal`]) and the harness numbering (`palette.row[N]`) all count rows only;
+//! * every command row shows its own key as a [`Kbd`], so the palette trains itself out of the
+//!   loop, and a destructive command wears a danger tile — it still goes through its confirm;
+//! * a press on a row runs it, exactly as `⏎` does with the cursor on it.
 //!
-//! Ranking, matching and the flat cursor belong to the caller; [`Palette::shown`] and
-//! [`Palette::flat_len`] give it the two numbers it needs to move that cursor with
-//! [`FuzzyList::next_cursor`] / [`FuzzyList::prev_cursor`] on `ctrl-n` / `ctrl-p`.
+//! Ranking, matching and the flat cursor belong to the caller; [`Palette::flat_len`] gives it
+//! the length to move that cursor with [`FuzzyList::next_cursor`] / [`FuzzyList::prev_cursor`].
 //!
 //! The query is a [`TextInput`] the caller owns, built embedded
-//! ([`TextInput::set_embedded`]) because the 44 px query row below is the palette's own chrome
-//! and a framed field inside it would draw a second box.
+//! ([`TextInput::set_embedded`]) because the query row is the palette's own chrome and a framed
+//! field inside it would draw a second box.
 
-use gpui::{AnyElement, App, Entity, SharedString, Window, div, prelude::*};
+use gpui::{
+    Action, AnyElement, App, Entity, FontWeight, ScrollHandle, SharedString, Window, div,
+    prelude::*,
+};
 use std::rc::Rc;
 
 use crate::{
-    components::{FuzzyItem, FuzzyList, KeyHintRow, TextInput},
+    components::{Chip, FuzzyItem, FuzzyList, Kbd, KbdSize, TextInput},
     harness::HarnessTargetExt as _,
-    icons::Icon,
+    icons::{Icon, IconSize},
     text::{Text, TextRole, styled_with},
-    theme::ActiveTheme,
+    theme::{ActiveTheme, Theme},
     tone::Tone,
 };
-
-/// The palette sections, in their fixed order.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum PaletteSectionKind {
-    /// Objects: worktrees, PRs, repos. Ranked above commands.
-    Go,
-    /// Valid commands only, each with its bound key.
-    Do,
-    /// Context switches, with their digit.
-    Context,
-    /// Native agent threads, opened by the seeded `agents` query.
-    Agents,
-}
-
-impl PaletteSectionKind {
-    /// The section title.
-    pub fn title(self) -> &'static str {
-        match self {
-            PaletteSectionKind::Go => "go",
-            PaletteSectionKind::Do => "do",
-            PaletteSectionKind::Context => "context",
-            PaletteSectionKind::Agents => "AGENTS",
-        }
-    }
-}
 
 /// One palette row.
 pub struct PaletteRow {
     icon: Option<Icon>,
+    leading: Option<AnyElement>,
     item: FuzzyItem,
     destructive: bool,
-    leading: Option<AnyElement>,
 }
 
 impl PaletteRow {
@@ -70,27 +48,35 @@ impl PaletteRow {
     pub fn new(label: impl Into<SharedString>) -> Self {
         Self {
             icon: None,
+            leading: None,
             item: FuzzyItem::new(label),
             destructive: false,
-            leading: None,
         }
     }
 
-    /// The glyph. Use the same glyph the object or action uses elsewhere.
+    /// The glyph inside the row's tile. Use the same glyph the object or action uses elsewhere.
     pub fn icon(mut self, icon: Icon) -> Self {
         self.icon = Some(icon);
         self
     }
 
-    /// A custom leading element, e.g. a [`super::StatusGlyph`] for a worktree row.
+    /// A custom element inside the row's tile instead of a glyph, e.g. a
+    /// [`super::StatusGlyph`] for a worktree row.
     pub fn leading(mut self, leading: impl IntoElement) -> Self {
         self.leading = Some(leading.into_any_element());
         self
     }
 
-    /// The muted right-hand description (`session attached`, `PR · mine`, `repo`).
+    /// The muted right-hand description: the place a command acts in (`Board`), a worktree's
+    /// state (`session attached`), or `asks first` on a destructive command.
     pub fn detail(mut self, detail: impl Into<SharedString>) -> Self {
         self.item = self.item.trailing(detail);
+        self
+    }
+
+    /// A muted qualifier on the label's own line, read with it (`· spike`).
+    pub fn qualifier(mut self, qualifier: impl Into<SharedString>) -> Self {
+        self.item = self.item.detail(qualifier);
         self
     }
 
@@ -100,69 +86,88 @@ impl PaletteRow {
         self
     }
 
-    /// A right-aligned value, e.g. `attach` or `go`.
+    /// A right-aligned value, e.g. `attach` or `go`. Shares the slot with
+    /// [`PaletteRow::detail`]; a row carries one or the other.
     pub fn trailing(mut self, trailing: impl Into<SharedString>) -> Self {
         self.item = self.item.trailing(trailing);
         self
     }
 
-    /// The bound key, right-aligned.
-    pub fn key(mut self, key: impl Into<SharedString>) -> Self {
-        self.item = self.item.key(key);
+    /// A status word after the label, e.g. a card's column (`Todo`).
+    pub fn badge(mut self, badge: impl Into<SharedString>) -> Self {
+        self.item = self.item.badge(badge);
         self
     }
 
-    /// The character indices of the label the ranker matched (§3.9 allows a weight bump and
-    /// nothing louder).
+    /// The row's own key, right-aligned as chips. Resolved from the keymap by the owner.
+    pub fn kbd(mut self, kbd: Kbd) -> Self {
+        self.item = self.item.kbd(kbd);
+        self
+    }
+
+    /// The character indices of the label the ranker matched, drawn as a weight bump.
     pub fn matches(mut self, matches: impl IntoIterator<Item = usize>) -> Self {
         self.item = self.item.matches(matches);
         self
     }
 
-    /// Prefix with `triangle-alert`. The action is still routed through its confirm dialog.
+    /// Draw the tile in the danger wash: the command deletes or stops something. The action
+    /// is still routed through its confirm; say so with [`PaletteRow::detail`] (`asks first`).
     pub fn destructive(mut self, destructive: bool) -> Self {
         self.destructive = destructive;
         self
     }
 
-    /// The [`FuzzyItem`] this row renders as.
-    fn into_item(self, secondary: gpui::Hsla) -> FuzzyItem {
-        let mut item = self.item;
-        if self.destructive {
-            // §3.9: "Destructive commands — prefixed with `triangle-alert`". Recolouring the
-            // action's own glyph is not that prefix: a red `trash` still reads as "delete",
-            // which is what the label already says, while the warning mark reads as "stop".
-            // Leaving the leading slot empty is what lets `FuzzyList` draw that mark.
-            item = item.destructive(true);
-        } else if let Some(leading) = self.leading {
-            item = item.leading(leading);
-        } else if let Some(icon) = self.icon {
-            item = item.leading(
+    /// The [`FuzzyItem`] this row renders as, with its tile as the leading element.
+    fn into_item(self, heading: Option<SharedString>, theme: &Theme) -> FuzzyItem {
+        let (fill, color) = if self.destructive {
+            (Tone::Danger.fill(theme), theme.colors.danger)
+        } else {
+            (theme.colors.control, theme.colors.text_secondary)
+        };
+        let content = self.leading.or_else(|| {
+            self.icon.map(|icon| {
                 icon.el()
-                    .size(crate::icons::IconSize::Large)
-                    .color(secondary),
-            );
+                    .size(IconSize::Small)
+                    .color(color)
+                    .into_any_element()
+            })
+        });
+        let tile = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .size(theme.metrics.palette_tile)
+            .rounded(theme.radii.sm)
+            .bg(fill)
+            .children(content);
+        let item = self.item.leading(tile);
+        match heading {
+            Some(heading) => item.heading(heading),
+            None => item,
         }
-        item
     }
 }
 
-/// One section of the palette.
+impl FluentBuilder for PaletteRow {}
+
+/// One titled run of rows. Sections render in the order they are added.
 pub struct PaletteSection {
-    kind: PaletteSectionKind,
+    title: SharedString,
     rows: Vec<PaletteRow>,
 }
 
 impl PaletteSection {
-    /// A section.
-    pub fn new(kind: PaletteSectionKind, rows: impl IntoIterator<Item = PaletteRow>) -> Self {
+    /// A section under a sentence-case `title` (`Commands`, `Go to`).
+    pub fn new(title: impl Into<SharedString>, rows: impl IntoIterator<Item = PaletteRow>) -> Self {
         Self {
-            kind,
+            title: title.into(),
             rows: rows.into_iter().collect(),
         }
     }
 
-    /// How many rows this section holds before the palette-wide cap.
+    /// How many rows this section holds.
     pub fn len(&self) -> usize {
         self.rows.len()
     }
@@ -182,8 +187,12 @@ pub struct Palette {
     input: Entity<TextInput>,
     sections: Vec<PaletteSection>,
     cursor: usize,
-    cap: usize,
-    total: usize,
+    visible_rows: usize,
+    scroll: Option<ScrollHandle>,
+    scope: Option<SharedString>,
+    prefix_hint: Vec<(SharedString, SharedString)>,
+    selected_label: Option<SharedString>,
+    run_action: Option<Box<dyn Action>>,
     empty: Option<SharedString>,
     on_click: Option<RowHandler>,
 }
@@ -195,21 +204,18 @@ impl Palette {
             input,
             sections: Vec::new(),
             cursor: 0,
-            cap: 10,
-            total: 0,
+            visible_rows: 10,
+            scroll: None,
+            scope: None,
+            prefix_hint: Vec::new(),
+            selected_label: None,
+            run_action: None,
             empty: None,
             on_click: None,
         }
     }
 
-    /// A press on a row runs it. The handler receives the **flat** index the cursor uses, so
-    /// it can do exactly what `⏎` does with the cursor on that row.
-    pub fn on_click(mut self, handler: impl Fn(usize, &mut Window, &mut App) + 'static) -> Self {
-        self.on_click = Some(Rc::new(handler));
-        self
-    }
-
-    /// Append a section. Order is normalised on render.
+    /// Append a section, below the ones already added.
     pub fn section(mut self, section: PaletteSection) -> Self {
         self.sections.push(section);
         self
@@ -221,15 +227,46 @@ impl Palette {
         self
     }
 
-    /// The total row cap. 10 by the spec.
-    pub fn cap(mut self, cap: usize) -> Self {
-        self.cap = cap;
+    /// How many rows tall the results are before they scroll. 10 by default.
+    pub fn visible_rows(mut self, rows: usize) -> Self {
+        self.visible_rows = rows;
         self
     }
 
-    /// How many candidates matched in total, for the `9 of 63` footer.
-    pub fn total(mut self, total: usize) -> Self {
-        self.total = total;
+    /// Track the results' scroll position, so the owner can [`Palette::reveal`] the cursor.
+    pub fn track_scroll(mut self, handle: &ScrollHandle) -> Self {
+        self.scroll = Some(handle.clone());
+        self
+    }
+
+    /// The scope chip after the query (`All`, `Commands`): what the typed prefix narrowed to.
+    pub fn scope(mut self, scope: impl Into<SharedString>) -> Self {
+        self.scope = Some(scope.into());
+        self
+    }
+
+    /// The prefix legend (`type > commands · @ worktrees · # cards`), as `(prefix, meaning)`
+    /// pairs. The owner passes it while the query is empty and nothing once typing starts.
+    pub fn prefix_hint(
+        mut self,
+        hint: impl IntoIterator<Item = (impl Into<SharedString>, impl Into<SharedString>)>,
+    ) -> Self {
+        self.prefix_hint = hint
+            .into_iter()
+            .map(|(prefix, meaning)| (prefix.into(), meaning.into()))
+            .collect();
+        self
+    }
+
+    /// The footer's left half: the label of the row `⏎` would run.
+    pub fn selected_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.selected_label = Some(label.into());
+        self
+    }
+
+    /// The action `⏎` dispatches. The footer's `Run` chip is resolved from its live binding.
+    pub fn run_action(mut self, action: Box<dyn Action>) -> Self {
+        self.run_action = Some(action);
         self
     }
 
@@ -239,97 +276,102 @@ impl Palette {
         self
     }
 
-    /// How many rows exist across every section, before the cap.
+    /// A press on a row runs it. The handler receives the **flat** index the cursor uses, so
+    /// it can do exactly what `⏎` does with the cursor on that row.
+    pub fn on_click(mut self, handler: impl Fn(usize, &mut Window, &mut App) + 'static) -> Self {
+        self.on_click = Some(Rc::new(handler));
+        self
+    }
+
+    /// How many rows exist across every section: the length `ctrl-n` / `ctrl-p` wrap around.
     pub fn flat_len(&self) -> usize {
         self.sections.iter().map(PaletteSection::len).sum()
     }
 
-    /// How many rows will actually render, after the cap. The left half of `9 of 63`, and the
-    /// length `ctrl-n` / `ctrl-p` wrap around.
-    pub fn shown(&self) -> usize {
-        self.flat_len().min(self.cap)
+    /// Scroll `handle` so the row at flat index `cursor` (with its heading, when it opens a
+    /// section) is in view. Call it from the action that moved the cursor, never from `render`.
+    pub fn reveal(handle: &ScrollHandle, cursor: usize) {
+        FuzzyList::reveal(handle, cursor);
     }
 }
 
 impl RenderOnce for Palette {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let shown = self.shown();
-        let total = self.total.max(shown);
-        let cursor = self.cursor;
-        let cap = self.cap;
-        let secondary = theme.colors.text_secondary;
+        let run_kbd = self
+            .run_action
+            .as_deref()
+            .and_then(|action| Kbd::for_action(action, window, cx))
+            .map(|kbd| kbd.size(KbdSize::Small));
 
-        let mut sections = self.sections;
-        sections.sort_by_key(|section| section.kind);
+        let items: Vec<FuzzyItem> = self
+            .sections
+            .into_iter()
+            .flat_map(|section| {
+                let title = section.title;
+                section
+                    .rows
+                    .into_iter()
+                    .enumerate()
+                    .map(move |(index, row)| ((index == 0).then(|| title.clone()), row))
+            })
+            .map(|(heading, row)| row.into_item(heading, &theme))
+            .collect();
 
-        // One flat cursor across every section: the caller counts rows, not sections.
-        let mut consumed = 0usize;
-        let mut blocks: Vec<AnyElement> = Vec::new();
-        for section in sections {
-            if consumed >= cap || section.is_empty() {
-                continue;
-            }
-            let room = cap - consumed;
-            let take = section.len().min(room);
-            let items = section
-                .rows
-                .into_iter()
-                .take(take)
-                .map(|row| row.into_item(secondary));
-            let local_cursor = cursor.checked_sub(consumed).unwrap_or(usize::MAX);
-            let first = consumed;
+        let query_style = TextRole::Title.style(&theme);
+        let query = styled_with(div(), query_style, &theme)
+            .flex()
+            .flex_1()
+            .min_w_0()
+            .items_center()
+            .h(query_style.line_height)
+            .overflow_hidden()
+            .font_weight(FontWeight::NORMAL)
+            .text_color(theme.colors.text)
+            .child(self.input)
+            .harness_target("palette.input");
 
-            blocks.push(
-                div()
-                    .flex()
-                    .flex_col()
-                    .w_full()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_none()
-                            .items_center()
-                            .h(theme.metrics.section_header_h)
-                            .px(theme.space.md)
-                            .child(Text::label(section.kind.title())),
-                    )
-                    .child(
-                        FuzzyList::new(("palette-section", consumed), items)
-                            .cap(take)
-                            .when_some(self.on_click.clone(), |list, run| {
-                                list.on_click(move |ix, window, cx| run(first + ix, window, cx))
-                            })
-                            .cursor(local_cursor)
-                            .under_text_field(true)
-                            // One flat numbering across every section, so `palette.row[0]` is
-                            // the top match whichever section it came from — the same counting
-                            // the flat cursor above uses.
-                            .harness_rows("palette.row", consumed)
-                            .row_height(theme.metrics.palette_row_h),
-                    )
-                    .into_any_element(),
-            );
-            consumed += take;
-        }
-
-        let body: AnyElement = if blocks.is_empty() {
+        let hint = (!self.prefix_hint.is_empty()).then(|| {
+            let last = self.prefix_hint.len() - 1;
             div()
                 .flex()
+                .flex_none()
                 .items_center()
-                .h(theme.metrics.palette_row_h)
-                .px(theme.space.md)
-                .child(Text::ui(self.empty.unwrap_or_default()).muted())
-                .into_any_element()
-        } else {
-            div()
-                .flex()
-                .flex_col()
-                .w_full()
-                .pb(theme.space.xs)
-                .children(blocks)
-                .into_any_element()
-        };
+                .gap(theme.space.xxs)
+                .child(Text::caption("type").muted())
+                .children(self.prefix_hint.into_iter().enumerate().flat_map(
+                    move |(index, (prefix, meaning))| {
+                        [
+                            Text::hint(prefix)
+                                .color(theme.colors.text_secondary)
+                                .into_any_element(),
+                            Text::caption(meaning).muted().into_any_element(),
+                        ]
+                        .into_iter()
+                        .chain(
+                            (index < last)
+                                .then(|| Text::caption("\u{b7}").faint().into_any_element()),
+                        )
+                    },
+                ))
+        });
+
+        let mut results = FuzzyList::new("palette-results", items)
+            .cursor(self.cursor)
+            .under_text_field(true)
+            .visible_rows(self.visible_rows)
+            .row_height(theme.metrics.palette_row_h)
+            .leading_width(theme.metrics.palette_tile)
+            // One flat numbering across every section, so `palette.row[0]` is the top match
+            // whichever section it came from — the same counting the cursor uses.
+            .harness_rows("palette.row", 0)
+            .empty(Text::ui(self.empty.unwrap_or_default()).muted());
+        if let Some(handle) = self.scroll.as_ref() {
+            results = results.track_scroll(handle);
+        }
+        if let Some(run) = self.on_click {
+            results = results.on_click(move |ix, window, cx| run(ix, window, cx));
+        }
 
         div()
             .flex()
@@ -340,65 +382,50 @@ impl RenderOnce for Palette {
                     .flex()
                     .flex_none()
                     .items_center()
+                    .gap(theme.space.sm)
                     .w_full()
-                    .px(theme.space.sm)
+                    .h(theme.metrics.palette_input_h)
+                    .px(theme.space.lg)
                     .border_b(theme.metrics.hairline)
                     .border_color(theme.colors.border)
                     .child(
-                        // The query line carries neither a preview nor a validation message,
-                        // so it is the one field allowed to drop the 18 px status slot.
-                        // §3.9's prompt is `:` — the key that opens the palette. A `command`
-                        // glyph there advertises `⌘`, which Fleet binds nowhere.
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(theme.space.sm)
-                            .h(theme.metrics.palette_input_h)
-                            .w_full()
-                            .px(theme.space.md)
-                            .rounded(theme.radii.sm)
-                            .bg(theme.colors.bg)
-                            // The query owns the keyboard for as long as the palette is open,
-                            // so the box is always drawn in its focused state.
-                            .border(theme.metrics.hairline)
-                            .border_color(theme.colors.focus_ring)
-                            .overflow_hidden()
-                            .child(Text::data(":").color(theme.colors.text_secondary))
-                            .child(
-                                styled_with(div(), TextRole::Ui.style(&theme), &theme)
-                                    .flex()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .items_center()
-                                    .h(TextRole::Ui.style(&theme).line_height)
-                                    .overflow_hidden()
-                                    .text_color(theme.colors.text)
-                                    .child(self.input),
-                            )
-                            .harness_target("palette.input"),
-                    ),
+                        Icon::Search
+                            .el()
+                            .size(IconSize::Large)
+                            .color(theme.colors.text_secondary),
+                    )
+                    .child(query)
+                    .children(self.scope.map(|scope| Chip::new().text(scope).filled(true)))
+                    .children(hint),
             )
-            .child(body)
+            .child(div().w_full().py(theme.space.xs).child(results))
             .child(
                 div()
                     .flex()
                     .flex_none()
                     .items_center()
-                    .gap(theme.space.sm)
+                    .gap(theme.space.md)
                     .w_full()
-                    .h(theme.metrics.section_header_h)
+                    .h(theme.metrics.row_h)
                     .px(theme.space.md)
-                    .py(theme.space.xs)
                     .border_t(theme.metrics.hairline)
                     .border_color(theme.colors.border)
-                    .child(Text::hint(format!("{shown} of {total}")).tone(Tone::Muted))
-                    .child(Text::hint("\u{b7}").faint())
+                    .bg(theme.colors.chrome)
                     .child(
-                        KeyHintRow::new()
-                            .key("\u{23ce}", "run")
-                            .key("\u{2303}n/\u{2303}p", "move")
-                            .key("esc", "cancel"),
-                    ),
+                        div().flex().flex_1().min_w_0().children(
+                            self.selected_label
+                                .map(|label| Text::caption(label).muted().ellipsize()),
+                        ),
+                    )
+                    .children(run_kbd.map(|kbd| {
+                        div()
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .gap(theme.space.xs)
+                            .child(Text::caption("Run").faint())
+                            .child(kbd)
+                    })),
             )
     }
 }
@@ -408,49 +435,23 @@ mod tests {
     use super::*;
     use crate::components::InputMode;
 
-    fn section(kind: PaletteSectionKind, n: usize) -> PaletteSection {
-        PaletteSection::new(kind, (0..n).map(|i| PaletteRow::new(format!("row {i}"))))
+    fn section(title: &'static str, n: usize) -> PaletteSection {
+        PaletteSection::new(title, (0..n).map(|i| PaletteRow::new(format!("row {i}"))))
     }
 
-    fn palette(cx: &mut gpui::TestAppContext) -> Palette {
+    #[gpui::test]
+    fn every_row_of_every_section_is_counted(cx: &mut gpui::TestAppContext) {
         let input = cx.new(|cx| TextInput::new(InputMode::SingleLine, cx));
-        Palette::new(input)
-    }
-
-    #[gpui::test]
-    fn the_cap_bounds_the_whole_palette_not_each_section(cx: &mut gpui::TestAppContext) {
-        let palette = palette(cx)
-            .section(section(PaletteSectionKind::Go, 6))
-            .section(section(PaletteSectionKind::Do, 8))
-            .section(section(PaletteSectionKind::Context, 3));
+        let palette = Palette::new(input)
+            .section(section("Commands", 6))
+            .section(section("Go to", 8))
+            .section(section("Cards", 3));
         assert_eq!(palette.flat_len(), 17);
-        assert_eq!(palette.shown(), 10);
-    }
-
-    #[gpui::test]
-    fn a_short_palette_shows_everything(cx: &mut gpui::TestAppContext) {
-        let palette = palette(cx).section(section(PaletteSectionKind::Do, 3));
-        assert_eq!(palette.shown(), 3);
     }
 
     #[test]
-    fn sections_have_a_fixed_order() {
-        let mut kinds = vec![
-            PaletteSectionKind::Context,
-            PaletteSectionKind::Agents,
-            PaletteSectionKind::Do,
-            PaletteSectionKind::Go,
-        ];
-        kinds.sort();
-        assert_eq!(
-            kinds,
-            vec![
-                PaletteSectionKind::Go,
-                PaletteSectionKind::Do,
-                PaletteSectionKind::Context,
-                PaletteSectionKind::Agents
-            ]
-        );
-        assert_eq!(PaletteSectionKind::Agents.title(), "AGENTS");
+    fn an_empty_section_is_empty() {
+        assert!(section("Cards", 0).is_empty());
+        assert_eq!(section("Cards", 2).len(), 2);
     }
 }

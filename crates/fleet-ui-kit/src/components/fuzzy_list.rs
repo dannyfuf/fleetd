@@ -26,7 +26,7 @@ use gpui::{
 use std::rc::Rc;
 
 use crate::{
-    components::{Badge, ColumnAlign, Row, RowColumn},
+    components::{Badge, ColumnAlign, Kbd, KbdSize, Row, RowColumn},
     harness::HarnessTargetExt as _,
     icons::{Icon, IconSize},
     text::{Text, TextRole},
@@ -49,6 +49,8 @@ pub struct FuzzyItem {
     disabled: bool,
     badge: Option<SharedString>,
     checked: bool,
+    heading: Option<SharedString>,
+    kbd: Option<Kbd>,
 }
 
 impl FuzzyItem {
@@ -66,7 +68,25 @@ impl FuzzyItem {
             disabled: false,
             badge: None,
             checked: false,
+            heading: None,
+            kbd: None,
         }
+    }
+
+    /// Open a new section with this row: a sentence-case heading drawn above it, inside the
+    /// same list item. The heading scrolls with its first row and is never a row of its own,
+    /// so the cursor, [`FuzzyList::reveal`] and the harness numbering all keep counting rows.
+    pub fn heading(mut self, heading: impl Into<SharedString>) -> Self {
+        self.heading = Some(heading.into());
+        self
+    }
+
+    /// The row's own key as chips, right-aligned in the last column. Resolve it from the
+    /// keymap ([`Kbd::for_action`], or the owner's key table), never from a typed string; use
+    /// [`FuzzyItem::key`] only for a value that is not a keystroke.
+    pub fn kbd(mut self, kbd: Kbd) -> Self {
+        self.kbd = Some(kbd);
+        self
     }
 
     /// A neutral [`super::Badge`] after the label that names what the row *is* among its
@@ -264,6 +284,7 @@ pub struct FuzzyList {
     on_click: Option<RowHandler>,
     under_text_field: bool,
     row_height: Option<Pixels>,
+    leading_width: Option<Pixels>,
     empty: Option<AnyElement>,
     harness_rows: Option<(&'static str, usize)>,
 }
@@ -282,6 +303,7 @@ impl FuzzyList {
             on_click: None,
             under_text_field: true,
             row_height: None,
+            leading_width: None,
             empty: None,
             harness_rows: None,
         }
@@ -336,6 +358,13 @@ impl FuzzyList {
     /// Override the row height. 30 px one-line, 44 px two-line, 34 px inside the palette.
     pub fn row_height(mut self, height: Pixels) -> Self {
         self.row_height = Some(height);
+        self
+    }
+
+    /// Widen every row's leading slot, for a leading element wider than a glyph (the palette's
+    /// icon tile). See [`super::Row::leading_width`].
+    pub fn leading_width(mut self, width: Pixels) -> Self {
+        self.leading_width = Some(width);
         self
     }
 
@@ -409,12 +438,23 @@ impl RenderOnce for FuzzyList {
         let on_click = self.on_click;
         let one_line_h = self.row_height.unwrap_or(theme.metrics.row_h);
         let two_line_h = self.row_height.unwrap_or(theme.metrics.job_row_h);
-        let row_h = |item: &FuzzyItem| {
+        let heading_h = theme.metrics.section_header_h + theme.space.xs;
+        let line_h = |item: &FuzzyItem| {
             if item.secondary.is_some() {
                 two_line_h
             } else {
                 one_line_h
             }
+        };
+        // A heading rides above its first row inside the same item, so the height the
+        // viewport sums is the row's line plus its heading.
+        let row_h = |item: &FuzzyItem| {
+            line_h(item)
+                + if item.heading.is_some() {
+                    heading_h
+                } else {
+                    Pixels::ZERO
+                }
         };
         let shown = self.cap.unwrap_or(usize::MAX);
         let max_h = self.visible_rows.map(|rows| {
@@ -426,6 +466,10 @@ impl RenderOnce for FuzzyList {
         });
         let danger = theme.colors.danger;
         let accent = theme.colors.accent;
+        let leading_width = self.leading_width;
+        let header_px = theme.space.md;
+        let header_pt = theme.space.xs;
+        let header_h = theme.metrics.section_header_h;
 
         div()
             .id(self.id)
@@ -442,7 +486,8 @@ impl RenderOnce for FuzzyList {
                     .enumerate()
                     .map(move |(ix, item)| {
                         let selected = ix == cursor && !item.disabled;
-                        let height = row_h(&item);
+                        let height = line_h(&item);
+                        let heading = item.heading.clone();
                         let mut row = Row::new()
                             // Only some items carry a glyph; the column is reserved so the
                             // primary text of every row starts at the same x.
@@ -450,7 +495,8 @@ impl RenderOnce for FuzzyList {
                             .selected(selected)
                             .cursor(selected)
                             .disabled(item.disabled)
-                            .height(height);
+                            .height(height)
+                            .when_some(leading_width, Row::leading_width);
 
                         if let Some(run) = on_click.clone() {
                             row = row.on_click(move |_: &MouseDownEvent, window, cx| {
@@ -495,6 +541,11 @@ impl RenderOnce for FuzzyList {
                                 .align(ColumnAlign::Right),
                             );
                         }
+                        if let Some(kbd) = item.kbd {
+                            row = row.column(
+                                RowColumn::auto(kbd.size(KbdSize::Small)).align(ColumnAlign::Right),
+                            );
+                        }
                         if let Some(key) = item.key {
                             row = row.column(
                                 RowColumn::fixed(ch(KEY_COLUMN_CH), Text::hint(key))
@@ -504,9 +555,24 @@ impl RenderOnce for FuzzyList {
                         if let Some(secondary) = item.secondary {
                             row = row.second_line(Text::ui(secondary).muted().ellipsize());
                         }
-                        row.harness_target_optional(
+                        let row = row.harness_target_optional(
                             harness_rows.map(|(part, first)| (part, first + ix)),
-                        )
+                        );
+                        div()
+                            .flex()
+                            .flex_col()
+                            .w_full()
+                            .children(heading.map(|heading| {
+                                div()
+                                    .flex()
+                                    .flex_none()
+                                    .items_end()
+                                    .h(header_h)
+                                    .mt(header_pt)
+                                    .px(header_px)
+                                    .child(Text::sentence_label(heading).muted())
+                            }))
+                            .child(row)
                     }),
             )
             .into_any_element()

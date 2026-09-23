@@ -210,6 +210,24 @@ impl HubCtx {
         cursors.repos = reconcile_index(&model.rail, cursors.repos, &mut selection.rail, |row| {
             row.repo.clone()
         });
+        // The palette names a PR to land on (`GoToPr`); the list is anchored by identity, so
+        // naming it as the anchor is what puts the cursor there. It waits for rows to exist.
+        let pending = self.state.read(cx).pending_pr_focus.clone();
+        let on_prs = matches!(self.state.read(cx).screen, Screen::Hub { tab: HubTab::Prs });
+        let consumed = pending.is_some() && on_prs && !model.prs.is_empty();
+        if consumed
+            && let Some(target) = pending.filter(|target| {
+                model
+                    .prs
+                    .iter()
+                    .any(|row| row.repo == target.0 && row.number == target.1)
+            })
+        {
+            match self.state.read(cx).pr_tab {
+                PrTab::Mine => selection.prs_mine = Some(target),
+                PrTab::Review => selection.prs_review = Some(target),
+            }
+        }
         match &self.state.read(cx).screen {
             Screen::Hub {
                 tab: HubTab::Worktrees,
@@ -240,6 +258,10 @@ impl HubCtx {
                 }
             },
             _ => {}
+        }
+        if consumed {
+            self.state
+                .update(cx, |state, _| state.pending_pr_focus = None);
         }
         let displayed = model.displayed();
         let changed = {

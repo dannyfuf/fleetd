@@ -59,7 +59,7 @@ unlabelled. Change a row here and its entry there in the same commit.
 | Agent prefix | `Agent > Prefix` (one-shot) | `ctrl-s` inside the popup | any key (consumed) or `Esc` |
 | Agent scroll | `Agent > Scroll` | `ctrl-s [` inside the popup | `Esc`, `q`, `i` |
 | Filter | `Filter` | `/` in a list | `Esc` (first keeps filter, second clears), `Enter` |
-| Palette | `Palette` | `:` | `Esc`, `Enter` |
+| Palette | `Palette` | `:`, ⌘K / `ctrl-k`, `ctrl-s k` in the Workspace, the title bar's command field | `Esc`, `Enter`, a click on a row or outside the card |
 | Dialog | `Dialog > <name>` while browsing; `Dialog > <name>Editing` where the focused field owns typing | action | `Esc`, `Enter` |
 | Text input | `FleetTextInput` (`mode = single_line` \| `multiline`) | focusing a live `TextInput` | its container moves focus or closes |
 | Menu | `FleetMenu`, under the context that opened it | clicking a menu trigger, a dropdown, or right-clicking a row | `Esc`, `Enter`, clicking an item or anywhere outside |
@@ -98,7 +98,7 @@ behind it (`shell/root/focus.rs`, `focus_owner`).
 | `1`–`9`, `gt` / `gT` | switch to nth / next / previous context |
 | `p` | toggle Worktrees ⇄ Pull requests screen |
 | `/` | filter current list |
-| `:` | command palette |
+| `:`, ⌘K / `ctrl-k` | command palette |
 | `,` | settings |
 | `?` | help |
 | `J` | jobs panel |
@@ -206,9 +206,10 @@ alone preserves them.
 | `h` / `l`, `p` / `n` | previous / next terminal tab |
 | `Tab` | last terminal tab (MRU within this session) [A2] |
 | `w` | last session (MRU alternate, vim `ctrl-^`) [A3] |
-| `W` | session switcher: the palette pre-filtered to `GO`/sessions [A4] |
+| `W` | session switcher: the palette pre-filtered to running sessions, most recent first [A4] |
 | `u` | select the caller of the current child thread, attaching it first if needed; on a card run, the worktree's board tab with that card selected |
-| `d` | agent picker: the palette pre-filtered to `AGENTS` |
+| `d` | agent picker: the palette seeded with `!`, its agent threads |
+| `k` | command palette (the Workspace's palette key: `ctrl-k` belongs to the shell) |
 | `c` | new terminal tab (shell in worktree path) |
 | `b` | this worktree's board tab: created the first time, selected every time; an agent session is told `boards belong to worktrees` |
 | `x` | close current terminal (confirm if a keep-alive process is running) |
@@ -316,10 +317,10 @@ scroll mode or owned by a decision card preserves that mode's keyboard owner ins
 | every agent-thread sub-mode | `ctrl-s 1`–`9` · `ctrl-s Tab` · `ctrl-s w` | select a Workspace tab · return to the tab MRU · return to the session MRU |
 | every agent-thread sub-mode | `ctrl-s s` · `ctrl-s S` | go to Hub (thread keeps running) · sleep this session and return to the Hub |
 | every agent-thread sub-mode | `ctrl-s h`/`p` · `ctrl-s l`/`n` | previous / next tab, across the mixed terminal-and-thread strip |
-| every agent-thread sub-mode | `ctrl-s W` · `ctrl-s u` · `ctrl-s d` | session switcher · select the caller (attaching it first) · agent picker pre-filtered to `AGENTS` |
+| every agent-thread sub-mode | `ctrl-s W` · `ctrl-s u` · `ctrl-s d` | session switcher · select the caller (attaching it first) · agent picker seeded with `!` |
 | every agent-thread sub-mode | `ctrl-s c` · `ctrl-s b` · `ctrl-s y` · `ctrl-s z` | new terminal tab · this worktree's board tab · copy the worktree path · zoom |
 | every agent-thread sub-mode | `ctrl-s v` · `ctrl-s V` · `ctrl-s N` · `ctrl-s P` | the subagent watch pane: show/hide · dismiss · next · previous |
-| every agent-thread sub-mode | `ctrl-s !` · `ctrl-s J` · `ctrl-s ?` · `ctrl-s Esc` | sticky error · jobs panel · help · cancel the prefix |
+| every agent-thread sub-mode | `ctrl-s !` · `ctrl-s J` · `ctrl-s ?` · `ctrl-s k` · `ctrl-s Esc` | sticky error · jobs panel · help · command palette (⌘K too on macOS) · cancel the prefix |
 | both | `Esc` | close a picker, else abandon a gate draft, else leave scroll mode, else interrupt — and nothing at all on an idle thread |
 | `Agent > AgentDecision > AgentPermission` | `y` · `a` · `n` · `e` · `Esc` | allow once · allow for this session · deny · edit the command · deny and stop |
 | `Agent > AgentDecision > AgentQuestion` | `1`-`5` · `Space` · `Enter` · `p` | choose · toggle (multi-select) · answer / next · previous question |
@@ -638,16 +639,21 @@ is closed. On close the focus goes back to where it was.
 ## Palette mode (`:`)
 
 ⌘K on macOS and `ctrl-k` on other platforms open the palette alongside `:`, in every context
-where `:` does, and so does clicking the title bar's command field. `:` stays bound. Where
-`ctrl-k` already has an owner it keeps it: a terminal grid, where it belongs to the shell, and a
-focused `FleetTextInput`, where it deletes to the line end (ADR 0020). ⌘K also opens the palette
-from the Workspace; on other platforms the Workspace uses `ctrl-s k`.
+where `:` does (`Hub` and `Dialog > CardDetail`), and so does clicking the title bar's command
+field. `:` stays bound. Where `ctrl-k` already has an owner it keeps it: a terminal grid, where
+it belongs to the shell, and a focused `FleetTextInput`, where it deletes to the line end
+(ADR 0020). ⌘K also opens the palette from the Workspace — its terminal and native tabs and the
+agent thread — on macOS; on every platform the Workspace has `ctrl-s k`, the only Workspace key
+on Linux. The title bar's chip shows whichever key the focused context binds.
+
+The query's first character narrows the list: `>` commands, `@` worktrees and sessions, `#`
+cards, `!` agent threads (UX-SPEC §3.9).
 
 | Key | Action |
 | --- | --- |
 | printable, `Backspace`, `ctrl-w`, `ctrl-u`, motion, selection, undo | edit the query through the full `FleetTextInput` table above |
-| `ctrl-n` / `↓`, `ctrl-p` / `↑` | move between `GO` / `DO` / `CONTEXT` rows |
-| `Enter` | run the highlighted row (destructive commands still route through their confirm) |
+| `ctrl-n` / `↓`, `ctrl-p` / `↑` | move through the ranked rows, across sections; the list scrolls to keep the row in view |
+| `Enter` | run the highlighted row (destructive commands still route through their confirm); a click on a row does the same |
 | `Esc` | close (`q` remains a printable query character) |
 
 ## Daemon-down surfaces (§3.12)
@@ -824,7 +830,7 @@ that cannot contain a space, and `space` toggles the highlighted card.
 | `>` | `Dialog > CardDetail` | `board::RunNow` — Run the column's action on this card now |
 | `b` | `Dialog > CardDetail` | `board::PickBlockedBy` — Pick the cards this one is blocked by |
 | `m` | `Dialog > CardDetail` | `board::PickAgent` — Pick the agent that runs this card |
-| `:` | `Dialog > CardDetail` | `OpenPalette` — Command palette over the open card detail |
+| `:` | `Dialog > CardDetail` | `OpenPalette` — Command palette over the open card detail (⌘K / `ctrl-k` too) |
 | `escape` | `Dialog > CardDetailEditing` | `card_detail::Close` — Cancel text edit |
 | `enter` | `Dialog > CardDetailEditing` | `card_detail::EditProperty` — Submit title or insert a legacy multiline newline |
 | `ctrl-s` | `Dialog > CardDetailEditing` | `card_detail::Save` — Save text edit |

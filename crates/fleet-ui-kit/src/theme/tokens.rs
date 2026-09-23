@@ -631,6 +631,8 @@ pub struct Metrics {
     pub stash_pane_h: Pixels,
     /// 34 px palette row.
     pub palette_row_h: Pixels,
+    /// 22 px icon tile that leads a palette row.
+    pub palette_tile: Pixels,
     /// 44 px two-line job row.
     pub job_row_h: Pixels,
     /// 4 px track of a running job's progress bar.
@@ -761,6 +763,7 @@ impl Default for Metrics {
             status_pane_h: px(62.0),
             stash_pane_h: px(92.0),
             palette_row_h: px(34.0),
+            palette_tile: px(22.0),
             job_row_h: px(44.0),
             progress_bar_h: px(4.0),
             section_header_h: px(20.0),

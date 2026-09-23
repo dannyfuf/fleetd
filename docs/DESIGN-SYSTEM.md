@@ -276,7 +276,7 @@ list below is the complete inventory, in px unless marked `ch`; a unit test in
 | --- | --- |
 | Window chrome | `title_bar_h 44` · `status_bar_h 28` · `traffic_light_inset 84` · `command_field_w 340` · `monogram_size 18` · `mode_word_w 84` · `banner_h 28` · `strip_h 22` |
 | Layout columns | `sidebar_w 232` · `rail_w 240` · `detail_w 344` · `detail_overlay_w 320` · `sheet_w 440` · `sheet_expanded_w 640` · `sheet_w_detail 736` |
-| Rows and headers | `row_h 30` · `row_h_comfortable 44` · `pane_header_h 30` · `section_header_h 20` · `palette_row_h 34` · `job_row_h 44` · `progress_bar_h 4` |
+| Rows and headers | `row_h 30` · `row_h_comfortable 44` · `pane_header_h 30` · `section_header_h 20` · `palette_row_h 34` · `palette_tile 22` · `job_row_h 44` · `progress_bar_h 4` |
 | Controls | `button_h 30` · `button_h_compact 26` · `kbd_h 18` · `kbd_h_small 16` · `chip_h 22` · `text_field_h 36` · `field_status_h 18` · `number_field_w 96` · `segment_h 24` · `switch_w 34` · `switch_h 20` · `checkbox_size 16` |
 | Dialogs and floating layers | `dialog_w 560` · `confirm_compact_w 480` · `dialog_header_h 44` · `dialog_footer_h 44` · `palette_w 640` · `palette_top 120` · `prefix_menu_w 900` · `palette_input_h 44` · `overlay_help_w 640` · `toast_w 320` · `toast_inset 12` · `scroll_pill_w 176` · `menu_min_w 240` · `alert_tile 34` |
 | Lines and marks | `hairline 1` · `focus_ring_w 2` · `scroll_thumb_w 3` · `dot_size 8` · `dot_size_small 6` |
@@ -754,11 +754,13 @@ per item, which is far too much overhead per terminal row.
 
 #### `Row` / `RowColumn`
 **Purpose.** One list row: leading glyph slot, flex content, trailing columns.
-**API.** `Row::{new, with_id}().leading(..).column(RowColumn).columns(..).second_line(..)
+**API.** `Row::{new, with_id}().leading(..).leading_width(Pixels).column(RowColumn).columns(..).second_line(..)
 .details(..).height(Pixels).comfortable().selected(bool).cursor(bool).dimmed(bool).disabled(bool)
 .hoverable(bool).hover_actions(..).on_click(..).on_double_click(..).on_secondary_click(..)`;
 `RowColumn::{fixed(Pixels, ..), fixed_ch(f32, ..), flex(..), auto(..), resolved(..)}
-.align(ColumnAlign).min_width(Pixels).min_width_ch(f32).hover_only()`.
+.align(ColumnAlign).min_width(Pixels).min_width_ch(f32).hover_only()`. The leading slot is
+2 ch wide; `leading_width` widens it for an element that is not a glyph (the palette's
+`palette_tile`), and every row of one list passes the same width.
 **Variants.** 30 px one-line · 44 px two-line (`second_line`) · 44 px comfortable
 (`comfortable()`, `row_h_comfortable`: the Hub lists; primary cell `Text::ui_strong`, secondary
 cells `Text::ui(..).muted()`) · 34 px palette row · grown (`details`: the line keeps its
@@ -1031,13 +1033,18 @@ paragraph wraps like text rather than like a flex row.
 #### `FuzzyList` / `FuzzyItem`
 **Purpose.** A scrolling list of already-ranked results.
 **API.** `FuzzyItem::new(primary).detail(..).secondary(..).trailing(..).leading(..)
-.disabled(bool).key(..).matches(..).destructive(bool).badge(..).checked(bool)`; `badge` is a
+.disabled(bool).key(..).kbd(Kbd).matches(..).destructive(bool).badge(..).checked(bool)
+.heading(..)`; `kbd` is the row's own key as chips resolved from the keymap (`key` stays for a
+value that is not a keystroke); `heading` opens a section — a sentence-case label drawn above
+the row inside the same list item, so the cursor, `reveal` and the harness numbering keep
+counting rows; `badge` is a
 neutral `Badge` naming what the row is among its siblings (`default`, `previous base`), and
 `checked` ends the row with an accent `✓` — the chosen value of a list that is a choice rather
 than a launcher (the create dialog's base refs);
 `FuzzyList::new(id, items).cursor(usize).cap(usize).visible_rows(usize).track_scroll(&ScrollHandle)
 .on_click(|ix, window, cx| ..).under_text_field(bool).empty(..).row_height(Pixels)
-.harness_rows(part, first)`; `.binds_jk()`, `.shown()`,
+.leading_width(Pixels).harness_rows(part, first)`; `leading_width` widens every row's leading
+slot for a leading element wider than a glyph (the palette's icon tile); `.binds_jk()`, `.shown()`,
 `FuzzyList::{next_cursor, prev_cursor, reveal}`.
 **Pointer.** Rows hover; a press on an enabled row runs it (`on_click` receives the index in
 `items` and does what `⏎` does there — a picker has no separate select). `visible_rows(n)` makes
@@ -1048,7 +1055,7 @@ to one line — zero-suppression. `detail` is a muted qualifier drawn **on the s
 the primary label: use it when the qualifier is part of the row's identity (§3.8.5's context
 owners), and `secondary` only for a description that earns a second line.
 **Caps.** Unbounded by default. A cap is a product decision where a predictable `Enter` beats
-completeness: 8 (Clone results) · 50 (Create base list, 6 visible) · 10 (palette). To bound the
+completeness: 8 (Clone results) · 50 (Create base list, 6 visible). To bound the
 *height* and keep every result reachable, use `visible_rows` instead.
 **Keyboard.** `ctrl-n`/`ctrl-p` or `↓`/`↑` under a text field; `j`/`k` too when there is none.
 **Usage rule.** Matching, ranking and the 150 ms debounce belong to the caller — they need the
@@ -1178,21 +1185,32 @@ and name exactly what is lost (`The 2 unpushed commits exist only here and will 
 
 #### `Palette`
 **Purpose.** Jump to anything by name, or do the thing whose key you do not remember.
-**Anatomy.** 640 px card at y = 120 · 44 px input · default sections `GO` → `DO` → `CONTEXT`,
-or one seeded `AGENTS` section · ≤ 10 rows of 34 px · footer `9 of 63 · ⏎ run · esc cancel`.
-**API.** `Palette::new(input: Entity<TextInput>).section(PaletteSection::new(PaletteSectionKind::Go, rows))
-.cursor(usize).cap(usize).total(usize).empty(..).on_click(|flat_ix, window, cx| ..)`;
-`.shown()`, `.flat_len()`; a press on a row runs it with the same flat index the cursor uses;
-`PaletteSection::{len, is_empty}`;
-`PaletteRow::new(label).icon(Icon).leading(..).detail(..).key(..).destructive(bool).matches(..)`.
+**Anatomy.** 640 px card at y = 120 · `palette_input_h` query row: `search` icon, the query in
+the 15 px `title` size at regular weight, a scope chip (`All`, `Commands`, `Worktrees`, `Cards`,
+`Agents`) and, while the query is empty, the prefix legend `type > commands · @ worktrees ·
+# cards` · one `FuzzyList` of 34 px rows, `visible_rows` tall, scrolling past it, with sentence
+case section headings riding above each section's first row · a footer naming the selected
+row on the left and `Run ⏎` on the right.
+**Row.** A `palette_tile` icon tile (`control` fill, `text_secondary` glyph; a custom leading
+element such as a `StatusGlyph` sits in the same tile) · the label with its matched characters
+bumped in weight · an optional same-line `qualifier` · a `badge` (a card's column) · a muted
+right-hand `detail` (the place a command acts in, a worktree's state, `asks first`) or
+`trailing` verb · the row's own key as a `Kbd`. A destructive row's tile takes the danger wash
+and its glyph the danger colour.
+**API.** `Palette::new(input: Entity<TextInput>).section(PaletteSection::new(title, rows))
+.cursor(usize).visible_rows(usize).track_scroll(&ScrollHandle).scope(..).prefix_hint([(prefix,
+meaning)]).selected_label(..).run_action(Box<dyn Action>).empty(..).on_click(|flat_ix, window,
+cx| ..)`; `.flat_len()`; `Palette::reveal(&handle, cursor)`;
+`PaletteSection::{new, len, is_empty}`;
+`PaletteRow::new(label).icon(Icon).leading(..).detail(..).qualifier(..).secondary(..)
+.trailing(..).badge(..).kbd(Kbd).matches(..).destructive(bool)`.
 The owner builds the query editor **embedded** (`set_embedded(true, cx)`) and sets its
-placeholder: the 44 px row with its `:` prompt is the palette's own chrome.
-`PaletteSectionKind::Agents` titles the seeded section. Its five row slots are attention mark,
-provider/title label, worktree detail, child/caller relationship, and optional strip-index key.
-**Usage rule.** `GO` (objects) always first — that is what makes a session reachable from inside
-another session. Every `DO` row shows its bound key, right-aligned, so the palette trains itself
-out of the loop. A command that is invalid here is **not listed**, never greyed. Destructive
-commands are prefixed with `triangle-alert` and still routed through their confirm.
+placeholder; the `Run` chip resolves from `run_action`'s live binding.
+**Usage rule.** The owner ranks and the palette draws: sections render in the order they are
+added, rows in the order given, so the first row is the best match and the flat cursor starts
+there. A press on a row runs it with the same flat index the cursor uses. A command that is
+invalid here is **not listed**, never greyed. Destructive commands still route through their
+confirm.
 
 ### 6.5 Jobs and terminal
 

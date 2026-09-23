@@ -1,17 +1,20 @@
-# KEYMAP.md §Palette mode (`:`) — open, type, run the highlighted row, `Esc` closes
+# KEYMAP.md §Palette mode — open, type, run the highlighted row, `Esc` closes.
 #
-# The palette's rows are drawn from the key table itself, so a row that runs is a claim about
-# the whole `GO` section: typing `Pull` leaves exactly one row standing, and `Enter` runs it.
+# One palette over everything: `:` and `ctrl-k` (⌘K on macOS) open it, a typed query ranks
+# commands, worktrees, cards and agents in one list, and a leading `>` narrows it to commands.
 # The rows are painted targets rather than snapshot rows, so what the query narrowed to is
-# recorded in the dump (`palette.row[N]`) rather than asserted; the assertion is where it went.
+# recorded in the dump (`palette.row[N]`) and the shots rather than asserted; the assertion is
+# where `Enter` went.
 fixture: busy
 await idle 30000
 assert screen == Hub && hub_tab == Worktrees
 
-# `:` opens the palette. It shadows the Hub: one key context, one focus owner.
+# `:` opens the palette. It shadows the Hub: one key context, one focus owner. The empty query
+# lists recent sessions and suggested commands under the prefix legend.
 key :
 await overlay == Palette
 assert mode == Palette && key_contexts[0] == Palette && focused == palette.input
+assert targets["palette.input"] exists && targets["palette.row[0]"] exists
 shot palette
 dump palette
 
@@ -20,12 +23,22 @@ key escape
 await overlay absent
 assert screen == Hub && hub_tab == Worktrees && mode == Normal && focused == worktrees.row[0]
 
-# Re-opened and narrowed to one row, `Enter` runs it: `Go: Pull requests` is the same screen
-# `gp` reaches, which is what makes the palette checkable at all.
-key :
+# `ctrl-k` is the palette's other key. A typed query is one ranked list: the best match of any
+# kind is row 0, with its matched letters bumped and its own key chip on the right.
+key ctrl-k
 await overlay == Palette
-type Pull
+assert focused == palette.input
+type del
 await idle
+shot palette-ranked
+dump palette-ranked
+
+# `>` narrows to commands and the scope chip says so; `Enter` runs the top row. `Pull requests`
+# is the same screen `p` reaches, which is what makes the palette checkable at all.
+key ctrl-u
+type >Pull
+await idle
+shot palette-commands
 dump palette-narrowed
 key enter
 await hub_tab == Prs 15000

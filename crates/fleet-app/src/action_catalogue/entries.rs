@@ -71,9 +71,9 @@ pub(super) const ENTRIES: &[Entry] = &[
     e(
         &["fleet::OpenPalette"],
         P::Hub,
-        G::App,
+        G::Panels,
         "Open the command palette",
-        "Search for any command, worktree or session by name and run it.",
+        "Search commands, worktrees, cards, pull requests and agents by name, and run one.",
     )
     .featured(80)
     .short("Command palette"),

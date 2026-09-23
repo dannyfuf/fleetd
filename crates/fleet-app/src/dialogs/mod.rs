@@ -39,6 +39,7 @@ pub(crate) use host::{
 };
 #[cfg(test)]
 pub(crate) use host::{focused_input_text, hook_row_count};
+pub use palette::PalettePr;
 pub(crate) use settings::editor_command;
 #[cfg(test)]
 pub(crate) use settings::refresh_rows as settings_refresh_rows;

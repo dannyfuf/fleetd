@@ -67,9 +67,9 @@ fn a_go_row_says_its_state_not_its_type() {
 #[test]
 fn every_command_has_a_label_and_a_bound_key() {
     for command in Command::ALL {
-        assert!(!command.label().is_empty());
+        assert!(!command.info().label.is_empty());
         assert!(
-            key_for(command.action()).is_some(),
+            keys_for(command.action()).is_some(),
             "`{}` is bound to nothing",
             command.action()
         );
@@ -91,7 +91,7 @@ fn the_palette_offers_exactly_the_catalogue_s_palette_entries() {
     for command in Command::ALL {
         let info = crate::action_catalogue::info(command.action())
             .unwrap_or_else(|| panic!("{command:?}"));
-        assert_eq!(command.label(), info.label);
+        assert_eq!(command.info().label, info.label);
         assert_eq!(command.destructive(), info.destructive);
     }
 }
@@ -117,7 +117,7 @@ fn commands_that_need_a_connection_or_snapshot_are_not_listed_without_one() {
 #[test]
 fn an_empty_snapshot_still_offers_the_always_valid_commands() {
     let state = AppState::new("/tmp/fleet", Instant::now());
-    let rows = candidates(&state, "", None, None);
+    let rows = candidates(&state, "", None, None, &[]);
     assert!(
         rows.is_empty(),
         "without a snapshot the palette has nothing to point at"
@@ -305,7 +305,7 @@ fn agents_picker_state() -> (AppState, Vec<AgentThreadSummary>) {
 #[test]
 fn agents_picker_orders_callers_then_local_and_other_worktree_children() {
     let (state, _) = agents_picker_state();
-    let rows = candidates(&state, "agents", None, None);
+    let rows = candidates(&state, "agents", None, None, &[]);
     assert_eq!(
         rows.iter()
             .map(|row| row.label.as_str())
@@ -317,10 +317,7 @@ fn agents_picker_orders_callers_then_local_and_other_worktree_children() {
             "↳ codex — remote child · acme/widgets#feature-1",
         ]
     );
-    assert!(
-        rows.iter()
-            .all(|row| row.section == PaletteSectionKind::Agents)
-    );
+    assert!(rows.iter().all(|row| row.section == Section::Agents));
 }
 
 #[test]
@@ -351,19 +348,19 @@ fn agents_picker_keeps_a_closed_caller_reachable() {
         .find(|summary| summary.title == "closed caller")
         .expect("closed caller fixture");
     assert!(state.agents.is_closed(closed.thread));
-    let rows = candidates(&state, "agents", None, None);
+    let rows = candidates(&state, "agents", None, None, &[]);
     let row = rows
         .iter()
         .find(|row| row.label.contains("closed caller"))
         .expect("closed caller row");
-    assert_eq!(row.key.as_deref(), Some("·"));
+    assert_eq!(key_text(row), None);
     assert_eq!(row.trailing.as_deref(), Some("go"));
 }
 
 #[test]
 fn agents_picker_shows_a_strip_index_only_for_an_attached_thread() {
     let (state, _) = agents_picker_state();
-    let rows = candidates(&state, "agents", None, None);
+    let rows = candidates(&state, "agents", None, None, &[]);
     let caller = rows
         .iter()
         .find(|row| row.label == "claude — current caller")
@@ -376,9 +373,9 @@ fn agents_picker_shows_a_strip_index_only_for_an_attached_thread() {
         .iter()
         .find(|row| row.label.contains("remote child"))
         .expect("remote child row");
-    assert_eq!(caller.key.as_deref(), Some("1"));
-    assert_eq!(child.key.as_deref(), Some("2"));
-    assert_eq!(hidden.key.as_deref(), Some("·"));
+    assert_eq!(key_text(caller).as_deref(), Some("ctrl-s 1"));
+    assert_eq!(key_text(child).as_deref(), Some("ctrl-s 2"));
+    assert_eq!(key_text(hidden), None);
 }
 
 #[gpui::test]
@@ -422,7 +419,7 @@ fn capacity_refused_agent_selection_does_not_ensure_a_session(cx: &mut gpui::Tes
         });
     }
     app.overlay = Some(Overlay::Palette);
-    let rows = candidates(&app, "agents", None, None);
+    let rows = candidates(&app, "agents", None, None, &[]);
     let cursor = rows
         .iter()
         .position(|row| row.run == Run::OpenAgentThread(target))
@@ -461,7 +458,7 @@ fn reopening_a_closed_caller_from_the_picker_sends_agent_thread_reopen(
         .expect("closed caller fixture")
         .thread;
     app.overlay = Some(Overlay::Palette);
-    let rows = candidates(&app, "agents", None, None);
+    let rows = candidates(&app, "agents", None, None, &[]);
     let cursor = rows
         .iter()
         .position(|row| row.run == Run::OpenAgentThread(target))
@@ -502,7 +499,7 @@ fn selecting_an_already_open_top_level_thread_from_the_picker_sends_nothing(
         .expect("current caller fixture")
         .thread;
     app.overlay = Some(Overlay::Palette);
-    let rows = candidates(&app, "agents", None, None);
+    let rows = candidates(&app, "agents", None, None, &[]);
     let cursor = rows
         .iter()
         .position(|row| row.run == Run::OpenAgentThread(target))
@@ -529,7 +526,7 @@ fn selecting_an_already_open_top_level_thread_from_the_picker_sends_nothing(
 #[test]
 fn agents_picker_filters_on_the_provider_name() {
     let (state, _) = agents_picker_state();
-    let rows = candidates(&state, "agents codex", None, None);
+    let rows = candidates(&state, "agents codex", None, None, &[]);
     assert_eq!(rows.len(), 2);
     assert!(rows.iter().all(|row| row.label.contains("codex")));
 }
@@ -544,7 +541,7 @@ fn agents_picker_projects_cached_attention_without_attaching_a_blocked_child() {
         .clone();
     child.attention = Attention::NeedsYou(AttentionKind::Question);
     state.apply_agent_summary(child.clone(), Instant::now());
-    let row = candidates(&state, "agents", None, None)
+    let row = candidates(&state, "agents", None, None, &[])
         .into_iter()
         .find(|row| row.label.contains("remote child"))
         .expect("blocked child row");
@@ -646,7 +643,7 @@ fn destructive_target_matches_row() {
 #[test]
 fn session_switcher_is_mru_and_uncapped() {
     let mut app = AppState::new("/tmp/fleet", Instant::now());
-    app.snapshot = Some(multi_session_snapshot(ROW_CAP + 4));
+    app.snapshot = Some(multi_session_snapshot(VISIBLE_ROWS + 4));
     app.touch_session(
         "widgets/feature-2"
             .parse()
@@ -658,16 +655,16 @@ fn session_switcher_is_mru_and_uncapped() {
             .unwrap_or_else(|error| panic!("{error}")),
     );
 
-    let rows = candidates(&app, "sessions", None, None);
-    assert_eq!(rows.len(), ROW_CAP + 4);
+    let rows = candidates(&app, "sessions", None, None, &[]);
+    // Every session, past the visible height: the list scrolls rather than dropping rows.
+    assert_eq!(rows.len(), VISIBLE_ROWS + 4);
     assert_eq!(rows[0].label, "acme/widgets#feature-6");
     assert_eq!(rows[1].label, "acme/widgets#feature-2");
-    for cursor in 0..rows.len() {
-        let (visible, local_cursor) = visible_rows(&rows, cursor, true);
-        assert_eq!(visible.len(), ROW_CAP);
-        assert!(local_cursor < visible.len());
-        assert_eq!(visible[local_cursor], rows[cursor]);
-    }
+    // `@` is the same list, reached by its prefix.
+    assert_eq!(
+        candidates(&app, "@", None, None, &[]).len(),
+        VISIBLE_ROWS + 4
+    );
 }
 
 #[test]
@@ -675,10 +672,10 @@ fn a_go_row_takes_its_state_and_its_id_from_the_same_place_the_hub_does() {
     let now = Instant::now();
     let mut app = AppState::new("/tmp/fleet", now);
     app.apply_snapshot(go_snapshot(SessionState::Detached, false), now);
-    let rows = candidates(&app, "", None, None);
+    let rows = candidates(&app, "", None, None, &[]);
     let go: Vec<_> = rows
         .iter()
-        .filter(|entry| entry.section == PaletteSectionKind::Go)
+        .filter(|entry| entry.section == Section::Recent)
         .collect();
     assert_eq!(go.len(), 1, "one worktree is one GO row, {go:?}");
     assert_eq!(
@@ -691,11 +688,11 @@ fn a_go_row_takes_its_state_and_its_id_from_the_same_place_the_hub_does() {
     // The same worktree, actually attached, and slept.
     let mut app = AppState::new("/tmp/fleet", now);
     app.apply_snapshot(go_snapshot(SessionState::Attached, false), now);
-    let rows = candidates(&app, "", None, None);
+    let rows = candidates(&app, "", None, None, &[]);
     assert_eq!(rows[0].status, Some(StatusKind::Attached));
     let mut app = AppState::new("/tmp/fleet", now);
     app.apply_snapshot(go_snapshot(SessionState::Detached, true), now);
-    let rows = candidates(&app, "", None, None);
+    let rows = candidates(&app, "", None, None, &[]);
     assert_eq!(rows[0].status, Some(StatusKind::Sleeping));
     assert_eq!(rows[0].detail.as_deref(), Some("sleeping"));
 }
@@ -799,7 +796,7 @@ fn every_run_row_dispatches_the_action_its_key_is_bound_to() {
         assert!(
             contexts.contains(&"Workspace > Native > Board"),
             "`{}` is offered where its key is unbound: {action}",
-            command.label()
+            command.info().label
         );
     }
 }
@@ -923,7 +920,7 @@ fn palette_uses_normal_transition(cx: &mut gpui::TestAppContext) {
         app
     });
     cx.update(|cx| {
-        let rows = candidates(state.read(cx), "sessions", None, None).into();
+        let rows = candidates(state.read(cx), "sessions", None, None, &[]).into();
         with_host(&state, cx, |host| {
             host.palette.rows = rows;
             host.palette.cursor = 0;
@@ -989,7 +986,7 @@ fn palette_wakes_agent_session_before_entering(cx: &mut gpui::TestAppContext) {
         app
     });
     cx.update(|cx| {
-        let rows = candidates(state.read(cx), "sessions", None, None).into();
+        let rows = candidates(state.read(cx), "sessions", None, None, &[]).into();
         with_host(&state, cx, |host| {
             host.palette.rows = rows;
             host.palette.cursor = 0;
@@ -1037,7 +1034,7 @@ fn palette_reports_ensure_failure(cx: &mut gpui::TestAppContext) {
         app
     });
     cx.update(|cx| {
-        let rows = candidates(state.read(cx), "sessions", None, None).into();
+        let rows = candidates(state.read(cx), "sessions", None, None, &[]).into();
         with_host(&state, cx, |host| host.palette.rows = rows);
     });
     let transport = FakeTransport::default();
@@ -1070,10 +1067,113 @@ fn palette_reports_ensure_failure(cx: &mut gpui::TestAppContext) {
 }
 
 #[test]
-fn the_section_order_is_fixed() {
-    assert!(PaletteSectionKind::Go < PaletteSectionKind::Do);
-    assert!(PaletteSectionKind::Do < PaletteSectionKind::Context);
-    assert!(PaletteSectionKind::Context < PaletteSectionKind::Agents);
+fn a_leading_prefix_narrows_the_scope() {
+    let scope = |query: &str| parse_query(query).scope;
+    assert_eq!(scope("del"), Scope::All);
+    assert_eq!(scope(">del"), Scope::Commands);
+    assert_eq!(scope("@ pay"), Scope::GoTo);
+    assert_eq!(scope("#FLT"), Scope::Cards);
+    assert_eq!(scope("!codex"), Scope::Agents);
+    assert_eq!(parse_query("> del ").needle, "del");
+    // The words `^s W` and `^s d` used to seed keep working.
+    assert!(parse_query("sessions").sessions_only);
+    assert_eq!(parse_query("agents codex").scope, Scope::Agents);
+    assert_eq!(parse_query("agents codex").needle, "codex");
+    assert_eq!(parse_query("agentsx").scope, Scope::All);
+}
+
+#[test]
+fn an_empty_query_lists_recent_sessions_then_suggested_commands() {
+    let mut app = AppState::new("/tmp/fleet", Instant::now());
+    app.snapshot = Some(multi_session_snapshot(VISIBLE_ROWS));
+    app.daemon = crate::state::DaemonLink::Connected;
+    let rows = candidates(&app, "", None, None, &[]);
+    let recent = rows
+        .iter()
+        .take_while(|row| row.section == Section::Recent)
+        .count();
+    assert_eq!(recent, RECENT_ROWS);
+    let suggested = &rows[recent..];
+    assert!(!suggested.is_empty());
+    assert!(suggested.len() <= SUGGESTED_ROWS);
+    assert!(
+        suggested
+            .iter()
+            .all(|row| row.section == Section::Suggested && matches!(row.run, Run::Command(_)))
+    );
+}
+
+#[test]
+fn a_typed_query_ranks_the_best_match_first_across_sections() {
+    let mut app = AppState::new("/tmp/fleet", Instant::now());
+    app.snapshot = Some(multi_session_snapshot(3));
+    app.daemon = crate::state::DaemonLink::Connected;
+    let rows = candidates(&app, "help", None, None, &[]);
+    assert_eq!(rows[0].run, Run::Command(Command::Help));
+    assert_eq!(rows[0].matches.len(), 4);
+    // Rows of one section stay together, and no section is capped.
+    let mut seen: Vec<Section> = Vec::new();
+    for row in &rows {
+        if seen.last() != Some(&row.section) {
+            assert!(
+                !seen.contains(&row.section),
+                "{:?} split in two",
+                row.section
+            );
+            seen.push(row.section);
+        }
+    }
+    let commands = candidates(&app, ">", None, None, &[]);
+    assert!(commands.iter().all(|row| row.section == Section::Commands));
+    let valid = Command::ALL
+        .iter()
+        .filter(|command| command.valid(&app))
+        .count();
+    assert_eq!(
+        commands.len(),
+        valid,
+        "a scoped list is every valid command, uncapped"
+    );
+}
+
+#[test]
+fn destructive_commands_say_they_ask_first_and_every_command_shows_its_key() {
+    let rows: Vec<Entry> = Command::ALL
+        .iter()
+        .copied()
+        .map(rows::command_entry)
+        .collect();
+    for row in &rows {
+        if row.destructive {
+            assert_eq!(row.detail.as_deref(), Some(ASKS_FIRST), "{}", row.label);
+        }
+        assert!(row.key.is_some(), "{} has no key chip", row.label);
+    }
+}
+
+#[test]
+fn cards_and_pull_requests_are_listed_under_their_own_sections() {
+    let app = board_with_one_card();
+    let cards = candidates(&app, "#", None, None, &[]);
+    assert_eq!(cards.len(), 1);
+    assert_eq!(cards[0].section, Section::Cards);
+    assert!(matches!(cards[0].run, Run::OpenCard(_)));
+    assert!(cards[0].badge.is_some(), "a card row names its column");
+
+    let pr = PalettePr {
+        tab: PrTab::Mine,
+        repo: "acme/api".parse().unwrap_or_else(|error| panic!("{error}")),
+        number: 412,
+        title: "Fix RUT validation".to_owned(),
+        local: None,
+    };
+    let rows = candidates(&app, "rut valid", None, None, std::slice::from_ref(&pr));
+    let row = rows
+        .iter()
+        .find(|row| row.section == Section::PullRequests)
+        .unwrap_or_else(|| panic!("no PR row in {rows:?}"));
+    assert_eq!(row.label, "#412 Fix RUT validation");
+    assert!(matches!(row.run, Run::GoToPr { number: 412, .. }));
 }
 
 #[gpui::test]
@@ -1135,8 +1235,11 @@ fn an_unrelated_notify_does_not_rebuild_the_palette(cx: &mut gpui::TestAppContex
             // A row no rebuild could ever produce: it survives exactly as long as
             // `refresh` returns without calling `candidates` again.
             host.palette.rows = std::rc::Rc::from(vec![Entry {
-                section: PaletteSectionKind::Do,
+                section: Section::Commands,
                 label: "sentinel".to_owned(),
+                search: None,
+                badge: None,
+                matches: Vec::new(),
                 detail: None,
                 secondary: None,
                 trailing: None,
@@ -1233,4 +1336,14 @@ fn palette_seeding_and_cursor_motion_reuse_prepared_matches(cx: &mut gpui::TestA
         assert!(after.is_empty());
         assert!(!std::rc::Rc::ptr_eq(&before, &after));
     });
+}
+
+/// A row's key chips in keymap spelling, for assertions.
+fn key_text(entry: &Entry) -> Option<String> {
+    entry.key.as_ref().map(|keys| {
+        keys.iter()
+            .map(Keystroke::unparse)
+            .collect::<Vec<_>>()
+            .join(" ")
+    })
 }

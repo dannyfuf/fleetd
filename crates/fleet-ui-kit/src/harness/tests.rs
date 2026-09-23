@@ -134,8 +134,8 @@ struct FrozenTargets {
 impl gpui::Render for FrozenTargets {
     fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
         use crate::components::{
-            FuzzyItem, FuzzyList, Palette, PaletteRow, PaletteSection, PaletteSectionKind,
-            SegmentedTab, SegmentedTabs, TerminalTab, TerminalTabStrip, Toast, ToastStack,
+            FuzzyItem, FuzzyList, Palette, PaletteRow, PaletteSection, SegmentedTab, SegmentedTabs,
+            TerminalTab, TerminalTabStrip, Toast, ToastStack,
         };
 
         crate::AppFrame::new().body(
@@ -154,7 +154,7 @@ impl gpui::Render for FrozenTargets {
                 )
                 .child(
                     Palette::new(self.palette_query.clone()).section(PaletteSection::new(
-                        PaletteSectionKind::Go,
+                        "Go to",
                         [PaletteRow::new("Worktrees"), PaletteRow::new("Board")],
                     )),
                 )

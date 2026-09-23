@@ -157,7 +157,7 @@ Each one is a button that opens what it counts, and its tooltip carries the key 
 
 | Button | Mark | Color | Content | Opens |
 | --- | --- | --- | --- | --- |
-| Needs you | dot | amber | `<n> needs you` — top-level threads blocked on a permission, a question, a plan, or a finished turn nobody has read | with one waiting, that thread (as the palette's AGENTS row does); with more, the agents picker (`⌃S d` in the Workspace) |
+| Needs you | dot | amber | `<n> needs you` — top-level threads blocked on a permission, a question, a plan, or a finished turn nobody has read | with one waiting, that thread (as the palette's Agents row does); with more, the agents picker (`⌃S d` in the Workspace) |
 | Jobs | `loader-circle` (spin) | `fg.muted` | `<n> job(s)` running | the Jobs sheet (`J`) |
 | Failed jobs | `triangle-alert` | red | `<n> failed`, failed and unseen; replaces the jobs button, never a second one (§1.8) | the Jobs sheet (`J`) |
 | Sleeping | — | `fg.muted` | `<n> sleeping` (detached sessions); inert text — it counts nothing a click could open. Hub only, until the Worktrees subtitle takes the session counts over | — |
@@ -1674,51 +1674,60 @@ alternative instead of only threatening. With nothing running, `ctrl-shift-q` do
 
 ---
 
-### 3.9 Command palette (`:`)
+### 3.9 Command palette (`:`, ⌘K)
 
 **Purpose:** *Jump to anything by name, or do the thing whose key I do not remember.*
 
-**640 px** wide, top-anchored at **y = 120** (thinking position, not screen center), 44 px input,
-up to **10** rows × 34 px, sections in the fixed order `GO` → `DO` → `CONTEXT`. A click on the scrim outside the card
-closes it through `palette::Close`, the action `Esc` runs.
+Opened by `:`, by ⌘K on macOS or `ctrl-k` elsewhere, by `^s k` in the Workspace (KEYMAP.md §
+Palette mode), and by clicking the title bar's command field. **640 px** wide, top-anchored at
+**y = 120** (thinking position, not screen center). A click on the scrim outside the card closes
+it through `palette::Close`, the action `Esc` runs.
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│ : pay fix                                                   ▏│ 44
+│ ⌕ del▏                                      [All]            │ 44
 ├──────────────────────────────────────────────────────────────┤
-│ GO                                                           │ 20
-│▌◉ payroll#feat-payroll-fix          session attached         │ 34
-│  ☾ payroll#fix-rut-validator        sleeping                 │
-│  ⇱ #412 Fix RUT validation…         PR · mine                │
-│  🗀 buk/payroll                      repo                     │
-│ DO                                                           │ 20
-│  ✂ Clean up finished worktrees          Worktrees         x  │ 34
-│  ⌫ Cancel job: clone nixos                                J  │
-│  ⤓ Clone a repository                   Hub               n  │
-│ CONTEXT                                                      │ 20
-│  ⬚ personal                                               2  │
+│ Commands                                                     │ 20
+│▌[🗑] Delete worktree                    asks first      [d]  │ 34
+│ [🗑] Delete card                        Board           [d]  │
+│ [⬚] Delete context                      asks first    [⇧D]  │
+│ Go to                                                        │
+│ [◉] acme/api#model-registry             session attached     │
+│ Cards                                                        │
+│ [☑] FLT-7 Model delivery windows  Todo                       │
 ├──────────────────────────────────────────────────────────────┤
-│ 9 of 63 · ⏎ run · esc cancel                                 │
+│ Delete worktree                                   Run [⏎]    │ 30
 └──────────────────────────────────────────────────────────────┘
 ```
 
-| Element | Content | Position | Why | Cite |
-| --- | --- | --- | --- | --- |
-| `GO` section, **first** | worktrees (with their §2.5 session glyph), open PRs, repos — objects, ranked above commands | section 1 | makes a session reachable from *inside another session*: `ctrl-s s` `:` `pay fix` `⏎` with no list scan | extends §5's "commands + contexts" palette |
-| `DO` section | only **valid** commands, with the bound key **right-aligned** on every row | section 2 | right-aligned keys teach the shortcut every time, so the palette trains itself out of the loop | §5 "label/keys" |
-| Command label and place | the command's catalogue label, and the catalogue place it acts in (`Board`, `Card`, `Worktrees`…) as the muted detail; `Everywhere` commands carry none | `DO` rows | one label per action across Help, the palette and every button; the place tells apart a board row and an open card's row that do the same thing | `KEYMAP.md` § *Action catalogue* |
-| Job entries | running/failed jobs as `Cancel job: <kind> <target>` | in `DO` | a background action is reachable without learning the panel | §6 |
-| `CONTEXT` section | `Switch to context: <name>` + its digit | section 3 | swarm mixes commands and contexts | §5 |
-| Icon | the same Lucide glyph the action or object uses elsewhere | col 1 | teaches the icon language; palette rows and list rows read identically | — |
-| Cap | 10 rows total, fixed section order | — | a fixed maximum keeps `Enter` predictable — the top match never moves below the fold | §5 "first 10" |
-| Destructive commands | prefixed with `triangle-alert`, and still routed through their confirm dialog | — | the palette never bypasses a confirm | §1.7 |
+| Element | Content | Position | Why |
+| --- | --- | --- | --- |
+| Query row | `search` icon, the query at 15 px, placeholder `Search or run a command`, the scope chip | top | the palette reads as a search field, the same one the title bar draws |
+| Scope chip | `All`, or what a prefix narrowed to: `Commands` (`>`), `Worktrees` (`@`), `Cards` (`#`), `Agents` (`!`) | right of the query | a prefix is invisible once typed; the chip says what the list is |
+| Prefix legend | `type > commands · @ worktrees · # cards`, only while the query is empty | right of the chip | teaches the prefixes to whoever looks, gone once typing starts |
+| Results | **one ranked list** with section headings `Commands`, `Go to`, `Cards`, `Pull requests`, `Agents` | body | the best match is always the first row, whatever kind of thing it is, so `Enter` is predictable |
+| Ranking | a prefix match beats a word-start match beats a run anywhere beats a scattered one; rows sort by score inside a section and sections by their best row | — | `del` puts "Delete worktree" above "Undo delete" above `model-registry` |
+| Scrolling | `10` rows tall, the rest scrolls; no per-section cap while a query is typed (one overall bound of 200 rows) | — | every match is reachable; the cursor keeps its row in view |
+| Row | icon tile · label with its matched characters in a heavier weight · status word · muted detail · the row's own key chip | — | the key chip teaches the direct key, so the palette trains itself out of the loop |
+| Command detail | the catalogue place it acts in (`Board`, `Card`, `Worktrees`…); `Everywhere` commands carry none | `Commands` rows | one label per action across Help, the palette and every button; the place tells apart a board row and an open card's row that do the same thing |
+| Destructive commands | a red icon tile, and `asks first` in place of the place; still routed through their confirm | — | the palette never bypasses a confirm, and says so before you press |
+| `Go to` rows | sessions (most recent first) and worktrees with their §2.5 glyph and state (`session attached`, `sleeping`), repositories (`repo`), contexts (`context`, with their digit) | — | a session is reachable from inside another session: `^s k` `pay fix` `⏎` |
+| Card rows | `FLT-7 <title>` and the card's column as a status word; `Enter` selects the card on its board and opens its detail | `Cards` | a card is an object you jump to, like a worktree |
+| Pull request rows | `#412 <title>`, `<repo> · mine` / `review`; `Enter` opens its worktree when one is checked out, otherwise shows it selected on the PR screen | `Pull requests` | only the PRs the PR screen has already loaded — opening the palette fetches nothing |
+| Job rows | `Cancel job: <kind> <target>`, `Show failed job: <title>` | `Commands` | a background action is reachable without learning the panel |
+| Footer | the selected row's label, then `Run ⏎` | bottom | names what `Enter` will do. There is no `⌘⏎` "other targets" yet: no row has a second target |
 
-`^s d` opens the same palette with the query seeded to `agents` and shows the single `AGENTS`
-section. Its rows have five fixed slots:
+**Prefixes.** `>` commands only, `@` worktrees and sessions (with repositories and contexts),
+`#` cards, `!` agent threads. The prefix is read off the first character; the rest is the query.
+
+**Pointer.** Rows hover; a click runs the row, exactly as `Enter` does with the cursor on it.
+
+`^s d` opens the same palette with the query seeded to `!` and shows the single `Agents`
+section (typing `agents <filter>` still means the same). Its rows have five fixed slots:
 
 | Slot | Content |
 | --- | --- |
-| Key | the current strip index when attached, otherwise `·` |
+| Key | `^s <n>` for the thread's strip index when attached — the key that selects its tab — otherwise none |
 | Mark | the thread's attention glyph; a blocked gate reads `needs you` through the same amber vocabulary as its tab |
 | Primary | `↳ <provider> — <title>` for a child, `<provider> — <title>` for a caller |
 | Detail | `<word> · <age>`, except an open gate names `blocked · permission`, `blocked · question` or `blocked · plan` |
@@ -1736,12 +1745,13 @@ remaining terminal and restores `TERMINAL`; its picker row remains available wit
 The strip still has the hard nine-tab ceiling. Attach what you look at, detach when done, and
 reach the rest through `^s d`; delegation rows and the picker retain every hidden child.
 
-**States:** empty query → `GO` shows the 5 most-recently-opened worktrees, `DO` the 5 most-used
-commands. No match → `Nothing matches "<query>".` A command invalid in the current context is
-**not listed at all** — never greyed, because a greyed row costs a `j`.
+**States:** empty query → `Recent`: the 5 most recently opened sessions, then `Suggested`:
+the 6 highest-ranked commands valid where the palette was opened. No match →
+`Nothing matches "<query>".` A command invalid in the current context is **not listed at all**
+— never greyed, because a greyed row costs a `j`.
 
-**Omitted:** section descriptions, command history, a shell escape, multi-select, fuzzy-match
-highlighting beyond a subtle weight bump.
+**Omitted:** section descriptions, command history, a shell escape, multi-select, a second
+"other targets" run (`⌘⏎`) until a row has one.
 
 ---
 
@@ -1897,7 +1907,7 @@ checklist or sample data.
 | --- | --- | --- | --- | --- |
 | 1 | Open a worktree | `Enter` | **1** | MRU sort puts the last-used branch on row 0 |
 | 1b | Open one in another repo | `l` `j`×n `Enter` | 3+n | rail → list |
-| 1c | Open one by name from anywhere | `:` `<text>` `Enter` | **3** + text | palette `GO` section |
+| 1c | Open one by name from anywhere | `:` (or ⌘K / `ctrl-k`) `<text>` `Enter` | **3** + text | palette `Go to` rows |
 | 2 | Create a worktree from a branch | `n` `<text>` `Enter` | **2** + text | base preselected; the dialog closes instantly |
 | 2b | Create without opening | `n` `<text>` `⌥Enter` | 2 + text | batch capture |
 | 3 | Create a worktree from a PR | `p` `j`×n `Enter` | **2**+n | `Enter` creates *and* opens |
@@ -2084,7 +2094,7 @@ each component's full API. `Modal` is an alias of `Dialog` and `TabBar` an alias
 | `NumberField` | Integer with a unit suffix and a clamp | Settings (grace, TTLs, intervals, pool) |
 | `SegmentedTabs` | Underlined tabs with counts, `Tab`/`S-Tab`/`h`/`l` | PR Mine/Review |
 | `ConfirmDialog` | Compact/expanded switch driven by `FactList`; binds only `y`/`Y`/`Enter`/`n`/`Esc`/`q` (+ `I`, + `s` for prune) | §3.8.3, §3.8.8, §3.8.9 |
-| `Palette` | Default sectioned `GO`/`DO`/`CONTEXT` result list with right-aligned key hints, cap 10; seeded agent mode is one `AGENTS` section whose rows carry attention, provider/title, worktree, child/caller status, and optional strip index | §3.9 |
+| `Palette` | One ranked, scrolling result list with section headings, icon tiles, match highlight and each row's key chip; a scope chip and prefix legend in the query row, the selected row and `Run ⏎` in the footer; seeded agent mode is one `Agents` section whose rows carry attention, provider/title, worktree, child/caller status, and the strip key | §3.9 |
 | `Select` | A closed choice rendered as a row with its current value, for a set too long for `Cycler` | Settings, Create dialog |
 
 ### 9.5 Jobs and terminal

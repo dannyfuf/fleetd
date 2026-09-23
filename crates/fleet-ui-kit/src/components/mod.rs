@@ -156,7 +156,7 @@ pub use multiline_input::{
 };
 pub use number_field::NumberField;
 pub use overlay::{Overlay, OverlayLayer};
-pub use palette::{Palette, PaletteRow, PaletteSection, PaletteSectionKind};
+pub use palette::{Palette, PaletteRow, PaletteSection};
 pub use pane::{Pane, PaneBorder};
 pub use pane_header::PaneHeader;
 pub use pr_badge::{PrBadge, PrBadgeState};

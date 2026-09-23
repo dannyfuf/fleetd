@@ -207,6 +207,12 @@ pub struct AppState {
     pub jobs_focus: Option<JobId>,
     /// Initial palette query consumed when the palette next opens.
     pub palette_seed: Option<String>,
+    /// The pull requests the PR screen had loaded when the palette was last opened from the
+    /// shell, consumed with [`Self::palette_seed`].
+    pub palette_prs: Option<std::rc::Rc<[crate::dialogs::PalettePr]>>,
+    /// A pull request the palette sent the PR screen to: the Hub anchors its cursor on it the
+    /// next time it reconciles that list, then clears this.
+    pub pending_pr_focus: Option<(RepoId, u64)>,
     /// An action a surface that just closed asked to run on the surface behind it, by name:
     /// Help's rows and step buttons. The shell dispatches it once the frame that gave the
     /// keyboard back has painted, so it reaches the same listener its key would.
@@ -300,6 +306,8 @@ impl AppState {
             seen_failed: HashSet::new(),
             jobs_focus: None,
             palette_seed: None,
+            palette_prs: None,
+            pending_pr_focus: None,
             pending_action: None,
             last_trash_entry: None,
             pr_badges: HashMap::new(),

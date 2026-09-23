@@ -474,7 +474,8 @@ impl InputGallery {
             .filter_map(|(label, key, destructive)| {
                 subsequence(label, query).map(|hits| {
                     PaletteRow::new(*label)
-                        .key(*key)
+                        .kbd(chip(key))
+                        .when(*destructive, |row| row.detail("asks first"))
                         .matches(hits)
                         .destructive(*destructive)
                         .icon(if *destructive {
@@ -490,7 +491,7 @@ impl InputGallery {
             .filter_map(|(label, digit)| {
                 subsequence(label, query).map(|hits| {
                     PaletteRow::new(format!("{CONTEXT_PREFIX}{label}"))
-                        .key(*digit)
+                        .kbd(chip(digit))
                         .matches(
                             hits.into_iter()
                                 .map(|ix| ix + CONTEXT_PREFIX.chars().count()),
@@ -503,9 +504,9 @@ impl InputGallery {
         let matched = go.len() + do_rows.len() + contexts.len();
         let total = GO_ROWS.len() + DO_ROWS.len() + CONTEXT_ROWS.len();
         let sections = vec![
-            PaletteSection::new(PaletteSectionKind::Go, go),
-            PaletteSection::new(PaletteSectionKind::Do, do_rows),
-            PaletteSection::new(PaletteSectionKind::Context, contexts),
+            PaletteSection::new("Go to", go),
+            PaletteSection::new("Commands", do_rows),
+            PaletteSection::new("Contexts", contexts),
         ];
         (sections, matched, total)
     }
@@ -525,7 +526,7 @@ impl InputGallery {
     /// How many rows the cursor may land on right now.
     fn cursor_len(&self, cx: &App) -> usize {
         if self.palette_open {
-            self.palette_matches(cx).min(10)
+            self.palette_matches(cx)
         } else {
             self.ranked_branches(cx).len()
         }
@@ -1501,6 +1502,7 @@ impl Render for InputGallery {
         let (palette_sections, matched, total) = self.palette_sections(cx);
         let palette_query = self.palette_query.clone();
         let palette_cursor = self.palette_cursor;
+        let palette_empty = self.palette_query.read(cx).text().is_empty();
 
         div()
             .id("gallery-input")
@@ -1603,7 +1605,14 @@ impl Render for InputGallery {
                         palette_sections.into_iter().fold(
                             Palette::new(palette_query)
                                 .cursor(palette_cursor)
-                                .total(total)
+                                .scope("All")
+                                .when(palette_empty, |palette| {
+                                    palette.prefix_hint([
+                                        (">", "commands"),
+                                        ("@", "worktrees"),
+                                        ("#", "cards"),
+                                    ])
+                                })
                                 .empty("Nothing matches that query."),
                             Palette::section,
                         ),
@@ -1660,4 +1669,9 @@ fn main() {
         },
         InputGallery::new,
     );
+}
+
+/// A gallery key chip. The app resolves chips from its keymap; the gallery has none.
+fn chip(keys: &str) -> Kbd {
+    Kbd::parse(keys).unwrap_or_else(|error| panic!("{keys:?}: {error}"))
 }

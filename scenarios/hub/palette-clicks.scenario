@@ -1,0 +1,28 @@
+# UX-SPEC §3.9 — the palette by pointer: the title bar's command field opens it, a row runs on a
+# click exactly as `Enter` runs it, and a click outside the card closes it.
+fixture: busy
+await idle 30000
+assert screen == Hub && hub_tab == Worktrees && overlay absent
+
+# The command field opens the palette; the query owns the keyboard at once.
+click titlebar.command
+await overlay == Palette 10000
+assert mode == Palette && focused == palette.input
+type >Pull requests
+await idle
+await targets["palette.row[0]"] exists 5000
+shot palette-clicks
+
+# A click on the row runs it: the palette closes and the PR screen is up.
+click palette.row[0]
+await hub_tab == Prs 15000
+assert overlay absent && mode == Normal
+dump ran-by-click
+
+# Reopened, a click on the scrim closes it with nothing run.
+click titlebar.command
+await overlay == Palette 10000
+click 24 64
+await overlay absent 5000
+assert hub_tab == Prs
+quit

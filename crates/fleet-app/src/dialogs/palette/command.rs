@@ -219,12 +219,6 @@ impl Command {
             .expect("every palette command is catalogued (checked by the palette's tests)")
     }
 
-    /// The row label, from the catalogue.
-    #[must_use]
-    pub fn label(self) -> &'static str {
-        self.info().label
-    }
-
     /// The glyph, the same one the action wears elsewhere.
     #[must_use]
     pub const fn icon(self) -> Icon {
