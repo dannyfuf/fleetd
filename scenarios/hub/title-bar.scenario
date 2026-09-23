@@ -1,0 +1,72 @@
+# UX-SPEC §2.2 and §3.1 — the title bar and the status bar, driven by the pointer.
+#
+# Every control in the chrome runs what its key runs (ADR 0023). This clicks each one the Hub
+# paints and checks the surface its key opens: the command field opens the palette (`:`), Help
+# opens Help (`?`), Settings opens Settings (`,`), the status bar's Shortcuts opens Help too, and
+# the context switcher opens a menu whose rows are the context keys (`1`–`9`, `N`, `E`, `D`).
+# Then the Workspace variant: its breadcrumb's back button is `⌃S s`.
+fixture: busy
+await idle 30000
+assert screen == Hub && overlay absent
+assert targets["titlebar.context"] exists && targets["titlebar.command"] exists
+assert targets["titlebar.help"] exists && targets["titlebar.settings"] exists
+assert targets["statusbar.shortcuts"] exists && targets["hub.tab[2]"] exists
+shot title-bar
+
+# The command field is a button drawn as a search field: a click opens the palette.
+click titlebar.command
+await overlay == Palette 10000
+assert mode == Palette
+key escape
+await overlay absent
+
+click titlebar.help
+await overlay == Dialog 10000
+assert dialog.name == Help
+key escape
+await overlay absent
+
+click titlebar.settings
+await overlay == Dialog 10000
+assert dialog.name == Settings
+key escape
+await overlay absent
+
+click statusbar.shortcuts
+await overlay == Dialog 10000
+assert dialog.name == Help
+key escape
+await overlay absent
+
+# The switcher's menu: the fixture's one context, then New, Edit and Delete context. Its second
+# row is "New context", `N`, which opens the context dialog.
+click titlebar.context
+await targets["menu.item[3]"] exists 10000
+shot context-menu
+click menu.item[1]
+await overlay == Dialog 10000
+assert dialog.name == Context
+key escape
+await overlay absent
+assert screen == Hub && mode == Normal
+
+# The Workspace swaps the switcher and the nav for a breadcrumb; its back button is `⌃S s`.
+key o
+await screen == Workspace 20000
+await targets["titlebar.back"] exists 10000
+assert targets["hub.tab[0]"] absent && targets["titlebar.context"] absent
+assert targets["statusbar.commands"] exists && targets["statusbar.shortcuts"] exists
+shot workspace-title-bar
+click titlebar.back
+await screen == Hub 10000
+assert hub_tab == Worktrees && overlay absent
+
+# A running job shows as `1 job` with a spinner; the button opens the Jobs sheet, as `J` does.
+job long
+await targets["titlebar.jobs"] exists 20000
+shot jobs-running
+click titlebar.jobs
+await overlay == Jobs 10000
+key escape
+await overlay absent
+quit
