@@ -1986,6 +1986,20 @@ pub(super) const ENTRIES: &[Entry] = &[
     )
     .short("Run doctor"),
     e(
+        &["settings::Search"],
+        P::Dialog,
+        G::Dialog,
+        "Search settings",
+        "Find a setting in any section by its name or what it does.",
+    ),
+    e(
+        &["settings::EndSearch"],
+        P::Dialog,
+        G::Dialog,
+        "Clear the settings search",
+        "Empty the search and go back to the section's settings.",
+    ),
+    e(
         &["board_settings::Save"],
         P::Dialog,
         G::Dialog,

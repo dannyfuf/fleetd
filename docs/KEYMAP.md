@@ -587,7 +587,8 @@ belong to the `FleetTextInput` table above wherever an editor owns the keyboard.
 bare-letter or caret-collision commands publishes its existing word while browsing and a distinct
 `*Editing` word while a field owns typing. The browsing words are `CardDetail`, `BoardSettings`,
 `Settings`, and `Create`; their editing partners are `CardDetailEditing`, `BoardSettingsEditing`,
-`SettingsEditing`, and `CreateEditing`. Editing words contain only container commands, so the
+`SettingsEditing`, and `CreateEditing`; Settings' header search publishes `SettingsSearch`, a third
+word of the same kind. Editing words contain only container commands, so the
 deeper `FleetTextInput` rows own editing and no dialog action can steal an accepted character.
 Lists under an input use `ctrl-n` / `ctrl-p` or `down` / `up`; `Tab` / `S-Tab` move fields, `Enter`
 confirms where the single-line container says so, and `Esc` cancels. `CardPicker` is the documented
@@ -602,7 +603,7 @@ exception: its query is a filter that never contains a space, so it always publi
 | New / Edit context | `Tab` / `S-Tab` move between name and owners · `ctrl-shift-d` delete this context (routes to the expanded `Y` confirm); plain `ctrl-d` belongs to the focused editor |
 | Repository hooks (`e`) | one editor per command row, `Tab` / `S-Tab` between them; a filled trailing row grows the next blank one · `Enter` saves |
 | Assign repo to context (`m`) | this dialog has **no** text field, so `j` / `k` move the selection as well as `↓` / `↑` and `ctrl-n` / `ctrl-p` |
-| Settings (`,`) | browsing is `Dialog > Settings`: `Space` toggles · `h` / `l` or `←` / `→` cycle a choice · `j` / `k` move · `E` opens `config.json` · `D` runs doctor · `Enter` on a text or number row opens it for editing, and saves on every other row. That row's editor publishes `Dialog > SettingsEditing`, where every printable key types and `Enter` saves; `ctrl-n` / `ctrl-p` or `↓` / `↑` move to the next row and close it, and `Esc` discards in either word. |
+| Settings (`,`) | browsing is `Dialog > Settings`: `Tab` / `S-Tab` move between sections · `Space` toggles · `h` / `l` or `←` / `→` cycle a choice · `j` / `k` move · `E` opens `config.json` · `D` runs doctor · `/` searches every section · `Enter` on a text or number row opens it for editing, and saves on every other row. That row's editor publishes `Dialog > SettingsEditing`, where every printable key types and `Enter` saves; `ctrl-n` / `ctrl-p` or `↓` / `↑` move to the next row and close it, and `Esc` discards in either word. The search field publishes `Dialog > SettingsSearch`, where every printable key types, `ctrl-n` / `ctrl-p` or `↓` / `↑` move over the matching settings, `Enter` opens the selected one's section with the cursor on it, and `Esc` clears the search and gives the keys back to the rows (a second `Esc` discards). Every key has a pointer twin: the rail, a row, a switch, a segment or dropdown option, a text or number box (`Enter`), Open config.json (`E`), Run doctor (`D`), Cancel (`Esc`) and Save (`Enter`). |
 | Help (`?`) | `Esc` / `?` close · typing goes to its search field · `↓` / `↑` or `ctrl-n` / `ctrl-p` move in its list · `Enter` runs the row (or opens a guide a search found) on the surface Help was opened over · `ctrl-tab` / `ctrl-shift-tab` switch Guides ⇄ All shortcuts |
 | Quit (`ctrl-q`) | `y` quit · `n` / `Esc` cancel · `J` open the jobs panel · `W` never warn again (writes `jobs.warnBeforeQuit=false`) and quit [A23] |
 | Quit and stop daemon (`ctrl-shift-q`) | `Y` stop and quit · `n` / `Esc` cancel |

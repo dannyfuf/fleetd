@@ -1,7 +1,8 @@
-//! §3.8.6 Settings (`,`) — a 180 px section rail beside a 540 px pane.
+//! §3.8.6 Settings (`,`) — a section rail beside a pane of real controls, a search in the header
+//! and a footer that says whether anything is unsaved.
 
 use fleet_core::{
-    agents::{AgentKind, PermissionMode},
+    agents::AgentKind,
     config::{Agent, CloneProtocol, Config},
     sleep::KeepAliveKind,
 };
@@ -22,13 +23,15 @@ use crate::{
 };
 
 /// The section rail's width (§3.8.6).
-const RAIL_WIDTH: f32 = 180.0;
+const RAIL_WIDTH: f32 = 196.0;
 
-/// The label column of a read-only row, wide enough for the longest label the pane carries
-/// (`Claude default effort`); anything longer ellipsizes rather than breaking the grid.
+/// The label column of a text row and of a read-only fact, wide enough for the longest label the
+/// pane carries (`Binary for threads`); anything longer ellipsizes rather than breaking the grid.
 const LABEL_WIDTH: f32 = 170.0;
 
+mod choice;
 mod draft;
+mod interaction;
 mod persistence;
 
 pub(crate) use persistence::editor_command;
@@ -37,8 +40,10 @@ mod schema;
 mod tests;
 mod view;
 
+use choice::*;
 pub(super) use draft::SettingsState;
 use draft::*;
+use interaction::*;
 pub(crate) use persistence::seed;
 use persistence::*;
 pub(super) use schema::Section;

@@ -969,7 +969,13 @@ key_table! {
     "k",            "Dialog > Settings" => settings::MoveUp;
     "E",            "Dialog > Settings" => settings::OpenConfigFile;
     "D",            "Dialog > Settings" => settings::RunDoctor;
+    "/",            "Dialog > Settings" => settings::Search;
     "enter",        "Dialog > SettingsEditing" => dialog::Confirm;
+    // The header's search field owns the printable keys; `↓`/`↑` move over its hits through
+    // the `Dialog` rows, `Enter` jumps to the selected one and `Esc` clears it rather than
+    // discarding the dialog.
+    "enter",        "Dialog > SettingsSearch" => dialog::Confirm;
+    "escape",       "Dialog > SettingsSearch" => settings::EndSearch;
 
     "escape",       "Dialog > Help" => help::Close;
     "?",            "Dialog > Help" => help::Close;
@@ -1066,6 +1072,7 @@ mod tests {
         "Dialog > Assign",
         "Dialog > Settings",
         "Dialog > SettingsEditing",
+        "Dialog > SettingsSearch",
         "Dialog > Help",
         "Dialog > Quit",
         "Dialog > QuitDaemon",
@@ -1088,6 +1095,7 @@ mod tests {
         "Dialog > BoardSettingsEditing",
         "Dialog > CardPicker",
         "Dialog > SettingsEditing",
+        "Dialog > SettingsSearch",
         "Dialog > CreateEditing",
         "Dialog > CardCreate",
         "Dialog > Clone",

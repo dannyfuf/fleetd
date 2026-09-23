@@ -648,6 +648,10 @@ pub mod settings {
             OpenConfigFile,
             /// `D` — run doctor.
             RunDoctor,
+            /// `/` — search every section's settings.
+            Search,
+            /// `Esc` in the search field — clear the search and hand the keys back to the rows.
+            EndSearch,
         ]
     );
 }

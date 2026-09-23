@@ -300,6 +300,7 @@ The names Fleet paints today, by surface:
 | Filter and palette | `filter.input`, `palette.input`, `palette.row[N]` (one flat numbering across the Go / Do / Context sections) |
 | Dialogs | `dialog.field[N]`, `dialog.row[N]`, `dialog.close`, `dialog.button[N]`, `dialog.checkbox`, `dialog.segment[N]` |
 | Help | `help.search` (also `dialog.field[0]`), `help.tab[N]` (0 Guides, 1 All shortcuts), `help.here[N]` (the *Here in …* rows), `help.guide[N]` (by the guide's position in the full list, searched or not), `help.step[N].action[M]` (the shown guide's step `N`, button `M`, both from 0), `help.shortcut[N]` (the table's rows, or the actions a Guides-tab search lists), `help.place[N]` (0 All places, then the catalogue places in order), `help.run`, `help.related` |
+| Settings | `settings.search`, `settings.section[N]` (the rail, `0` General, `1` Agents, `2` Sleep, `3` Jobs & warnings, `4` Pool, `5` GitHub, `6` Status, `7` Hosts, `8` About), `settings.row[N]` (the shown section's rows, `0` first), `settings.switch`, `settings.option[N]`, `settings.dropdown`, `settings.copy[N]`, `settings.hit[N]`, `settings.config`, `settings.doctor`; its footer is `dialog.button[0]` Cancel and `dialog.button[1]` Save |
 | Sheets | `sheet.close` |
 | Jobs panel | `jobs.row[N].retry`, `jobs.row[N].cancel`, `jobs.row[N].log`, `jobs.filter[N]`, `jobs.clear`, `jobs.more`, `jobs.log.back`, `jobs.log.follow`, `jobs.log.end` |
 | Tabs | `tabs.tab[N]` for a process tab, `agents.tabs.tab[N]` for a conversation, sharing one numbering |
@@ -371,6 +372,17 @@ painted, so its name is absent rather than disabled. `jobs.filter[N]` is the fil
 `0` All, `1` Running, `2` Failed, `3` Done. `jobs.clear` is Clear finished (absent with nothing to
 clear), `jobs.more` the ⋯ holding Cancel all (absent with nothing cancellable). While a log is
 open the header is the log's toolbar: `jobs.log.back`, `jobs.log.follow`, `jobs.log.end`.
+
+Settings names its controls by the row they sit in. `settings.row[N]` is the whole row: a click
+puts the cursor on it and, on a text or number row, opens its editor, as `⏎` would. The control
+of the row **under the cursor** carries its own name, so a scenario clicks a row first and its
+control second: `settings.switch` is its switch, `settings.option[N]` a segment of its choice
+(`N` from `0`, left to right), and `settings.dropdown` its dropdown field when the choice has too
+many or too long options to sit side by side — the open list's options are then `menu.item[N]`.
+Only one of the three is painted, the one the row draws. `settings.copy[N]` is the copy button
+beside read-only row `N` (About's fleetd and `FLEET_HOME`). While a search is typed the pane lists
+its matches instead, `settings.hit[N]`, and a click on one opens its section with the cursor on
+it. `settings.config` and `settings.doctor` are the footer's Open config.json and Run doctor.
 
 `dialog.button[N]` is a button in a dialog's footer, `0`
 leftmost, painted by `Dialog::actions`: a dialog still on the legacy footer, whose `Dialog::primary`
@@ -794,9 +806,8 @@ still short of it, so no other document has to claim a capability that does not 
   query it filters and types values into — where `fields[N]` is exactly the field
   `targets["dialog.field[N]"]` paints; the command about to answer a `dump`, an `assert` or an
   `await` poll reads them across in its update path the same way it brings the target table
-  across. A dialog with a non-editor in its cycle (create-worktree's base list and host cycler,
-  Settings' switch rows) reports `[]` rather than a partial numbering that would not line up with
-  its targets. `message` is the one sentence an open Confirm asks — the consequence line §3.8.3
+  across. A dialog with a non-editor in its cycle (create-worktree's base list and host cycler)
+  reports `[]` rather than a partial numbering that would not line up with its targets. `message` is the one sentence an open Confirm asks — the consequence line §3.8.3
   has the user accept, read from the same draft the card is drawn from, including the board `X`
   and transcript `x` cards that draw their own — and stays `null` over every other dialog, whose
   body is elements rather than a sentence and would have to be invented to be named one. Board
@@ -809,7 +820,13 @@ still short of it, so no other document has to claim a capability that does not 
   `settings.columns` or `AppState` already carries. A row the cursor is merely on in the Columns
   pane owns no editor until `⏎` opens one, and a locked automation row never does, so the second
   field is absent in both cases. Board settings paints no `dialog.field[N]` target at all, so
-  neither field can put the field↔target numbering out of step. Typing into a field does not
+  neither field can put the field↔target numbering out of step. Settings follows the same rule:
+  a leading `section` field whose value is the shown section's title (`General`, `Agents`,
+  `Sleep`, …), then `row`, the row under the cursor as `<label> = <value>` with the value the
+  draft holds (`Sleep on switch = off`, `Default agent = Codex`; a switch reads `on` or `off`), so
+  a click on a control can be checked without a picture, then `search`, the header's search field, whose value is the typed query and which
+  is `focused` while the field owns the keyboard (`Dialog > SettingsSearch`). It too paints no
+  `dialog.field[N]` target; the search field is `settings.search`. Typing into a field does not
   itself notify `AppState`, so a scenario reads a field with `assert` or `dump`, which project on
   demand, and not with `await`.
 - **A headless `await` does not repaint, so `window.frame` freezes for the duration of the wait.**

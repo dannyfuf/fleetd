@@ -82,6 +82,11 @@ const CONTEXTS: &[(&str, Place, &str)] = &[
         Place::Dialog,
         "Settings, typing",
     ),
+    (
+        "Dialog > SettingsSearch",
+        Place::Dialog,
+        "Settings, searching",
+    ),
     ("Dialog > BoardSettings", Place::Dialog, "Board settings"),
     (
         "Dialog > BoardSettingsEditing",

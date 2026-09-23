@@ -1123,7 +1123,7 @@ title, with no ✕ — `Cancel` and a click outside close it.
 | Confirm — prune | 720 × auto (≈ 420) | `scissors` |
 | New / Edit context | 460 × 260 | `boxes` |
 | Assign repo to context | 460 × 340 | `arrow-right-left` |
-| Settings | 720 × 560 | `settings-2` |
+| Settings | 760 × 600 | `settings-2` |
 | Help | 1040 × 720, the whole window less the scrim margin when narrower | — (the search field takes the title's place) |
 | Quit (`ctrl-q`) | 520 × auto | `circle-question` |
 | Quit + stop daemon | 560 × auto | `power` |
@@ -1455,51 +1455,86 @@ The footer sentence is mandatory: the action *sounds* destructive and is not.
 
 #### 3.8.6 Settings (`,`)
 
-720 × 560, two columns: a 180 px section rail and a 540 px pane. **Board settings** (§Board, "The
-other three dialogs") is the same shape at the same size and borrows this section's rules for
-browsing, editing and cycling a row; where the two differ is stated there — its three sections are
-the board's own, it remembers the section it was left on for the app session, and `^s` rather than
-`⏎` is its save, because `⏎` inside its Columns pane has a level to drill into.
+760 × 600: a header, a 196 px section rail beside a pane of controls, and a button footer.
+**Board settings** (§Board, "The other three dialogs") is the older shape, 720 × 560 with a 180 px
+rail, and borrows this section's rules for browsing, editing and cycling a row; where the two
+differ is stated there — its three sections are the board's own, it remembers the section it was
+left on for the app session, and `^s` rather than `⏎` is its save, because `⏎` inside its Columns
+pane has a level to drill into.
 
-A value is in an input box **only while it is being edited**: browsing draws every text value as a `label   value` fact
-line, an editable one in the data face and an unset one as `—`, and `Enter` is what opens a box
-on the row under the cursor. Nothing here is ever drawn in a disabled style. A row that cannot be
-edited here has nothing behind `Enter`, and its section says where its editor is with a faint
-trailing `edit in config.json` **once**, not per row.
+**Header.** `⚙ Settings`, then a **Search settings** field with its `/` chip, then the close ✕
+(`Esc`'s action, ADR 0023).
+
+**Rail.** One row per section, its glyph and its name; the shown section is selected. A click
+opens it, as `Tab` / `S-Tab` step through them.
+
+**Pane.** One row per setting, drawn with the real control its kind calls for, each clickable and
+each keeping its key:
+
+| Kind | Control | Key | Pointer |
+| --- | --- | --- | --- |
+| On / off | a switch at the row's end | `Space` | a click on the switch |
+| Closed choice | a segmented control when its options are short (≤ 4, ≤ 32 characters), otherwise a dropdown | `h`/`l`, `←`/`→` | a segment, or an option of the dropdown's list |
+| Number | a box at the row's end, the unit after the number | `Enter` opens it | a click on the row |
+| Text | a box filling the row after its label; an empty value reads as what it means (`Harness default`) | `Enter` opens it | a click on the box or the row |
+| Read-only | a plain `label  value` line, with a copy button where a value is worth pasting (`FLEET_HOME`, the fleetd pid) | — | the copy button |
+
+A click on a row puts the cursor on it first, so the keyboard carries on from where the pointer
+left it. A value is in a live editor **only while it is being edited**: `Enter` (or a click on a
+text or number box) opens the editor inside the same box, so the row never moves. A helper
+sentence sits under the row in the caption face — plain words, e.g. *Typed into a terminal tab.
+Aliases work.* Rows that belong together sit in a titled card (`Claude`, `Codex`, the keep-alive
+rules, the terminal tabs). A section that cannot be edited here ends with a faint *Change these in
+config.json.* once, not per row.
 
 | Section | Rows |
 | --- | --- |
-| **General** | `Agent [ claude │ codex ]` · `Claude command [claude]` · `Codex command [codex]` · `Claude binary [claude]` · `Codex binary [codex]` · per-harness `Default access`, `Default model`, and `Default effort`. Access cycles only that harness's supported modes; model/effort are optional text, effort applies with a configured model, and blank means harness default. The two *command* rows are the shell lines a terminal pane types; the two *binary* rows are what the daemon runs for a native thread, with no shell — each carries that as its sub-label. Both native access defaults start at `full access`; new-thread requests omit mode/model and the daemon resolves them. |
-| **Sleep** | `Sleep on switch (on)` · `Grace ms [2000]` (editable, clamped ≥ 0) · rule list, each `[x] <label>  <kind>  <pattern>` **plus a live match count** `claude — matching 2 processes now` · invalid regex → red `invalid pattern — rule is skipped` |
-| **Jobs & warnings** | `Warn before quitting with running jobs (on)` · `Keep finished jobs for [10 min ⌄]` · `Trash retention [10 min ⌄]` |
-| **Pool** | `Hot pool size [ 0 │ 1 │ 2 │ 3 ]` · `Freshness ms [60000]` · `Refresh interval ms [300000]` · read-only `prepared copies: 1/1 ready` |
-| **GitHub** | `Clone protocol [ ssh │ https ]` · `Repo cache s [3600]` · `PR cache s [90]` |
-| **Status** | `Local status refresh ms [2000]` (min 500) · `Remote status refresh ms [10000]` (min 500) |
-| **Windows** | read-only ordered list `1 nvim — nvim .` / `2 cc — {agent}` / `3 lg — lazygit` |
-| **Hosts** | read-only per host `devbox — ssh danny@devbox — fleet` |
-| **About** | `Fleet 0.1.0+<sha>` · update row `Fleet 0.2.0 available · U` (§2.3) · `fleetd running · pid 4211 · up 3h` · `FLEET_HOME ~/.fleet` · `protocol 4` · `E open config.json in a new terminal tab` · `Run doctor · D` |
+| **General** | read-only, in a *Terminal tabs a new worktree opens* card: `1 nvim — nvim .` / `2 cc — {agent}` / `3 lg — fleet://lazygit (built in)` |
+| **Agents** | `Default agent [ Claude │ Codex ]` (*Used by the Agent buttons and by a new thread.*), then one card per harness: `Terminal command [claude]` (*Typed into a terminal tab. Aliases work.*) · `Binary for threads [claude]` (*Run directly for an agent thread, without a shell.*) · `Default access [full access ⌄]` (that harness's supported modes only; *New threads start with it. Each thread can change it.*) · `Default model [Harness default]` · `Effort [ Default │ Low │ Medium │ High ]` (*Used with the default model.*). Effort offers `low`/`medium`/`high` plus whatever that harness has declared on a thread this app opened; a configured value outside them is shown as it is until the row is moved. Both access defaults start at `full access`; new-thread requests omit mode/model and the daemon resolves them. No health chip: doctor does not check the agent binaries, and the dialog does not invent a check. |
+| **Sleep** | `Sleep on switch` switch · `Grace [2000 ms]` (clamped ≥ 0) · a *Keep awake while running* card with one switch per rule, `<label>  <kind>  <pattern>`, **plus a live match count** `claude — matching 2 processes now` · invalid regex → red `invalid pattern — rule is skipped` |
+| **Jobs & warnings** | `Warn before quitting with running jobs` switch (*They keep running in fleetd either way.*) · `Keep finished jobs for [10 min ⌄]` · `Trash retention [10 min ⌄]` |
+| **Pool** | `Hot pool size [ 0 │ 1 │ 2 │ 3 ]` · `Freshness [60000 ms]` · `Refresh interval [300000 ms]` · read-only `prepared copies: 1/1 ready` |
+| **GitHub** | `Clone protocol [ ssh │ https ]` · `Repo cache [3600 s]` · `PR cache [90 s]` |
+| **Status** | `Local status refresh [2000 ms]` (min 500) · `Remote status refresh [10000 ms]` (min 500) |
+| **Hosts** | read-only per host `devbox — tailscale · node devbox — ready · fleetd 0.2.0` |
+| **About** | `Fleet 0.1.0+<sha>` · `fleetd running · pid 4211 · up 3h` (copy: the pid) · `FLEET_HOME ~/.fleet` (copy: the path) · update row `Fleet 0.2.0 available · U` (§2.3) · `protocol 4` |
+
+**Search.** `/` (or a click) puts the keyboard in the header's field. Typing replaces the pane with
+every row, across all sections, whose section, card, label or helper sentence holds each typed
+word — its label (led by its card, `Claude › Effort`), its helper sentence and its section's name.
+`↓`/`↑` move over them, `Enter` or a click opens that row's section with the cursor on it and
+clears the search, and `Esc` clears the search and gives the keys back to the rows. Nothing
+matching says so.
+
+**Footer.** Left: *Open config.json* (`E`) and *Run doctor* (`D`), each a button showing its key.
+Right: *Unsaved changes* in amber while the draft differs from what was loaded, then *Cancel*
+(`Esc`) and the primary *Save* (`⏎`), disabled until there is something to save; while the
+configuration failed to load, the primary reads *Retry* and is enabled, because `⏎` retries.
 
 **[D-13]** The editable set closes §9's *"Settings cannot edit grace/rule definitions/windows/
 hosts/protocol/pool/timers/status intervals; many require JSON"* for everything a user changes
 more than once a year. `windows` and `hosts` stay read-only in v1 because both are ordered/keyed
 structures whose editor is a whole screen; `E` (open `config.json` in a terminal tab) is the
-escape hatch and is one key. The **`Warn before quitting with running jobs`** toggle is the
+escape hatch and is one key. The **`Warn before quitting with running jobs`** switch is the
 mechanism that makes KEYMAP's `ctrl-q` clause implementable at all (§3.8.9).
 
 **States:** saving is synchronous and silent (never a toast, §2.7); a failed write shows a red
-footer line with the exact error and keeps the dialog open. Dirty state marks the title
-`⚙ Settings ·` in accent and the footer becomes `⏎ save · esc discard changes`.
+footer line with the exact error and keeps the dialog open. While the draft is dirty the footer
+says *Unsaved changes*, Save is enabled, and the amber strip above the buttons says *Esc or Cancel
+discards the unsaved changes* — `Esc` discards, as it always has, and the strip says so before it
+happens. An error takes that strip's place.
 
-**Keyboard:** while browsing, `j`/`k`, `↓`/`↑`, `ctrl-n`/`ctrl-p` move · `Space` toggles ·
-`h`/`l` and `←`/`→` cycle a choice · `Enter` **opens** the focused text or number row for
-editing, and saves on every other row · `Esc` discards.
+**Keyboard:** while browsing, `j`/`k`, `↓`/`↑`, `ctrl-n`/`ctrl-p` move · `Tab`/`S-Tab` change
+section · `Space` toggles · `h`/`l` and `←`/`→` cycle a choice · `Enter` **opens** the focused text
+or number row for editing, and saves on every other row · `/` searches · `E` config.json · `D`
+doctor · `Esc` discards.
 
 Landing on a row deliberately does not open it: a row that grabbed the keyboard on arrival would
 make the next `j` type into the value instead of moving on. `Enter` is the gesture that opens it,
-and the row then materializes a live `TextInput` — a number row keeps its `NumberField` chrome
-around that editor and filters to ASCII digits, so `j` can never become part of a number. While
-that editor owns the keyboard every printable key types, `Enter` saves, and `↓`/`↑` or
-`ctrl-n`/`ctrl-p` move to the next row and close it.
+and the row then materializes a live `TextInput` inside its own box — a number row filters to ASCII
+digits, so `j` can never become part of a number. While that editor owns the keyboard every
+printable key types, `Enter` saves, and `↓`/`↑` or `ctrl-n`/`ctrl-p` move to the next row and
+close it.
 
 ---
 
@@ -1964,7 +1999,7 @@ all applied there; cite `docs/KEYMAP.md` rather than restating a binding here.
 | D-10 | Uniform `y` for everything up to a context cascade | §3.8.3: `Y` escalation on unknown facts, and for repo/context delete |
 | D-11 | `D` (context delete) adjacency risk | §3.8.4: `D` kept, routed through the expanded `Y` confirm; `E` + `ctrl-shift-d` is the discoverable path |
 | D-12 | Assign dialog bound only `⌃n`/`⌃p` | §3.8.5: `j`/`k` restored — the dialog has no text field |
-| D-13 | Settings could not edit grace / pool / TTLs / intervals | §3.8.6: all editable; `windows`/`hosts` read-only with a 1-key `E` escape to `config.json` |
+| D-13 | Settings could not edit grace / pool / TTLs / intervals | §3.8.6: all editable; `windows` (General) / `hosts` read-only with a 1-key `E` escape to `config.json` |
 | D-14 | `ctrl-q` rule contradicted KEYMAP in **both** rival proposals | §3.8.8: opt-in warning implemented exactly as KEYMAP words it |
 | D-15 | swarm's "Esc quits" | §3.10 / A13: `Esc` never quits |
 | D-16 | One daemon banner for three situations | §3.12: cold start / will-not-start / died-while-attached, each with its own surface and keys |

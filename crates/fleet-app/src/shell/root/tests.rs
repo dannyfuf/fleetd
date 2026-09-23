@@ -1015,7 +1015,9 @@ fn real_shell_settings_text_row_opens_on_enter_and_then_types(cx: &mut gpui::Tes
     open_loaded_settings(&mut fixture);
     assert_eq!(live_contexts(&mut fixture), vec!["Dialog", "Settings"]);
 
-    // Browsing: `j` moves to `Claude command`, the first free-text row of §3.8.6.
+    // Browsing: `Tab` opens Agents and `j` moves to Claude's terminal command, the first
+    // free-text row of §3.8.6.
+    dispatch_root_key(&mut fixture, "tab");
     dispatch_root_key(&mut fixture, "j");
     assert_eq!(
         fixture.visual.update(
@@ -1062,7 +1064,7 @@ fn real_shell_settings_number_row_drops_every_letter(cx: &mut gpui::TestAppConte
     let state = fixture.state.clone();
     fixture.visual.update(|_, cx| {
         crate::dialogs::with_host(&state, cx, |host| {
-            host.settings.section = 1;
+            host.settings.section = 2;
             host.settings.row = 1;
         });
         crate::dialogs::settings_refresh_rows(&state, cx);

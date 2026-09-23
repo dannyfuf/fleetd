@@ -36,6 +36,39 @@ pub struct SettingsState {
     pub(crate) seq: u64,
     pub(crate) scroll: gpui::ScrollHandle,
     pub(crate) prepared: std::rc::Rc<[SettingRow]>,
+    /// The effort vocabulary the Agents section offers, refreshed with the rows.
+    pub(crate) efforts: Efforts,
+    /// The search the header's field holds, while it holds one.
+    pub(crate) search: Option<SearchState>,
+    /// Whether the search field owns the keyboard, which publishes `Dialog > SettingsSearch`.
+    pub(crate) search_focused: bool,
+    /// The search results' scroll position.
+    pub(crate) hit_scroll: gpui::ScrollHandle,
+}
+
+/// What the search field holds and what it found.
+#[derive(Debug, Default)]
+pub struct SearchState {
+    /// The typed query.
+    pub(crate) query: String,
+    /// The rows it matched, across every section.
+    pub(crate) hits: Vec<SearchHit>,
+    /// The hit `Enter` jumps to.
+    pub(crate) cursor: usize,
+}
+
+impl SearchState {
+    /// Replaces the hits and keeps the cursor on one of them.
+    pub(super) fn set_hits(&mut self, hits: Vec<SearchHit>) {
+        self.hits = hits;
+        self.cursor = self.cursor.min(self.hits.len().saturating_sub(1));
+    }
+
+    /// Whether the pane shows hits rather than the section: a query is typed.
+    #[must_use]
+    pub fn active(&self) -> bool {
+        !self.query.trim().is_empty()
+    }
 }
 
 impl SettingsState {
@@ -55,6 +88,24 @@ impl SettingsState {
             (Some(config), Some(original)) => config != original,
             _ => false,
         }
+    }
+
+    /// The row under the cursor as the harness reads it: `<label> = <value>`, a switch's value
+    /// `on` or `off`. Empty before the configuration has loaded.
+    #[must_use]
+    pub fn cursor_summary(&self) -> String {
+        let Some(row) = self.prepared.get(self.row) else {
+            return String::new();
+        };
+        let value = match &row.kind {
+            RowKind::Toggle(true) => "on".to_owned(),
+            RowKind::Toggle(false) => "off".to_owned(),
+            RowKind::Choice { value, .. } | RowKind::Text(value) | RowKind::Fact(value) => {
+                value.clone()
+            }
+            RowKind::Number { value, .. } => value.to_string(),
+        };
+        format!("{} = {value}", row.label)
     }
 
     pub(super) fn load_error(&self) -> Option<String> {
@@ -123,92 +174,6 @@ impl SettingsState {
     }
 }
 
-/// `Space`: flips the toggle under the cursor.
-pub fn toggle(config: &mut Config, id: &RowId) {
-    match id {
-        RowId::SleepOnSwitch => config.sleep.enabled = !config.sleep.enabled,
-        RowId::WarnBeforeQuit => config.jobs.warn_before_quit = !config.jobs.warn_before_quit,
-        RowId::KeepAliveRule(index) => {
-            if let Some(rule) = config.sleep.keep_alive.get_mut(*index) {
-                rule.enabled = !rule.enabled;
-            }
-        }
-        _ => {}
-    }
-}
-
-/// `←` / `→`: steps the choice under the cursor, never wrapping.
-pub fn cycle(config: &mut Config, id: &RowId, delta: isize) {
-    match id {
-        RowId::Agent => {
-            let index = AGENTS
-                .iter()
-                .position(|name| *name == agent_name(config.agent))
-                .unwrap_or(0);
-            config.agent = match step(index, delta, AGENTS.len()) {
-                0 => Agent::Claude,
-                _ => Agent::Codex,
-            };
-        }
-        RowId::CloneProtocol => {
-            let index = PROTOCOLS
-                .iter()
-                .position(|name| *name == protocol_name(config.github.clone_protocol))
-                .unwrap_or(0);
-            config.github.clone_protocol = match step(index, delta, PROTOCOLS.len()) {
-                0 => CloneProtocol::Ssh,
-                _ => CloneProtocol::Https,
-            };
-        }
-        RowId::KeepFinishedFor => {
-            config.jobs.keep_finished_for = stepped_duration(config.jobs.keep_finished_for, delta);
-        }
-        RowId::TrashRetention => {
-            config.trash.retention_ms = stepped_duration(config.trash.retention_ms, delta);
-        }
-        RowId::HotPoolSize => {
-            let index = POOL_SIZES
-                .iter()
-                .position(|size| *size == config.hot_pool_size)
-                .unwrap_or(0);
-            config.hot_pool_size = POOL_SIZES
-                .get(step(index, delta, POOL_SIZES.len()))
-                .copied()
-                .unwrap_or(config.hot_pool_size);
-        }
-        RowId::ClaudeDefaultMode => cycle_mode(config, AgentKind::Claude, delta),
-        RowId::CodexDefaultMode => cycle_mode(config, AgentKind::Codex, delta),
-        _ => {}
-    }
-}
-
-fn cycle_mode(config: &mut Config, kind: AgentKind, delta: isize) {
-    let modes = kind.supported_modes();
-    let defaults = match kind {
-        AgentKind::Claude => &mut config.native_agents.claude,
-        AgentKind::Codex => &mut config.native_agents.codex,
-    };
-    let index = modes
-        .iter()
-        .position(|mode| *mode == defaults.mode)
-        .unwrap_or(0);
-    defaults.mode = modes
-        .get(step(index, delta, modes.len()))
-        .copied()
-        .unwrap_or(defaults.mode);
-}
-
-pub(super) fn stepped_duration(current: u64, delta: isize) -> u64 {
-    let index = DURATIONS
-        .iter()
-        .position(|value| *value == current)
-        .unwrap_or(0);
-    DURATIONS
-        .get(step(index, delta, DURATIONS.len()))
-        .copied()
-        .unwrap_or(current)
-}
-
 /// Writes a complete, valid edit back into the draft.
 pub fn commit_value(config: &mut Config, id: &RowId, raw: &str) -> bool {
     let number = |min: i64| raw.trim().parse::<i64>().ok().filter(|value| *value >= min);
@@ -218,9 +183,7 @@ pub fn commit_value(config: &mut Config, id: &RowId, raw: &str) -> bool {
         RowId::ClaudeBinary => config.agent_binaries.claude = raw.to_owned(),
         RowId::CodexBinary => config.agent_binaries.codex = raw.to_owned(),
         RowId::ClaudeDefaultModel => config.native_agents.claude.model = optional(raw),
-        RowId::ClaudeDefaultEffort => config.native_agents.claude.effort = optional(raw),
         RowId::CodexDefaultModel => config.native_agents.codex.model = optional(raw),
-        RowId::CodexDefaultEffort => config.native_agents.codex.effort = optional(raw),
         RowId::GraceMs => {
             let Some(value) = number(0) else { return false };
             config.sleep.grace_ms = value;
@@ -273,7 +236,7 @@ pub(super) fn focused_row(state: &Entity<AppState>, cx: &mut App) -> Option<Focu
 }
 
 impl SettingsState {
-    fn update_selected(&mut self) {
+    pub(super) fn update_selected(&mut self) {
         let Some(focused) = self.focused_row() else {
             return;
         };
@@ -292,18 +255,18 @@ impl SettingsState {
         }
     }
 
-    fn row_id(&self) -> Option<RowId> {
+    pub(super) fn row_id(&self) -> Option<RowId> {
         use RowId::*;
         let ids: &[RowId] = match self.current_section() {
-            Section::General => &[
+            Section::Agents => &[
                 Agent,
                 ClaudeCommand,
-                CodexCommand,
                 ClaudeBinary,
-                CodexBinary,
                 ClaudeDefaultMode,
                 ClaudeDefaultModel,
                 ClaudeDefaultEffort,
+                CodexCommand,
+                CodexBinary,
                 CodexDefaultMode,
                 CodexDefaultModel,
                 CodexDefaultEffort,
@@ -325,7 +288,7 @@ impl SettingsState {
             Section::Pool => &[HotPoolSize, HotFreshnessMs, HotRefreshIntervalMs, ReadOnly],
             Section::Github => &[CloneProtocol, RepoCacheSeconds, PrCacheSeconds],
             Section::Status => &[StatusRefreshMs, RemoteStatusRefreshMs],
-            Section::Windows | Section::Hosts | Section::About => return Some(ReadOnly),
+            Section::General | Section::Hosts | Section::About => return Some(ReadOnly),
         };
         ids.get(self.row).cloned()
     }
@@ -333,90 +296,60 @@ impl SettingsState {
     pub(super) fn focused_row(&self) -> Option<FocusedSetting> {
         let config = self.config.as_ref()?;
         let id = self.row_id()?;
-        let number = |value, min| RowKind::Number {
-            value,
-            min,
-            unit: None,
-        };
-        let kind = match id {
-            RowId::ClaudeCommand => RowKind::Text(config.agent_commands.claude.clone()),
-            RowId::CodexCommand => RowKind::Text(config.agent_commands.codex.clone()),
-            RowId::ClaudeBinary => RowKind::Text(config.agent_binaries.claude.clone()),
-            RowId::CodexBinary => RowKind::Text(config.agent_binaries.codex.clone()),
-            RowId::ClaudeDefaultModel => RowKind::Text(
-                config
-                    .native_agents
-                    .claude
-                    .model
-                    .clone()
-                    .unwrap_or_default(),
-            ),
-            RowId::ClaudeDefaultEffort => RowKind::Text(
-                config
-                    .native_agents
-                    .claude
-                    .effort
-                    .clone()
-                    .unwrap_or_default(),
-            ),
-            RowId::CodexDefaultModel => {
-                RowKind::Text(config.native_agents.codex.model.clone().unwrap_or_default())
-            }
-            RowId::CodexDefaultEffort => RowKind::Text(
-                config
-                    .native_agents
-                    .codex
-                    .effort
-                    .clone()
-                    .unwrap_or_default(),
-            ),
-            RowId::GraceMs => number(config.sleep.grace_ms, 0),
-            RowId::HotFreshnessMs => number(
-                i64::try_from(config.hot_freshness_ms).unwrap_or(i64::MAX),
-                0,
-            ),
-            RowId::HotRefreshIntervalMs => number(
-                i64::try_from(config.hot_refresh_interval_ms).unwrap_or(i64::MAX),
-                0,
-            ),
-            RowId::RepoCacheSeconds => number(config.github.cache_ttl_seconds, 0),
-            RowId::PrCacheSeconds => number(config.github.pr_ttl_seconds, 0),
-            RowId::StatusRefreshMs => number(config.ui.status_refresh_ms, 500),
-            RowId::RemoteStatusRefreshMs => number(config.ui.remote_status_refresh_ms, 500),
-            RowId::Agent => choice(agent_name(config.agent), AGENTS, agent_name(config.agent)),
-            RowId::ClaudeDefaultMode => {
-                mode_choice(AgentKind::Claude, config.native_agents.claude.mode)
-            }
-            RowId::CodexDefaultMode => {
-                mode_choice(AgentKind::Codex, config.native_agents.codex.mode)
-            }
-            RowId::CloneProtocol => choice(
-                protocol_name(config.github.clone_protocol),
-                PROTOCOLS,
-                protocol_name(config.github.clone_protocol),
-            ),
-            RowId::SleepOnSwitch => RowKind::Toggle(config.sleep.enabled),
-            RowId::WarnBeforeQuit => RowKind::Toggle(config.jobs.warn_before_quit),
-            RowId::KeepAliveRule(index) => {
-                RowKind::Toggle(config.sleep.keep_alive.get(index)?.enabled)
-            }
-            RowId::KeepFinishedFor => duration_choice(config.jobs.keep_finished_for),
-            RowId::TrashRetention => duration_choice(config.trash.retention_ms),
-            RowId::HotPoolSize => pool_choice(config.hot_pool_size),
-            RowId::ReadOnly => RowKind::Fact(String::new()),
-        };
+        let kind = kind_of(config, &id, &self.efforts)?;
         Some(FocusedSetting { id, kind })
     }
 }
 
-fn mode_choice(kind: AgentKind, mode: PermissionMode) -> RowKind {
-    let labels = kind
-        .supported_modes()
-        .iter()
-        .map(|mode| crate::screens::agent_thread::presentation::mode_label(*mode))
-        .collect::<Vec<_>>();
-    let current = crate::screens::agent_thread::presentation::mode_label(mode);
-    choice(current, &labels, current)
+/// The kind an editable row draws with, straight from the draft, so the row under the cursor can
+/// be refreshed without rebuilding the section. `None` for a keep-alive rule that is gone.
+fn kind_of(config: &Config, id: &RowId, efforts: &Efforts) -> Option<RowKind> {
+    let number = |value, min| RowKind::Number {
+        value,
+        min,
+        unit: None,
+    };
+    let text = |value: &Option<String>| RowKind::Text(value.clone().unwrap_or_default());
+    if let Some(choice) = choice_of(config, id, efforts) {
+        return Some(choice.kind());
+    }
+    if let Some(on) = switch_of(config, id) {
+        return Some(RowKind::Toggle(on));
+    }
+    Some(match id {
+        RowId::ClaudeCommand => RowKind::Text(config.agent_commands.claude.clone()),
+        RowId::CodexCommand => RowKind::Text(config.agent_commands.codex.clone()),
+        RowId::ClaudeBinary => RowKind::Text(config.agent_binaries.claude.clone()),
+        RowId::CodexBinary => RowKind::Text(config.agent_binaries.codex.clone()),
+        RowId::ClaudeDefaultModel => text(&config.native_agents.claude.model),
+        RowId::CodexDefaultModel => text(&config.native_agents.codex.model),
+        RowId::GraceMs => number(config.sleep.grace_ms, 0),
+        RowId::HotFreshnessMs => number(
+            i64::try_from(config.hot_freshness_ms).unwrap_or(i64::MAX),
+            0,
+        ),
+        RowId::HotRefreshIntervalMs => number(
+            i64::try_from(config.hot_refresh_interval_ms).unwrap_or(i64::MAX),
+            0,
+        ),
+        RowId::RepoCacheSeconds => number(config.github.cache_ttl_seconds, 0),
+        RowId::PrCacheSeconds => number(config.github.pr_ttl_seconds, 0),
+        RowId::StatusRefreshMs => number(config.ui.status_refresh_ms, 500),
+        RowId::RemoteStatusRefreshMs => number(config.ui.remote_status_refresh_ms, 500),
+        RowId::ReadOnly => RowKind::Fact(String::new()),
+        RowId::KeepAliveRule(_) => return None,
+        RowId::Agent
+        | RowId::CloneProtocol
+        | RowId::KeepFinishedFor
+        | RowId::TrashRetention
+        | RowId::HotPoolSize
+        | RowId::ClaudeDefaultMode
+        | RowId::CodexDefaultMode
+        | RowId::ClaudeDefaultEffort
+        | RowId::CodexDefaultEffort
+        | RowId::SleepOnSwitch
+        | RowId::WarnBeforeQuit => return None,
+    })
 }
 
 /// `j` / `k` move the cursor (§3.8.6).
@@ -435,10 +368,21 @@ pub(super) fn move_row(
     let len = focused_len(state, cx);
     with_host(state, cx, |host| {
         host.settings.row = step(host.settings.row, delta, len);
-        host.settings.scroll.scroll_to_item(host.settings.row);
+        let block = block_of(&host.settings.prepared, host.settings.row);
+        host.settings.scroll.scroll_to_item(block);
     });
     end_editing(state, focus, window, cx);
     notify(state, cx);
+}
+
+/// The pane child that holds `row`: consecutive rows of one card are one child.
+#[must_use]
+pub fn block_of(rows: &[SettingRow], row: usize) -> usize {
+    // Every row after the first starts a new child unless it continues the card above it.
+    rows.windows(2)
+        .take(row)
+        .filter(|pair| pair[1].card.is_none() || pair[1].card != pair[0].card)
+        .count()
 }
 
 /// `h` / `l` and `\u{2190}` / `\u{2192}` cycle a closed choice while no row owns the keyboard.
@@ -447,8 +391,9 @@ pub(super) fn cycle_row(state: &Entity<AppState>, delta: isize, cx: &mut App) {
         return;
     };
     with_host(state, cx, |host| {
+        let efforts = host.settings.efforts.clone();
         if let Some(config) = host.settings.config.as_mut() {
-            cycle(config, &row.id, delta);
+            cycle(config, &row.id, delta, &efforts);
         }
         host.settings.update_selected();
     });
@@ -500,24 +445,14 @@ pub(super) fn begin_editing(state: &Entity<AppState>, window: &mut Window, cx: &
         RowKind::Number { value, min, .. } => (value.to_string(), Some(*min)),
         RowKind::Toggle(_) | RowKind::Choice { .. } | RowKind::Fact(_) => return false,
     };
-    // A number row is drawn by `NumberField`, which keeps the label and the unit around the
-    // editor; a text row's editor carries its own label.
-    let label = min.is_none().then(|| {
-        read_host(state, cx, |host, _| {
-            host.settings
-                .prepared
-                .get(host.settings.row)
-                .map(|row| row.label.clone())
-        })
-    });
     let seed = text.clone();
     let input = cx.new(|cx| {
         let mut input = TextInput::new(InputMode::SingleLine, cx);
         input.set_mono(true, cx);
         input.set_hide_status_line(true, cx);
-        if let Some(label) = label.flatten() {
-            input.set_label(Some(label.into()), cx);
-        }
+        // The row draws the box (`ValueField`, `NumberField`) and keeps its label beside it, so
+        // the editor is only the line of text and its caret.
+        input.set_embedded(true, cx);
         if min.is_some() {
             // A number row is not a free-text field: a letter that reached the buffer would
             // make `commit_value` fail to parse it and clamp the setting to its minimum.
@@ -600,11 +535,12 @@ pub(super) fn focused_len(state: &Entity<AppState>, cx: &mut App) -> usize {
             return 0;
         };
         match draft.current_section() {
-            Section::General | Section::Jobs | Section::Github => 3,
+            Section::Agents => 11,
+            Section::Jobs | Section::Github => 3,
             Section::Sleep => 2 + config.sleep.keep_alive.len(),
             Section::Pool => 4,
             Section::Status => 2,
-            Section::Windows => config.windows.len(),
+            Section::General => config.windows.len(),
             Section::Hosts => host_rows(config, state.read(cx)).len(),
             Section::About => about_rows(state.read(cx)).len(),
         }
@@ -618,13 +554,36 @@ pub(super) fn move_section(
     window: &mut Window,
     cx: &mut App,
 ) {
-    with_host(state, cx, |host| {
-        host.settings.section = step(host.settings.section, delta, Section::ALL.len());
-        host.settings.row = 0;
-        host.settings.scroll.scroll_to_item(host.settings.row);
+    let section = read_host(state, cx, |host, _| {
+        step(host.settings.section, delta, Section::ALL.len())
     });
+    goto_row(state, section, 0, focus, window, cx);
+}
+
+/// Shows `section` with the cursor on `row`: a click on the rail, `Tab`, or a search hit.
+///
+/// Whatever owned the keyboard — a row editor or the search field — gives it back to the dialog.
+pub(super) fn goto_row(
+    state: &Entity<AppState>,
+    section: usize,
+    row: usize,
+    focus: &FocusHandle,
+    window: &mut Window,
+    cx: &mut App,
+) {
     end_editing(state, focus, window, cx);
+    end_search(state, focus, window, cx);
+    with_host(state, cx, |host| {
+        host.settings.section = section.min(Section::ALL.len() - 1);
+        host.settings.row = 0;
+    });
     refresh_rows(state, cx);
+    let len = focused_len(state, cx);
+    with_host(state, cx, |host| {
+        host.settings.row = row.min(len.saturating_sub(1));
+        let block = block_of(&host.settings.prepared, host.settings.row);
+        host.settings.scroll.scroll_to_item(block);
+    });
     notify(state, cx);
 }
 

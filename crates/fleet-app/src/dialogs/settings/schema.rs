@@ -5,8 +5,10 @@ use fleet_proto::snapshot::{HostStatus, LinkState};
 /// The sections of the rail, in order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
-    /// Agent and its commands.
+    /// The terminal tabs a new worktree opens with (read-only).
     General,
+    /// The default agent and each harness's command, binary and thread defaults.
+    Agents,
     /// Sleep policy and keep-alive rules.
     Sleep,
     /// Job retention and the quit warning.
@@ -17,8 +19,6 @@ pub enum Section {
     Github,
     /// Status refresh intervals.
     Status,
-    /// The default terminal layout (read-only).
-    Windows,
     /// Configured remote hosts (read-only).
     Hosts,
     /// Versions, the daemon and the escape hatches.
@@ -29,12 +29,12 @@ impl Section {
     /// Every section, in rail order.
     pub const ALL: &'static [Self] = &[
         Self::General,
+        Self::Agents,
         Self::Sleep,
         Self::Jobs,
         Self::Pool,
         Self::Github,
         Self::Status,
-        Self::Windows,
         Self::Hosts,
         Self::About,
     ];
@@ -44,22 +44,46 @@ impl Section {
     pub const fn title(self) -> &'static str {
         match self {
             Self::General => "General",
+            Self::Agents => "Agents",
             Self::Sleep => "Sleep",
             Self::Jobs => "Jobs & warnings",
             Self::Pool => "Pool",
             Self::Github => "GitHub",
             Self::Status => "Status",
-            Self::Windows => "Windows",
             Self::Hosts => "Hosts",
             Self::About => "About",
         }
     }
 
-    /// Whether the section holds anything editable, which decides the `edit in config.json`
-    /// trailer.
+    /// The rail glyph.
+    #[must_use]
+    pub const fn icon(self) -> Icon {
+        match self {
+            Self::General => Icon::Settings2,
+            Self::Agents => Icon::Bot,
+            Self::Sleep => Icon::Moon,
+            Self::Jobs => Icon::LoaderCircle,
+            Self::Pool => Icon::Boxes,
+            Self::Github => Icon::GitPullRequest,
+            Self::Status => Icon::Activity,
+            Self::Hosts => Icon::Server,
+            Self::About => Icon::Info,
+        }
+    }
+
+    /// Whether the section holds anything editable, which decides the `config.json` trailer.
     #[must_use]
     pub const fn editable(self) -> bool {
-        !matches!(self, Self::Windows | Self::Hosts | Self::About)
+        !matches!(self, Self::General | Self::Hosts | Self::About)
+    }
+
+    /// The section's position in [`Self::ALL`].
+    #[must_use]
+    pub fn index(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|section| *section == self)
+            .unwrap_or(0)
     }
 }
 
@@ -167,138 +191,130 @@ pub struct SettingRow {
     pub(crate) detail: Option<String>,
     /// A validation problem, e.g. an invalid keep-alive pattern.
     pub(crate) invalid: Option<String>,
+    /// The card the row sits in, named by its heading (`Claude`); consecutive rows sharing one
+    /// are drawn together.
+    pub(crate) card: Option<&'static str>,
+    /// What an empty text value means (`Harness default`).
+    pub(crate) placeholder: Option<&'static str>,
+    /// The text a copy button beside a read-only value puts on the clipboard.
+    pub(crate) copy: Option<String>,
+}
+
+impl SettingRow {
+    fn new(id: RowId, label: &str, kind: RowKind) -> Self {
+        Self {
+            id,
+            label: label.to_owned(),
+            kind,
+            detail: None,
+            invalid: None,
+            card: None,
+            placeholder: None,
+            copy: None,
+        }
+    }
+
+    /// Attaches the helper sentence drawn under the row.
+    fn detail(mut self, detail: &str) -> Self {
+        self.detail = Some(detail.to_owned());
+        self
+    }
+
+    fn card(mut self, card: &'static str) -> Self {
+        self.card = Some(card);
+        self
+    }
+
+    fn placeholder(mut self, placeholder: &'static str) -> Self {
+        self.placeholder = Some(placeholder);
+        self
+    }
+
+    fn copy(mut self, copy: String) -> Self {
+        self.copy = Some(copy);
+        self
+    }
+}
+
+/// Builds the rows of the section the rail highlights.
+#[must_use]
+pub fn rows(state: &SettingsState, app: &AppState) -> Vec<SettingRow> {
+    section_rows(state.current_section(), state, app)
 }
 
 /// Builds the rows of one section from the draft.
 #[must_use]
-pub fn rows(state: &SettingsState, app: &AppState) -> Vec<SettingRow> {
+pub fn section_rows(section: Section, state: &SettingsState, app: &AppState) -> Vec<SettingRow> {
     let Some(config) = state.config.as_ref() else {
         return Vec::new();
     };
-    match state.current_section() {
-        Section::General => general_rows(config),
+    match section {
+        Section::General => window_rows(config),
+        Section::Agents => agent_rows(config, &state.efforts),
         Section::Sleep => sleep_rows(config, &state.matches),
         Section::Jobs => jobs_rows(config),
         Section::Pool => pool_rows(config, app),
         Section::Github => github_rows(config),
         Section::Status => status_rows(config),
-        Section::Windows => window_rows(config),
         Section::Hosts => host_rows(config, app),
         Section::About => about_rows(app),
     }
 }
 
-fn general_rows(config: &Config) -> Vec<SettingRow> {
-    vec![
-        SettingRow {
-            id: RowId::Agent,
-            label: "Agent".to_owned(),
-            kind: choice(agent_name(config.agent), AGENTS, agent_name(config.agent)),
-            detail: None,
-            invalid: None,
-        },
-        detailed(
-            text_row(
-                RowId::ClaudeCommand,
-                "Claude command",
-                &config.agent_commands.claude,
-            ),
-            "Shell line typed into a terminal pane; a function or alias is fine.",
-        ),
-        detailed(
-            text_row(
-                RowId::CodexCommand,
-                "Codex command",
-                &config.agent_commands.codex,
-            ),
-            "Shell line typed into a terminal pane; a function or alias is fine.",
-        ),
-        detailed(
-            text_row(
-                RowId::ClaudeBinary,
-                "Claude binary",
-                &config.agent_binaries.claude,
-            ),
-            "Executable Fleet runs for a native thread, with no shell.",
-        ),
-        detailed(
-            text_row(
-                RowId::CodexBinary,
-                "Codex binary",
-                &config.agent_binaries.codex,
-            ),
-            "Executable Fleet runs for a native thread, with no shell.",
-        ),
-        default_mode_row(
-            RowId::ClaudeDefaultMode,
-            "Claude default access",
-            AgentKind::Claude,
-            config.native_agents.claude.mode,
-        ),
-        detailed(
-            text_row(
-                RowId::ClaudeDefaultModel,
-                "Claude default model",
-                config.native_agents.claude.model.as_deref().unwrap_or(""),
-            ),
-            "Blank uses the harness default.",
-        ),
-        detailed(
-            text_row(
+/// A choice row, drawn from [`choice_of`].
+fn choice_row(config: &Config, id: RowId, label: &str, efforts: &Efforts) -> SettingRow {
+    let kind =
+        choice_of(config, &id, efforts).map_or_else(|| RowKind::Fact(String::new()), Choice::kind);
+    SettingRow::new(id, label, kind)
+}
+
+/// The Agents section: the default agent, then one card per harness.
+fn agent_rows(config: &Config, efforts: &Efforts) -> Vec<SettingRow> {
+    let mut rows = vec![
+        choice_row(config, RowId::Agent, "Default agent", efforts)
+            .detail("Used by the Agent buttons and by a new thread."),
+    ];
+    for kind in [AgentKind::Claude, AgentKind::Codex] {
+        let (card, command, binary, mode, model, effort) = match kind {
+            AgentKind::Claude => (
+                "Claude",
+                (RowId::ClaudeCommand, &config.agent_commands.claude),
+                (RowId::ClaudeBinary, &config.agent_binaries.claude),
+                RowId::ClaudeDefaultMode,
+                (
+                    RowId::ClaudeDefaultModel,
+                    &config.native_agents.claude.model,
+                ),
                 RowId::ClaudeDefaultEffort,
-                "Claude default effort",
-                config.native_agents.claude.effort.as_deref().unwrap_or(""),
             ),
-            "Used with the default model; blank uses the harness default.",
-        ),
-        default_mode_row(
-            RowId::CodexDefaultMode,
-            "Codex default access",
-            AgentKind::Codex,
-            config.native_agents.codex.mode,
-        ),
-        detailed(
-            text_row(
-                RowId::CodexDefaultModel,
-                "Codex default model",
-                config.native_agents.codex.model.as_deref().unwrap_or(""),
-            ),
-            "Blank uses the harness default.",
-        ),
-        detailed(
-            text_row(
+            AgentKind::Codex => (
+                "Codex",
+                (RowId::CodexCommand, &config.agent_commands.codex),
+                (RowId::CodexBinary, &config.agent_binaries.codex),
+                RowId::CodexDefaultMode,
+                (RowId::CodexDefaultModel, &config.native_agents.codex.model),
                 RowId::CodexDefaultEffort,
-                "Codex default effort",
-                config.native_agents.codex.effort.as_deref().unwrap_or(""),
             ),
-            "Used with the default model; blank uses the harness default.",
-        ),
-    ]
-}
-
-fn default_mode_row(id: RowId, label: &str, kind: AgentKind, mode: PermissionMode) -> SettingRow {
-    let labels = kind
-        .supported_modes()
-        .iter()
-        .map(|mode| crate::screens::agent_thread::presentation::mode_label(*mode))
-        .collect::<Vec<_>>();
-    SettingRow {
-        id,
-        label: label.to_owned(),
-        kind: choice(
-            crate::screens::agent_thread::presentation::mode_label(mode),
-            &labels,
-            crate::screens::agent_thread::presentation::mode_label(mode),
-        ),
-        detail: Some("Applied to new threads; each thread can override it.".to_owned()),
-        invalid: None,
+        };
+        rows.extend([
+            text_row(command.0, "Terminal command", command.1)
+                .detail("Typed into a terminal tab. Aliases work.")
+                .card(card),
+            text_row(binary.0, "Binary for threads", binary.1)
+                .detail("Run directly for an agent thread, without a shell.")
+                .card(card),
+            choice_row(config, mode, "Default access", efforts)
+                .detail("New threads start with it. Each thread can change it.")
+                .card(card),
+            text_row(model.0, "Default model", model.1.as_deref().unwrap_or(""))
+                .placeholder("Harness default")
+                .card(card),
+            choice_row(config, effort, "Effort", efforts)
+                .detail("Used with the default model.")
+                .card(card),
+        ]);
     }
-}
-
-/// Attaches the sub-label that says which launch path a row governs.
-fn detailed(mut row: SettingRow, detail: &str) -> SettingRow {
-    row.detail = Some(detail.to_owned());
-    row
+    rows
 }
 
 fn sleep_rows(config: &Config, matches: &[KeepAliveRuleMatch]) -> Vec<SettingRow> {
@@ -322,46 +338,42 @@ fn sleep_rows(config: &Config, matches: &[KeepAliveRuleMatch]) -> Vec<SettingRow
                     KeepAliveKind::Process => "process",
                     KeepAliveKind::ListeningPort => "listening-port",
                 };
-                SettingRow {
-                    id: RowId::KeepAliveRule(index),
-                    label: format!("{}  {kind}  {}", rule.label, rule.pattern),
-                    kind: RowKind::Toggle(rule.enabled),
-                    detail: live.map(|entry| {
-                        format!(
-                            "{} \u{2014} matching {} processes now",
-                            rule.label, entry.count
-                        )
-                    }),
-                    invalid: live
-                        .and_then(|entry| entry.error.as_ref())
-                        .map(|_| "invalid pattern \u{2014} rule is skipped".to_owned()),
-                }
+                let mut row = SettingRow::new(
+                    RowId::KeepAliveRule(index),
+                    &format!("{}  {kind}  {}", rule.label, rule.pattern),
+                    RowKind::Toggle(rule.enabled),
+                );
+                row.detail = live.map(|entry| {
+                    format!(
+                        "{} \u{2014} matching {} processes now",
+                        rule.label, entry.count
+                    )
+                });
+                row.invalid = live
+                    .and_then(|entry| entry.error.as_ref())
+                    .map(|_| "invalid pattern \u{2014} rule is skipped".to_owned());
+                row.card("Keep awake while running")
             }),
     );
     list
 }
 
 fn jobs_rows(config: &Config) -> Vec<SettingRow> {
+    let efforts = Efforts::default();
     vec![
         toggle_row(
             RowId::WarnBeforeQuit,
             "Warn before quitting with running jobs",
             config.jobs.warn_before_quit,
+        )
+        .detail("They keep running in fleetd either way."),
+        choice_row(
+            config,
+            RowId::KeepFinishedFor,
+            "Keep finished jobs for",
+            &efforts,
         ),
-        SettingRow {
-            id: RowId::KeepFinishedFor,
-            label: "Keep finished jobs for".to_owned(),
-            kind: duration_choice(config.jobs.keep_finished_for),
-            detail: None,
-            invalid: None,
-        },
-        SettingRow {
-            id: RowId::TrashRetention,
-            label: "Trash retention".to_owned(),
-            kind: duration_choice(config.trash.retention_ms),
-            detail: None,
-            invalid: None,
-        },
+        choice_row(config, RowId::TrashRetention, "Trash retention", &efforts),
     ]
 }
 
@@ -372,13 +384,12 @@ fn pool_rows(config: &Config, app: &AppState) -> Vec<SettingRow> {
         })
     });
     vec![
-        SettingRow {
-            id: RowId::HotPoolSize,
-            label: "Hot pool size".to_owned(),
-            kind: pool_choice(config.hot_pool_size),
-            detail: None,
-            invalid: None,
-        },
+        choice_row(
+            config,
+            RowId::HotPoolSize,
+            "Hot pool size",
+            &Efforts::default(),
+        ),
         number_row(
             RowId::HotFreshnessMs,
             "Freshness",
@@ -398,15 +409,13 @@ fn pool_rows(config: &Config, app: &AppState) -> Vec<SettingRow> {
 }
 
 fn github_rows(config: &Config) -> Vec<SettingRow> {
-    let protocol = protocol_name(config.github.clone_protocol);
     vec![
-        SettingRow {
-            id: RowId::CloneProtocol,
-            label: "Clone protocol".to_owned(),
-            kind: choice(protocol, PROTOCOLS, protocol),
-            detail: None,
-            invalid: None,
-        },
+        choice_row(
+            config,
+            RowId::CloneProtocol,
+            "Clone protocol",
+            &Efforts::default(),
+        ),
         number_row(
             RowId::RepoCacheSeconds,
             "Repo cache",
@@ -461,6 +470,7 @@ fn window_rows(config: &Config) -> Vec<SettingRow> {
                 &format!("{}", index + 1),
                 format!("{} \u{2014} {command}", window.name),
             )
+            .card("Terminal tabs a new worktree opens")
         })
         .collect()
 }
@@ -540,7 +550,8 @@ fn host_link(host: &fleet_core::model::HostConfigEntry, status: Option<&HostStat
     }
 }
 
-/// The About section: versions, the daemon, and the two escape hatches.
+/// The About section: versions and the daemon. The two escape hatches, `config.json` and doctor,
+/// are the footer's buttons.
 pub(super) fn about_rows(app: &AppState) -> Vec<SettingRow> {
     let mut list = vec![fact(
         "Fleet",
@@ -550,17 +561,21 @@ pub(super) fn about_rows(app: &AppState) -> Vec<SettingRow> {
     if let Some(snapshot) = app.snapshot.as_ref().filter(|_| app.daemon.is_connected()) {
         let uptime = age_secs(&snapshot.daemon.started_at, now)
             .map_or_else(|| "\u{2013}".to_owned(), fleet_ui_kit::format_age);
-        list.push(fact(
-            "fleetd",
-            format!(
-                "running \u{00b7} pid {} \u{00b7} up {uptime}",
-                snapshot.daemon.pid
-            ),
-        ));
+        list.push(
+            fact(
+                "fleetd",
+                format!(
+                    "running \u{00b7} pid {} \u{00b7} up {uptime}",
+                    snapshot.daemon.pid
+                ),
+            )
+            .copy(snapshot.daemon.pid.to_string()),
+        );
     } else {
         list.push(fact("fleetd", "not connected".to_owned()));
     }
-    list.push(fact("FLEET_HOME", app.home.display().to_string()));
+    let home = app.home.display().to_string();
+    list.push(fact("FLEET_HOME", home.clone()).copy(home));
     if let Some(version) = app.update_version.as_ref() {
         list.push(fact(
             "Update",
@@ -571,11 +586,6 @@ pub(super) fn about_rows(app: &AppState) -> Vec<SettingRow> {
         "protocol",
         crate::dialogs::help::protocol().to_string(),
     ));
-    list.push(fact(
-        "E",
-        "open config.json in a new terminal tab".to_owned(),
-    ));
-    list.push(fact("D", "run doctor".to_owned()));
     list
 }
 
@@ -604,42 +614,6 @@ pub(super) const fn protocol_name(protocol: CloneProtocol) -> &'static str {
     }
 }
 
-pub(super) fn choice(value: &str, options: &[&str], current: &str) -> RowKind {
-    let index = options.iter().position(|option| *option == current);
-    RowKind::Choice {
-        value: value.to_owned(),
-        has_prev: index.is_some_and(|index| index > 0),
-        has_next: index.is_some_and(|index| index + 1 < options.len()),
-        off_grid: index.is_none(),
-        options: options.iter().map(|option| (*option).to_owned()).collect(),
-    }
-}
-
-pub(super) fn duration_choice(value: u64) -> RowKind {
-    let index = DURATIONS.iter().position(|step| *step == value);
-    RowKind::Choice {
-        value: format_cycler_duration(value),
-        has_prev: index.is_some_and(|index| index > 0),
-        has_next: index.is_some_and(|index| index + 1 < DURATIONS.len()),
-        off_grid: index.is_none(),
-        options: DURATIONS
-            .iter()
-            .map(|step| format_cycler_duration(*step))
-            .collect(),
-    }
-}
-
-pub(super) fn pool_choice(value: u64) -> RowKind {
-    let index = POOL_SIZES.iter().position(|step| *step == value);
-    RowKind::Choice {
-        value: value.to_string(),
-        has_prev: index.is_some_and(|index| index > 0),
-        has_next: index.is_some_and(|index| index + 1 < POOL_SIZES.len()),
-        off_grid: index.is_none(),
-        options: POOL_SIZES.iter().map(u64::to_string).collect(),
-    }
-}
-
 /// A millisecond duration as the settings cycler words it (`10 min`).
 ///
 /// Deliberately not [`fleet_ui_kit::format_duration`], which words the same number the way an
@@ -659,52 +633,95 @@ pub fn format_cycler_duration(millis: u64) -> String {
 
 /// A read-only row: a label and the value it states.
 fn fact(label: &str, value: String) -> SettingRow {
-    SettingRow {
-        id: RowId::ReadOnly,
-        label: label.to_owned(),
-        kind: RowKind::Fact(value),
-        detail: None,
-        invalid: None,
-    }
+    SettingRow::new(RowId::ReadOnly, label, RowKind::Fact(value))
 }
 
 fn toggle_row(id: RowId, label: &str, checked: bool) -> SettingRow {
-    SettingRow {
-        id,
-        label: label.to_owned(),
-        kind: RowKind::Toggle(checked),
-        detail: None,
-        invalid: None,
-    }
+    SettingRow::new(id, label, RowKind::Toggle(checked))
 }
 
 pub(super) fn text_row(id: RowId, label: &str, value: &str) -> SettingRow {
-    SettingRow {
-        id,
-        label: label.to_owned(),
-        kind: RowKind::Text(value.to_owned()),
-        detail: None,
-        invalid: None,
-    }
+    SettingRow::new(id, label, RowKind::Text(value.to_owned()))
 }
 
 pub(super) fn number_row(id: RowId, label: &str, value: i64, min: i64, unit: &str) -> SettingRow {
-    SettingRow {
+    SettingRow::new(
         id,
-        label: label.to_owned(),
-        kind: RowKind::Number {
+        label,
+        RowKind::Number {
             value,
             min,
             unit: Some(unit.to_owned()),
         },
-        detail: None,
-        invalid: None,
-    }
+    )
 }
 
+/// Rebuilds the pane's rows, and the search hits when a search is typed.
 pub(crate) fn refresh_rows(state: &Entity<AppState>, cx: &mut App) {
-    let prepared = read_host(state, cx, |host, cx| {
-        rows(&host.settings, state.read(cx)).into()
+    let efforts = Efforts::declared(state.read(cx));
+    with_host(state, cx, |host| host.settings.efforts = efforts);
+    let (prepared, hits) = read_host(state, cx, |host, cx| {
+        let app = state.read(cx);
+        let prepared: std::rc::Rc<[SettingRow]> = rows(&host.settings, app).into();
+        let hits = host
+            .settings
+            .search
+            .as_ref()
+            .map(|search| search_hits(&search.query, &host.settings, app));
+        (prepared, hits)
     });
-    with_host(state, cx, |host| host.settings.prepared = prepared);
+    with_host(state, cx, |host| {
+        host.settings.prepared = prepared;
+        if let (Some(search), Some(hits)) = (host.settings.search.as_mut(), hits) {
+            search.set_hits(hits);
+        }
+    });
+}
+
+/// Every row of every section whose label or helper sentence contains each word of `query`,
+/// ignoring case, in rail order. An empty query matches nothing: the pane shows the section.
+#[must_use]
+pub fn search_hits(query: &str, state: &SettingsState, app: &AppState) -> Vec<SearchHit> {
+    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+    if words.is_empty() {
+        return Vec::new();
+    }
+    let mut hits = Vec::new();
+    for section in Section::ALL {
+        for (row, entry) in section_rows(*section, state, app).into_iter().enumerate() {
+            let haystack = format!(
+                "{} {} {} {}",
+                section.title(),
+                entry.card.unwrap_or(""),
+                entry.label,
+                entry.detail.as_deref().unwrap_or("")
+            )
+            .to_lowercase();
+            if words.iter().all(|word| haystack.contains(word.as_str())) {
+                hits.push(SearchHit {
+                    section: *section,
+                    row,
+                    label: match entry.card {
+                        Some(card) => format!("{card} \u{203a} {}", entry.label),
+                        None => entry.label,
+                    },
+                    detail: entry.detail,
+                });
+            }
+        }
+    }
+    hits
+}
+
+/// One row a search found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchHit {
+    /// The section it lives in.
+    pub section: Section,
+    /// Its position in that section.
+    pub row: usize,
+    /// Its label, led by its card's heading when it sits in one (`Claude › Effort`).
+    pub label: String,
+    /// Its helper sentence.
+    pub detail: Option<String>,
 }

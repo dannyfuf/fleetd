@@ -354,6 +354,15 @@ fn declared_models(
     models
 }
 
+/// Every reasoning effort `provider` has declared on this client's threads, over all of its
+/// models, in harness order: the Settings Agents section's effort vocabulary beyond the base.
+pub(crate) fn declared_effort_ids(state: &AppState, provider: AgentKind) -> Vec<String> {
+    declared_efforts(state, Some(provider), None)
+        .into_iter()
+        .map(|effort| effort.id)
+        .collect()
+}
+
 /// The efforts declared for the model this card would run under, in harness order.
 ///
 /// `^s e` offers the selected model's efforts and no others. A model nobody has declared —

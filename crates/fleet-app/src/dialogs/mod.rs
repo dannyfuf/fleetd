@@ -47,8 +47,12 @@ pub(crate) use settings::refresh_rows as settings_refresh_rows;
 const NARROW_W: Pixels = px(460.0);
 /// §3.8 card width for a yes/no prompt with facts above it.
 const PROMPT_W: Pixels = px(520.0);
-/// §3.8 card width for the settings rail plus pane.
+/// §3.8 card width for a rail plus pane: Board settings.
 const WIDE_W: Pixels = px(720.0);
+/// §3.8.6 Settings: a rail, a pane of controls and a search in the header, `760 × 600`.
+const SETTINGS_W: Pixels = px(760.0);
+/// §3.8.6 Settings' header search field.
+pub(crate) const SETTINGS_SEARCH_W: Pixels = px(240.0);
 /// §3.8 card width for the card detail.
 const CARD_DETAIL_W: Pixels = px(880.0);
 /// §3.8.7 Help: a large panel, `1040 × 720`, clamped to the window on a narrow one.
@@ -62,8 +66,10 @@ pub(crate) const HELP_KEYS_COL_W: Pixels = px(150.0);
 
 /// §3.8.2 card height for the clone-repo list: `560 × 420`.
 const CLONE_H: Pixels = px(420.0);
-/// §3.8.6 card height for the settings rail plus pane: `720 × 560`.
-const SETTINGS_H: Pixels = px(560.0);
+/// Board settings' card height: `720 × 560`.
+const BOARD_SETTINGS_H: Pixels = px(560.0);
+/// §3.8.6 Settings' card height: `760 × 600`.
+const SETTINGS_H: Pixels = px(600.0);
 /// §3.8.7 card height for Help: `1040 × 720`.
 const HELP_H: Pixels = px(720.0);
 
@@ -147,7 +153,7 @@ impl Dialogs {
             Self::NewContext | Self::EditContext | Self::RenameTerminal | Self::AssignRepo => {
                 NARROW_W
             }
-            Self::Settings => WIDE_W,
+            Self::Settings => SETTINGS_W,
             Self::CardDetail => CARD_DETAIL_W,
             Self::Help => HELP_W,
             Self::Quit => PROMPT_W,
@@ -186,7 +192,8 @@ impl Dialogs {
     pub(crate) const fn height(&self) -> Option<Pixels> {
         match self {
             Self::CloneRepo => Some(CLONE_H),
-            Self::BoardSettings | Self::Settings => Some(SETTINGS_H),
+            Self::BoardSettings => Some(BOARD_SETTINGS_H),
+            Self::Settings => Some(SETTINGS_H),
             Self::Help => Some(HELP_H),
             _ => None,
         }

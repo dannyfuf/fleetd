@@ -1,4 +1,23 @@
+//! Settings' card: the search header, the section rail, the pane of controls and the footer.
+//!
+//! Composes what the draft prepared (`SettingsState::prepared`, the search hits); it builds no
+//! rows and reads no configuration itself.
+
+use fleet_ui_kit::{
+    Button, ButtonSize, ButtonStyle, Dialog, EmptyState, FactRow, FactValue, IconButton, IconSize,
+    Kbd, KbdSize, Row, RowColumn, Text, Tone, ValueField,
+};
+use gpui::{MouseButton, SharedString};
+
 use super::*;
+use crate::dialogs::{Dialogs, SETTINGS_SEARCH_W};
+
+/// What a row's controls call back into: the draft and the dialog's own focus handle.
+#[derive(Clone)]
+struct Handlers {
+    state: Entity<AppState>,
+    focus: FocusHandle,
+}
 
 /// Renders the dialog (§3.8.6).
 pub(crate) fn render(
@@ -6,87 +25,134 @@ pub(crate) fn render(
     bridge: &Bridge,
     focus: &FocusHandle,
     host: &Entity<DialogHost>,
-    _window: &mut Window,
+    window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let (gap, tight) = {
-        let theme = cx.theme();
-        (theme.space.md, theme.space.xs)
+    let handlers = Handlers {
+        state: state.clone(),
+        focus: focus.clone(),
     };
-    let draft = &host.read(cx).settings;
-    let pane_rows = &draft.prepared;
-    let section = draft.current_section();
+    let cx: &App = cx;
+    let theme = cx.theme();
+    let host_ref = host.read(cx);
+    let draft = &host_ref.settings;
     let dirty = draft.dirty();
+    let load_failed = draft.config_error.is_some();
+    let viewport = window.viewport_size();
+    let width = Dialogs::Settings
+        .width(cx)
+        .min(viewport.width - theme.space.xl * 2.0);
+    let height = Dialogs::Settings
+        .height()
+        .unwrap_or(viewport.height)
+        .min(viewport.height - theme.space.xl * 2.0);
+    // Chips are resolved against the dialog's own handle. While the search field or a row
+    // editor holds the keyboard, `E`, `D` and `/` type instead, so their chips drop out; the
+    // buttons still work by pointer.
+    let chip = |action: &dyn gpui::Action| Kbd::for_action_in(action, focus, window);
 
-    let rail = div()
+    let search = div()
         .flex()
-        .flex_col()
-        .flex_none()
-        .w(px(RAIL_WIDTH))
-        .gap(tight)
-        .children(Section::ALL.iter().enumerate().map(|(index, entry)| {
-            let selected = index == draft.section;
-            Row::new()
-                .selected(selected)
-                .cursor(selected)
-                .column(RowColumn::flex(Text::ui(entry.title())))
-        }));
-
-    let editing = host.read(cx).settings_input.clone();
-    let pane = div()
-        .id("settings-pane")
-        .min_h_0()
-        .overflow_y_scroll()
-        .track_scroll(&draft.scroll)
-        .flex()
-        .flex_col()
-        .flex_1()
-        .min_w_0()
-        .gap(tight)
-        .children(pane_rows.iter().enumerate().map(|(index, row)| {
-            let focused = index == draft.row;
-            row_element(row, focused, focused.then(|| editing.clone()).flatten())
+        .items_center()
+        .gap(theme.space.sm)
+        .w(SETTINGS_SEARCH_W)
+        .children(host_ref.settings_search.clone().map(|input| {
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(input.harness_target("settings.search"))
         }))
         .children(
-            section
-                .editable()
-                .then(|| Text::hint("edit in config.json").tone(Tone::Muted)),
+            (!draft.search_focused)
+                .then(|| chip(&settings_actions::Search).map(|kbd| kbd.size(KbdSize::Small)))
+                .flatten(),
         );
+
+    let pane = match draft.search.as_ref().filter(|search| search.active()) {
+        Some(search) => hits_pane(search, &draft.hit_scroll, &handlers, cx).into_any_element(),
+        None => {
+            section_pane(draft, host_ref.settings_input.clone(), &handlers, cx).into_any_element()
+        }
+    };
 
     let body = div()
         .flex()
-        .flex_row()
-        .gap(gap)
         .size_full()
-        .child(rail)
-        .child(Divider::vertical())
+        .min_h_0()
+        .child(rail(draft, &handlers, cx))
         .child(pane);
 
-    let mut card = Dialog::new("Settings")
-        .dismiss_action(crate::dialogs::Dialogs::Settings.dismiss_action())
-        .icon(Icon::Settings2)
-        .width(crate::dialogs::Dialogs::Settings.width(cx))
-        .when_some(crate::dialogs::Dialogs::Settings.height(), Dialog::height)
-        .body(body)
-        .hint_row(if dirty {
-            KeyHintRow::new()
-                .key("\u{23ce}", "save")
-                .key("esc", "discard changes")
-                .key("E", "config.json")
-                .key("D", "doctor")
-        } else {
-            KeyHintRow::new()
-                .key("\u{21e5}", "section")
-                .key("j/k", "row")
-                .key("E", "config.json")
-                .key("D", "doctor")
+    let config_button = Button::new("settings-config", "Open config.json")
+        .style(ButtonStyle::Ghost)
+        .size(ButtonSize::Compact)
+        .icon(Icon::ExternalLink)
+        .action(Box::new(settings_actions::OpenConfigFile))
+        .map(|button| match chip(&settings_actions::OpenConfigFile) {
+            Some(kbd) => button.kbd(kbd),
+            None => button,
         });
-    if dirty {
-        // §3.8.6: the dirty state marks the title in accent and renames the footer.
-        card = card.tone(Tone::Accent).primary("\u{23ce} Save");
-    }
+    let doctor_button = Button::new("settings-doctor", "Run doctor")
+        .style(ButtonStyle::Ghost)
+        .size(ButtonSize::Compact)
+        .icon(Icon::Wrench)
+        .action(Box::new(settings_actions::RunDoctor))
+        .map(|button| match chip(&settings_actions::RunDoctor) {
+            Some(kbd) => button.kbd(kbd),
+            None => button,
+        });
+    let footer_start = div()
+        .flex()
+        .flex_1()
+        .min_w_0()
+        .items_center()
+        .gap(theme.space.sm)
+        .child(config_button.harness_target("settings.config"))
+        .child(doctor_button.harness_target("settings.doctor"))
+        .child(div().flex_1())
+        .children(dirty.then(|| {
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(theme.space.xs)
+                .child(Icon::Dot.el().size(IconSize::Small).tone(Tone::Warning))
+                .child(Text::ui("Unsaved changes").tone(Tone::Warning))
+        }));
+
+    let cancel = Button::new("settings-cancel", "Cancel")
+        .action(Dialogs::Settings.dismiss_action())
+        .map(|button| match chip(&dialog::Cancel) {
+            Some(kbd) => button.kbd(kbd),
+            None => button,
+        });
+    let save_state = state.clone();
+    let save_bridge = bridge.clone();
+    // Save is the primary once there is something to save; a failed load turns it into the
+    // retry `Enter` already is.
+    let save_button = Button::new("settings-save", if load_failed { "Retry" } else { "Save" })
+        .style(ButtonStyle::Primary)
+        .disabled(!(dirty || load_failed) || draft.save_in_flight)
+        .on_click(move |_, _, cx| save(&save_state, &save_bridge, cx))
+        .map(|button| match chip(&dialog::Confirm) {
+            Some(kbd) => button.kbd(kbd),
+            None => button,
+        });
+
+    let mut card = Dialog::new("Settings")
+        .dismiss_action(Dialogs::Settings.dismiss_action())
+        .icon(Icon::Settings2)
+        .width(width)
+        .height(height)
+        .header_actions(search)
+        .flush_body(true)
+        .body(body)
+        .footer_start(footer_start)
+        .actions(vec![cancel, save_button]);
     if let Some(message) = draft.error.clone().or_else(|| draft.load_error()) {
         card = card.error(message);
+    } else if dirty {
+        // `Esc` keeps discarding, as it always has; the strip says so before it happens.
+        card = card.warning("Esc or Cancel discards the unsaved changes.");
     }
 
     let save_state = state.clone();
@@ -94,14 +160,22 @@ pub(crate) fn render(
     let doctor_bridge = bridge.clone();
 
     input_actions(root(focus), state, focus)
-        .on_action(move |_: &dialog::Confirm, window, cx| {
-            // §3.8.6: a text or number row is opened for editing by `Enter`; once its editor
-            // owns the keyboard the dialog publishes `SettingsEditing`, whose own `Enter` row
-            // reaches this handler again and saves. Every other row saves straight away.
-            if confirm_opens_editing(&save_state, window, cx) {
-                return;
+        .on_action({
+            let focus = focus.clone();
+            move |_: &dialog::Confirm, window, cx| {
+                // In the search field `Enter` jumps to the selected hit.
+                if read_host(&save_state, cx, |host, _| host.settings.search_focused) {
+                    jump_to_hit(&save_state, None, &focus, window, cx);
+                    return;
+                }
+                // §3.8.6: a text or number row is opened for editing by `Enter`; once its
+                // editor owns the keyboard the dialog publishes `SettingsEditing`, whose own
+                // `Enter` row reaches this handler again and saves. Every other row saves.
+                if confirm_opens_editing(&save_state, window, cx) {
+                    return;
+                }
+                save(&save_state, &save_bridge, cx);
             }
-            save(&save_state, &save_bridge, cx);
         })
         .on_action({
             let state = state.clone();
@@ -116,25 +190,184 @@ pub(crate) fn render(
                 run_doctor(&state, &doctor_bridge, cx);
             }
         })
+        .on_action({
+            let state = state.clone();
+            let focus = focus.clone();
+            move |_: &settings_actions::Search, window, cx| {
+                begin_search(&state, &focus, window, cx);
+            }
+        })
+        .on_action({
+            let state = state.clone();
+            let focus = focus.clone();
+            move |_: &settings_actions::EndSearch, window, cx| {
+                end_search(&state, &focus, window, cx);
+            }
+        })
         .child(card)
         .into_any_element()
 }
 
-/// Draws one row with the kit control its kind calls for.
+/// The section rail: one row per section, its glyph and its name.
+fn rail(draft: &SettingsState, handlers: &Handlers, cx: &App) -> impl IntoElement {
+    let theme = cx.theme();
+    div()
+        .flex()
+        .flex_col()
+        .flex_none()
+        .w(px(RAIL_WIDTH))
+        .h_full()
+        .gap(theme.space.xxs)
+        .p(theme.space.sm)
+        .bg(theme.colors.surface)
+        .border_r(theme.metrics.hairline)
+        .border_color(theme.colors.border)
+        .children(Section::ALL.iter().enumerate().map(|(index, entry)| {
+            let selected = index == draft.section;
+            let handlers = handlers.clone();
+            Row::with_id(("settings-section", index))
+                .selected(selected)
+                .leading(entry.icon().el().size(IconSize::Small).tone(if selected {
+                    Tone::Default
+                } else {
+                    Tone::Secondary
+                }))
+                .column(RowColumn::flex(Text::ui(entry.title()).tone(if selected {
+                    Tone::Default
+                } else {
+                    Tone::Secondary
+                })))
+                .on_click(move |_, window, cx| {
+                    goto_row(&handlers.state, index, 0, &handlers.focus, window, cx);
+                })
+                .harness_target_indexed("settings.section", index)
+        }))
+}
+
+/// The pane for the section the rail highlights: its rows, a card per group of them.
+fn section_pane(
+    draft: &SettingsState,
+    editing: Option<Entity<TextInput>>,
+    handlers: &Handlers,
+    cx: &App,
+) -> impl IntoElement {
+    let theme = cx.theme();
+    let rows = &draft.prepared;
+    let section = draft.current_section();
+    let mut blocks: Vec<AnyElement> = Vec::new();
+    let mut index = 0;
+    while let Some(row) = rows.get(index) {
+        let element = |index: usize, row: &SettingRow| {
+            let focused = index == draft.row;
+            row_element(
+                row,
+                index,
+                focused,
+                focused.then(|| editing.clone()).flatten(),
+                handlers,
+                cx,
+            )
+        };
+        match row.card {
+            Some(title) => {
+                let start = index;
+                while rows.get(index).is_some_and(|next| next.card == Some(title)) {
+                    index += 1;
+                }
+                blocks.push(card(
+                    title,
+                    rows.iter()
+                        .enumerate()
+                        .skip(start)
+                        .take(index - start)
+                        .map(|(index, row)| element(index, row)),
+                    cx,
+                ));
+            }
+            None => {
+                blocks.push(element(index, row));
+                index += 1;
+            }
+        }
+    }
+
+    div()
+        .id("settings-pane")
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_w_0()
+        .min_h_0()
+        .overflow_y_scroll()
+        .track_scroll(&draft.scroll)
+        .gap(theme.space.md)
+        .p(theme.space.lg)
+        .children(blocks)
+        .children((!section.editable()).then(|| {
+            Text::caption("Change these in config.json.")
+                .faint()
+                .into_any_element()
+        }))
+}
+
+/// A group of rows under a heading (`Claude`), drawn as one bordered card.
+fn card(title: &'static str, rows: impl Iterator<Item = AnyElement>, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    div()
+        .flex()
+        .flex_col()
+        .flex_none()
+        .gap(theme.space.xxs)
+        .py(theme.space.sm)
+        .rounded(theme.radii.card)
+        .border(theme.metrics.hairline)
+        .border_color(theme.colors.border)
+        .bg(theme.colors.surface)
+        .child(
+            div()
+                .px(theme.space.md)
+                .pb(theme.space.xs)
+                .child(Text::ui_strong(title)),
+        )
+        .children(rows)
+        .into_any_element()
+}
+
+/// Draws one row with the control its kind calls for, every control wired to the pointer.
 ///
-/// `editing` is the live editor of §3.8.6, present only on the row that `Enter` opened. A text
-/// row *is* that editor; a number row keeps its `NumberField` chrome around it so the label and
-/// the unit stay where they were.
-pub(super) fn row_element(
+/// `editing` is the live editor of §3.8.6, present only on the row that `Enter` (or a click on
+/// its box) opened; text and number rows draw it inside their own box.
+fn row_element(
     row: &SettingRow,
+    index: usize,
     focused: bool,
     editing: Option<Entity<TextInput>>,
+    handlers: &Handlers,
+    cx: &App,
 ) -> AnyElement {
-    match &row.kind {
+    let theme = cx.theme();
+    // The controls of the row under the cursor carry the harness names a scenario clicks.
+    let named = focused;
+    let control = match &row.kind {
         RowKind::Toggle(checked) => {
-            let mut toggle = Toggle::labeled(row.label.clone(), *checked).focused(focused);
-            if let Some(detail) = row.invalid.clone().or_else(|| row.detail.clone()) {
-                toggle = toggle.detail(detail);
+            let handlers = handlers.clone();
+            let mut toggle = Toggle::labeled(row.label.clone(), *checked)
+                .id(("settings-switch", index))
+                .focused(focused)
+                .on_toggle(move |on, window, cx| {
+                    set_row_switch(&handlers.state, index, on, &handlers.focus, window, cx);
+                });
+            // A switch's live count and a broken rule sit beside its label, where the kit puts
+            // them; a helper sentence goes under the row like every other one.
+            if let Some(live) = row.invalid.clone().or_else(|| {
+                matches!(row.id, RowId::KeepAliveRule(_))
+                    .then(|| row.detail.clone())
+                    .flatten()
+            }) {
+                toggle = toggle.detail(live);
+            }
+            if named {
+                toggle = toggle.harness_switch("settings.switch");
             }
             toggle.into_any_element()
         }
@@ -144,16 +377,27 @@ pub(super) fn row_element(
             has_next,
             off_grid,
             options,
-        } => Cycler::labeled(row.label.clone(), value.clone())
-            .options(options.iter().cloned())
-            .has_prev(*has_prev)
-            .has_next(*has_next)
-            .off_grid(*off_grid)
-            .focused(focused)
-            .into_any_element(),
+        } => {
+            let handlers = handlers.clone();
+            let mut cycler = Cycler::labeled(row.label.clone(), value.clone())
+                .id(("settings-choice", index))
+                .options(options.iter().cloned())
+                .has_prev(*has_prev)
+                .has_next(*has_next)
+                .off_grid(*off_grid)
+                .focused(focused)
+                .on_select(move |option, window, cx| {
+                    select_option(&handlers.state, index, option, &handlers.focus, window, cx);
+                });
+            if named {
+                cycler = cycler.harness("settings.option", "settings.dropdown");
+            }
+            cycler.into_any_element()
+        }
         RowKind::Number { value, min, unit } => {
             let mut field = NumberField::labeled(row.label.clone(), *value)
                 .min(*min)
+                .end_aligned(true)
                 .focused(focused && editing.is_none());
             if let Some(unit) = unit {
                 field = field.unit(unit.clone());
@@ -164,32 +408,129 @@ pub(super) fn row_element(
             field.into_any_element()
         }
         RowKind::Text(value) => {
-            if let Some(input) = editing {
-                return input.into_any_element();
-            }
-            // §6.4: a value nobody is editing is a read-only fact, not an empty box. `Enter`
-            // opens the row and the editor it opens carries the placeholder and the rule.
-            let mut column = div().flex().flex_col().child(
-                FactRow::new(
-                    row.label.clone(),
-                    FactValue::from_option((!value.is_empty()).then(|| value.clone())),
-                )
+            let handlers = handlers.clone();
+            let mut field = ValueField::new(("settings-text", index), value.clone())
+                .label(row.label.clone())
                 .label_width(px(LABEL_WIDTH))
-                .mono(true),
-            );
-            // The sub-label and the failing rule share one line, and the rule wins it, which
-            // is the zero-shift rule the field used to state in its 18 px slot.
-            if let Some(invalid) = row.invalid.clone() {
-                column = column.child(FactRow::warning(invalid));
-            } else if let Some(detail) = row.detail.clone() {
-                column = column.child(Text::caption(detail).faint().ellipsize());
+                .mono(true)
+                .focused(focused)
+                .on_click(move |window, cx| {
+                    click_row(&handlers.state, index, &handlers.focus, window, cx);
+                });
+            if let Some(placeholder) = row.placeholder {
+                field = field.placeholder(placeholder);
             }
-            column.into_any_element()
+            if let Some(input) = editing {
+                field = field.editor(input);
+            }
+            field.into_any_element()
         }
-        RowKind::Fact(value) => KeyValueList::new()
-            .row(row.label.clone(), FactValue::known(value.clone()))
+        RowKind::Fact(value) => div()
+            .flex()
+            .items_center()
+            .gap(theme.space.sm)
+            .px(theme.space.md)
+            .child(
+                div().flex_1().min_w_0().child(
+                    FactRow::new(row.label.clone(), FactValue::known(value.clone()))
+                        .label_width(px(LABEL_WIDTH)),
+                ),
+            )
+            .children(row.copy.clone().map(|text| {
+                IconButton::new(("settings-copy", index), Icon::Copy, "Copy")
+                    .size(ButtonSize::Compact)
+                    .on_click(move |_, _, cx| copy_value(&text, cx))
+                    .harness_target_indexed("settings.copy", index)
+            }))
             .into_any_element(),
-    }
+    };
+
+    let helper = match &row.kind {
+        // A keep-alive rule's detail is its live count, already beside the label.
+        RowKind::Toggle(_) if matches!(row.id, RowId::KeepAliveRule(_)) => None,
+        _ => row.detail.clone(),
+    };
+    let handlers = handlers.clone();
+    div()
+        .id(("settings-row", index))
+        .flex()
+        .flex_col()
+        .flex_none()
+        .rounded(theme.radii.sm)
+        .when(focused, |el| el.bg(theme.colors.row_selected))
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            click_row(&handlers.state, index, &handlers.focus, window, cx);
+        })
+        .child(control)
+        .children(helper.map(|helper| {
+            div()
+                .px(theme.space.md)
+                .pb(theme.space.xs)
+                .child(Text::caption(helper).faint())
+        }))
+        .harness_target_indexed("settings.row", index)
+        .into_any_element()
+}
+
+/// The pane while a search is typed: every matching row, with its section, in rail order.
+fn hits_pane(
+    search: &SearchState,
+    scroll: &gpui::ScrollHandle,
+    handlers: &Handlers,
+    cx: &App,
+) -> impl IntoElement {
+    let theme = cx.theme();
+    div()
+        .id("settings-hits")
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_w_0()
+        .min_h_0()
+        .overflow_y_scroll()
+        .track_scroll(scroll)
+        .gap(theme.space.xxs)
+        .p(theme.space.lg)
+        .when(search.hits.is_empty(), |el| {
+            el.child(EmptyState::new(SharedString::from(format!(
+                "No setting matches \u{201c}{}\u{201d}.",
+                search.query.trim()
+            ))))
+        })
+        .children(search.hits.iter().enumerate().map(|(index, hit)| {
+            let selected = index == search.cursor;
+            let handlers = handlers.clone();
+            Row::with_id(("settings-hit", index))
+                .selected(selected)
+                .cursor(selected)
+                .leading(
+                    hit.section
+                        .icon()
+                        .el()
+                        .size(IconSize::Small)
+                        .tone(Tone::Secondary),
+                )
+                .column(RowColumn::flex(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .min_w_0()
+                        .child(Text::ui(hit.label.clone()).ellipsize())
+                        .children(
+                            hit.detail
+                                .clone()
+                                .map(|detail| Text::caption(detail).faint().ellipsize()),
+                        ),
+                ))
+                .column(RowColumn::auto(
+                    Text::caption(hit.section.title()).tone(Tone::Secondary),
+                ))
+                .height(theme.metrics.row_h_comfortable)
+                .on_click(move |_, window, cx| {
+                    jump_to_hit(&handlers.state, Some(index), &handlers.focus, window, cx);
+                })
+                .harness_target_indexed("settings.hit", index)
+        }))
 }
 
 pub(super) fn input_actions(
@@ -210,12 +551,24 @@ pub(super) fn input_actions(
     .on_action({
         let state = state.clone();
         let focus = focus.clone();
-        move |_: &dialog::CursorDown, window, cx| move_row(&state, 1, &focus, window, cx)
+        move |_: &dialog::CursorDown, window, cx| {
+            if searching(&state, cx) {
+                move_hit(&state, 1, cx);
+            } else {
+                move_row(&state, 1, &focus, window, cx);
+            }
+        }
     })
     .on_action({
         let state = state.clone();
         let focus = focus.clone();
-        move |_: &dialog::CursorUp, window, cx| move_row(&state, -1, &focus, window, cx)
+        move |_: &dialog::CursorUp, window, cx| {
+            if searching(&state, cx) {
+                move_hit(&state, -1, cx);
+            } else {
+                move_row(&state, -1, &focus, window, cx);
+            }
+        }
     })
     .on_action({
         let state = state.clone();

@@ -77,6 +77,9 @@ pub(crate) struct DialogHost {
     /// The input materialized for the settings row that entered editing.
     pub(super) settings_input: Option<Entity<TextInput>>,
     pub(super) settings_input_subscription: Option<Subscription>,
+    /// The settings header's search field, alive for the dialog's whole lifetime.
+    pub(super) settings_search: Option<Entity<TextInput>>,
+    pub(super) settings_search_subscription: Option<Subscription>,
     /// Rename-terminal draft.
     pub rename_terminal: rename_terminal::RenameState,
     /// The rename dialog's one editor, alive for its whole lifetime.
@@ -458,6 +461,7 @@ fn dialog_key_context(dialog: &Dialogs, host: &DialogHost) -> &'static str {
         Dialogs::CardDetail if host.card_detail.is_editing() => "CardDetailEditing",
         Dialogs::BoardSettings if host.board_settings_input.is_some() => "BoardSettingsEditing",
         Dialogs::Settings if host.settings.editing.is_some() => "SettingsEditing",
+        Dialogs::Settings if host.settings.search_focused => "SettingsSearch",
         Dialogs::CreateWorktree if host.create.field == create_worktree::Field::Branch => {
             "CreateEditing"
         }
@@ -495,7 +499,13 @@ fn focused_input_entity(state: &Entity<AppState>, cx: &mut App) -> Option<Entity
             },
             Dialogs::EditHooks => host.hook_inputs.get(host.edit_hooks.field),
             Dialogs::RenameTerminal => host.rename_input.as_ref(),
-            Dialogs::Settings => host.settings_input.as_ref(),
+            // The row editor while one is open; the header's search while it has the keyboard.
+            Dialogs::Settings => host.settings_input.as_ref().or_else(|| {
+                host.settings
+                    .search_focused
+                    .then_some(host.settings_search.as_ref())
+                    .flatten()
+            }),
             // Typing goes to Help's search: its keys are `↑`/`↓`/`⏎`/`esc`/`?`, none printable
             // but the last, which closes Help as it always has.
             Dialogs::Help => host.help_input.as_ref(),
@@ -514,11 +524,12 @@ pub(crate) fn focused_input(state: &Entity<AppState>, cx: &mut App) -> Option<Fo
 ///
 /// Only the dialogs whose whole tab cycle is made of editors are reported, so that
 /// `dialog.fields[N]` and the painted `targets["dialog.field[N]"]` always name the same field
-/// (`docs/TESTING-HARNESS.md` §3). Create-worktree's base list and host cycler and Settings'
-/// switch rows are not editors, so those dialogs report nothing rather than a partial numbering
-/// that would not line up with their targets. Board settings is the exception in the other
-/// direction: it paints no `dialog.field[N]` target at all, so it reports its open rail section
-/// and its one row-scoped editor without any numbering to keep in step.
+/// (`docs/TESTING-HARNESS.md` §3). Create-worktree's base list and host cycler are not editors,
+/// so that dialog reports nothing rather than a partial numbering that would not line up with
+/// its targets. Board settings and Settings are the exception in the other direction: they
+/// paint no `dialog.field[N]` target at all, so each reports its open rail section and its
+/// editor — Board settings' row-scoped one, Settings' header search — without any numbering to
+/// keep in step.
 pub(crate) fn dialog_fields(state: &Entity<AppState>, cx: &mut App) -> Vec<FieldSnapshot> {
     let Some(Overlay::Dialog(dialog)) = state.read(cx).overlay.as_ref().cloned() else {
         return Vec::new();
@@ -533,6 +544,26 @@ pub(crate) fn dialog_fields(state: &Entity<AppState>, cx: &mut App) -> Vec<Field
             value: read_host(state, cx, |host, _| {
                 host.board_settings.section_title().to_owned()
             }),
+            focused: false,
+        });
+    }
+    // Settings, the same way: the section the pane shows and the row under the cursor with
+    // the value the draft holds for it (`Sleep on switch = on`), then the header's search.
+    if dialog == Dialogs::Settings {
+        let (section, row) = read_host(state, cx, |host, _| {
+            (
+                host.settings.current_section().title().to_owned(),
+                host.settings.cursor_summary(),
+            )
+        });
+        fields.push(FieldSnapshot {
+            name: "section".to_owned(),
+            value: section,
+            focused: false,
+        });
+        fields.push(FieldSnapshot {
+            name: "row".to_owned(),
+            value: row,
             focused: false,
         });
     }
@@ -551,6 +582,7 @@ pub(crate) fn dialog_fields(state: &Entity<AppState>, cx: &mut App) -> Vec<Field
         Dialogs::CardPicker => named(&[("query", host.card_picker_input.as_ref())]),
         Dialogs::CloneRepo => named(&[("search", host.clone_query.as_ref())]),
         Dialogs::Help => named(&[("search", host.help_input.as_ref())]),
+        Dialogs::Settings => named(&[("search", host.settings_search.as_ref())]),
         // The one row-scoped editor Board settings mounts, named after the row it belongs to.
         // It is the only place a value typed into that dialog can be read back — every other
         // row is a cycler the projection already carries — and it follows the `section` field
@@ -730,6 +762,8 @@ fn close_with(state: &Entity<AppState>, preserve_card_detail: bool, cx: &mut App
         host.hook_input_subscriptions.clear();
         host.settings_input = None;
         host.settings_input_subscription = None;
+        host.settings_search = None;
+        host.settings_search_subscription = None;
         host.rename_input = None;
         host.rename_input_subscription = None;
         if !preserve_card_detail {
