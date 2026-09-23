@@ -42,6 +42,10 @@ pub enum ButtonStyle {
     Ghost,
     /// `danger` fill: the strong form of a destructive action (the `Y` of a confirmation).
     Danger,
+    /// A [`ButtonStyle::Ghost`] whose label is `danger`: a destructive action that is not the
+    /// surface's main one, set apart from its neighbours rather than shouted (an approval's
+    /// "Deny and stop").
+    GhostDanger,
 }
 
 /// Button height.
@@ -128,6 +132,14 @@ impl ButtonBase {
                 active: c.control_active,
                 border: clear,
                 fg: if selected { c.text } else { c.text_secondary },
+                kbd: KbdTone::Default,
+            },
+            ButtonStyle::GhostDanger => Paint {
+                bg: clear,
+                hover: c.control_hover,
+                active: c.control_active,
+                border: clear,
+                fg: c.danger,
                 kbd: KbdTone::Default,
             },
         }

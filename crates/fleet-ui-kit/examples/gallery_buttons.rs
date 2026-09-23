@@ -80,11 +80,12 @@ fn kbd(source: &str) -> Kbd {
     Kbd::parse(source).unwrap_or_else(|error| panic!("{source:?}: {error}"))
 }
 
-const STYLES: [(&str, ButtonStyle); 4] = [
+const STYLES: [(&str, ButtonStyle); 5] = [
     ("primary", ButtonStyle::Primary),
     ("secondary", ButtonStyle::Secondary),
     ("ghost", ButtonStyle::Ghost),
     ("danger", ButtonStyle::Danger),
+    ("ghost danger", ButtonStyle::GhostDanger),
 ];
 
 fn styles_section(cx: &App) -> AnyElement {
@@ -97,19 +98,21 @@ fn styles_section(cx: &App) -> AnyElement {
                 ButtonStyle::Primary => Box::new(Create),
                 ButtonStyle::Secondary => Box::new(Cancel),
                 ButtonStyle::Ghost => Box::new(GoToBoard),
-                ButtonStyle::Danger => Box::new(DeleteAnyway),
+                ButtonStyle::Danger | ButtonStyle::GhostDanger => Box::new(DeleteAnyway),
             };
             let label = match style {
                 ButtonStyle::Primary => "Create worktree",
                 ButtonStyle::Secondary => "Cancel",
                 ButtonStyle::Ghost => "Board",
                 ButtonStyle::Danger => "Delete anyway",
+                ButtonStyle::GhostDanger => "Deny and stop",
             };
             let icon = match style {
                 ButtonStyle::Primary => Icon::Plus,
                 ButtonStyle::Secondary => Icon::X,
                 ButtonStyle::Ghost => Icon::GitBranch,
                 ButtonStyle::Danger => Icon::Trash2,
+                ButtonStyle::GhostDanger => Icon::CircleStop,
             };
             let base = |slot| Button::new(id(slot), label).style(style).size(size);
             children.push(LAYOUT.labeled(

@@ -1709,7 +1709,7 @@ lives beside it only until the Help overlay, the palette and the prefix toast ar
 **Anatomy.** `[icon] label [Kbd]`, `sm` apart, `md` side padding (`sm` compact), `button_h` (or
 `button_h_compact`) tall, `radii.control`, a hairline. Label in `UiStrong`; icon 14 px (12
 compact); the chip `kbd_h` (`kbd_h_small` compact) and toned for the fill.
-**API.** `Button::new(id, label)` then `.style(ButtonStyle::{Primary, Secondary, Ghost, Danger})
+**API.** `Button::new(id, label)` then `.style(ButtonStyle::{Primary, Secondary, Ghost, Danger, GhostDanger})
 .size(ButtonSize::{Default, Compact}) .icon(Icon) .kbd(Kbd) .action(Box<dyn Action>)
 .on_click(Fn(&ClickEvent, &mut Window, &mut App)) .disabled(bool) .selected(bool) .full_width()
 .tooltip(text)`.
@@ -1718,7 +1718,9 @@ in `accent_fill_text` — a surface's one primary action. `Secondary` (default):
 `control_hover` / `control_active` in a `control_border` hairline. `Ghost`: no fill until
 hovered, label `text_secondary`. `Danger`: `danger` / `danger_fill_hover` / `danger_fill_active`
 under `text_inverse` — the strong form of a destructive action, the `Y` of a
-`ConfirmKey::Upper` confirmation (§4).
+`ConfirmKey::Upper` confirmation (§4). `GhostDanger`: a `Ghost` whose label is `danger` — a
+destructive action that is not the surface's main one, set apart rather than shouted (an
+approval's "Deny and stop", §6.6).
 **States.** default · hover (pointer only) · pressed · selected (`row_selected` fill, announced as
 toggled — only for a toggle, and only on `Secondary` / `Ghost`) · disabled (40 %, no hover, no
 click). Never focused.

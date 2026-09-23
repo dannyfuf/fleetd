@@ -2157,6 +2157,10 @@ fn controls_section(cx: &mut App) -> AnyElement {
                         .style(ButtonStyle::Danger)
                         .kbd(kbd("shift-y"))
                         .into_any_element(),
+                    Button::new("kit-ghost-danger", "Deny and stop")
+                        .style(ButtonStyle::GhostDanger)
+                        .kbd(kbd("escape"))
+                        .into_any_element(),
                     Button::new("kit-compact", "Close")
                         .size(ButtonSize::Compact)
                         .kbd(kbd("ctrl-s x"))
