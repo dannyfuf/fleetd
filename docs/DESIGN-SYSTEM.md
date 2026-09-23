@@ -1033,8 +1033,10 @@ retained chip afterwards.
 **Purpose.** A closed choice in a settings row. The keyboard is the cycler's; the drawing picks
 the form that reads at a glance.
 **Anatomy.** The `row_h` cursor band (`control::cursor_row`): the label in `Ui`, then the control
-at the row's end. Given its `options`, a set of up to `SEGMENTED_MAX` (4) draws as a
-`SegmentedControl` with the value raised, a longer one as a compact `Dropdown`. A cycler whose
+at the row's end. Given its `options`, a set of up to `SEGMENTED_MAX` (4) options of at most
+`SEGMENTED_MAX_CHARS` (32) characters together draws as a `SegmentedControl` with the value
+raised; any other set, as a compact `Dropdown`. The label keeps its width and the control takes
+the rest of the row, so a long value never pushes the setting's name out. A cycler whose
 caller lists no options, or whose value is off the configured steps (none of the segments), draws
 the compact dropdown field alone, stating the value.
 **API.** `Cycler::{new(value), labeled(label, value)}().options(iter).on_select(Fn(ix, window,

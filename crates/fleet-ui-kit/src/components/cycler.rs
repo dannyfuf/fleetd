@@ -1,9 +1,9 @@
 //! `Cycler` — a closed choice in a settings row, changed with `←` / `→` (`h` / `l`).
 //!
 //! The keyboard is the cycler's, unchanged; the drawing picks the form that reads at a glance.
-//! Given its [`Cycler::options`], a set of up to [`SEGMENTED_MAX`] draws as a
-//! [`SegmentedControl`] with the value raised, and a longer set as a compact [`Dropdown`] whose
-//! list opens on a click. A cycler whose caller has not listed its options (or whose value is off
+//! Given its [`Cycler::options`], a set of up to [`SEGMENTED_MAX`] short options (at most
+//! [`SEGMENTED_MAX_CHARS`] characters together) draws as a [`SegmentedControl`] with the value
+//! raised, and any other set as a compact [`Dropdown`] whose list opens on a click. A cycler whose caller has not listed its options (or whose value is off
 //! the configured steps) draws the dropdown field alone, stating the value.
 //!
 //! Zero-suppression applies to the control itself: a set with fewer than two members has no
@@ -22,6 +22,11 @@ use crate::{text::Text, theme::ActiveTheme, tone::Tone};
 
 /// The most options a cycler draws side by side; a longer set draws as a dropdown.
 pub const SEGMENTED_MAX: usize = 4;
+
+/// The most characters, summed over every option, a cycler draws side by side. Four short words
+/// (`Low` `Medium` `High` `Max`) fit a settings row beside its label; four phrases
+/// (`asks before edits` …) do not, and draw as a dropdown instead of pushing the label out.
+pub const SEGMENTED_MAX_CHARS: usize = 32;
 
 type CyclerSelect = dyn Fn(usize, &mut Window, &mut App);
 
@@ -156,8 +161,16 @@ impl Cycler {
     /// The form this cycler draws in.
     pub fn form(&self) -> CyclerForm {
         let listed = self.options.as_ref().map_or(0, Vec::len);
+        let chars: usize = self
+            .options
+            .iter()
+            .flatten()
+            .map(|option| option.chars().count())
+            .sum();
         match self.position() {
-            Some(ix) if listed <= SEGMENTED_MAX => CyclerForm::Segmented(ix),
+            Some(ix) if listed <= SEGMENTED_MAX && chars <= SEGMENTED_MAX_CHARS => {
+                CyclerForm::Segmented(ix)
+            }
             Some(_) => CyclerForm::Dropdown(self.on_select.is_some() && !self.disabled),
             // An off-grid value is not one of the segments, and a dropdown field can show it.
             None => CyclerForm::Dropdown(listed > 0 && self.on_select.is_some() && !self.disabled),
@@ -224,25 +237,26 @@ impl RenderOnce for Cycler {
             .h_full()
             .w_full()
             .px(theme.space.md)
+            // The label keeps its width; the control takes what is left and clips, so a value
+            // never pushes the name of the setting out of its own row.
+            .children(self.label.map(|label| {
+                let text = Text::ui(label)
+                    .tone(if disabled { Tone::Muted } else { Tone::Default })
+                    .flex_none();
+                match self.label_width {
+                    Some(width) => text.w(width),
+                    None => text,
+                }
+            }))
             .child(
                 div()
                     .flex()
                     .flex_1()
                     .min_w_0()
-                    .items_center()
-                    .children(self.label.map(|label| {
-                        let text = Text::ui(label).tone(if disabled {
-                            Tone::Muted
-                        } else {
-                            Tone::Default
-                        });
-                        match self.label_width {
-                            Some(width) => text.w(width).flex_none(),
-                            None => text.ellipsize(),
-                        }
-                    })),
-            )
-            .child(div().flex_none().child(control));
+                    .justify_end()
+                    .overflow_hidden()
+                    .child(control),
+            );
 
         super::control::cursor_row(theme, self.focused && !disabled, disabled, body)
             .into_any_element()
@@ -257,6 +271,20 @@ mod tests {
     fn a_short_listed_set_draws_side_by_side() {
         let cycler = Cycler::new("codex").options(["claude", "codex"]);
         assert_eq!(cycler.form(), CyclerForm::Segmented(1));
+    }
+
+    #[test]
+    fn four_long_phrases_draw_as_a_dropdown() {
+        let modes = [
+            "asks before edits",
+            "accepts edits",
+            "plans before editing",
+            "full access",
+        ];
+        let cycler = Cycler::new("full access").options(modes);
+        assert_eq!(cycler.form(), CyclerForm::Dropdown(false));
+        let effort = Cycler::new("High").options(["Low", "Medium", "High", "Max"]);
+        assert_eq!(effort.form(), CyclerForm::Segmented(2));
     }
 
     #[test]

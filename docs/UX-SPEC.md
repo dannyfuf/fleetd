@@ -1127,7 +1127,7 @@ and undo. Lists **under a text field** use `ctrl-n`/`ctrl-p` or `↓`/`↑` and 
 | Base list | up to **6** rows: `origin/<defaultBranch>` first and preselected, then the previous `baseRef`, then `origin/*` fuzzy-filtered by the typed text; free text accepted | field 2 | 6 is swarm's number and fits without scrolling | §5 Create dialog |
 | `default` tag | faint, right-aligned on the default row | — | one word instead of a "use default" control | — |
 | Fetch indicator | `loader-circle` + `fetching` at the section's right | — | the list may grow under you; say so, and never block `Enter` | §5 "fetching indicator" |
-| Host cycler | the hosts side by side with the chosen one raised (a dropdown field past four hosts), `←`/`→` cycle it; hidden when `config.hosts` is empty | field 3 | zero-suppressed for the local-only majority | `defaultHost` |
+| Host cycler | the hosts side by side with the chosen one raised (a dropdown field past four hosts, or names too long to sit side by side), `←`/`→` cycle it; hidden when `config.hosts` is empty | field 3 | zero-suppressed for the local-only majority | `defaultHost` |
 | Expectation line | `⚡ prepared copy ready — create takes ~2 s` **or** `⧗ no prepared copy — the first create copies the repo (~40 s) in the background` | above the footer | the pool's only user-visible consequence is latency; saying it decides whether the user waits or switches away | §1 prepared-copy slots; §6 |
 | **Hooks preview** | `hooks: <prepare · joined> · <postCreate · joined>` + `(run in background)`; `hooks: none` when both are empty | above the footer | post-create hooks run detached and can fail *after* the worktree looks ready; naming them here is what makes the later `⚠ hooks failed` chip intelligible | §3 create step 6; §9 |
 

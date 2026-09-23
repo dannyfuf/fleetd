@@ -97,7 +97,7 @@ pub use chip::Chip;
 pub use column_ladder::{ColumnLadder, ColumnSpec, ColumnWidth, ResolvedColumn};
 pub use confirm_dialog::ConfirmDialog;
 pub use context_bar::{ContextBar, ContextTab};
-pub use cycler::{Cycler, CyclerForm, SEGMENTED_MAX};
+pub use cycler::{Cycler, CyclerForm, SEGMENTED_MAX, SEGMENTED_MAX_CHARS};
 pub use daemon_dot::{DaemonDot, DaemonState};
 pub use daemon_splash::{DaemonSplash, DaemonSplashKind};
 pub use degraded_chip::DegradedChip;
