@@ -294,7 +294,8 @@ The names Fleet paints today, by surface:
 | Hub lists | `worktrees.row[N]`, `prs.row[N]`, `jobs.row[N]`, `hub.tab[N]`, `prs.tab[N]` |
 | Board | `board.column[C]`, `board.column[C].card[R]`, `board.filter` |
 | Filter and palette | `filter.input`, `palette.input`, `palette.row[N]` (one flat numbering across the Go / Do / Context sections) |
-| Dialogs | `dialog.field[N]`, `dialog.row[N]` |
+| Dialogs | `dialog.field[N]`, `dialog.row[N]`, `dialog.close`, `dialog.button[N]` |
+| Sheets | `sheet.close` |
 | Tabs | `tabs.tab[N]` for a process tab, `agents.tabs.tab[N]` for a conversation, sharing one numbering |
 | Toasts and errors | `toasts.toast[N]` (0 is the oldest, matching the `toasts` array), `sticky_error.retry` |
 | Menus | `menu.item[N]`: the items of the one open kit `Menu` (a ⋯, `+`, right-click or dropdown menu), numbered over the visible items in order, separators and headers skipped |
@@ -325,10 +326,12 @@ at a time — opening another closes the first — so the name needs no surface 
 action the surface cannot run is left out of the menu, not greyed, so `N` counts only what is
 shown.
 
-`dialog.button[N]` is part of the vocabulary but is painted nowhere: Fleet's dialogs are confirmed
-from the keyboard and `Dialog::primary` renders text, not a control. It stays unpopulated until a
-dialog grows a real button, because naming a label "button" is a lie a scenario would then depend
-on.
+`dialog.close` is the close ✕ in every dialog's header; clicking it runs the action `Esc` runs in
+that dialog, and so does a click on the scrim outside the card. `sheet.close` is the same ✕ on a
+dismissable sheet (the Jobs panel). `dialog.button[N]` is a button in a dialog's footer, `0`
+leftmost, painted by `Dialog::actions`: a dialog still on the legacy footer, whose `Dialog::primary`
+renders a label rather than a control, paints none, so a scenario may target `dialog.button[N]`
+only in a dialog that has been moved onto the button footer.
 
 ## 4. Lanes and fixtures
 

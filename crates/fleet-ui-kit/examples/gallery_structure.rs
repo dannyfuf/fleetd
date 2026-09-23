@@ -893,6 +893,44 @@ fn sheet_section(cx: &mut App) -> AnyElement {
                 ),
             ),
             specimen(
+                "dismissable · ✕ in the header, click outside closes, scrim for a detail sheet",
+                &t,
+                stage(
+                    &t,
+                    px(200.0),
+                    div()
+                        .relative()
+                        .size_full()
+                        .child(
+                            Pane::new()
+                                .header(PaneHeader::new("board").total(12).range(1, 8))
+                                .body(filler(&t, 6)),
+                        )
+                        .child(
+                            Sheet::new(true)
+                                .on_dismiss(|_, _| {})
+                                .scrim(true)
+                                .header(sheet_header(&t))
+                                .body(filler(&t, 4)),
+                        ),
+                ),
+            ),
+            specimen(
+                "docked left · SheetSide::Left",
+                &t,
+                stage(
+                    &t,
+                    px(160.0),
+                    div().relative().size_full().child(filler(&t, 4)).child(
+                        Sheet::new(true)
+                            .side(SheetSide::Left)
+                            .on_dismiss(|_, _| {})
+                            .header(sheet_header(&t))
+                            .body(filler(&t, 2)),
+                    ),
+                ),
+            ),
+            specimen(
                 "closed · renders nothing at all",
                 &t,
                 stage(
@@ -907,6 +945,11 @@ fn sheet_section(cx: &mut App) -> AnyElement {
             ),
         ],
     )
+}
+
+/// A gallery-only key chip for a key the gallery has no live keymap for.
+fn gallery_kbd(keys: &str) -> Kbd {
+    Kbd::parse(keys).unwrap_or_else(|error| panic!("{keys:?}: {error}"))
 }
 
 fn sheet_header(t: &Theme) -> AnyElement {
@@ -956,9 +999,59 @@ fn sheet_footer(t: &Theme) -> AnyElement {
 fn dialog_section(cx: &mut App) -> AnyElement {
     let t = cx.theme().clone();
     LAYOUT.section(
-        "Dialog — scrim + card + 44 header + 44 footer, and never a button pair",
+        "Dialog — scrim + card + 44 header + 44 footer · close ✕, button footer, click outside closes",
         &t,
         vec![
+            specimen(
+                "button footer · ✕ and scrim close · header actions · footer start",
+                &t,
+                stage(
+                    &t,
+                    px(230.0),
+                    div().relative().size_full().child(filler(&t, 5)).child(
+                        Dialog::new("Settings")
+                            .icon(Icon::Settings2)
+                            .width(px(560.0))
+                            .on_dismiss(|_, _| {})
+                            .header_actions(IconButton::new("gallery-search", Icon::Search, "Search settings").kbd(gallery_kbd("/")))
+                            .body(Text::ui("Every change is saved together.").muted())
+                            .footer_start(
+                                Button::new("gallery-open-config", "Open config.json")
+                                    .style(ButtonStyle::Ghost),
+                            )
+                            .actions(vec![
+                                Button::new("gallery-dialog-cancel", "Cancel")
+                                    .kbd(gallery_kbd("escape")),
+                                Button::new("gallery-dialog-save", "Save")
+                                    .style(ButtonStyle::Primary)
+                                    .kbd(gallery_kbd("enter")),
+                            ]),
+                    ),
+                ),
+            ),
+            specimen(
+                "danger primary · the strong confirm",
+                &t,
+                stage(
+                    &t,
+                    px(200.0),
+                    div().relative().size_full().child(filler(&t, 5)).child(
+                        Dialog::new("Delete worktree hotfix?")
+                            .icon(Icon::TriangleAlert)
+                            .tone(Tone::Warning)
+                            .width(px(480.0))
+                            .on_dismiss(|_, _| {})
+                            .body(Text::ui("The 2 unpushed commits exist only here and will be lost.").muted())
+                            .actions(vec![
+                                Button::new("gallery-confirm-cancel", "Cancel")
+                                    .kbd(gallery_kbd("escape")),
+                                Button::new("gallery-confirm-delete", "Delete anyway")
+                                    .style(ButtonStyle::Danger)
+                                    .kbd(gallery_kbd("shift-y")),
+                            ]),
+                    ),
+                ),
+            ),
             specimen(
                 "compact confirm, 480 px · the hint row is the affordance",
                 &t,

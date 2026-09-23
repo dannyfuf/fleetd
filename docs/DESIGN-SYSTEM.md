@@ -613,24 +613,42 @@ filter retained (`.filter_chip("rut")`) · stale (`· stale · 2m`, amber).
 the header, or the row shifts by a pixel and the illusion of "the list did not move" breaks.
 
 #### `Sheet`
-**Purpose.** A right-docked, non-blocking panel (the Jobs panel).
-**API.** `Sheet::new(open: bool).expanded(bool).width(Pixels).header(..).body(..).footer(..)`;
+**Purpose.** A docked panel (the Jobs panel; the board card detail).
+**API.** `Sheet::new(open: bool).expanded(bool).width(Pixels).side(SheetSide).scrim(bool)
+.dismiss_action(Box<dyn Action>).on_dismiss(handler).header(..).body(..).footer(..)`;
 `.resolved_width(&Theme)`.
-**Variants.** 440 px · 640 px expanded for an inline log.
+**Variants.** 440 px · 640 px expanded for an inline log · `sheet_w_detail` 736 px for a full
+detail · `SheetSide::Right` (default) or `Left` · dismissable (close ✕ at the top right of the
+header, painted `sheet.close`; a click in the band outside the panel closes) · `scrim(true)`
+darkens that band with `overlay`.
 **Usage rule.** Use a `Sheet`, not a `Dialog`, whenever the content is *about* the rows behind
-it. A centered modal would hide exactly what the jobs refer to.
+it. A centered modal would hide exactly what the jobs refer to. Leave the scrim off for such a
+sheet so the rows stay readable; turn it on for a sheet that is a detail of its own. Pass
+`dismiss_action` the action `esc` runs on the sheet, so the ✕, the click outside and the key are
+one path.
 
 #### `Dialog`
 **Purpose.** The shared modal frame: scrim + card + 44 px header + 44 px footer.
-**Anatomy.** header = icon + title + subtitle, no close button; footer = key hints on the left,
-the primary action **label** on the right.
+**Anatomy.** header = icon + title + subtitle, then `header_actions` (a search field, a segmented
+control) and the close ✕ at the right; footer = `footer_start` (a link-like control such as "Open
+config.json", after any legacy hints) on the left, the `actions` buttons right-aligned —
+secondary first, the one primary last, each with its key chip.
 **API.** `Dialog::new(title).icon(Icon).subtitle(..).width(Pixels).height(Pixels).tone(Tone)
-.body(..).hints(..).hint_row(KeyHintRow).primary("⏎ Create").error(..).warning(..)`.
+.dismiss_action(Box<dyn Action>).on_dismiss(handler).header_actions(..).body(..)
+.footer_start(..).actions(Vec<Button>).error(..).warning(..)`. Deprecated while the dialogs
+migrate: `.hints(..)`, `.hint_row(KeyHintRow)` and `.primary("⏎ Create")`, the bold label drawn
+when there are no `actions`.
+**Dismissal.** Either dismiss builder draws the ✕ and arms the scrim: a click outside the card
+runs it, a click inside never does. `dismiss_action` is the normal form — pass the action `esc`
+runs in that dialog; the pointer dispatches it to the focused element as the key would, and the
+✕'s tooltip shows that key from the live keymap. `fleet-app` takes it from
+`Dialogs::dismiss_action()`, which a test holds to the keymap's `escape` rows.
+**Harness.** The ✕ paints `dialog.close`; footer buttons paint `dialog.button[N]`, `0` leftmost.
 **Widths.** 460 context/assign · 480 compact confirm · 520 quit · 560 create/clone/expanded
 confirm · 720 settings/prune · 880 help.
 **States.** default · error (red footer line, dialog stays open).
-**Keyboard.** `Esc` closes. There is **no OK/Cancel button pair anywhere** — the hint row states
-the keys.
+**Keyboard.** `Esc` closes. Buttons are not focusable (ADR 0023): each shows the key that is
+its keyboard path.
 **Usage rule.** `Dialog` always ghosts the base screen. `Overlay` can do so when configured with
 `scrim(true)` and `OverlayLayer::Dialog`, as the floating Agent terminal does. Use `ConfirmDialog`
 for anything destructive so the `y`/`Y` escalation is computed, not typed.
@@ -638,13 +656,17 @@ for anything destructive so the `y`/`Y` escalation is computed, not typed.
 #### `Overlay`
 **Purpose.** A centered floating layer used by the top-anchored palette and the Agent popup.
 **API.** `Overlay::new().top(Pixels).width(Pixels).scrim(bool).layer(OverlayLayer)
-.popover_elevation(bool).content(..)`.
-**Variants.** dialog elevation (default: `radii.lg`, level-3 shadow) · popover elevation
+.popover_elevation(bool).dismiss_action(Box<dyn Action>).on_dismiss(handler)
+.dismiss_on_scrim_click(bool).content(..)`.
+**Variants.** dialog elevation (default: `radii.dialog`, level-3 shadow) · popover elevation
 (`radii.popover`, level-4 shadow).
+**Dismissal.** A scrimmed overlay with a dismiss closes on a scrim click unless
+`dismiss_on_scrim_click(false)` (default `true`); it draws no ✕ of its own.
 **Usage rule.** Default `top` is 120 px — the thinking position, not screen center. Leave
 `scrim` off and use `OverlayLayer::Anchored` for the palette: it is a jump, not a decision. The
 Agent popup is a modal floating surface, so it opts into the scrim and `OverlayLayer::Dialog`,
-and into the popover elevation so the floating terminal reads as a window above the app.
+and into the popover elevation so the floating terminal reads as a window above the app. The
+palette closes on a scrim click through `palette::Close`.
 
 #### `Toast` / `ToastStack`
 **Purpose.** Bottom-right transient acknowledgements, max 3.
@@ -1059,7 +1081,8 @@ consequence) · expanded 560 px (`⚠` title tone, target on its own line, one l
 stamp, consequence).
 **API.** `ConfirmDialog::new(title, FactList).target(..).consequence(..).stamp(FreshnessStamp)
 .icon(Icon).hints(KeyHintRow).action_label(..).width(Pixels).body(..).error(..)
-.force_confirm_key(ConfirmKey)`; `.is_compact()`, `.confirm_key()`, `.resolved_width(&Theme)`.
+.force_confirm_key(ConfirmKey).dismiss_action(..).on_dismiss(..)`, the last two passed to its
+`Dialog`; `.is_compact()`, `.confirm_key()`, `.resolved_width(&Theme)`.
 **Keyboard.** `y`/`Y`/`Enter` confirm · `n`/`Esc`/`q` cancel · `I` re-check (delete) · `s` toggle
 the KEEP list (prune). Nothing else is bound, so muscle memory cannot misfire.
 **Usage rule.** No "don't ask again" checkbox, no second confirmation step, no countdown, no

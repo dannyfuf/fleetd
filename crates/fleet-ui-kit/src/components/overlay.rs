@@ -5,9 +5,15 @@
 //! overlay is `deferred` so it paints above the body regardless of sibling order, and it does
 //! **not** ghost the base — only [`super::Dialog`] does that, because only a dialog is a
 //! decision. An overlay is a jump.
+//!
+//! An overlay with a scrim and a [`Overlay::dismiss_action`] closes on a click on the scrim, as
+//! a dialog does, unless [`Overlay::dismiss_on_scrim_click`] turns that off (the Agent popup,
+//! which ADR 0023 leaves to its own card). An overlay has no close ✕ of its own; its content
+//! draws one if it wants one.
 
 use gpui::{AnyElement, App, Pixels, Window, deferred, div, prelude::*};
 
+use super::dismiss::{Dismiss, dismiss_builders};
 use crate::theme::ActiveTheme;
 
 /// Paint order of the five floating surfaces.
@@ -65,6 +71,8 @@ pub struct Overlay {
     layer: OverlayLayer,
     popover_elevation: bool,
     child: Option<AnyElement>,
+    dismiss: Option<Dismiss>,
+    dismiss_on_scrim_click: bool,
 }
 
 impl Overlay {
@@ -77,7 +85,18 @@ impl Overlay {
             layer: OverlayLayer::Anchored,
             popover_elevation: false,
             child: None,
+            dismiss: None,
+            dismiss_on_scrim_click: true,
         }
+    }
+
+    dismiss_builders!();
+
+    /// Whether a click on the scrim runs the dismiss. On by default; it needs
+    /// [`Self::scrim`] and a dismiss to do anything.
+    pub fn dismiss_on_scrim_click(mut self, dismiss: bool) -> Self {
+        self.dismiss_on_scrim_click = dismiss;
+        self
     }
 
     /// Override the distance from the top of the window.
@@ -136,16 +155,25 @@ impl RenderOnce for Overlay {
         let (radius, shadow) = if self.popover_elevation {
             (theme.radii.popover, theme.popover_shadow())
         } else {
-            (theme.radii.lg, theme.dialog_shadow())
+            (theme.radii.dialog, theme.dialog_shadow())
         };
+        let on_scrim = self
+            .dismiss
+            .as_ref()
+            .filter(|_| scrim && self.dismiss_on_scrim_click)
+            .map(Dismiss::callback);
         deferred(
             div()
+                .id("overlay-scrim")
                 .absolute()
                 .inset_0()
                 .flex()
                 .flex_col()
                 .items_center()
                 .when(scrim, |el| el.bg(theme.colors.overlay).occlude())
+                .when_some(on_scrim, |el, dismiss| {
+                    el.on_click(move |_, window, cx| dismiss(window, cx))
+                })
                 .child(
                     div()
                         .flex()

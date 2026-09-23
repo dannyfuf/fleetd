@@ -18,6 +18,7 @@
 
 use gpui::{AnyElement, App, Pixels, SharedString, Window, div, prelude::*};
 
+use super::dismiss::{Dismiss, dismiss_builders};
 use crate::{
     components::{ConfirmKey, Dialog, FactList, FreshnessStamp, KeyHint, KeyHintRow},
     icons::{Icon, IconSize},
@@ -41,6 +42,7 @@ pub struct ConfirmDialog {
     width_override: Option<Pixels>,
     body_override: Option<AnyElement>,
     error: Option<SharedString>,
+    dismiss: Option<Dismiss>,
 }
 
 impl ConfirmDialog {
@@ -59,8 +61,11 @@ impl ConfirmDialog {
             width_override: None,
             body_override: None,
             error: None,
+            dismiss: None,
         }
     }
+
+    dismiss_builders!();
 
     /// The full id of what is being acted on. Shown on its own line in the expanded form.
     pub fn target(mut self, target: impl Into<SharedString>) -> Self {
@@ -234,6 +239,7 @@ impl RenderOnce for ConfirmDialog {
             })
             .body(body)
             .hints(hints)
+            .dismiss(self.dismiss)
             .primary(format!("{}  {}", key.label(), self.action_label));
         if let Some(error) = self.error {
             dialog = dialog.error(error);

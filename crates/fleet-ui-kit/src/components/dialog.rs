@@ -1,8 +1,9 @@
 //! `Dialog` — scrim + card + 44 px header + 44 px footer.
 //!
-//! §3.8: no close button (`Esc` closes), and **no OK/Cancel button pair anywhere** — the
-//! footer hint row states the keys, because this is a keyboard app. The primary action is a
-//! label on the right of the footer, not a button.
+//! ADR 0023: a dialog closes and confirms by pointer as well as by key. The header carries a
+//! close ✕ and the footer a row of [`super::Button`]s, secondary first and the one primary
+//! last, each showing its key as a chip. A click on the scrim closes the dialog through the same
+//! path as the ✕ ([`Dialog::dismiss_action`]), which is the same action `esc` dispatches.
 //!
 //! The dialog is the only surface that ghosts the base screen: its scrim paints
 //! `colors.overlay` over the whole frame and swallows pointer events, so the screen behind is
@@ -10,15 +11,24 @@
 //!
 //! ## Keyboard
 //!
-//! The caller owns dialog actions and focus. The view
-//! binds `Esc` to close, `Enter` to the primary action, and the keys its own
-//! [`super::KeyHintRow`] advertises. What the component guarantees is that every one of those
-//! keys is *stated* in the footer.
+//! The caller owns dialog actions and focus. The view binds `Esc` to close, `Enter` to the
+//! primary action, and whatever else its buttons show. The buttons are not focusable; the key
+//! on each chip is the keyboard path to it.
+//!
+//! ## Harness
+//!
+//! The ✕ paints `dialog.close` and the footer buttons paint `dialog.button[N]`, `0` leftmost
+//! (`docs/TESTING-HARNESS.md` §3).
 
 use gpui::{AnyElement, App, Pixels, SharedString, Window, deferred, div, prelude::*};
 
+use super::{
+    button::Button,
+    dismiss::{Dismiss, dismiss_builders},
+};
 use crate::{
     components::{KeyHintRow, OverlayLayer},
+    harness::HarnessTargetExt,
     icons::{Icon, IconSize},
     text::Text,
     theme::ActiveTheme,
@@ -36,8 +46,12 @@ pub struct Dialog {
     tone: Tone,
     body: Option<AnyElement>,
     hints: Option<AnyElement>,
+    footer_start: Option<AnyElement>,
+    header_actions: Option<AnyElement>,
+    actions: Vec<Button>,
     primary: Option<SharedString>,
     footer_note: Option<(SharedString, Tone)>,
+    dismiss: Option<Dismiss>,
 }
 
 impl Dialog {
@@ -52,9 +66,22 @@ impl Dialog {
             tone: Tone::Default,
             body: None,
             hints: None,
+            footer_start: None,
+            header_actions: None,
+            actions: Vec::new(),
             primary: None,
             footer_note: None,
+            dismiss: None,
         }
+    }
+
+    dismiss_builders!();
+
+    /// Carry a dismiss already chosen by a wrapping component such as
+    /// [`super::ConfirmDialog`].
+    pub(super) fn dismiss(mut self, dismiss: Option<Dismiss>) -> Self {
+        self.dismiss = dismiss;
+        self
     }
 
     /// The header glyph (§3.8 lists one per dialog).
@@ -94,7 +121,28 @@ impl Dialog {
         self
     }
 
-    /// The footer's left side: contextual key hints.
+    /// Controls on the right of the header, before the close ✕: a search field (Settings) or a
+    /// segmented control (Help).
+    pub fn header_actions(mut self, actions: impl IntoElement) -> Self {
+        self.header_actions = Some(actions.into_any_element());
+        self
+    }
+
+    /// The footer's buttons, right-aligned in the order given: secondary first (`Cancel`), the
+    /// one primary last. Each paints `dialog.button[N]`, `0` leftmost.
+    pub fn actions(mut self, actions: Vec<Button>) -> Self {
+        self.actions = actions;
+        self
+    }
+
+    /// The footer's left side: a link-like control such as "Open config.json".
+    pub fn footer_start(mut self, start: impl IntoElement) -> Self {
+        self.footer_start = Some(start.into_any_element());
+        self
+    }
+
+    /// The footer's left side: contextual key hints. A dialog on the button footer does not
+    /// need them, because each button shows its own key (ADR 0023).
     pub fn hints(mut self, hints: impl IntoElement) -> Self {
         self.hints = Some(hints.into_any_element());
         self
@@ -105,15 +153,18 @@ impl Dialog {
         self.hints(hints)
     }
 
-    /// The footer's right side: the primary action label only, e.g. `⏎ Create`.
+    /// The footer's right side as a bold label, e.g. `⏎ Create`.
+    ///
+    /// **Deprecated:** kept only while dialogs migrate to [`Self::actions`], which draws real
+    /// buttons with live key chips. Ignored when `actions` is set.
     pub fn primary(mut self, primary: impl Into<SharedString>) -> Self {
         self.primary = Some(primary.into());
         self
     }
 
     /// A red footer line: an exact conflict or write error. The dialog **stays open**, the
-    /// line sits directly above the hint row, and the hints never move (the error is its own
-    /// 22 px strip), so the keys the user was about to press do not shift under their eyes.
+    /// line sits directly above the button row, and the buttons never move (the error is its
+    /// own 22 px strip), so the control the user was about to press does not shift under them.
     pub fn error(mut self, error: impl Into<SharedString>) -> Self {
         self.footer_note = Some((error.into(), Tone::Danger));
         self
@@ -135,6 +186,12 @@ impl RenderOnce for Dialog {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
         let tone_color = self.tone.color(theme);
+        let on_scrim = self.dismiss.as_ref().map(Dismiss::callback);
+        let close = self.dismiss.as_ref().map(|dismiss| {
+            dismiss
+                .close_button("dialog-close")
+                .harness_target("dialog.close")
+        });
 
         let header = div()
             .flex()
@@ -142,7 +199,14 @@ impl RenderOnce for Dialog {
             .items_center()
             .gap(theme.space.sm)
             .h(theme.metrics.dialog_header_h)
-            .px(theme.space.lg)
+            .pl(theme.space.lg)
+            .map(|el| {
+                if close.is_some() {
+                    el.pr(theme.space.sm)
+                } else {
+                    el.pr(theme.space.lg)
+                }
+            })
             .border_b(theme.metrics.hairline)
             .border_color(theme.colors.border)
             .children(
@@ -150,7 +214,15 @@ impl RenderOnce for Dialog {
                     .map(|icon| icon.el().size(IconSize::Large).color(tone_color)),
             )
             .child(Text::title(self.title).color(tone_color))
-            .children(self.subtitle.map(|s| Text::ui(s).muted().ellipsize()));
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_w_0()
+                    .children(self.subtitle.map(|s| Text::ui(s).muted().ellipsize())),
+            )
+            .children(self.header_actions)
+            .children(close);
 
         let error_line = self.footer_note.map(|(note, tone)| {
             div()
@@ -171,11 +243,32 @@ impl RenderOnce for Dialog {
                 .child(Text::ui(note).tone(tone).ellipsize())
         });
 
+        let trailing = if self.actions.is_empty() {
+            self.primary
+                .map(|p| Text::ui_strong(p).ellipsize().into_any_element())
+        } else {
+            Some(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(theme.space.sm)
+                    .children(
+                        self.actions
+                            .into_iter()
+                            .enumerate()
+                            .map(|(ix, button)| button.harness_target_indexed("dialog.button", ix)),
+                    )
+                    .into_any_element(),
+            )
+        };
+
         let footer = div()
             .flex()
             .flex_col()
             .flex_none()
             .w_full()
+            .bg(theme.colors.surface)
             .border_t(theme.metrics.hairline)
             .border_color(theme.colors.border)
             .children(error_line)
@@ -187,12 +280,22 @@ impl RenderOnce for Dialog {
                     .h(theme.metrics.dialog_footer_h)
                     .px(theme.space.lg)
                     .gap(theme.space.md)
-                    .child(div().flex().flex_1().min_w_0().children(self.hints))
-                    .children(self.primary.map(|p| Text::ui_strong(p).ellipsize())),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_1()
+                            .min_w_0()
+                            .items_center()
+                            .gap(theme.space.md)
+                            .children(self.hints)
+                            .children(self.footer_start),
+                    )
+                    .children(trailing),
             );
 
         deferred(
             div()
+                .id("dialog-scrim")
                 .absolute()
                 .inset_0()
                 .flex()
@@ -201,6 +304,9 @@ impl RenderOnce for Dialog {
                 .p(theme.space.xl)
                 .bg(theme.colors.overlay)
                 .occlude()
+                .when_some(on_scrim, |el, dismiss| {
+                    el.on_click(move |_, window, cx| dismiss(window, cx))
+                })
                 .child(
                     div()
                         .flex()
@@ -209,7 +315,7 @@ impl RenderOnce for Dialog {
                         .when_some(self.height, |el, h| el.h(h))
                         .max_h_full()
                         .min_h_0()
-                        .rounded(theme.radii.lg)
+                        .rounded(theme.radii.dialog)
                         .bg(theme.colors.elevated)
                         .border(theme.metrics.hairline)
                         .border_color(theme.colors.border_strong)
@@ -234,3 +340,6 @@ impl RenderOnce for Dialog {
         .with_priority(OverlayLayer::Dialog.priority())
     }
 }
+
+#[cfg(test)]
+mod tests;

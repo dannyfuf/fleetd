@@ -69,6 +69,11 @@ impl Focusable for Gallery {
 
 use support::layout::strip;
 
+/// A gallery-only key chip for a key the gallery has no live keymap for.
+fn gallery_kbd(keys: &str) -> Kbd {
+    Kbd::parse(keys).unwrap_or_else(|error| panic!("{keys:?}: {error}"))
+}
+
 fn box_of(t: &Theme, height: gpui::Pixels, child: impl IntoElement) -> AnyElement {
     let theme = t;
     div()
@@ -1752,8 +1757,13 @@ fn overlays_section(
                     .child(dialog_branch)
                     .child(Text::hint("⚡ prepared copy ready — create takes ~2 s").faint()),
             )
-            .hints(KeyHintRow::new().key("⇥", "field").key("esc", "cancel"))
-            .primary("⏎ Create"),
+            .on_dismiss(|_, _| {})
+            .actions(vec![
+                Button::new("kit-dialog-cancel", "Cancel").kbd(gallery_kbd("escape")),
+                Button::new("kit-dialog-create", "Create")
+                    .style(ButtonStyle::Primary)
+                    .kbd(gallery_kbd("enter")),
+            ]),
     );
 
     let confirm_compact = box_of(
@@ -1841,6 +1851,7 @@ fn overlays_section(
         &t,
         px(260.0),
         Sheet::new(true)
+            .on_dismiss(|_, _| {})
             .header(
                 div()
                     .flex()
