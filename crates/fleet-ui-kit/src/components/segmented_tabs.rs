@@ -1,4 +1,6 @@
-//! `SegmentedTabs` — underlined tabs with counts. Fleet's only tab bar outside the Workspace.
+//! `SegmentedTabs` — underlined sub-tabs with counts inside a pane (the pull requests screen's
+//! `MINE 7` / `REVIEW 4`). A parent navigation level, such as the Hub's screens, is a
+//! [`super::SegmentedControl`] instead.
 //!
 //! §3.5: `MINE 7` / `REVIEW 4`, active tab marked with a 2 px accent underline, moved with
 //! `Tab` / `S-Tab` / `h` / `l`. The counts answer "how much is queued" without entering.
@@ -66,7 +68,6 @@ impl SegmentedTab {
 pub struct SegmentedTabs {
     tabs: Vec<SegmentedTab>,
     active: usize,
-    underlined: bool,
     harness_tabs: Option<&'static str>,
     on_select: Option<Rc<TabSelect>>,
 }
@@ -79,16 +80,9 @@ impl SegmentedTabs {
         Self {
             tabs: tabs.into_iter().collect(),
             active: 0,
-            underlined: true,
             harness_tabs: None,
             on_select: None,
         }
-    }
-
-    /// Use a selected background instead of an underline for a parent navigation level.
-    pub fn underlined(mut self, underlined: bool) -> Self {
-        self.underlined = underlined;
-        self
     }
 
     /// Handles mouse selection with the same intent as keyboard tab navigation.
@@ -170,11 +164,6 @@ impl RenderOnce for SegmentedTabs {
                             },
                         )
                     })
-                    .when(!self.underlined, |el| {
-                        el.px(theme.space.sm)
-                            .rounded(theme.radii.sm)
-                            .when(is_active, |el| el.bg(theme.colors.row_selected))
-                    })
                     .flex()
                     .flex_col()
                     .justify_between()
@@ -201,16 +190,11 @@ impl RenderOnce for SegmentedTabs {
                     )
                     // The underline slot exists on every tab so the active one does not
                     // shift the row by 2 px when it moves.
-                    .child(
-                        div()
-                            .h(underline_h)
-                            .w_full()
-                            .bg(if is_active && self.underlined {
-                                accent
-                            } else {
-                                gpui::transparent_black()
-                            }),
-                    )
+                    .child(div().h(underline_h).w_full().bg(if is_active {
+                        accent
+                    } else {
+                        gpui::transparent_black()
+                    }))
                     .harness_target_optional(harness_tabs.map(|part| (part, ix)))
             }))
     }

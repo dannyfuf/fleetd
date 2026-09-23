@@ -1068,13 +1068,12 @@ While an editor is present the derived range message is suppressed — the numbe
 last committed one, and the editor states its own rule.
 
 #### `SegmentedTabs`
-Parent Hub navigation uses `underlined(false)` for a selected background; PR sub-tabs retain
-underlines. `on_select` sends mouse selection through the same actions as keyboard navigation.
-**Purpose.** Underlined tabs with counts.
+**Purpose.** Underlined sub-tabs with counts inside a pane (PR `MINE 7` / `REVIEW 4`). A parent
+navigation level, such as the Hub's screens, is a `SegmentedControl`.
 **API.** `SegmentedTabs::new([SegmentedTab::new("mine", 7), SegmentedTab::bare("help")
-.loading(bool)]).active(usize).underlined(bool).on_select(Fn(index, window, app))`; `SegmentedTab::count_text()`, `SegmentedTabs::{len, is_empty,
-next_index, prev_index}`.
-**Keyboard.** `Tab`/`S-Tab`/`h`/`l`.
+.loading(bool)]).active(usize).harness_tabs(part).on_select(Fn(index, window, app))`;
+`SegmentedTab::count_text()`, `SegmentedTabs::{len, is_empty, next_index, prev_index}`.
+**Keyboard.** `Tab`/`S-Tab`/`h`/`l`. `on_select` sends a click through the same actions.
 **Usage rule.** A tab is **not** a chip: `Some(0)` renders `0`, because an empty tab must still
 say it is empty. `loading(true)` shows `…` while a refresh is in flight and keeps the cached
 rows at full opacity.

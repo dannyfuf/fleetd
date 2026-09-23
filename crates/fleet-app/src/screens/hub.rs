@@ -534,8 +534,8 @@ fn row_capacity(window_height: f32, metrics: fleet_ui_kit::theme::Metrics) -> us
 }
 
 /// The Hub's screen tabs; summary counts are context scoped, independent of repo scope.
-fn hub_tabs(state: &AppState) -> fleet_ui_kit::SegmentedTabs {
-    use fleet_ui_kit::{SegmentedTab, SegmentedTabs};
+fn hub_tabs(state: &AppState) -> fleet_ui_kit::SegmentedControl {
+    use fleet_ui_kit::{Segment, SegmentedControl};
     let summary = state
         .snapshot
         .as_ref()
@@ -545,25 +545,24 @@ fn hub_tabs(state: &AppState) -> fleet_ui_kit::SegmentedTabs {
     } else {
         "Board"
     };
-    let board = summary
-        .map_or_else(
-            || SegmentedTab::bare(label),
-            |summary| SegmentedTab::new(label, summary.open_count),
-        )
+    let board = Segment::new(label)
+        .count(summary.map(|summary| summary.open_count))
         .loading(state.board.loading);
     let active = match state.screen {
         Screen::Hub { tab: HubTab::Prs } => 1,
         Screen::Hub { tab: HubTab::Board } => 2,
         _ => 0,
     };
-    SegmentedTabs::new([
-        SegmentedTab::bare("Worktrees"),
-        SegmentedTab::bare("Pull requests"),
-        board,
-    ])
-    .active(active)
-    .underlined(false)
-    .harness_tabs("hub.tab")
+    SegmentedControl::new(
+        "hub-tabs",
+        [
+            Segment::new("Worktrees"),
+            Segment::new("Pull requests"),
+            board,
+        ],
+    )
+    .active(Some(active))
+    .harness_segments("hub.tab")
     .on_select(|index, window, cx| {
         let action: Box<dyn gpui::Action> = match index {
             1 => Box::new(hub::GoPrs),

@@ -5,7 +5,7 @@
 
 use std::sync::OnceLock;
 
-use fleet_ui_kit::{Button, ButtonSize, ButtonStyle, Icon, Kbd};
+use fleet_ui_kit::{Button, ButtonSize, ButtonStyle, Icon, Kbd, Segment, SegmentedControl};
 use gpui::{Action, SharedString};
 
 use super::*;
@@ -46,7 +46,7 @@ fn window_header(agent: Agent, model: Option<&Model>, cx: &App) -> AnyElement {
         .gap(theme.space.md)
         .border_b(theme.metrics.hairline)
         .border_color(theme.colors.border)
-        .child(provider_switch(agent, keys, theme))
+        .child(provider_switch(agent, keys))
         .child(
             div()
                 .flex()
@@ -84,61 +84,41 @@ fn window_header(agent: Agent, model: Option<&Model>, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-/// One provider in the switch.
-struct Segment {
-    label: &'static str,
-    icon: Icon,
-    selected: bool,
-    action: Box<dyn Action>,
-    kbd: Option<Kbd>,
-}
-
 /// `Claude | Codex`: the selected provider is the raised segment; the other one switches to it
 /// and carries the key that does the same (`⌃S a` / `⌃S A`).
 ///
-/// The selected segment has no action, because its key would *hide* the popup (`a` on the open
-/// Claude popup toggles it), and clicking the provider that is already showing must not.
-fn provider_switch(agent: Agent, keys: &HeaderKeys, theme: &fleet_ui_kit::Theme) -> Div {
+/// A click on the selected segment does nothing, because its key would *hide* the popup (`a` on
+/// the open Claude popup toggles it), and clicking the provider that is already showing must not.
+fn provider_switch(agent: Agent, keys: &HeaderKeys) -> SegmentedControl {
     // ADR 0014: a config still naming OpenCode runs OpenCode in the second slot.
     let second = if agent == Agent::Opencode {
         ("OpenCode", Icon::Bot)
     } else {
         ("Codex", Icon::SquareTerminal)
     };
-    let segments = [
-        Segment {
-            label: "Claude",
-            icon: Icon::Sparkles,
-            selected: agent == Agent::Claude,
-            action: Box::new(OpenAgentClaude),
-            kbd: keys.claude.clone(),
-        },
-        Segment {
-            label: second.0,
-            icon: second.1,
-            selected: agent != Agent::Claude,
-            action: Box::new(OpenAgentCodex),
-            kbd: keys.codex.clone(),
-        },
-    ];
-    div()
-        .flex()
-        .flex_none()
-        .items_center()
-        .gap(theme.space.xxs)
-        .children(segments.into_iter().enumerate().map(|(index, segment)| {
-            let button = Button::new(("agent-popup-provider", index), segment.label)
-                .style(ButtonStyle::Ghost)
-                .size(ButtonSize::Compact)
-                .icon(segment.icon)
-                .selected(segment.selected);
-            let button = if segment.selected {
-                button
+    let selected = usize::from(agent != Agent::Claude);
+    let claude = Segment::new("Claude").icon(Icon::Sparkles);
+    let other = Segment::new(second.0).icon(second.1);
+    // Only the provider a click would switch to shows its key.
+    let (claude, other) = if selected == 0 {
+        (claude, other.kbd(keys.codex.clone()))
+    } else {
+        (claude.kbd(keys.claude.clone()), other)
+    };
+    SegmentedControl::new("agent-popup-provider", [claude, other])
+        .active(Some(selected))
+        .harness_segments("agents.popup.agent")
+        .on_select(move |index, window, cx| {
+            if index == selected {
+                return;
+            }
+            let action: Box<dyn Action> = if index == 0 {
+                Box::new(OpenAgentClaude)
             } else {
-                button.action(segment.action).map_kbd(segment.kbd)
+                Box::new(OpenAgentCodex)
             };
-            button.harness_target_indexed("agents.popup.agent", index)
-        }))
+            window.dispatch_action(action, cx);
+        })
 }
 
 /// Sets the chip only when the key table gave one, so a missing row shows no chip rather than
