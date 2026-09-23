@@ -469,8 +469,7 @@ fn root_input_fixture(cx: &mut gpui::TestAppContext, name: &str) -> RootInputFix
     let mut focus_owner_keys = None;
     let home = format!("/tmp/fleet-shell-input-focus-{name}");
     let window = cx.add_window(|window, cx| {
-        let mut shell = Shell::new(home.into(), cx);
-        shell.bridge.shutdown();
+        let mut shell = Shell::with_bridge(home.into(), crate::bridge::Bridge::closed(), cx);
         shell.state.update(cx, |app, _| {
             app.apply_snapshot(snapshot, Instant::now());
             app.apply_board_view(view);
@@ -993,8 +992,8 @@ fn real_shell_repository_hooks_grow_a_row_as_they_are_filled(cx: &mut gpui::Test
     assert_eq!(dialog_input_text(&mut fixture), "");
 }
 
-/// The settings dialog with a configuration already loaded: the fixture's bridge is shut down,
-/// so the daemon's `GetConfig` never answers and the rows are planted directly.
+/// The settings dialog with a configuration already loaded: the fixture's bridge is closed, so
+/// the daemon's `GetConfig` is refused and the rows are planted directly.
 fn open_loaded_settings(fixture: &mut RootInputFixture) {
     dispatch_root_key(fixture, ",");
     let state = fixture.state.clone();
@@ -1402,7 +1401,7 @@ fn real_shell_board_pane_binds_the_board_keys_and_keeps_the_prefix(cx: &mut gpui
     assert_eq!(chain(&mut fixture), vec!["Workspace", "Native", "Board"]);
 
     // `]` asks the daemon to move the card and never writes the move itself. The fixture's
-    // bridge is shut down, so the refusal in the sticky slot is what proves the key reached
+    // bridge is closed, so the refusal in the sticky slot is what proves the key reached
     // `board::MoveNextColumn` rather than falling through to the Workspace behind it.
     dispatch_root_key(&mut fixture, "]");
     fixture.visual.run_until_parked();

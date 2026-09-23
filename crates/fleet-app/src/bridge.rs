@@ -517,6 +517,20 @@ impl Bridge {
         }
     }
 
+    /// A bridge whose runtime is already gone, with no thread and no daemon behind it.
+    ///
+    /// Every `request` is answered and every `send` refused synchronously, on the caller's
+    /// thread, exactly as [`Bridge::start`]'s handle behaves once its runtime has stopped. A
+    /// GPUI test therefore sees each refusal within one `run_until_parked`, instead of racing a
+    /// real runtime thread that may not have processed its `Shutdown` yet.
+    #[cfg(test)]
+    pub(crate) fn closed() -> Self {
+        let (commands, command_rx) = async_channel::bounded(COMMAND_CAPACITY);
+        command_rx.close();
+        let (event_tx, events) = async_channel::bounded(EVENT_CAPACITY);
+        Self::with_channels(commands, events, event_tx, Arc::new(AtomicBool::new(false)))
+    }
+
     /// Persisted native-agent cursors fetched for the current daemon connection.
     #[must_use]
     pub fn agent_seen_cursors(&self) -> Vec<(ThreadId, Seq)> {

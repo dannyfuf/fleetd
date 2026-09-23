@@ -84,6 +84,14 @@ impl Shell {
     /// Builds the shell and installs the bridge, state observers, and owned background tasks.
     pub fn new(home: PathBuf, cx: &mut Context<Self>) -> Self {
         let bridge = Bridge::start(home.clone());
+        Self::with_bridge(home, bridge, cx)
+    }
+
+    /// Builds the shell around a bridge the caller already holds.
+    ///
+    /// Tests hand it [`Bridge::closed`], whose refusals are delivered on the GPUI executor, so
+    /// no reply depends on a background thread's wall-clock progress.
+    fn with_bridge(home: PathBuf, bridge: Bridge, cx: &mut Context<Self>) -> Self {
         let state = cx.new(|_| AppState::new(home, Instant::now()));
         // `idle` reports in-flight requests (`docs/TESTING-HARNESS.md` §2), and only the bridge
         // knows when one ends: it claims a slot on admission and releases it on the runtime
