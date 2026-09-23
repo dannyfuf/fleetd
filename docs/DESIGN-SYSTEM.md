@@ -840,7 +840,10 @@ and still reserves its width.
 `::pull_requests_for()` are the §2.9 ladders verbatim, including the two-step author breakpoint
 (12 ch at 70 ch, 16 ch at 130 ch). The worktrees ladder is keyed `branch` (Name, flex 24) ·
 `repo` (12, from 110 ch or forced in `All`) · `session` (18 / 14 / 0 ch at 100 / 72 ch) · `pr`
-(15, from 60 ch) · `age` (5, from 52 ch) · `actions` (13, always, filled `hover_only`).
+(15, from 60 ch) · `age` (5, from 52 ch) · `actions` (13, always, filled `hover_only`). The PR ladder is keyed `number` (6) ·
+`title` (flex 24) · `author` (review tab) · `head` (12, from 100 ch, 120 on the review tab) · `repo`
+(12, from 125 ch in a multi-repo scope) · `state` (16, the PR chip) · `checks` (10, from 70 ch) · `age` (5) ·
+`actions` (14, filled `hover_only`).
 
 #### `StatusGlyph`
 **Purpose.** The §2.5 vocabulary, in one place. See §5.2 for the table.
@@ -1203,15 +1206,21 @@ While an editor is present the derived range message is suppressed — the numbe
 last committed one, and the editor states its own rule.
 
 #### `SegmentedTabs`
-**Purpose.** Underlined sub-tabs with counts inside a pane (PR `MINE 7` / `REVIEW 4`). A parent
-navigation level, such as the Hub's screens, is a `SegmentedControl`.
-**API.** `SegmentedTabs::new([SegmentedTab::new("mine", 7), SegmentedTab::bare("help")
-.loading(bool)]).active(usize).harness_tabs(part).on_select(Fn(index, window, app))`;
-`SegmentedTab::count_text()`, `SegmentedTabs::{len, is_empty, next_index, prev_index}`.
+**Purpose.** Underlined sub-tabs with counts inside a pane (the PR screen's `Mine 3` /
+`Waiting for my review 1`). A parent navigation level, such as the Hub's screens, is a
+`SegmentedControl`.
+**Anatomy.** Sentence-case `ui` label (weight 500 when active), then the count in a small
+`radii.pill` pill (`caption`, neutral fill); a 2 px accent underline under the active tab.
+**API.** `SegmentedTabs::new([SegmentedTab::new("Mine", 7), SegmentedTab::bare("Help")
+.loading(bool).attention(bool)]).active(usize).harness_tabs(part).on_select(Fn(index, window,
+app))`; `SegmentedTab::{count_text, wants_attention}()`,
+`SegmentedTabs::{len, is_empty, next_index, prev_index}`.
 **Keyboard.** `Tab`/`S-Tab`/`h`/`l`. `on_select` sends a click through the same actions.
 **Usage rule.** A tab is **not** a chip: `Some(0)` renders `0`, because an empty tab must still
 say it is empty. `loading(true)` shows `…` while a refresh is in flight and keeps the cached
-rows at full opacity.
+rows at full opacity. `attention(true)` marks a queue that is waiting on the person (the review
+tab): its pill turns amber while its count is settled and not zero — amber only ever means
+"needs a person".
 
 #### `Select`
 **Purpose.** A closed-list chooser that opens a `FuzzyList`.

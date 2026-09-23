@@ -1,9 +1,11 @@
 //! `SegmentedTabs` — underlined sub-tabs with counts inside a pane (the pull requests screen's
-//! `MINE 7` / `REVIEW 4`). A parent navigation level, such as the Hub's screens, is a
-//! [`super::SegmentedControl`] instead.
+//! `Mine 3` / `Waiting for my review 1`). A parent navigation level, such as the Hub's screens,
+//! is a [`super::SegmentedControl`] instead.
 //!
-//! §3.5: `MINE 7` / `REVIEW 4`, active tab marked with a 2 px accent underline, moved with
-//! `Tab` / `S-Tab` / `h` / `l`. The counts answer "how much is queued" without entering.
+//! §3.5: sentence-case labels, each followed by its count in a small pill, the active tab marked
+//! with a 2 px accent underline, moved with `Tab` / `S-Tab` / `h` / `l` or a click. The counts
+//! answer "how much is queued" without entering; a tab whose queue is waiting on the person
+//! ([`SegmentedTab::attention`]) tints its pill amber while the count is not zero.
 //!
 //! A tab is **not** a chip. `Some(0)` renders `0`, because §1.2's zero-suppression is about
 //! chrome that would otherwise say nothing; an empty tab must still say it is empty, or the
@@ -19,13 +21,16 @@ use crate::{harness::HarnessTargetExt as _, text::Text, theme::ActiveTheme, tone
 /// One tab.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SegmentedTab {
-    /// The label. Rendered in the label type role, so it is uppercased.
+    /// The label, in sentence case.
     pub label: SharedString,
     /// The count. `None` renders no number; `Some(0)` renders `0` (a tab is not a chip: an
     /// empty tab must still say it is empty).
     pub count: Option<usize>,
     /// Replace the count with `…` while a refresh is in flight.
     pub loading: bool,
+    /// Whether a non-zero count is waiting on the person (the review queue): the pill turns
+    /// amber, the one colour that means "needs a person".
+    pub attention: bool,
 }
 
 impl SegmentedTab {
@@ -35,6 +40,7 @@ impl SegmentedTab {
             label: label.into(),
             count: Some(count),
             loading: false,
+            attention: false,
         }
     }
 
@@ -44,6 +50,7 @@ impl SegmentedTab {
             label: label.into(),
             count: None,
             loading: false,
+            attention: false,
         }
     }
 
@@ -51,6 +58,17 @@ impl SegmentedTab {
     pub fn loading(mut self, loading: bool) -> Self {
         self.loading = loading;
         self
+    }
+
+    /// Mark a non-zero count as waiting on the person: the pill is drawn amber.
+    pub fn attention(mut self, attention: bool) -> Self {
+        self.attention = attention;
+        self
+    }
+
+    /// Whether the pill is drawn amber: an attention tab with a settled, non-zero count.
+    pub fn wants_attention(&self) -> bool {
+        self.attention && !self.loading && self.count.is_some_and(|count| count > 0)
     }
 
     /// What the count column renders, if anything.
@@ -145,12 +163,11 @@ impl RenderOnce for SegmentedTabs {
             .children(self.tabs.into_iter().enumerate().map(move |(ix, tab)| {
                 let is_active = ix == active;
                 let count = tab.count_text();
-                let count_tone = if tab.loading {
-                    Tone::Warning
-                } else if is_active {
-                    Tone::Secondary
+                let attention = tab.wants_attention();
+                let (count_tone, count_fill) = if attention {
+                    (Tone::Warning, Tone::Warning.fill(theme))
                 } else {
-                    Tone::Muted
+                    (Tone::Secondary, Tone::Secondary.fill(theme))
                 };
                 let on_select = self.on_select.clone();
                 div()
@@ -174,7 +191,7 @@ impl RenderOnce for SegmentedTabs {
                             .items_center()
                             .gap(theme.space.sm)
                             .child(
-                                Text::label(tab.label)
+                                Text::ui(tab.label)
                                     .tone(if is_active {
                                         Tone::Default
                                     } else {
@@ -186,7 +203,16 @@ impl RenderOnce for SegmentedTabs {
                                         theme.text.ui.weight
                                     }),
                             )
-                            .children(count.map(|count| Text::label(count).tone(count_tone))),
+                            .children(count.map(|count| {
+                                div()
+                                    .flex()
+                                    .flex_none()
+                                    .items_center()
+                                    .px(theme.space.xs)
+                                    .rounded(theme.radii.pill)
+                                    .bg(count_fill)
+                                    .child(Text::caption(count).tone(count_tone))
+                            })),
                     )
                     // The underline slot exists on every tab so the active one does not
                     // shift the row by 2 px when it moves.
@@ -211,6 +237,27 @@ mod tests {
             Some("0")
         );
         assert_eq!(SegmentedTab::bare("help").count_text(), None);
+    }
+
+    #[test]
+    fn only_a_settled_non_zero_attention_count_is_amber() {
+        assert!(
+            SegmentedTab::new("Waiting for my review", 1)
+                .attention(true)
+                .wants_attention()
+        );
+        assert!(
+            !SegmentedTab::new("Waiting for my review", 0)
+                .attention(true)
+                .wants_attention()
+        );
+        assert!(
+            !SegmentedTab::new("Waiting for my review", 1)
+                .attention(true)
+                .loading(true)
+                .wants_attention()
+        );
+        assert!(!SegmentedTab::new("Mine", 3).wants_attention());
     }
 
     #[test]

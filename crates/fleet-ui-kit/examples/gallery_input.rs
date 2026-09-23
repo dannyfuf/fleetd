@@ -1276,16 +1276,25 @@ fn tabs_and_select_section(
                 "tabs (h / l)",
                 theme,
                 SegmentedTabs::new([
-                    SegmentedTab::new("mine", 7),
-                    SegmentedTab::new("review", 4).loading(true),
-                    SegmentedTab::new("closed", 0),
+                    SegmentedTab::new("Mine", 7),
+                    SegmentedTab::new("Waiting for my review", 2).attention(true),
+                    SegmentedTab::new("Closed", 0),
                 ])
                 .active(gallery.tab),
             ),
             LAYOUT.labeled(
+                "tabs \u{b7} refreshing, zero attention",
+                theme,
+                SegmentedTabs::new([
+                    SegmentedTab::new("Mine", 7).loading(true),
+                    SegmentedTab::new("Waiting for my review", 0).attention(true),
+                ])
+                .active(0),
+            ),
+            LAYOUT.labeled(
                 "tabs \u{b7} bare",
                 theme,
-                SegmentedTabs::new([SegmentedTab::bare("keys"), SegmentedTab::bare("glossary")])
+                SegmentedTabs::new([SegmentedTab::bare("Keys"), SegmentedTab::bare("Glossary")])
                     .active(1),
             ),
             LAYOUT.labeled(

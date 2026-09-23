@@ -1810,8 +1810,8 @@ fn input_section(cx: &mut App, fields: &[(&'static str, Entity<TextInput>)]) -> 
             "segmented tabs",
             &t,
             SegmentedTabs::new([
-                SegmentedTab::new("mine", 7),
-                SegmentedTab::new("review", 4).loading(true),
+                SegmentedTab::new("Mine", 7),
+                SegmentedTab::new("Waiting for my review", 4).attention(true),
             ])
             .active(0),
         ),

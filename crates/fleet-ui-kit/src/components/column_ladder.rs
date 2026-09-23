@@ -233,31 +233,41 @@ impl ColumnLadder {
     }
 
     /// The PR list ladder of §2.9, keyed
-    /// `presence`, `number`, `title`, `author`, `head`, `repo`, `state`, `age`, for one tab and
-    /// one scope.
+    /// `number`, `title`, `author`, `head`, `repo`, `state`, `checks`, `age`, `actions`, for one
+    /// tab and one scope.
     ///
     /// The two-step author breakpoint (12 ch at 70 ch, 16 ch at 130 ch) is [D-5] and is the one
     /// ladder the pixel-only port lost. §2.9: the `author` column is meaningful only in the
-    /// `REVIEW` tab, and the `repo` column needs both a wide pane **and** a multi-repo scope.
+    /// review tab, and the `repo` column needs both a wide pane **and** a multi-repo scope (the
+    /// detail panel names the repository whenever the column has had to go).
+    /// `state` is wide enough for its longest chip (`Needs changes`); `actions` is the
+    /// hover-only `Open ⏎` / `⋯` slot, reserved so revealing it never moves a column.
     pub fn pull_requests_for(review_tab: bool, multi_repo: bool) -> Self {
         const AUTHOR: &[(f32, f32)] = &[(130.0, 16.0), (70.0, 12.0), (0.0, 0.0)];
         let mut specs = vec![
-            ColumnSpec::fixed("presence", 2.0).align(ColumnAlign::Center),
-            ColumnSpec::fixed("number", 6.0).align(ColumnAlign::Right),
-            ColumnSpec::flex("title", 32.0),
+            ColumnSpec::fixed("number", 6.0),
+            ColumnSpec::flex("title", 24.0),
         ];
         if review_tab {
             specs.push(ColumnSpec::ladder("author", AUTHOR));
         }
-        specs.push(ColumnSpec::fixed("head", 12.0).shown_from(90.0));
+        // The review tab spends 12 ch on the author, so the branch gives way sooner there.
+        let head_from = if review_tab { 120.0 } else { 100.0 };
+        specs.push(ColumnSpec::fixed("head", 12.0).shown_from(head_from));
         if multi_repo {
-            specs.push(ColumnSpec::fixed("repo", 10.0).shown_from(110.0));
+            specs.push(ColumnSpec::fixed("repo", 12.0).shown_from(125.0));
         }
-        specs.push(ColumnSpec::fixed("state", 8.0));
+        specs.push(ColumnSpec::fixed("state", 16.0));
+        specs.push(ColumnSpec::fixed("checks", 10.0).shown_from(70.0));
         specs.push(
-            ColumnSpec::fixed("age", 7.0)
+            ColumnSpec::fixed("age", 5.0)
                 .align(ColumnAlign::Right)
                 .shown_from(52.0),
+        );
+        specs.push(
+            ColumnSpec::fixed("actions", 14.0)
+                .align(ColumnAlign::Right)
+                .shown_from(60.0),
         );
         Self::new(specs)
     }
@@ -339,6 +349,18 @@ mod tests {
     }
 
     #[test]
+    fn pull_requests_keep_number_title_and_state_when_narrow() {
+        let ladder = ColumnLadder::pull_requests_for(false, true);
+        let keys: Vec<_> = ladder
+            .resolve(50.0)
+            .into_iter()
+            .map(|column| column.key.to_string())
+            .collect();
+        assert_eq!(keys, ["number", "title", "state"]);
+        assert!(ladder.shows("checks", 100.0) && ladder.shows("actions", 100.0));
+    }
+
+    #[test]
     fn flex_columns_carry_their_minimum() {
         let title = ColumnLadder::pull_requests_for(true, true)
             .resolve(140.0)
@@ -346,6 +368,6 @@ mod tests {
             .find(|c| c.key.as_ref() == "title")
             .expect("the title column is always shown");
         assert_eq!(title.width, None);
-        assert_eq!(title.min_width, Some(ch(32.0)));
+        assert_eq!(title.min_width, Some(ch(24.0)));
     }
 }
