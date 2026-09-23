@@ -1053,11 +1053,11 @@ fn dialog_section(cx: &mut App) -> AnyElement {
                                     .child(Text::ui("What do you want to do?").muted()),
                             )
                             .header_actions(
-                                SegmentedTabs::new([
-                                    SegmentedTab::bare("Guides"),
-                                    SegmentedTab::bare("All shortcuts"),
-                                ])
-                                .underlined(false),
+                                SegmentedControl::new(
+                                    "gallery-help-tabs",
+                                    [Segment::new("Guides"), Segment::new("All shortcuts")],
+                                )
+                                .active(Some(0)),
                             )
                             .flush_body(true)
                             .body(

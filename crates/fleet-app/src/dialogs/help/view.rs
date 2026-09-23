@@ -6,7 +6,7 @@ mod shortcuts;
 
 use fleet_ui_kit::{
     Button, ButtonSize, ButtonStyle, Dialog, EmptyState, Icon, IconSize, Kbd, KbdSize, Row,
-    RowColumn, SegmentedTab, SegmentedTabs, Text, Tone, prelude::*,
+    RowColumn, Segment, SegmentedControl, Text, Tone, prelude::*,
 };
 use gpui::{
     AnyElement, App, Entity, FocusHandle, ScrollStrategy, SharedString, Window, div, relative,
@@ -78,13 +78,12 @@ pub(crate) fn render(
         }));
 
     let tabs_state = state.clone();
-    let tabs = SegmentedTabs::new([
-        SegmentedTab::bare("Guides"),
-        SegmentedTab::bare("All shortcuts"),
-    ])
-    .underlined(false)
-    .active(help.tab.index())
-    .harness_tabs("help.tab")
+    let tabs = SegmentedControl::new(
+        "help-tabs",
+        [Segment::new("Guides"), Segment::new("All shortcuts")],
+    )
+    .active(Some(help.tab.index()))
+    .harness_segments("help.tab")
     .on_select(move |ix, _, cx| {
         let tab = if ix == 0 { Tab::Guides } else { Tab::Shortcuts };
         edit(&tabs_state, cx, |help| help.set_tab(tab));
@@ -587,8 +586,8 @@ fn terminal_callout(cx: &App) -> AnyElement {
                         .children(super::model::prefix_kbd().map(|kbd| kbd.size(KbdSize::Small))),
                 )
                 .child(Text::caption(
-                    "Everything else you type goes to the program running there. Press it twice \
-                     to send it to the program instead.",
+                    "Everything else you type goes to the program running there. Hold it a moment to \
+                     see every Fleet command, or press it twice to send it to the program.",
                 )),
         )
         .into_any_element()
