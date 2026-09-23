@@ -684,7 +684,7 @@ fn worktree_row(t: &Theme, ix: usize, pane_ch: f32, cursor: bool) -> AnyElement 
             ),
             "repo" => RowColumn::resolved(
                 &column,
-                Text::ui(truncate("buk/payroll", 16, Truncate::Head)).muted(),
+                Text::ui(truncate("buk/payroll", 12, Truncate::Head)).muted(),
             ),
             "session" => RowColumn::resolved(
                 &column,

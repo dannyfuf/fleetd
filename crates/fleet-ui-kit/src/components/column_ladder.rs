@@ -215,20 +215,20 @@ impl ColumnLadder {
     /// §2.9 column 2: `owner/name` is shown when the scope is `All` **or** the pane is at least
     /// 110 ch, because in `All` scope the repo is the only thing that disambiguates two
     /// identically named branches. The session column says the session in words and steps
-    /// 24 / 16 / 0 ch; `actions` is the hover-only `Open ⏎  ⋯` slot, headed by nothing, and
+    /// 18 / 14 / 0 ch; `actions` is the hover-only `Open ⏎  ⋯` slot, headed by nothing, and
     /// always reserved so revealing it never reflows a row.
     pub fn worktrees_in_scope(all_scope: bool) -> Self {
         Self::new([
             ColumnSpec::flex("branch", 24.0),
-            ColumnSpec::fixed("repo", 16.0)
+            ColumnSpec::fixed("repo", 12.0)
                 .shown_from(110.0)
                 .forced(all_scope),
             ColumnSpec::ladder("session", SESSION_STEPS),
-            ColumnSpec::fixed("pr", 18.0).shown_from(60.0),
-            ColumnSpec::fixed("age", 6.0)
+            ColumnSpec::fixed("pr", 15.0).shown_from(60.0),
+            ColumnSpec::fixed("age", 5.0)
                 .align(ColumnAlign::Right)
                 .shown_from(52.0),
-            ColumnSpec::fixed("actions", 15.0).align(ColumnAlign::Right),
+            ColumnSpec::fixed("actions", 13.0).align(ColumnAlign::Right),
         ])
     }
 
@@ -264,7 +264,7 @@ impl ColumnLadder {
 }
 
 /// The worktrees list's session column: words such as `claude working · 2 tabs`.
-const SESSION_STEPS: &[(f32, f32)] = &[(100.0, 24.0), (72.0, 16.0), (0.0, 0.0)];
+const SESSION_STEPS: &[(f32, f32)] = &[(100.0, 18.0), (72.0, 14.0), (0.0, 0.0)];
 
 pub(super) const KEEP_ALIVE_STEPS: &[(f32, f32)] =
     &[(104.0, 18.0), (88.0, 14.0), (72.0, 10.0), (0.0, 0.0)];
@@ -294,11 +294,11 @@ mod tests {
     }
 
     #[test]
-    fn session_steps_24_16_0() {
+    fn session_steps_18_14_0() {
         let ladder = ColumnLadder::worktrees();
-        assert_eq!(ladder.width_ch("session", 138.0), Some(24.0));
-        assert_eq!(ladder.width_ch("session", 90.0), Some(16.0));
-        assert_eq!(ladder.width_ch("session", 72.0), Some(16.0));
+        assert_eq!(ladder.width_ch("session", 138.0), Some(18.0));
+        assert_eq!(ladder.width_ch("session", 90.0), Some(14.0));
+        assert_eq!(ladder.width_ch("session", 72.0), Some(14.0));
         assert_eq!(ladder.width_ch("session", 60.0), None);
     }
 
