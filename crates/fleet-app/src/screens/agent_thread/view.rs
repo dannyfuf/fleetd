@@ -12,7 +12,7 @@ use fleet_core::agents::PermissionMode;
 use fleet_ui_kit::{
     AGENT_CONTENT_W, ActiveTheme, Button, ButtonSize, ButtonStyle, ComposerChip, ContextMeter,
     Decision, DecisionAction, DecisionDock, HarnessTargetExt, Icon, IconSize, Kbd, Menu, MenuItem,
-    MetadataRow, PopoverMenu, Text, Tone, Tooltip, WithTooltip as _,
+    MetadataRow, PopoverMenu, Segment, SegmentedControl, Text, Tone,
 };
 use gpui::{Action, Context, Entity, SharedString, Window, div, prelude::*};
 
@@ -261,39 +261,35 @@ impl AgentThreadView {
                 .menu(move |menu, _window, cx| entity.read(cx).access_menu(menu, &entity))
         };
 
+        // Build | Plan: `⇧⇥` toggles, a click names the side it wants, so the side already
+        // chosen is a no-op rather than a flip. The key rides on the side it would switch to.
         let interaction = controls.interaction;
-        let segment = |id: &'static str, label: &'static str, mode: InteractionMode| {
-            let entity = entity.clone();
-            Button::new(id, label)
-                .style(ButtonStyle::Ghost)
-                .size(ButtonSize::Compact)
-                .selected(interaction == mode)
-                .on_click(move |_, _window, cx| {
-                    // `⇧⇥` toggles; a click names the side it wants, so the side already chosen
-                    // is a no-op rather than a flip.
-                    entity.update(cx, |view, cx| {
-                        if view.interaction_mode() != mode {
-                            view.toggle_plan_mode(cx);
-                        }
-                    });
-                })
-        };
         let plan_kbd = Kbd::for_action(&native_agent::PlanMode, window, cx);
-        let build_plan = div()
-            .id("composer-interaction")
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap(theme.space.xxs)
-            .p(theme.space.xxs)
-            .rounded(theme.radii.control)
-            .bg(theme.colors.bg)
-            .child(segment("composer-build", "Build", InteractionMode::Build))
-            .child(segment("composer-plan", "Plan", InteractionMode::Plan))
-            .with_tooltip(
-                Tooltip::new("Switch between build and plan").kbd(plan_kbd),
-                cx,
-            );
+        let build_plan = {
+            let entity = entity.clone();
+            let modes = [InteractionMode::Build, InteractionMode::Plan];
+            SegmentedControl::new(
+                "composer-interaction",
+                modes.map(|mode| {
+                    Segment::new(match mode {
+                        InteractionMode::Build => "Build",
+                        InteractionMode::Plan => "Plan",
+                    })
+                    .kbd(plan_kbd.clone().filter(|_| mode != interaction))
+                }),
+            )
+            .active(modes.iter().position(|mode| *mode == interaction))
+            .on_select(move |ix, _window, cx| {
+                let Some(mode) = modes.get(ix).copied() else {
+                    return;
+                };
+                entity.update(cx, |view, cx| {
+                    if view.interaction_mode() != mode {
+                        view.toggle_plan_mode(cx);
+                    }
+                });
+            })
+        };
 
         div()
             .flex()

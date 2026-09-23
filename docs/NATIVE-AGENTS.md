@@ -70,7 +70,7 @@ The canvas fixes these decisions; do not relitigate them in code.
   $ skills · / commands`; Enter sends, Shift+Enter inserts a newline) over a settings strip. On the
   left, the model chip `claude-sonnet-5 · high` (a menu of the harness's models and, under a
   separator, their efforts — the `^s m` / `^s e` candidates), the access chip `asks before edits`
-  (a menu of the declared ladder — `^s t`) and a Build | Plan control (`⇧⇥`); on the right, the
+  (a menu of the declared ladder — `^s t`) and a Build | Plan `SegmentedControl` (`⇧⇥`); on the right, the
   context meter `34%`, the facts `$0.42 · 48m · account`, and **Send** (`⏎`), which reads **Steer**
   with a draft while the agent works and **Stop** (`esc`) without one. Each control calls the
   method its key's action calls. Nothing is invented: a model with no published effort reads as the
