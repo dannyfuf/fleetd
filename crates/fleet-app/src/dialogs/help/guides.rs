@@ -154,17 +154,17 @@ pub(crate) const GUIDES: &[Guide] = &[
                  or edits a file, and “needs you” shows until you answer.",
                 &[
                     act("Allow once", &["native_agent::AllowOnce"]),
-                    act("Allow for the session", &["native_agent::AllowSession"]),
+                    act("Allow for this session", &["native_agent::AllowSession"]),
                     act("Deny", &["native_agent::Deny"]),
                 ],
             ),
             step(
                 "Review its plan",
-                "In plan mode it proposes a plan before it touches anything. Go ahead, or ask \
-                 for changes.",
+                "In plan mode it proposes a plan before it touches anything. Implement it as it \
+                 stands, or send it back to refine it.",
                 &[
-                    act("Go ahead", &["native_agent::Implement"]),
-                    act("Ask for changes", &["native_agent::Refine"]),
+                    act("Implement", &["native_agent::Implement"]),
+                    act("Refine", &["native_agent::Refine"]),
                 ],
             ),
             step(

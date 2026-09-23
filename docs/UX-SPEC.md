@@ -1484,7 +1484,8 @@ button, which closes Help and raises the doctor report.
   drifts from it is a bug in the guide.
 * *Start work*, *Work with an agent*, *Review a pull request* and *Terminals* end with the one
   callout that confuses everyone: **inside a terminal, Fleet's keys start with `ctrl-s`**;
-  everything else goes to the program, and `ctrl-s` twice sends it to the program.
+  everything else goes to the program; holding `ctrl-s` a moment shows every Fleet command
+  (the ⌃S menu, KEYMAP), and `ctrl-s` twice sends it to the program.
 
 **What keeps running** is the old paragraph, rewritten as a guide: closing Fleet never stops
 your work — terminals, agents and jobs run in fleetd and terminals even survive a fleetd restart
@@ -1996,9 +1997,9 @@ each component's full API. `Modal` is an alias of `Dialog` and `TabBar` an alias
 | `FilterBar` | In-place pane-header replacement with live `shown/total`, two-stage `Esc`, retained chip | every list (§3.10) |
 | `Cycler` | A closed choice, `←`/`→`; drawn as a `SegmentedControl` up to four options, a `Dropdown` field past that | host selector, Settings choices |
 | `Toggle` | A labelled row ending in a `Switch`, `Space` | Settings |
-| `SegmentedControl` | Two to four options side by side, the chosen one raised; a click runs the surface's own action | Hub screens, agent popup provider, Settings choices |
+| `SegmentedControl` | Two to four options side by side, the chosen one raised; a click runs the surface's own action | Hub screens, agent popup provider, Help's Guides / All shortcuts switch, Settings choices |
 | `NumberField` | Integer with a unit suffix and a clamp | Settings (grace, TTLs, intervals, pool) |
-| `SegmentedTabs` | Underlined tabs with counts, `Tab`/`S-Tab`/`h`/`l` | PR Mine/Review, Help's Guides / All shortcuts switch |
+| `SegmentedTabs` | Underlined tabs with counts, `Tab`/`S-Tab`/`h`/`l` | PR Mine/Review |
 | `ConfirmDialog` | Compact/expanded switch driven by `FactList`; binds only `y`/`Y`/`Enter`/`n`/`Esc`/`q` (+ `I`, + `s` for prune) | §3.8.3, §3.8.8, §3.8.9 |
 | `Palette` | Default sectioned `GO`/`DO`/`CONTEXT` result list with right-aligned key hints, cap 10; seeded agent mode is one `AGENTS` section whose rows carry attention, provider/title, worktree, child/caller status, and optional strip index | §3.9 |
 | `Select` | A closed choice rendered as a row with its current value, for a set too long for `Cycler` | Settings, Create dialog |
