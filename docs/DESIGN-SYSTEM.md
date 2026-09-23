@@ -327,7 +327,8 @@ Row states, and what each means:
 | default | — | `bg` | — |
 | selected | `.selected(true)` | `row_selected` | the list's current item |
 | cursor | `.cursor(true)` | 2 px accent bar | this pane has focus |
-| hover | automatic with `.with_id(..)` | `row_hover` | pointer only, never state |
+| hover | automatic on every row, id or not; off with `.hoverable(false)` | `row_hover` | pointer only, never state |
+| hover actions | `.hover_actions(..)` / `RowColumn::hover_only()` | revealed while hovered or selected, width always reserved | pointer twins of row keys, all also in the row menu |
 | dimmed | `.dimmed(true)` | 40 % opacity | a row being deleted |
 | disabled | `.disabled(true)` | 40 % opacity, no hover | not selectable |
 | loading | `SkeletonRows` | 30 % placeholder | cold load only |
@@ -666,9 +667,22 @@ ListCursor::new(len).scrolloff(2).page(10)
     .scroll_target(moving_down) -> usize
 ListCursor::{scrolloff_rows, page_rows}; list_key_bindings(Option<&str>)
 ListMotion::{Down, Up, First, Last, PageDown, PageUp}
+
+// pointer (ADR 0023, UX-SPEC §5.1): the list routes every press through one ListPointer
+ListView::new(..).on_select(|ix, window, cx| ..).on_open(|ix, window, cx| ..)
+    .on_menu(|ix, position, window, cx| ..)     // or .pointer(ListPointer)
+ListPointer::new().on_select(..).on_open(..).on_menu(..)
+    .attach(ix, Row) -> Row                     // rows not inside a ListView
+    .press(ix, &MouseDownEvent, window, cx)
+RowPress::classify(MouseButton, click_count) -> Option<RowPress::{Select, Open, Menu}>
 ```
 **States.** default · empty (`EmptyState`) · loading (`SkeletonRows` in the body instead).
 **Keyboard.** `j`/`k`, `gg`/`G`, `ctrl-d`/`ctrl-u` — the view binds them and calls `ListCursor`.
+**Pointer.** A primary press selects the row (`on_select`, which does what `j`/`k` do minus the
+motion); the second press of a double-click selects and then opens it (`on_open`, the twin of
+`⏎`); a right click selects and then asks for the row's menu at the pointer (`on_menu`). Every
+press selects first, so `on_open` and `on_menu` act on the cursor row exactly as their keys do.
+The list wraps each row only when a handler is set; a keyboard-only list keeps its element tree.
 **Usage rule — cursor stability.** Background events (status polls, PR fetches, job completions)
 must **never** re-sort, re-scroll or re-focus. Adopt new data with `ListCursor::retain`, and
 re-sort only on an explicit user action (`r`, filter change, repo change, screen change).
@@ -678,14 +692,35 @@ per item, which is far too much overhead per terminal row.
 #### `Row` / `RowColumn`
 **Purpose.** One list row: leading glyph slot, flex content, trailing columns.
 **API.** `Row::{new, with_id}().leading(..).column(RowColumn).columns(..).second_line(..)
-.height(Pixels).selected(bool).cursor(bool).dimmed(bool).disabled(bool).hoverable(bool)`;
+.height(Pixels).comfortable().selected(bool).cursor(bool).dimmed(bool).disabled(bool)
+.hoverable(bool).hover_actions(..).on_click(..).on_double_click(..).on_secondary_click(..)`;
 `RowColumn::{fixed(Pixels, ..), fixed_ch(f32, ..), flex(..), auto(..), resolved(..)}
-.align(ColumnAlign).min_width(Pixels).min_width_ch(f32)`.
-**Variants.** 30 px one-line · 44 px two-line (`second_line`) · 34 px palette row.
+.align(ColumnAlign).min_width(Pixels).min_width_ch(f32).hover_only()`.
+**Variants.** 30 px one-line · 44 px two-line (`second_line`) · 44 px comfortable
+(`comfortable()`, `row_h_comfortable`: the Hub lists; primary cell `Text::ui_strong`, secondary
+cells `Text::ui(..).muted()`) · 34 px palette row.
 **States.** the table in §3.
+**Pointer.** Handlers take `(&MouseDownEvent, &mut Window, &mut App)`, so a view can pass a
+`cx.listener(..)`. They fire on the **press**, as native lists select, and need no id: `on_click`
+on a single press, `on_double_click` on the second press of a pair (click count ≥ 2; without it
+a double-click is two selects), `on_secondary_click` on a right click. Any handler implies the
+pointer cursor; a disabled row takes none. A row with indices wires all three through
+`ListPointer::attach`. `hover_actions` is the trailing slot for the mockup's `Open ⏎` and `⋯`:
+drawn while the row is hovered or selected, its width reserved either way so revealing it never
+reflows the row. In a list with a `ListHeader`, make it a ladder column instead —
+`RowColumn::resolved(actions, ..).hover_only()` — so the header reserves the same width.
 **Usage rule.** A row that changes state changes its **glyph** in place; it does not change its
 background color and it does not move. Leave `leading` unset when the column does not apply —
 that is the blank cell of §2.5.
+
+#### `ListHeader`
+**Purpose.** The column heads above a laddered list: one line of sentence-case `caption`
+labels over a hairline. Not a `SectionHeader`, which titles a group of rows.
+**API.** `ListHeader::new().reserve_leading(bool).column(&ResolvedColumn, label)`.
+**Usage rule.** Build it from the **same** `ColumnLadder::resolve(pane_ch)` the rows use, and
+match the rows' `reserve_leading`; it renders through `Row` itself, so padding, gap and column
+boxes cannot drift. A column with no head (the hover-only actions column) gets an empty label
+and still reserves its width.
 
 #### `ColumnLadder`
 **Purpose.** Resolve a `ch`-based responsive column set for the current pane width.
@@ -921,20 +956,27 @@ is a paragraph. Inline flow is one `gpui::StyledText` with byte-range highlights
 paragraph wraps like text rather than like a flex row.
 
 #### `FuzzyList` / `FuzzyItem`
-**Purpose.** A capped list of already-ranked results.
+**Purpose.** A scrolling list of already-ranked results.
 **API.** `FuzzyItem::new(primary).detail(..).secondary(..).trailing(..).leading(..)
 .disabled(bool).key(..).matches(..).destructive(bool)`;
-`FuzzyList::new(items).cursor(usize).cap(usize).under_text_field(bool).empty(..).row_height(Pixels)`;
-`.binds_jk()`, `.shown()`, `FuzzyList::{next_cursor, prev_cursor}`.
+`FuzzyList::new(id, items).cursor(usize).cap(usize).visible_rows(usize).track_scroll(&ScrollHandle)
+.on_click(|ix, window, cx| ..).under_text_field(bool).empty(..).row_height(Pixels)
+.harness_rows(part, first)`; `.binds_jk()`, `.shown()`,
+`FuzzyList::{next_cursor, prev_cursor, reveal}`.
+**Pointer.** Rows hover; a press on an enabled row runs it (`on_click` receives the index in
+`items` and does what `⏎` does there — a picker has no separate select). `visible_rows(n)` makes
+the list exactly `n` rows tall and scrolls the rest by wheel; the caller keeps the cursor in view
+with `FuzzyList::reveal(&handle, cursor)` from the action that moved it, never from render.
 **Variants.** one-line (no `secondary`) · two-line. An item with an empty description collapses
 to one line — zero-suppression. `detail` is a muted qualifier drawn **on the same line**, after
 the primary label: use it when the qualifier is part of the row's identity (§3.8.5's context
 owners), and `secondary` only for a description that earns a second line.
-**Caps.** 8 (Clone results) · 6 (Create base list) · 10 (palette).
+**Caps.** Unbounded by default. A cap is a product decision where a predictable `Enter` beats
+completeness: 8 (Clone results) · 6 (Create base list) · 10 (palette). To bound the *height* and
+keep every result reachable, use `visible_rows` instead.
 **Keyboard.** `ctrl-n`/`ctrl-p` or `↓`/`↑` under a text field; `j`/`k` too when there is none.
 **Usage rule.** Matching, ranking and the 150 ms debounce belong to the caller — they need the
-domain's fields. Never render a list longer than its cap: a predictable `Enter` matters more
-than completeness, and the footer says `9 of 63`.
+domain's fields. Where a surface keeps a cap, the footer says `9 of 63`.
 
 #### `FilterBar`
 **Purpose.** Narrow a list without moving it.
@@ -1020,7 +1062,8 @@ and name the irreversibility.
 **Anatomy.** 640 px card at y = 120 · 44 px input · default sections `GO` → `DO` → `CONTEXT`,
 or one seeded `AGENTS` section · ≤ 10 rows of 34 px · footer `9 of 63 · ⏎ run · esc cancel`.
 **API.** `Palette::new(input: Entity<TextInput>).section(PaletteSection::new(PaletteSectionKind::Go, rows))
-.cursor(usize).cap(usize).total(usize).empty(..)`; `.shown()`, `.flat_len()`;
+.cursor(usize).cap(usize).total(usize).empty(..).on_click(|flat_ix, window, cx| ..)`;
+`.shown()`, `.flat_len()`; a press on a row runs it with the same flat index the cursor uses;
 `PaletteSection::{len, is_empty}`;
 `PaletteRow::new(label).icon(Icon).leading(..).detail(..).key(..).destructive(bool).matches(..)`.
 The owner builds the query editor **embedded** (`set_embedded(true, cx)`) and sets its

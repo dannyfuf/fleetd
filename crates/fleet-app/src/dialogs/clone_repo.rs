@@ -451,24 +451,27 @@ fn no_results(draft: &CloneState) -> AnyElement {
 
 /// One row per candidate repository: visibility, name, description and last push.
 fn results_list(draft: &CloneState, rows: &[RemoteRepo], now: i64) -> FuzzyList {
-    FuzzyList::new(rows.iter().map(|repo| {
-        let mut item = FuzzyItem::new(repo.full_name.clone()).leading(
-            if repo.is_private {
-                Icon::Lock
-            } else {
-                Icon::Globe
+    FuzzyList::new(
+        "clone-results",
+        rows.iter().map(|repo| {
+            let mut item = FuzzyItem::new(repo.full_name.clone()).leading(
+                if repo.is_private {
+                    Icon::Lock
+                } else {
+                    Icon::Globe
+                }
+                .el()
+                .size(IconSize::Medium),
+            );
+            if !repo.description.is_empty() {
+                item = item.secondary(repo.description.clone());
             }
-            .el()
-            .size(IconSize::Medium),
-        );
-        if !repo.description.is_empty() {
-            item = item.secondary(repo.description.clone());
-        }
-        if !repo.updated_at.is_empty() {
-            item = item.trailing(age_label(&repo.updated_at, now));
-        }
-        item
-    }))
+            if !repo.updated_at.is_empty() {
+                item = item.trailing(age_label(&repo.updated_at, now));
+            }
+            item
+        }),
+    )
     .cursor(draft.cursor)
     .cap(RESULT_ROWS)
     .under_text_field(true)

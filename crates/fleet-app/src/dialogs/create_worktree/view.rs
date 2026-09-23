@@ -14,15 +14,18 @@ fn base_section(draft: &CreateState, tight: gpui::Pixels) -> Div {
                 .then(|| SpinnerWithLabel::new("create-base-fetch", "fetching")),
         );
     let previous_base = draft.previous_base.clone();
-    let base_list = FuzzyList::new(candidates.iter().enumerate().map(|(index, candidate)| {
-        let mut item = FuzzyItem::new(candidate.clone());
-        if index == 0 {
-            item = item.trailing("default");
-        } else if previous_base.as_deref() == Some(candidate.as_str()) {
-            item = item.trailing("(previous base)");
-        }
-        item
-    }))
+    let base_list = FuzzyList::new(
+        "create-base-list",
+        candidates.iter().enumerate().map(|(index, candidate)| {
+            let mut item = FuzzyItem::new(candidate.clone());
+            if index == 0 {
+                item = item.trailing("default");
+            } else if previous_base.as_deref() == Some(candidate.as_str()) {
+                item = item.trailing("(previous base)");
+            }
+            item
+        }),
+    )
     .cursor(draft.base_cursor)
     .cap(BASE_ROWS)
     .under_text_field(true)

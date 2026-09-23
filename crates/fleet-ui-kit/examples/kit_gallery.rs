@@ -19,7 +19,7 @@ use fleet_ui_kit::prelude::*;
 use fleet_ui_kit::theme::{CONTRAST_AA, contrast_ratio};
 use gpui::{
     AnyElement, App, Context, Entity, FocusHandle, Focusable, KeyBinding, SharedString,
-    UniformListScrollHandle, Window, actions, div, px,
+    UniformListScrollHandle, WeakEntity, Window, actions, div, px,
 };
 
 actions!(kit_gallery, [ToggleTheme, Quit]);
@@ -889,7 +889,12 @@ fn facts_section(cx: &mut App) -> AnyElement {
     LAYOUT.section("facts and tables", &t, children)
 }
 
-fn rows_section(cx: &mut App, cursor: usize, scroll: &UniformListScrollHandle) -> AnyElement {
+fn rows_section(
+    cx: &mut App,
+    this: WeakEntity<Gallery>,
+    cursor: usize,
+    scroll: &UniformListScrollHandle,
+) -> AnyElement {
     let t = cx.theme().clone();
     let sample_row = |glyph: StatusKind, branch: &'static str, ix: usize| {
         Row::with_id(("row", ix))
@@ -933,11 +938,29 @@ fn rows_section(cx: &mut App, cursor: usize, scroll: &UniformListScrollHandle) -
             ),
     );
 
+    // The pointer contract of UX-SPEC §5.1: a press selects, a double-click would open, a
+    // right click would open the row's menu. The overview wires select only.
+    let select = ListPointer::new().on_select(move |ix, _window, cx| {
+        let Some(gallery) = this.upgrade() else {
+            return;
+        };
+        gallery.update(cx, |gallery, cx| {
+            gallery.cursor = ix;
+            cx.notify();
+        });
+    });
+    let actions_color = t.colors.text_secondary;
     let list = box_of(
         &t,
         px(180.0),
         ListView::new("gallery-list", 24, move |ix, is_cursor, _window, _cx| {
             Row::with_id(("list-row", ix))
+                .hover_actions(
+                    Icon::Ellipsis
+                        .el()
+                        .size(IconSize::Medium)
+                        .color(actions_color),
+                )
                 .selected(is_cursor)
                 .cursor(is_cursor)
                 .leading(StatusGlyph::new(StatusKind::DetachedAwake).id(("list-glyph", ix)))
@@ -953,6 +976,7 @@ fn rows_section(cx: &mut App, cursor: usize, scroll: &UniformListScrollHandle) -
                 )
                 .into_any_element()
         })
+        .pointer(select)
         .cursor(cursor)
         .track_scroll(scroll)
         .empty(EmptyState::new("Nothing matches.").action("esc  clear")),
@@ -1671,11 +1695,14 @@ fn input_section(cx: &mut App, fields: &[(&'static str, Entity<TextInput>)]) -> 
                     .open(true)
                     .focused(true)
                     .options(
-                        FuzzyList::new([
-                            FuzzyItem::new("origin/main").trailing("default"),
-                            FuzzyItem::new("origin/release-2026"),
-                            FuzzyItem::new("pull/412/head").trailing("previous base"),
-                        ])
+                        FuzzyList::new(
+                            "kit-select-options",
+                            [
+                                FuzzyItem::new("origin/main").trailing("default"),
+                                FuzzyItem::new("origin/release-2026"),
+                                FuzzyItem::new("pull/412/head").trailing("previous base"),
+                            ],
+                        )
                         .cursor(0)
                         .cap(6),
                     ),
@@ -1685,15 +1712,18 @@ fn input_section(cx: &mut App, fields: &[(&'static str, Entity<TextInput>)]) -> 
             "fuzzy list · two-line",
             &t,
             div().w(px(420.0)).child(
-                FuzzyList::new([
-                    FuzzyItem::new("bukhr/payroll")
-                        .secondary("Nómina y remuneraciones")
-                        .trailing("2d")
-                        .leading(Icon::Lock.el().size(IconSize::Medium)),
-                    FuzzyItem::new("acme/payrolls")
-                        .trailing("3w")
-                        .leading(Icon::Globe.el().size(IconSize::Medium)),
-                ])
+                FuzzyList::new(
+                    "kit-fuzzy-two-line",
+                    [
+                        FuzzyItem::new("bukhr/payroll")
+                            .secondary("Nómina y remuneraciones")
+                            .trailing("2d")
+                            .leading(Icon::Lock.el().size(IconSize::Medium)),
+                        FuzzyItem::new("acme/payrolls")
+                            .trailing("3w")
+                            .leading(Icon::Globe.el().size(IconSize::Medium)),
+                    ],
+                )
                 .cursor(0),
             ),
         ),
@@ -2115,6 +2145,7 @@ impl Render for Gallery {
         let pad = cx.theme().space.xl;
         let cursor = self.cursor;
         let scroll = self.list_scroll.clone();
+        let this = cx.entity().downgrade();
         let filter_query = self.filter_query.clone();
         let palette_query = self.palette_query.clone();
         let dialog_branch = self.dialog_branch.clone();
@@ -2128,7 +2159,7 @@ impl Render for Gallery {
             icons_section(cx),
             glyphs_section(cx),
             facts_section(cx),
-            rows_section(cx, cursor, &scroll),
+            rows_section(cx, this, cursor, &scroll),
             structure_section(cx, filter_query),
             terminal_section(cx),
             input_section(cx, &fields),

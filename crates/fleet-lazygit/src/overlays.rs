@@ -93,7 +93,7 @@ pub(crate) fn render(view: &Lazygit, cx: &mut Context<Lazygit>) -> Option<AnyEle
             let items = visible
                 .iter()
                 .map(|(_, item)| FuzzyItem::new(item.label.clone()).key(item.key.clone()));
-            let list = FuzzyList::new(items)
+            let list = FuzzyList::new("lazygit-menu", items)
                 .cursor(menu.cursor)
                 .cap(12)
                 .under_text_field(menu.filter.is_some())

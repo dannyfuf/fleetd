@@ -14,6 +14,7 @@
 //! | --- | --- |
 //! | `t` | toggle light / dark |
 //! | `j` `k` `gg` `G` `ctrl-d` `ctrl-u` | drive the live list's cursor (the real bindings) |
+//! | click · double-click · right click | select · open · menu on a live-list row (UX-SPEC §5.1) |
 //! | `w` | cycle the worktrees pane width: 138 → 93 → 70 ch, so the column ladder moves |
 //! | `s` | cycle the live list between rows, cold load and empty |
 //! | `q` / `cmd-q` | quit |
@@ -27,8 +28,8 @@ const LAYOUT: support::layout::GalleryLayout = support::layout::GalleryLayout {
 };
 use fleet_ui_kit::prelude::*;
 use gpui::{
-    AnyElement, App, Context, FocusHandle, Focusable, KeyBinding, Pixels, UniformListScrollHandle,
-    Window, actions, div, px,
+    AnyElement, App, Context, FocusHandle, Focusable, KeyBinding, Pixels, SharedString,
+    UniformListScrollHandle, WeakEntity, Window, actions, div, px,
 };
 
 actions!(
@@ -73,6 +74,9 @@ struct DataGallery {
     cursor: ListCursor,
     width_ix: usize,
     list_state: ListState,
+    /// What the last pointer press on the live list asked for. The menu is a stub until the
+    /// kit has one: the gallery shows the request instead of opening anything.
+    last_press: SharedString,
 }
 
 impl DataGallery {
@@ -83,7 +87,47 @@ impl DataGallery {
             cursor: ListCursor::new(LIVE_ROWS).page(6),
             width_ix: 0,
             list_state: ListState::Rows,
+            last_press: SharedString::new_static("none yet"),
         }
+    }
+
+    /// The three pointer handlers of the live list: exactly what a Hub list hands its
+    /// `ListView`. Select moves the cursor like `j`/`k`; open and menu only report, because
+    /// the gallery has nothing to open and the kit has no menu yet.
+    fn pointer(this: WeakEntity<Self>) -> ListPointer {
+        fn press(
+            this: &WeakEntity<DataGallery>,
+            cx: &mut App,
+            update: impl FnOnce(&mut DataGallery),
+        ) {
+            let Some(gallery) = this.upgrade() else {
+                return;
+            };
+            gallery.update(cx, |gallery, cx| {
+                update(gallery);
+                cx.notify();
+            });
+        }
+        let (select, open, menu) = (this.clone(), this.clone(), this);
+        ListPointer::new()
+            .on_select(move |ix, _window, cx| {
+                press(&select, cx, |gallery| gallery.cursor.set(ix));
+            })
+            .on_open(move |ix, _window, cx| {
+                press(&open, cx, |gallery| {
+                    gallery.last_press = format!("open row {ix:02}").into();
+                });
+            })
+            .on_menu(move |ix, position, _window, cx| {
+                press(&menu, cx, |gallery| {
+                    gallery.last_press = format!(
+                        "menu for row {ix:02} at {:.0}, {:.0}",
+                        f32::from(position.x),
+                        f32::from(position.y)
+                    )
+                    .into();
+                });
+            })
     }
 
     fn pane_ch(&self) -> f32 {
@@ -670,17 +714,58 @@ fn worktree_row(t: &Theme, ix: usize, pane_ch: f32, cursor: bool) -> AnyElement 
     row.into_any_element()
 }
 
+/// The column heads of [`worktree_row`], from the same ladder resolution.
+fn worktree_header(pane_ch: f32) -> ListHeader {
+    ColumnLadder::worktrees_in_scope(false)
+        .resolve(pane_ch)
+        .iter()
+        .filter(|column| column.key != "glyph")
+        .fold(ListHeader::new().reserve_leading(true), |header, column| {
+            let label = match column.key.as_ref() {
+                "branch" => "Name",
+                "repo" => "Repository",
+                "keepalive" => "Keeps running",
+                "pr" => "Pull request",
+                "age" => "Age",
+                _ => "",
+            };
+            header.column(column, label)
+        })
+}
+
+/// The hover actions of a row: stand-ins for the `Open ⏎` button and the `⋯` trigger, which
+/// the kit's button components will fill.
+fn hover_actions(t: &Theme) -> AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .gap(t.space.sm)
+        .child(KeyHint::labeled("enter", "open"))
+        .child(
+            Icon::Ellipsis
+                .el()
+                .size(IconSize::Medium)
+                .color(t.colors.text_secondary),
+        )
+        .into_any_element()
+}
+
 fn rows_section(cx: &mut App, pane_ch: f32) -> AnyElement {
     let t = cx.theme().clone();
 
     let states = framed(
         &t,
         None,
-        t.metrics.row_h * 6.0 + t.metrics.job_row_h,
+        t.metrics.section_header_h
+            + t.space.xs
+            + t.metrics.row_h * 7.0
+            + t.metrics.job_row_h
+            + t.metrics.row_h_comfortable,
         div()
             .flex()
             .flex_col()
             .w_full()
+            .child(worktree_header(pane_ch))
             .child(worktree_row(&t, 0, pane_ch, false))
             .child(worktree_row(&t, 1, pane_ch, true))
             .child(
@@ -713,6 +798,26 @@ fn rows_section(cx: &mut App, pane_ch: f32) -> AnyElement {
                     .column(RowColumn::flex(Text::data("nixos")))
                     .column(RowColumn::fixed_ch(7.0, AgeLabel::none()).align(ColumnAlign::Right))
                     .second_line(Text::data_small("Receiving objects: 40% (81/202)").faint()),
+            )
+            .child(
+                // Hover actions: hidden until the pointer is on the row, width always reserved.
+                Row::new()
+                    .leading(StatusGlyph::new(StatusKind::DetachedAwake).id("row-hover"))
+                    .column(RowColumn::flex(Text::data(
+                        "hover me \u{2014} actions appear",
+                    )))
+                    .hover_actions(hover_actions(&t)),
+            )
+            .child(
+                // The Hub's comfortable density: 44 px, a strong name, secondary facts.
+                Row::new()
+                    .comfortable()
+                    .leading(StatusGlyph::new(StatusKind::Attached).id("row-comfortable"))
+                    .column(RowColumn::flex(Text::ui_strong(
+                        "comfortable \u{2014} 44 px",
+                    )))
+                    .column(RowColumn::fixed_ch(14.0, Text::ui("acme/web").muted()))
+                    .hover_actions(hover_actions(&t)),
             ),
     );
 
@@ -779,8 +884,10 @@ fn rows_section(cx: &mut App, pane_ch: f32) -> AnyElement {
     )
 }
 
-fn list_section(cx: &mut App, gallery: &DataGallery) -> AnyElement {
+fn list_section(cx: &mut Context<DataGallery>, gallery: &DataGallery) -> AnyElement {
     let t = cx.theme().clone();
+    let pointer = DataGallery::pointer(cx.entity().downgrade());
+    let actions_t = t.clone();
     let cursor = gallery.cursor.index();
     let state = gallery.list_state;
     let item_count = match state {
@@ -799,15 +906,17 @@ fn list_section(cx: &mut App, gallery: &DataGallery) -> AnyElement {
                     StatusGlyph::new(STATUS_KINDS[ix % STATUS_KINDS.len()]).id(("live-glyph", ix)),
                 )
                 .column(RowColumn::flex(Text::data(format!(
-                    "row {ix:02} \u{2014} j/k, gg/G, ctrl-d/ctrl-u"
+                    "row {ix:02} \u{2014} j/k, gg/G, ctrl-d/ctrl-u, or click"
                 ))))
                 .column(
                     RowColumn::fixed_ch(7.0, AgeLabel::from_secs(60 * ix as i64 + 30))
                         .align(ColumnAlign::Right),
                 )
+                .hover_actions(hover_actions(&actions_t))
                 .into_any_element()
         },
     )
+    .pointer(pointer)
     .cursor(cursor)
     .row_height(t.metrics.row_h)
     .track_scroll(&gallery.scroll)
@@ -846,12 +955,13 @@ fn list_section(cx: &mut App, gallery: &DataGallery) -> AnyElement {
                     .gap(t.space.xs)
                     .child(
                         Text::hint(format!(
-                            "state {} (s) \u{b7} cursor {}/{} \u{b7} page {} \u{b7} scrolloff {}",
+                            "state {} (s) \u{b7} cursor {}/{} \u{b7} page {} \u{b7} scrolloff {} \u{b7} last press: {}",
                             state.label(),
                             cursor + 1,
                             gallery.cursor.len(),
                             gallery.cursor.page_rows(),
                             gallery.cursor.scrolloff_rows(),
+                            gallery.last_press,
                         ))
                         .faint(),
                     )

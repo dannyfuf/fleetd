@@ -39,6 +39,7 @@ mod kbd;
 mod keep_alive_chips;
 mod key_hint;
 mod key_value_list;
+mod list_header;
 mod list_view;
 mod log_view;
 mod markdown;
@@ -51,6 +52,8 @@ mod overlay;
 mod palette;
 mod pane;
 mod pane_header;
+#[cfg(test)]
+mod pointer_tests;
 mod pr_badge;
 mod prefix_hint;
 mod priority_glyph;
@@ -118,11 +121,12 @@ pub use keep_alive_chips::MAX_VISIBLE;
 pub use keep_alive_chips::{KeepAliveChips, KeepAliveLabel};
 pub use key_hint::{KeyHint, KeyHintRow};
 pub use key_value_list::KeyValueList;
+pub use list_header::ListHeader;
 pub use list_view::{
     DEFAULT_PAGE, ListDown, ListFirst, ListLast, ListMotion, ListPageDown, ListPageUp, ListUp,
     SCROLLOFF, SKELETON_ROWS, list_key_bindings,
 };
-pub use list_view::{ListCursor, ListView};
+pub use list_view::{ListCursor, ListPointer, ListView, RowPress};
 pub use log_view::{LOG_TAIL_LINES, LogCommand, LogView};
 pub use markdown::{
     CodeHighlights, HighlightCache, MarkdownBlock, MarkdownDocument, MarkdownInline, markdown,

@@ -21,6 +21,7 @@
 //! and a framed field inside it would draw a second box.
 
 use gpui::{AnyElement, App, Entity, SharedString, Window, div, prelude::*};
+use std::rc::Rc;
 
 use crate::{
     components::{FuzzyItem, FuzzyList, KeyHintRow, TextInput},
@@ -172,6 +173,9 @@ impl PaletteSection {
     }
 }
 
+/// `(flat index, window, cx)`: run the clicked row.
+type RowHandler = Rc<dyn Fn(usize, &mut Window, &mut App)>;
+
 /// The command palette card. Wrap it in an [`super::Overlay`].
 #[derive(IntoElement)]
 pub struct Palette {
@@ -181,6 +185,7 @@ pub struct Palette {
     cap: usize,
     total: usize,
     empty: Option<SharedString>,
+    on_click: Option<RowHandler>,
 }
 
 impl Palette {
@@ -193,7 +198,15 @@ impl Palette {
             cap: 10,
             total: 0,
             empty: None,
+            on_click: None,
         }
+    }
+
+    /// A press on a row runs it. The handler receives the **flat** index the cursor uses, so
+    /// it can do exactly what `⏎` does with the cursor on that row.
+    pub fn on_click(mut self, handler: impl Fn(usize, &mut Window, &mut App) + 'static) -> Self {
+        self.on_click = Some(Rc::new(handler));
+        self
     }
 
     /// Append a section. Order is normalised on render.
@@ -265,6 +278,7 @@ impl RenderOnce for Palette {
                 .take(take)
                 .map(|row| row.into_item(secondary));
             let local_cursor = cursor.checked_sub(consumed).unwrap_or(usize::MAX);
+            let first = consumed;
 
             blocks.push(
                 div()
@@ -281,8 +295,11 @@ impl RenderOnce for Palette {
                             .child(Text::label(section.kind.title())),
                     )
                     .child(
-                        FuzzyList::new(items)
+                        FuzzyList::new(("palette-section", consumed), items)
                             .cap(take)
+                            .when_some(self.on_click.clone(), |list, run| {
+                                list.on_click(move |ix, window, cx| run(first + ix, window, cx))
+                            })
                             .cursor(local_cursor)
                             .under_text_field(true)
                             // One flat numbering across every section, so `palette.row[0]` is

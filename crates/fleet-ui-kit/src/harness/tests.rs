@@ -165,7 +165,10 @@ impl gpui::Render for FrozenTargets {
                     ])
                     .harness_tabs("prs.tab"),
                 )
-                .child(FuzzyList::new([FuzzyItem::new("acme/web")]).harness_rows("dialog.row", 0))
+                .child(
+                    FuzzyList::new("dialog-list", [FuzzyItem::new("acme/web")])
+                        .harness_rows("dialog.row", 0),
+                )
                 .child(ToastStack::new([
                     Toast::new("Worktree created"),
                     Toast::new("Path copied"),

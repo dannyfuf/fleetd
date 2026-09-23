@@ -40,7 +40,7 @@ const LAYOUT: support::layout::GalleryLayout = support::layout::GalleryLayout {
 use fleet_ui_kit::prelude::*;
 use gpui::{
     AnyElement, App, Context, Entity, EntityInputHandler, FocusHandle, Focusable, KeyBinding,
-    SharedString, Subscription, Window, actions, div, px,
+    ScrollHandle, SharedString, Subscription, WeakEntity, Window, actions, div, px,
 };
 
 actions!(
@@ -176,6 +176,10 @@ struct InputGallery {
     capture: Capture,
     filter_focused: bool,
     fuzzy_cursor: usize,
+    /// The long list's cursor and scroll position: a click moves the one and reveals it in
+    /// the other.
+    long_cursor: usize,
+    long_scroll: ScrollHandle,
     palette_cursor: usize,
     palette_open: bool,
     tab: usize,
@@ -354,6 +358,8 @@ impl InputGallery {
             capture: Capture::None,
             filter_focused: true,
             fuzzy_cursor: 0,
+            long_cursor: 0,
+            long_scroll: ScrollHandle::new(),
             palette_cursor: 0,
             palette_open: false,
             tab: 0,
@@ -792,7 +798,15 @@ fn text_input_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
     )
 }
 
-fn fuzzy_section(gallery: &InputGallery, theme: &Theme, cx: &App) -> AnyElement {
+/// How many rows the long list holds: well past any cap, so only the wheel reaches its end.
+const LONG_ROWS: usize = 24;
+
+fn fuzzy_section(
+    gallery: &InputGallery,
+    this: WeakEntity<InputGallery>,
+    theme: &Theme,
+    cx: &App,
+) -> AnyElement {
     let ranked = gallery.ranked_branches(cx);
     let items = ranked.iter().map(|(name, detail, hits)| {
         let mut item = FuzzyItem::new(*name).matches(hits.clone());
@@ -812,7 +826,7 @@ fn fuzzy_section(gallery: &InputGallery, theme: &Theme, cx: &App) -> AnyElement 
                 card(
                     theme,
                     px(420.0),
-                    FuzzyList::new(items)
+                    FuzzyList::new("gallery-fuzzy-ranked", items)
                         .cap(6)
                         .cursor(gallery.fuzzy_cursor)
                         .under_text_field(true)
@@ -828,18 +842,53 @@ fn fuzzy_section(gallery: &InputGallery, theme: &Theme, cx: &App) -> AnyElement 
                 card(
                     theme,
                     px(420.0),
-                    FuzzyList::new([
-                        FuzzyItem::new("buk/payroll")
-                            .secondary("Chilean payroll engine \u{b7} updated 2h ago")
-                            .matches([4, 5, 6])
-                            .trailing("2h"),
-                        FuzzyItem::new("buk/payroll-legacy")
-                            .secondary("archived")
-                            .disabled(true),
-                        FuzzyItem::new("Prune worktrees").destructive(true).key("x"),
-                    ])
+                    FuzzyList::new(
+                        "gallery-fuzzy-two-line",
+                        [
+                            FuzzyItem::new("buk/payroll")
+                                .secondary("Chilean payroll engine \u{b7} updated 2h ago")
+                                .matches([4, 5, 6])
+                                .trailing("2h"),
+                            FuzzyItem::new("buk/payroll-legacy")
+                                .secondary("archived")
+                                .disabled(true),
+                            FuzzyItem::new("Prune worktrees").destructive(true).key("x"),
+                        ],
+                    )
                     .cap(8)
                     .cursor(0),
+                ),
+            ),
+            LAYOUT.labeled(
+                "scrolls past 6 rows · click runs a row",
+                theme,
+                card(
+                    theme,
+                    px(420.0),
+                    FuzzyList::new(
+                        "gallery-fuzzy-long",
+                        (0..LONG_ROWS).map(|ix| {
+                            let item = FuzzyItem::new(format!("origin/feat/branch-{ix:02}"));
+                            if ix == gallery.long_cursor {
+                                item.trailing("clicked")
+                            } else {
+                                item
+                            }
+                        }),
+                    )
+                    .visible_rows(6)
+                    .track_scroll(&gallery.long_scroll)
+                    .cursor(gallery.long_cursor)
+                    .on_click(move |ix, _window, cx| {
+                        let Some(gallery) = this.upgrade() else {
+                            return;
+                        };
+                        gallery.update(cx, |gallery, cx| {
+                            gallery.long_cursor = ix;
+                            FuzzyList::reveal(&gallery.long_scroll, ix);
+                            cx.notify();
+                        });
+                    }),
                 ),
             ),
             LAYOUT.labeled(
@@ -848,7 +897,8 @@ fn fuzzy_section(gallery: &InputGallery, theme: &Theme, cx: &App) -> AnyElement 
                 card(
                     theme,
                     px(420.0),
-                    FuzzyList::new([]).empty(Text::ui("Nothing matches \"gpu\".").muted()),
+                    FuzzyList::new("gallery-fuzzy-empty", [])
+                        .empty(Text::ui("Nothing matches \"gpu\".").muted()),
                 ),
             ),
         ],
@@ -1008,13 +1058,16 @@ fn choice_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
 }
 
 fn tabs_and_select_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
-    let options = FuzzyList::new(BRANCHES.iter().map(|(name, detail)| {
-        let mut item = FuzzyItem::new(*name);
-        if !detail.is_empty() {
-            item = item.trailing(*detail);
-        }
-        item
-    }))
+    let options = FuzzyList::new(
+        "gallery-select-options",
+        BRANCHES.iter().map(|(name, detail)| {
+            let mut item = FuzzyItem::new(*name);
+            if !detail.is_empty() {
+                item = item.trailing(*detail);
+            }
+            item
+        }),
+    )
     .cap(6)
     .cursor(0)
     .under_text_field(false);
@@ -1155,7 +1208,7 @@ impl Render for InputGallery {
         let sections = vec![
             branch_section(self, &theme, cx),
             text_input_section(self, &theme),
-            fuzzy_section(self, &theme, cx),
+            fuzzy_section(self, cx.entity().downgrade(), &theme, cx),
             filter_section(self, &theme, cx),
             choice_section(self, &theme),
             tabs_and_select_section(self, &theme),

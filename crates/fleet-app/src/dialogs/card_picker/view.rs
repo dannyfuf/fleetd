@@ -24,18 +24,21 @@ pub(crate) fn render(
     let label = picker_label(state.read(cx), &draft.kind);
     let selected = draft.selected.clone();
     let accent = Tone::Accent.color(cx.theme());
-    let list = FuzzyList::new(rows.iter().map(|option| {
-        // A row that cannot be taken is drawn faint and never as the selection, so the reason
-        // in its trailing detail — `would cycle` — is the only thing left to read.
-        let mut item = FuzzyItem::new(option.label.clone()).disabled(option.disabled);
-        if let Some(detail) = option.detail.clone() {
-            item = item.trailing(detail);
-        }
-        if multi && selected.contains(&option.value) {
-            item = item.leading(Icon::Check.el().size(IconSize::Small).color(accent));
-        }
-        item
-    }))
+    let list = FuzzyList::new(
+        "card-picker-list",
+        rows.iter().map(|option| {
+            // A row that cannot be taken is drawn faint and never as the selection, so the reason
+            // in its trailing detail — `would cycle` — is the only thing left to read.
+            let mut item = FuzzyItem::new(option.label.clone()).disabled(option.disabled);
+            if let Some(detail) = option.detail.clone() {
+                item = item.trailing(detail);
+            }
+            if multi && selected.contains(&option.value) {
+                item = item.leading(Icon::Check.el().size(IconSize::Small).color(accent));
+            }
+            item
+        }),
+    )
     .cursor(draft.cursor)
     .cap(PICKER_ROWS)
     .under_text_field(true)
