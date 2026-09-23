@@ -25,8 +25,8 @@ use crate::{
     async_util::before_timeout,
     bridge::Bridge,
     dialogs::{DialogHost, notify, open_session, read_host, root, step, with_host},
-    presentation::FuzzyQuery,
-    state::{AppState, Cursors, HubPane, RepoScope, Screen},
+    presentation::{DisplayedPr, DisplayedTarget, FuzzyQuery, filter_target},
+    state::{AppState, HubPane, RepoScope, Screen},
 };
 
 mod branch;
@@ -327,12 +327,16 @@ impl CreateState {
     }
 }
 
+/// Where the user was when Create was pressed, so a late reply never yanks them from where they
+/// went since. The selection is held by identity, not by cursor index: the snapshot that lists
+/// the new worktree inserts its row and moves the cursor to keep the same row selected, which is
+/// not the user navigating.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NavigationIntent {
     screen: Screen,
     hub_pane: HubPane,
     scope: RepoScope,
-    cursors: Cursors,
+    selected: Option<DisplayedTarget>,
 }
 
 struct NavigationGuard {
@@ -370,7 +374,13 @@ impl NavigationIntent {
             screen: state.screen.clone(),
             hub_pane: state.hub_pane,
             scope: state.scope.clone(),
-            cursors: state.cursors.clone(),
+            selected: filter_target(state).map(|target| match target {
+                // A pull request's `local` fills in when its worktree appears; the row is the same.
+                DisplayedTarget::PullRequest(row) => {
+                    DisplayedTarget::PullRequest(DisplayedPr { local: None, ..row })
+                }
+                target => target,
+            }),
         }
     }
 

@@ -664,10 +664,35 @@ fn the_open_after_box_decides_what_enter_does(cx: &mut gpui::TestAppContext) {
     });
 }
 
+/// Two displayed worktree rows, `first` above `second`, as the Hub list draws them.
+fn displayed_rows(ids: &[&str]) -> Vec<crate::presentation::DisplayedWorktree> {
+    ids.iter()
+        .map(|id| crate::presentation::DisplayedWorktree {
+            id: WorktreeId::try_from(*id).unwrap_or_else(|error| panic!("{error}")),
+            repo: RepoId::try_from("buk/payroll").unwrap_or_else(|error| panic!("{error}")),
+        })
+        .collect()
+}
+
 #[test]
 fn late_creation_does_not_override_navigation() {
     let mut state = AppState::new("/tmp/fleet", Instant::now());
+    state.displayed_hub.worktrees = displayed_rows(&["buk/payroll#feature", "buk/payroll#other"]);
     let intent = NavigationIntent::capture(&state);
-    state.cursors.worktrees = 4;
+    state.cursors.worktrees = 1;
     assert!(!intent.matches(&state));
+}
+
+#[test]
+fn the_new_row_shifting_the_cursor_is_not_navigation() {
+    let mut state = AppState::new("/tmp/fleet", Instant::now());
+    state.displayed_hub.worktrees = displayed_rows(&["buk/payroll#feature"]);
+    let intent = NavigationIntent::capture(&state);
+    // The snapshot that lists the created worktree inserts it above and keeps `feature` selected.
+    state.displayed_hub.worktrees = displayed_rows(&["buk/payroll#created", "buk/payroll#feature"]);
+    state.cursors.worktrees = 1;
+    assert!(
+        intent.matches(&state),
+        "the same row is selected, so Create must still open the worktree"
+    );
 }
