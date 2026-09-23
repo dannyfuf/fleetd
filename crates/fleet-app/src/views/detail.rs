@@ -1,18 +1,18 @@
 //! Scrollable Hub detail surfaces and shared anatomy.
 
 use fleet_core::{
-    github::{PrChecks, PrReviewDecision, PullRequest, derive_pr_state, local_branch_for_pr},
+    github::{PullRequest, local_branch_for_pr},
     model::{CloneJob, CloneStatus, Repo, Worktree},
     sessions::{AgentActivity, SessionState, WorktreeStatus},
 };
 use fleet_proto::snapshot::PoolStatus;
 use fleet_ui_kit::{
-    ActiveTheme, FactRow, FactValue, Icon, IconSize, KeyValueList, Pane, PaneBorder, PrBadge,
-    SectionHeader, Sheet, StatusKind, Text, Tone, Truncate, format_age, truncate,
+    ActiveTheme, FactValue, Icon, IconSize, KeyValueList, Pane, PaneBorder, SectionHeader, Sheet,
+    StatusKind, Text, Tone, Truncate, format_age, truncate,
 };
 use gpui::{AnyElement, App, IntoElement, SharedString, div, prelude::*};
 
-use crate::presentation::{age_secs, pr_badge_state, row_glyph};
+use crate::presentation::{age_secs, row_glyph};
 
 mod inspection;
 mod pull_request;

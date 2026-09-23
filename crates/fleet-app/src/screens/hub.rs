@@ -48,6 +48,7 @@ mod cache;
 mod composition;
 mod navigation;
 mod palette;
+mod pr_pointer;
 mod projection;
 #[cfg(test)]
 pub(crate) mod tests;
@@ -335,6 +336,8 @@ pub struct HubScreen {
     /// Mirrors the editor into `FilterState.query`, which every projection and the harness
     /// dump read.
     filter_subscription: Option<Subscription>,
+    /// What a click on the PR screen's tabs and rows does, built once `bind` has the context.
+    pr_handlers: Option<prs_screen::PrHandlers>,
     home: Option<std::path::PathBuf>,
 }
 
@@ -361,6 +364,7 @@ impl HubScreen {
             observation: None,
             filter_input,
             filter_subscription: None,
+            pr_handlers: None,
             home: crate::presentation::home_dir(),
         }
     }
@@ -399,6 +403,7 @@ impl HubScreen {
             },
         ));
         let ctx = self.context(state, bridge);
+        self.pr_handlers = Some(ctx.pr_handlers());
         let observed = ctx.clone();
         let filter_input = self.filter_input.clone();
         self.observation = Some(cx.observe(state, move |state, cx| {

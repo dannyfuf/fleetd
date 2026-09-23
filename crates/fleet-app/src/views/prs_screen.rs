@@ -1,25 +1,51 @@
-//! Prepared pull-request rows and tab/list composition.
+//! The pull requests screen (UX-SPEC §3.5): its page header, the Mine / Waiting-for-my-review
+//! tabs, and the list of prepared rows.
+//!
+//! Rows are prepared in the update path ([`build_rows`], memoised by the Hub's projection) with
+//! every word they draw; a frame only copies those words into elements. Every button dispatches
+//! the action its key runs and shows that key from the live keymap; a press anywhere on a row
+//! first puts the cursor on it, so the action acts on the row the pointer is on.
 
 use std::collections::{HashMap, HashSet};
 
+use std::rc::Rc;
+
 use fleet_core::{
-    github::{PrTab, PullRequest, derive_pr_state},
+    github::{PrTab, PullRequest},
     ids::{HostId, RepoId, WorktreeId},
     model::Worktree,
 };
 use fleet_proto::response::PrSlice;
 use fleet_proto::snapshot::LinkState;
 use fleet_ui_kit::{
-    ActiveTheme, AgeLabel, ColumnLadder, HarnessTargetExt, Icon, IconSize, ListView, Pane,
-    PaneBorder, PrBadge, PrBadgeState, ResolvedColumn, Row, RowColumn, SegmentedTab, SegmentedTabs,
-    SkeletonRows, StatusGlyph, StatusKind, Text, Tone, Truncate, format_age, truncate,
+    ActiveTheme, AgeLabel, Button, ButtonSize, ButtonStyle, Callout, Chip, ColumnLadder,
+    FilterField, HarnessTargetExt, Icon, IconButton, IconSize, ListHeader, ListPointer, ListView,
+    Menu, MenuAnchor, MenuItem, PageHeader, Pane, PaneBorder, PopoverMenu, PrBadge, ResolvedColumn,
+    Row, RowColumn, SegmentedTab, SegmentedTabs, SkeletonRows, Spinner, StatusKind, Text, Tone,
+    Truncate, format_age, truncate,
 };
-use gpui::{AnyElement, App, IntoElement, SharedString, UniformListScrollHandle, div, prelude::*};
+use gpui::{
+    Action, AnyElement, App, Context, IntoElement, SharedString, UniformListScrollHandle, Window,
+    div, prelude::*,
+};
 
 use crate::{
-    presentation::{SnapshotIndex, age_secs, contains_folded, pr_badge_state},
-    views::{detail::resolved_worktree_status, first_run::EmptySurface},
+    action_catalogue,
+    actions::{hub as hub_actions, prs as pr_actions},
+    presentation::{SnapshotIndex, age_secs, contains_folded},
+    views::{
+        detail::resolved_worktree_status,
+        first_run::EmptySurface,
+        harness,
+        worktrees_list::{FilterSlot, OPEN_KEY},
+    },
 };
+
+mod cells;
+#[cfg(test)]
+mod tests;
+
+pub use cells::{Checks, ChecksKind, ReviewState};
 
 /// The `All` scope cap of §3.5 [D-7]: never a refusal, always a final "narrow me" row.
 const ALL_SCOPE_CAP: usize = 100;
@@ -29,6 +55,20 @@ const HEAD_BUDGET: usize = 12;
 const REPO_BUDGET: usize = 10;
 /// How many skeleton rows a cold load shows (§3.5).
 const SKELETON_ROWS: usize = 6;
+/// The page's title.
+const TITLE: &str = "Pull requests";
+/// The filter field's placeholder.
+const FILTER_PLACEHOLDER: &str = "Filter";
+/// The two tabs' labels (§3.5).
+const MINE: &str = "Mine";
+const REVIEW: &str = "Waiting for my review";
+/// The tag after the title of a PR that already has a local worktree: opening it is instant.
+const HAS_WORKTREE: &str = "has worktree";
+/// The tag while `Enter` / `c` is creating that worktree.
+const CREATING: &str = "creating worktree";
+/// The error callout's button. It runs `r`, whose catalogue label is the longer "Refresh pull
+/// requests"; next to a failure the verb a person looks for is "Retry".
+const RETRY: &str = "Retry";
 
 /// One PR row, resolved against the local worktrees.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,8 +85,12 @@ pub struct PrRow {
     pub head: SharedString,
     /// Whether the head lives in another repository (`git-fork` prefix).
     pub cross_repository: bool,
-    /// The collapsed state badge.
-    pub state: PrBadgeState,
+    /// Where the review stands: the state chip.
+    pub review: ReviewState,
+    /// The checks column.
+    pub checks: Checks,
+    /// Whether `Enter` / `c` is creating this PR's worktree right now.
+    pub creating: bool,
     /// Age of `updatedAt`, in seconds.
     pub age: Option<i64>,
     /// The §2.5 glyph of column 1: the local worktree's session, or a 30 % dot.
@@ -111,44 +155,44 @@ pub fn build_rows(inputs: &PrInputs<'_>, index: &SnapshotIndex<'_>) -> Vec<PrRow
                 .chain(base)
                 .min()
                 .and_then(|position| inputs.worktrees.get(*position));
-            let (presence_glyph, local, host, host_link) =
-                if creating.contains(&(&pr.repo_id, pr.number)) {
-                    (StatusKind::JobRunning, None, None, None)
-                } else if let Some(worktree) = local {
-                    let status = index.status(&worktree.id);
-                    let slept = index
-                        .sessions_for_worktree(&worktree.id)
-                        .iter()
-                        .any(|session| session.slept_at.is_some());
-                    let unreachable = worktree.host.as_ref().is_some_and(|host| {
-                        index.host(host).is_none_or(|status| {
-                            !status.reachable || status.link == LinkState::Down
-                        })
-                    });
-                    let host_link = worktree
-                        .host
-                        .as_ref()
-                        .and_then(|host| index.host(host))
-                        .map(|status| status.link);
-                    let job_running = index
-                        .jobs_for_target(worktree.id.as_str())
-                        .iter()
-                        .any(|job| crate::views::worktrees_list::owns_row(job));
-                    (
-                        resolved_worktree_status(
-                            status,
-                            slept,
-                            worktree.degraded.is_some(),
-                            unreachable,
-                            job_running,
-                        ),
-                        Some(worktree.id.clone()),
-                        worktree.host.clone(),
-                        host_link,
-                    )
-                } else {
-                    (StatusKind::NoSession, None, None, None)
-                };
+            let is_creating = creating.contains(&(&pr.repo_id, pr.number));
+            let (presence_glyph, local, host, host_link) = if is_creating {
+                (StatusKind::JobRunning, None, None, None)
+            } else if let Some(worktree) = local {
+                let status = index.status(&worktree.id);
+                let slept = index
+                    .sessions_for_worktree(&worktree.id)
+                    .iter()
+                    .any(|session| session.slept_at.is_some());
+                let unreachable = worktree.host.as_ref().is_some_and(|host| {
+                    index
+                        .host(host)
+                        .is_none_or(|status| !status.reachable || status.link == LinkState::Down)
+                });
+                let host_link = worktree
+                    .host
+                    .as_ref()
+                    .and_then(|host| index.host(host))
+                    .map(|status| status.link);
+                let job_running = index
+                    .jobs_for_target(worktree.id.as_str())
+                    .iter()
+                    .any(|job| crate::views::worktrees_list::owns_row(job));
+                (
+                    resolved_worktree_status(
+                        status,
+                        slept,
+                        worktree.degraded.is_some(),
+                        unreachable,
+                        job_running,
+                    ),
+                    Some(worktree.id.clone()),
+                    worktree.host.clone(),
+                    host_link,
+                )
+            } else {
+                (StatusKind::NoSession, None, None, None)
+            };
             PrRow {
                 repo: pr.repo_id.clone(),
                 number: pr.number,
@@ -156,7 +200,9 @@ pub fn build_rows(inputs: &PrInputs<'_>, index: &SnapshotIndex<'_>) -> Vec<PrRow
                 author: SharedString::from(pr.author.clone()),
                 head: SharedString::from(pr.head_ref_name.clone()),
                 cross_repository: pr.is_cross_repository,
-                state: pr_badge_state(derive_pr_state(pr.is_draft, pr.checks, pr.review_decision)),
+                review: ReviewState::of(pr.is_draft, pr.review_decision),
+                checks: Checks::of(pr.checks, pr.checks_passed, pr.checks_total),
+                creating: is_creating,
                 age: age_secs(&pr.updated_at, inputs.now),
                 presence: presence_glyph,
                 local,
@@ -168,7 +214,7 @@ pub fn build_rows(inputs: &PrInputs<'_>, index: &SnapshotIndex<'_>) -> Vec<PrRow
         .collect()
 }
 
-/// How many rows the cap hid, for the faint `+n more — select a repo to narrow` row.
+/// How many rows the cap hid, for the `+n more — select a repo to narrow` button.
 #[must_use]
 pub fn hidden_rows(slice: Option<&PrSlice>) -> usize {
     slice.map_or(0, |slice| slice.total.saturating_sub(ALL_SCOPE_CAP))
@@ -189,8 +235,8 @@ pub fn matches(row: &PrRow, query: &str) -> bool {
 
 /// Everything the screen needs to draw itself.
 pub struct PrProps<Rows = Vec<PrRow>> {
-    /// A live filter editor that replaces the tab header.
-    pub header_override: Option<AnyElement>,
+    /// The page header's filter field: idle (with any retained query) or the live editor.
+    pub filter_slot: FilterSlot,
     /// The rows of the active tab, already filtered.
     pub rows: Rows,
     /// Cursor index into `rows`.
@@ -199,9 +245,9 @@ pub struct PrProps<Rows = Vec<PrRow>> {
     pub focused: bool,
     /// Which tab is active.
     pub tab: PrTab,
-    /// `MINE`'s count, or `None` while it is loading (`…`).
+    /// Mine's count, or `None` while it is loading (`…`).
     pub mine_count: Option<usize>,
-    /// `REVIEW`'s count, or `None` while it is loading.
+    /// The review tab's count, or `None` while it is loading.
     pub review_count: Option<usize>,
     /// Age of the active slice's `fetchedAt`, in seconds.
     pub fetched_age: Option<i64>,
@@ -219,17 +265,91 @@ pub struct PrProps<Rows = Vec<PrRow>> {
     pub multi_repo: bool,
     /// The scope's name, for the empty states.
     pub scope: SharedString,
+    /// What the subtitle says the list covers: the repository, or the context in `All`.
+    pub covers: SharedString,
     /// The live filter query, when one is set.
     pub filter: Option<SharedString>,
 }
 
-/// Renders the tabs, the fetch stamp, the error row and the list.
+/// A row-indexed pointer handler.
+type RowHandler = Rc<dyn Fn(usize, &mut Window, &mut App)>;
+/// A tab handler.
+type TabHandler = Rc<dyn Fn(PrTab, &mut Window, &mut App)>;
+
+/// What the screen's pointer does, built once by the Hub and cloned into each frame.
+#[derive(Clone)]
+pub struct PrHandlers {
+    /// A click on a tab: the same switch `Tab` / `h` / `l` make.
+    pub select_tab: TabHandler,
+    /// A press on row `ix`: put the cursor on it.
+    pub select_row: RowHandler,
+    /// A double-click on row `ix`: what `⏎` does on it.
+    pub open_row: RowHandler,
+}
+
+impl PrHandlers {
+    /// Handlers that do nothing, for a render test or a gallery.
+    #[must_use]
+    pub fn inert() -> Self {
+        Self {
+            select_tab: Rc::new(|_, _, _| {}),
+            select_row: Rc::new(|_, _, _| {}),
+            open_row: Rc::new(|_, _, _| {}),
+        }
+    }
+
+    /// The rows' click / double-click / right-click contract (UX-SPEC §5.1): a press selects, a
+    /// double-click opens as `⏎` does, and a right click selects before the row's `ContextMenu`
+    /// opens its menu.
+    fn pointer(&self) -> ListPointer {
+        let select = self.select_row.clone();
+        let open = self.open_row.clone();
+        ListPointer::new()
+            .on_select(move |ix, window, cx| select(ix, window, cx))
+            .on_open(move |ix, window, cx| open(ix, window, cx))
+            // The row's `ContextMenu` shows the menu; this handler exists so the right click is
+            // routed through `on_select` first and the menu acts on the row under the pointer.
+            .on_menu(|_, _, _, _| {})
+    }
+}
+
+/// The catalogue's short label for an action: what a button or a menu item reads.
+fn label(action: &dyn Action) -> &'static str {
+    action_catalogue::info(action.name()).map_or("", |info| info.short_label)
+}
+
+/// The verbs one pull request offers, as the row's ⋯, its right-click menu and the detail
+/// panel's ⋯ all list them. A verb that cannot work on this PR is left out, not greyed:
+/// `c` only creates, so it is absent once a worktree exists, and `I` only checks one.
+pub fn menu_builder(
+    local: bool,
+    creating: bool,
+) -> impl Fn(Menu, &mut Window, &mut Context<Menu>) -> Menu + Clone + 'static {
+    move |menu, _, _| {
+        let entry = |action: Box<dyn Action>| MenuItem::new(label(action.as_ref())).action(action);
+        let mut menu = menu
+            .item(entry(Box::new(pr_actions::Open)))
+            .item(entry(Box::new(pr_actions::OpenKeepAwake)));
+        if !local && !creating {
+            menu = menu.item(entry(Box::new(pr_actions::CreateWithoutOpening)));
+        }
+        if local {
+            menu = menu.item(entry(Box::new(pr_actions::Inspect)));
+        }
+        menu.separator()
+            .item(entry(Box::new(hub_actions::OpenInBrowser)))
+            .item(entry(Box::new(pr_actions::CopyUrl)))
+    }
+}
+
+/// Renders the page header, the tabs, the error callout and the list.
 ///
 /// `age_offset` ages the prepared rows by the seconds elapsed since the projection was built,
 /// so a clock tick re-labels the age column without rebuilding the model.
 #[must_use]
 pub fn render(
     props: PrProps<impl AsRef<[PrRow]> + 'static>,
+    handlers: &PrHandlers,
     scroll: &UniformListScrollHandle,
     age_offset: i64,
     cx: &App,
@@ -237,7 +357,7 @@ pub fn render(
     let theme = cx.theme();
     let PrProps {
         rows,
-        header_override,
+        filter_slot,
         cursor,
         focused,
         tab,
@@ -251,75 +371,112 @@ pub fn render(
         pane_ch,
         multi_repo,
         scope,
+        covers,
         filter,
     } = props;
 
-    let tabs = SegmentedTabs::new([tab_of("Mine", mine_count), tab_of("Review", review_count)])
-        .active(usize::from(tab == PrTab::Review))
-        .harness_tabs("prs.tab");
+    let select_tab = handlers.select_tab.clone();
+    let tabs = SegmentedTabs::new([
+        tab_of(MINE, mine_count),
+        tab_of(REVIEW, review_count).attention(true),
+    ])
+    .active(usize::from(tab == PrTab::Review))
+    .harness_tabs("prs.tab")
+    .on_select(move |index, window, cx| {
+        let tab = if index == 0 {
+            PrTab::Mine
+        } else {
+            PrTab::Review
+        };
+        select_tab(tab, window, cx);
+    });
 
-    let stamp = Text::ui(fetch_stamp_text(loading, fetched_age));
-    let stamp = if !loading && fetched_age.is_some() && error.is_some() {
-        stamp.tone(Tone::Warning)
-    } else {
-        stamp.muted()
-    };
+    let header = page_header(covers, fetch_stamp_text(loading, fetched_age), filter_slot);
 
-    let header = div()
-        .flex()
-        .items_center()
-        .justify_between()
-        .w_full()
-        .h(theme.metrics.pane_header_h)
-        .px(theme.space.md)
-        .child(tabs)
-        .child(stamp);
-
-    let empty = match (filter.clone(), tab) {
-        (Some(query), _) => EmptySurface::Filter.render(Some(&query)),
-        (None, PrTab::Mine) => EmptySurface::PrsMine.render(Some(&scope)),
-        (None, PrTab::Review) => EmptySurface::PrsReview.render(Some(&scope)),
-    };
-
+    // The page's own side padding is not the list's width: the ladder resolves against what is
+    // left between the list's two gutters.
+    let list_ch = pane_ch - f32::from(theme.space.md * 2.0) / fleet_ui_kit::theme::CH;
     let columns =
-        ColumnLadder::pull_requests_for(tab == PrTab::Review, multi_repo).resolve(pane_ch);
+        ColumnLadder::pull_requests_for(tab == PrTab::Review, multi_repo).resolve(list_ch);
     let row_count = rows.as_ref().len();
+    let empty = empty_state(filter, tab, &scope, cx);
+    let list_header = (row_count > 0 && !cold).then(|| column_heads(&columns));
+    let pointer = handlers.pointer();
     let body_rows = rows;
+    let row_columns = columns;
     let list = ListView::new("hub-prs", row_count, move |index, is_cursor, _w, cx| {
         let Some(row) = body_rows.as_ref().get(index) else {
             return div().into_any_element();
         };
-        pr_row(row, is_cursor, focused, &columns, age_offset, cx)
-            .harness_target_indexed("prs.row", index)
-            .into_any_element()
+        pr_row(
+            row,
+            RowContext {
+                ix: index,
+                is_cursor,
+                focused,
+                columns: &row_columns,
+                age_offset,
+                pointer: &pointer,
+            },
+            cx,
+        )
     })
+    .row_height(theme.metrics.row_h_comfortable)
     .cursor(cursor)
     .track_scroll(scroll)
     .empty(empty);
 
-    let body = div()
+    let page = div()
         .flex()
         .flex_col()
         .size_full()
         .min_h_0()
-        .children(error.map(|message| error_row(message, cx)))
-        .child(if cold {
-            SkeletonRows::new(SKELETON_ROWS).into_any_element()
-        } else {
-            div().flex_1().min_h_0().child(list).into_any_element()
-        })
-        .children((hidden > 0).then(|| {
+        .child(
             div()
+                .flex()
+                .flex_col()
+                .flex_none()
+                .px(theme.space.xl)
+                .pt(theme.space.xl)
+                .child(div().pb(theme.space.md).child(header))
+                .child(
+                    div()
+                        .flex_none()
+                        .w_full()
+                        .border_b(theme.metrics.hairline)
+                        .border_color(theme.colors.border)
+                        .child(tabs),
+                )
+                .children(error.map(|message| error_callout(message, cx))),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
                 .px(theme.space.md)
-                .child(Text::ui(format!("+{hidden} more \u{2014} select a repo to narrow")).faint())
-        }));
+                .pt(theme.space.sm)
+                .children(list_header)
+                .child(if cold {
+                    SkeletonRows::new(SKELETON_ROWS)
+                        .row_height(theme.metrics.row_h_comfortable)
+                        .into_any_element()
+                } else {
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .pt(theme.space.xs)
+                        .child(list)
+                        .into_any_element()
+                })
+                .children((hidden > 0).then(|| more_button(hidden, cx))),
+        );
 
-    let header = header_override.unwrap_or_else(|| header.into_any_element());
     Pane::new()
         .border(PaneBorder::None)
         .focused(focused)
-        .header(header)
-        .body(body)
+        .body(page)
         .into_any_element()
 }
 
@@ -336,366 +493,303 @@ fn fetch_stamp_text(loading: bool, fetched_age: Option<i64>) -> SharedString {
             "\u{27F3} refreshing · fetched {} ago",
             format_age(age)
         )),
-        (true, None) => SharedString::new_static("\u{27F3} refreshing"),
+        (true, None) => SharedString::new_static("\u{27F3} refreshing\u{2026}"),
         (false, Some(age)) => SharedString::from(format!("fetched {} ago", format_age(age))),
         (false, None) => SharedString::new_static("never fetched"),
     }
 }
 
-/// The sticky error row of §3.5: it never hides the stale rows underneath it.
-fn error_row(message: SharedString, cx: &App) -> AnyElement {
+/// `Pull requests` over `Open on GitHub for <scope> · fetched 12s ago`, then the filter field
+/// and Refresh.
+fn page_header(covers: SharedString, stamp: SharedString, filter: FilterSlot) -> PageHeader {
+    let field = match filter {
+        FilterSlot::Idle(query) => {
+            let field = FilterField::new("prs-filter", FILTER_PLACEHOLDER)
+                .action(Box::new(hub_actions::OpenFilter));
+            let field = match query {
+                Some(query) => field.query(query),
+                None => field,
+            };
+            field.harness_target("prs.filter").into_any_element()
+        }
+        FilterSlot::Editing {
+            input,
+            shown,
+            total,
+            ..
+        } => FilterField::new("prs-filter", FILTER_PLACEHOLDER)
+            .editor(input)
+            .counts(shown, total)
+            .harness_target("filter.input")
+            .into_any_element(),
+    };
+    PageHeader::new(TITLE)
+        .subtitle(format!("Open on GitHub for {covers} \u{00b7} {stamp}"))
+        .action(field)
+        .action(
+            Button::new("prs-refresh", label(&pr_actions::Refresh))
+                .icon(Icon::RefreshCw)
+                .action(Box::new(pr_actions::Refresh))
+                .harness_target("prs.refresh"),
+        )
+}
+
+/// The column heads, from the same ladder resolution as the rows.
+fn column_heads(columns: &[ResolvedColumn]) -> ListHeader {
+    columns.iter().fold(ListHeader::new(), |header, column| {
+        let label = match column.key.as_ref() {
+            "number" => "#",
+            "title" => "Title",
+            "author" => "Author",
+            "head" => "Branch",
+            "repo" => "Repository",
+            "state" => "Status",
+            "checks" => "Checks",
+            "age" => "Age",
+            _ => "",
+        };
+        header.column(column, label)
+    })
+}
+
+/// The sticky error of §3.5, as a callout with the Retry its `r` runs. It never hides the stale
+/// rows underneath it.
+fn error_callout(message: SharedString, cx: &App) -> AnyElement {
     let theme = cx.theme();
     div()
         .flex()
+        .flex_none()
         .items_center()
         .gap(theme.space.sm)
-        .w_full()
-        .h(theme.metrics.row_h)
-        .px(theme.space.md)
+        .pt(theme.space.md)
         .child(
-            Icon::CircleX
-                .el()
-                .size(IconSize::Small)
-                .color(Tone::Danger.color(theme)),
+            div().flex_1().min_w_0().child(
+                Callout::new(Tone::Danger, Icon::CircleX, "Could not load pull requests")
+                    .detail(message),
+            ),
         )
-        .child(Text::ui(message).tone(Tone::Danger).ellipsize())
-        .child(Text::hint("r  retry"))
+        .child(
+            Button::new("prs-retry", RETRY)
+                .action(Box::new(pr_actions::Refresh))
+                .harness_target("prs.retry"),
+        )
         .into_any_element()
 }
 
-/// One PR row, built strictly from the resolved §2.9 columns.
-fn pr_row(
-    row: &PrRow,
-    is_cursor: bool,
-    focused: bool,
-    columns: &[ResolvedColumn],
-    age_offset: i64,
+/// An empty tab: the fact, and the button that does what the old `r  refresh` hint said.
+fn empty_state(
+    filter: Option<SharedString>,
+    tab: PrTab,
+    scope: &SharedString,
     cx: &App,
 ) -> AnyElement {
+    if let Some(query) = filter {
+        return EmptySurface::Filter.render(Some(&query));
+    }
+    let surface = match tab {
+        PrTab::Mine => EmptySurface::PrsMine,
+        PrTab::Review => EmptySurface::PrsReview,
+    };
+    let (fact, _) = surface.copy(Some(scope));
     let theme = cx.theme();
-    let mut element = Row::new()
-        .leading(
-            StatusGlyph::new(row.presence).id(SharedString::from(format!(
-                "pr-glyph-{}-{}",
-                row.repo, row.number
-            ))),
+    div()
+        .flex()
+        .flex_col()
+        .size_full()
+        .items_center()
+        .justify_center()
+        .gap(theme.space.md)
+        .child(Text::ui(fact).muted())
+        .child(
+            Button::new("prs-empty-refresh", label(&pr_actions::Refresh))
+                .icon(Icon::RefreshCw)
+                .action(Box::new(pr_actions::Refresh)),
         )
+        .into_any_element()
+}
+
+/// `+n more — select a repo to narrow`: the §3.5 [D-7] cap row, as the button that takes the
+/// keyboard to the repositories.
+fn more_button(hidden: usize, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    div()
+        .flex_none()
+        .py(theme.space.sm)
+        .child(
+            Button::new(
+                "prs-more",
+                format!("+{hidden} more \u{2014} select a repo to narrow"),
+            )
+            .style(ButtonStyle::Ghost)
+            .size(ButtonSize::Compact)
+            .action(Box::new(hub_actions::GoRepos))
+            .harness_target("prs.more"),
+        )
+        .into_any_element()
+}
+
+/// What one row needs besides its PR.
+struct RowContext<'a> {
+    ix: usize,
+    is_cursor: bool,
+    focused: bool,
+    columns: &'a [ResolvedColumn],
+    age_offset: i64,
+    pointer: &'a ListPointer,
+}
+
+/// One PR row at the comfortable density, built strictly from the resolved §2.9 columns, with
+/// its hover actions and its right-click menu.
+fn pr_row(row: &PrRow, context: RowContext<'_>, cx: &App) -> AnyElement {
+    let RowContext {
+        ix,
+        is_cursor,
+        focused,
+        columns,
+        age_offset,
+        pointer,
+    } = context;
+    let theme = cx.theme();
+    let mut element = Row::with_id(("pr-row", ix))
+        .comfortable()
         .selected(is_cursor)
         .cursor(is_cursor && focused);
 
     for column in columns {
-        let cell: Option<AnyElement> = match column.key.as_ref() {
-            "presence" => None,
-            "number" => Some(
-                Text::data_small(format!("#{}", row.number))
-                    .muted()
-                    .into_any_element(),
-            ),
-            "title" => Some(Text::ui(row.title.clone()).ellipsize().into_any_element()),
-            "author" => Some(
-                Text::ui(row.author.clone())
-                    .muted()
-                    .ellipsize()
-                    .into_any_element(),
-            ),
-            "head" => Some(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(theme.space.xxs)
-                    .when(row.cross_repository, |el| {
-                        el.child(
-                            Icon::GitFork
-                                .el()
-                                .size(IconSize::Small)
-                                .color(Tone::Secondary.color(theme)),
-                        )
-                    })
-                    .child(
-                        Text::data_small(truncate(row.head.as_ref(), HEAD_BUDGET, Truncate::Tail))
-                            .muted(),
+        let cell: AnyElement = match column.key.as_ref() {
+            "number" => Text::data_small(format!("#{}", row.number))
+                .muted()
+                .into_any_element(),
+            "title" => div()
+                .flex()
+                .items_center()
+                .gap(theme.space.sm)
+                .min_w_0()
+                .child(Text::ui_strong(row.title.clone()).ellipsize())
+                .children(worktree_tag(row))
+                .into_any_element(),
+            "author" => Text::ui(row.author.clone())
+                .muted()
+                .ellipsize()
+                .into_any_element(),
+            "head" => div()
+                .flex()
+                .items_center()
+                .gap(theme.space.xxs)
+                .when(row.cross_repository, |el| {
+                    el.child(
+                        Icon::GitFork
+                            .el()
+                            .size(IconSize::Small)
+                            .color(Tone::Secondary.color(theme)),
                     )
-                    .into_any_element(),
-            ),
-            "repo" => Some(
-                Text::data_small(truncate(row.repo.as_ref(), REPO_BUDGET, Truncate::Head))
-                    .muted()
-                    .into_any_element(),
-            ),
-            "state" => Some(PrBadge::state_only(row.state).into_any_element()),
-            "age" => Some(
-                row.age
-                    .map_or_else(AgeLabel::none, |age| {
-                        AgeLabel::from_secs(age.saturating_add(age_offset).max(0))
-                    })
-                    .into_any_element(),
-            ),
-            _ => None,
+                })
+                .child(
+                    Text::data_small(truncate(row.head.as_ref(), HEAD_BUDGET, Truncate::Tail))
+                        .muted(),
+                )
+                .into_any_element(),
+            "repo" => Text::ui(truncate(row.repo.as_ref(), REPO_BUDGET, Truncate::Head))
+                .muted()
+                .into_any_element(),
+            "state" => state_chip(row.review).into_any_element(),
+            "checks" => checks_cell(&row.checks, ("pr-checks", ix), cx),
+            "age" => row
+                .age
+                .map_or_else(AgeLabel::none, |age| {
+                    AgeLabel::from_secs(age.saturating_add(age_offset).max(0))
+                })
+                .into_any_element(),
+            "actions" => {
+                element = element
+                    .column(RowColumn::resolved(column, hover_actions(row, ix, cx)).hover_only());
+                continue;
+            }
+            _ => continue,
         };
-        let Some(cell) = cell else { continue };
         element = element.column(RowColumn::resolved(column, cell));
     }
-    element.into_any_element()
+
+    let element = pointer.attach(ix, element);
+    fleet_ui_kit::ContextMenu::new(
+        ("pr-menu", ix),
+        element.harness_target_indexed("prs.row", ix),
+    )
+    .menu(menu_builder(row.local.is_some(), row.creating))
+    .into_any_element()
 }
 
-#[cfg(test)]
-mod tests {
-    use fleet_core::{
-        github::{PrChecks, PrReviewDecision},
-        ids::{HostId, WorktreeId},
-        model::Degraded,
-    };
+/// The review state as the kit's PR chip, the same pill the worktrees page draws.
+pub fn state_chip(review: ReviewState) -> PrBadge {
+    PrBadge::state_only(review.badge()).chip()
+}
 
-    use super::*;
-
-    use fleet_proto::snapshot::{HostStatus, Snapshot};
-
-    fn pr(number: u64, updated: &str, cross: bool, head: &str) -> PullRequest {
-        PullRequest {
-            repo_id: RepoId::try_from("buk/payroll").unwrap_or_else(|error| panic!("{error}")),
-            number,
-            title: format!("PR {number}"),
-            url: format!("https://github.com/buk/payroll/pull/{number}"),
-            author: "dannyfuf".to_owned(),
-            head_ref_name: head.to_owned(),
-            base_ref_name: "main".to_owned(),
-            is_draft: false,
-            is_cross_repository: cross,
-            head_repo: None,
-            review_decision: PrReviewDecision::None,
-            checks: PrChecks::Pass,
-            checks_passed: None,
-            checks_total: None,
-            additions: 1,
-            deletions: 1,
-            labels: Vec::new(),
-            updated_at: updated.to_owned(),
-        }
+/// `has worktree`, or a spinning `creating worktree` while `Enter` / `c` makes one.
+fn worktree_tag(row: &PrRow) -> Option<Chip> {
+    if row.creating {
+        return Some(
+            Chip::labeled(Icon::LoaderCircle, CREATING)
+                .spinning(true)
+                .id(SharedString::from(format!(
+                    "pr-creating-{}-{}",
+                    row.repo, row.number
+                )))
+                .filled(true),
+        );
     }
+    row.local.is_some().then(|| {
+        Chip::new()
+            .text(HAS_WORKTREE)
+            .tone(Tone::Secondary)
+            .filled(true)
+    })
+}
 
-    fn worktree(branch: &str, base: &str) -> Worktree {
-        Worktree {
-            id: WorktreeId::try_from(format!("buk/payroll#{}", branch.replace('/', "-")))
-                .unwrap_or_else(|error| panic!("{error}")),
-            repo_id: RepoId::try_from("buk/payroll").unwrap_or_else(|error| panic!("{error}")),
-            slug: "local".to_owned(),
-            branch: branch.to_owned(),
-            base_ref: base.to_owned(),
-            path: "/tmp/wt".to_owned(),
-            session: "payroll/local".to_owned(),
-            host: None,
-            created_at: "2026-09-01T10:00:00Z".to_owned(),
-            last_opened_at: None,
-            degraded: None,
-        }
-    }
-
-    fn slice(prs: Vec<PullRequest>, total: usize) -> PrSlice {
-        PrSlice {
-            tab: PrTab::Mine,
-            fetched_at: "2026-09-04T11:59:00Z".to_owned(),
-            loading: false,
-            error: None,
-            total,
-            prs,
-        }
-    }
-
-    /// A snapshot carrying only what a PR row build reads through the index.
-    fn snapshot(worktrees: Vec<Worktree>) -> Snapshot {
-        Snapshot {
-            boards: Vec::new(),
-            generated_at: String::new(),
-            revision: None,
-            contexts: Vec::new(),
-            repos: Vec::new(),
-            clones: Vec::new(),
-            worktrees,
-            active_context: None,
-            sessions: Vec::new(),
-            agent_threads: Vec::new(),
-            statuses: Vec::new(),
-            pools: Vec::new(),
-            hosts: Vec::new(),
-            jobs: Vec::new(),
-            daemon: fleet_proto::snapshot::DaemonInfo {
-                version: String::new(),
-                pid: 1,
-                started_at: String::new(),
-                home: String::new(),
-            },
-        }
-    }
-
-    fn rows(slice: &PrSlice, snapshot: &Snapshot, creating: &[(RepoId, u64)]) -> Vec<PrRow> {
-        build_rows(
-            &PrInputs {
-                slice: Some(slice),
-                worktrees: &snapshot.worktrees,
-                creating,
-                now: 1_788_523_200,
-            },
-            &SnapshotIndex::new(snapshot),
+/// The checks cell: a glyph (or a spinner) and the word, in the checks' tone.
+fn checks_cell(checks: &Checks, id: (&'static str, usize), cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let tone = checks.tone();
+    div()
+        .flex()
+        .items_center()
+        .gap(theme.space.xs)
+        .children(
+            checks
+                .icon()
+                .map(|icon| icon.el().size(IconSize::Small).color(tone.color(theme))),
         )
-    }
+        .when(checks.kind == ChecksKind::Running, |el| {
+            el.child(Spinner::new(id).size(IconSize::Small).tone(tone))
+        })
+        .child(Text::ui(checks.label.clone()).tone(tone))
+        .into_any_element()
+}
 
-    #[test]
-    fn rows_sort_by_update_time_and_cap_at_one_hundred() {
-        let prs: Vec<PullRequest> = (1..=120)
-            .map(|index| {
-                pr(
-                    index,
-                    &format!("2026-09-0{}T10:00:00Z", (index % 9) + 1),
-                    false,
-                    "feat/x",
-                )
-            })
-            .collect();
-        let slice = slice(prs, 120);
-        let rows = rows(&slice, &snapshot(Vec::new()), &[]);
-        assert_eq!(rows.len(), ALL_SCOPE_CAP);
-        assert_eq!(hidden_rows(Some(&slice)), 20);
-        assert!(rows[0].age <= rows[ALL_SCOPE_CAP - 1].age);
-    }
-
-    #[test]
-    fn a_pull_request_without_a_local_worktree_shows_the_dim_dot() {
-        let slice = slice(vec![pr(1, "2026-09-04T10:00:00Z", false, "feat/x")], 1);
-        let rows = rows(&slice, &snapshot(Vec::new()), &[]);
-        assert_eq!(rows[0].presence, StatusKind::NoSession);
-        assert_eq!(rows[0].local, None);
-    }
-
-    #[test]
-    fn a_matching_worktree_lights_the_presence_glyph() {
-        let slice = slice(vec![pr(1, "2026-09-04T10:00:00Z", false, "feat/x")], 1);
-        let rows = rows(
-            &slice,
-            &snapshot(vec![worktree("feat/x", "origin/main")]),
-            &[],
-        );
-        assert!(rows[0].local.is_some());
-        assert_eq!(
-            rows[0].presence,
-            StatusKind::Unknown,
-            "a worktree with no status yet is unknown, never `none`"
-        );
-    }
-
-    #[test]
-    fn a_pull_ref_worktree_matches_across_repositories() {
-        let slice = slice(vec![pr(412, "2026-09-04T10:00:00Z", true, "feat/x")], 1);
-        let rows = rows(
-            &slice,
-            &snapshot(vec![worktree("pr/412", "pull/412/head")]),
-            &[],
-        );
-        assert!(rows[0].local.is_some());
-    }
-
-    #[test]
-    fn creating_a_worktree_spins_the_presence_glyph_without_moving_the_row() {
-        let repo = RepoId::try_from("buk/payroll").unwrap_or_else(|error| panic!("{error}"));
-        let slice = slice(vec![pr(7, "2026-09-04T10:00:00Z", false, "feat/x")], 1);
-        let rows = rows(&slice, &snapshot(Vec::new()), &[(repo, 7)]);
-        assert_eq!(rows[0].presence, StatusKind::JobRunning);
-    }
-
-    #[test]
-    fn pr_presence_obeys_worktree_health_precedence() {
-        let pull_requests = slice(vec![pr(1, "2026-09-04T10:00:00Z", false, "feat/x")], 1);
-        let mut degraded = worktree("feat/x", "origin/main");
-        degraded.degraded = Some(Degraded {
-            kind: "post_create_hooks".to_owned(),
-            step: "1".to_owned(),
-            exit_code: Some(1),
-            at: "2026-09-04T11:00:00Z".to_owned(),
-            log_path: "/tmp/hooks.log".to_owned(),
-        });
-        let degraded_snapshot = snapshot(vec![degraded]);
-        assert_eq!(
-            rows(&pull_requests, &degraded_snapshot, &[])[0].presence,
-            StatusKind::Degraded
-        );
-
-        let mut remote = worktree("feat/x", "origin/main");
-        let host = HostId::try_from("devbox").unwrap_or_else(|error| panic!("{error}"));
-        remote.host = Some(host.clone());
-        let mut offline_snapshot = snapshot(vec![remote]);
-        offline_snapshot.hosts.push(HostStatus {
-            id: host,
-            provider: "tailscale".to_owned(),
-            version: None,
-            link: fleet_proto::snapshot::LinkState::Down,
-            address: None,
-            agent_binaries: None,
-            reachable: true,
-            checked_at: "2026-09-04T11:59:00Z".to_owned(),
-            error: Some("ssh timed out".to_owned()),
-        });
-        assert_eq!(
-            rows(&pull_requests, &offline_snapshot, &[])[0].presence,
-            StatusKind::HostUnreachable
-        );
-        let row = &rows(&pull_requests, &offline_snapshot, &[])[0];
-        assert_eq!(row.host.as_ref().map(HostId::as_str), Some("devbox"));
-        assert_eq!(row.host_link, Some(LinkState::Down));
-    }
-
-    #[test]
-    fn refreshing_counts_are_consistently_marked() {
-        let cached = tab_of("Mine", Some(7));
-        assert_eq!(cached.count, Some(7));
-        assert!(!cached.loading);
-        assert_eq!(cached.count_text().as_deref(), Some("7"));
-        assert_eq!(
-            fetch_stamp_text(true, Some(120)).as_ref(),
-            "\u{27F3} refreshing · fetched 2m ago"
-        );
-
-        let settled = tab_of("Review", Some(4));
-        assert_eq!(settled.count_text().as_deref(), Some("4"));
-        let cold = tab_of("Review", None);
-        assert!(cold.loading);
-        assert_eq!(cold.count_text().as_deref(), Some("\u{2026}"));
-    }
-
-    #[test]
-    fn badge_states_follow_the_documented_priority() {
-        assert_eq!(
-            pr_badge_state(derive_pr_state(
-                true,
-                PrChecks::Fail,
-                PrReviewDecision::Approved
-            )),
-            PrBadgeState::Draft
-        );
-        assert_eq!(
-            pr_badge_state(derive_pr_state(
-                false,
-                PrChecks::Fail,
-                PrReviewDecision::Approved
-            )),
-            PrBadgeState::CiFail
-        );
-        assert_eq!(
-            pr_badge_state(derive_pr_state(
-                false,
-                PrChecks::Pass,
-                PrReviewDecision::Approved
-            )),
-            PrBadgeState::Approved
-        );
-    }
-
-    #[test]
-    fn the_filter_matches_number_title_author_and_branch() {
-        let slice = slice(vec![pr(412, "2026-09-04T10:00:00Z", false, "feat/rut")], 1);
-        let rows = rows(&slice, &snapshot(Vec::new()), &[]);
-        assert!(matches(&rows[0], "412"));
-        assert!(matches(&rows[0], "pr 412"));
-        assert!(matches(&rows[0], "danny"));
-        assert!(matches(&rows[0], "rut"));
-        assert!(!matches(&rows[0], "nixos"));
-    }
+/// `Open ⏎` and the ⋯ holding every other verb, shown while the row is hovered or selected.
+fn hover_actions(row: &PrRow, ix: usize, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    div()
+        .flex()
+        .items_center()
+        .gap(theme.space.xs)
+        .child(
+            Button::new(("pr-open", ix), label(&pr_actions::Open))
+                .style(ButtonStyle::Secondary)
+                .size(ButtonSize::Compact)
+                .prefer_key(OPEN_KEY)
+                .action(Box::new(pr_actions::Open))
+                .harness_target(harness::name(|| format!("prs.row[{ix}].open"))),
+        )
+        .child(
+            PopoverMenu::new(("pr-more", ix))
+                .anchor(MenuAnchor::BottomRight)
+                .trigger_with(move |open, _, _| {
+                    IconButton::new(("pr-more-trigger", ix), Icon::Ellipsis, "More actions")
+                        .size(ButtonSize::Compact)
+                        .selected(open)
+                })
+                .menu(menu_builder(row.local.is_some(), row.creating))
+                .harness_target(harness::name(|| format!("prs.row[{ix}].menu"))),
+        )
+        .into_any_element()
 }

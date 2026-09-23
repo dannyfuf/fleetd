@@ -1,0 +1,59 @@
+# UX-SPEC §3.5 and §5.1 — the pull requests screen by pointer: the Mine / Waiting-for-my-review
+# tabs are clickable, a click on a row selects it, the row's ⋯ and a right click open the same
+# menu, and the keys still do what the buttons do.
+#
+# Nothing here opens a worktree: `⏎`, a double-click and the menu's Open would create one from a
+# pull request, which is the create-worktree scenarios' business. The menu is proven by what it
+# lists and by Escape closing it with nothing run.
+fixture: busy
+await idle 30000
+key g p
+await hub_tab == Prs 15000
+await lists.prs.rows[0] exists 15000
+# The fixture's Mine tab lists three pull requests and the review tab one, which is how the
+# snapshot tells the two tabs apart.
+assert focused == prs.row[0] && lists.prs.rows[2] exists
+shot prs-mine
+dump prs-mine
+
+# A click on the second tab is `Tab`: the review list, with its own cursor.
+click prs.tab[1]
+await lists.prs.rows[1] absent 15000
+assert hub_tab == Prs && overlay absent && lists.prs.rows[0] exists
+shot prs-review
+click prs.tab[0]
+await lists.prs.rows[2] exists 15000
+
+# The keys still switch tabs after a click.
+key l
+await lists.prs.rows[1] absent 15000
+key h
+await lists.prs.rows[2] exists 15000
+
+# A click on a row puts the cursor on it, as `j` would.
+await lists.prs.rows[1] exists 15000
+click prs.row[1]
+await focused == prs.row[1]
+assert hub_pane == List && overlay absent
+
+# Its ⋯ opens the row's menu; Escape closes it with nothing run.
+click prs.row[1].menu
+await targets["menu.item[0]"] exists 15000
+shot prs-row-menu
+key escape
+await targets["menu.item[0]"] absent 15000
+assert focused == prs.row[1] && hub_tab == Prs
+
+# A right click on another row selects it first, then opens the same menu.
+click right prs.row[0]
+await targets["menu.item[0]"] exists 15000
+assert focused == prs.row[0]
+key escape
+await targets["menu.item[0]"] absent 15000
+
+# The header's Refresh is `r`: it asks GitHub again and the list stays put.
+click prs.refresh
+await idle 30000
+assert hub_tab == Prs && focused == prs.row[0] && sticky_error absent
+dump prs-after-refresh
+quit

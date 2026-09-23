@@ -230,7 +230,8 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Filter the list",
         "Type to narrow the list you are in.",
     )
-    .featured(40),
+    .featured(40)
+    .short("Filter"),
     e(
         &["fleet::Cancel"],
         P::Hub,
@@ -531,14 +532,16 @@ pub(super) const ENTRIES: &[Entry] = &[
         G::PullRequests,
         "Open it and keep the last one awake",
         "Open the pull request's worktree without putting the one you were in to sleep.",
-    ),
+    )
+    .short("Open, keep last awake"),
     e(
         &["prs::CreateWithoutOpening"],
         P::PullRequests,
         G::PullRequests,
         "Create its worktree without opening it",
         "Check out the pull request's branch in a worktree and stay on this list.",
-    ),
+    )
+    .short("Create worktree only"),
     e(
         &["prs::NextTab"],
         P::PullRequests,
@@ -560,7 +563,8 @@ pub(super) const ENTRIES: &[Entry] = &[
         G::PullRequests,
         "Check its worktree",
         "Look for uncommitted changes and running programs in the pull request's worktree.",
-    ),
+    )
+    .short("Check worktree"),
     e(
         &["prs::CopyUrl"],
         P::PullRequests,
@@ -575,7 +579,8 @@ pub(super) const ENTRIES: &[Entry] = &[
         G::PullRequests,
         "Refresh pull requests",
         "Fetch both lists again from GitHub.",
-    ),
+    )
+    .short("Refresh"),
     e(
         &["prs::Back"],
         P::PullRequests,

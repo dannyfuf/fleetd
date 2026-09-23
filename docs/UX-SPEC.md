@@ -51,8 +51,9 @@ Responsive ladders are expressed in **ch of the pane that owns the columns**, no
    the cursor, the focus ring and the fill of a surface's one primary button. Everything else is
    one of three neutrals. Draft, muted, disabled and "not applicable" are rendered by *lowering
    contrast*, never by adding a hue.
-5. **Progressive disclosure with a stable frame.** The detail panel is closed by default (`i`)
-   and never focusable; the filter replaces the pane header in place; dialogs are the only layer
+5. **Progressive disclosure with a stable frame.** The detail panel is open by default on a
+   window at least 1120 px wide, `i` toggles it, and it is never focusable; the filter replaces
+   the pane header in place; dialogs are the only layer
    that ghosts the base; the Jobs panel docks to the right instead of covering the list. Nothing
    the user opens ever reflows what they were already looking at — position is memory.
 6. **Nothing the user started is owned by a surface.** Anything that can exceed ~200 ms is a
@@ -296,18 +297,20 @@ open, 160 ch without):
 
 Below 72 ch only columns 1, 4, 5, 6 survive. Gaps are 12 px between columns, 12 px row padding.
 
-**PR list**, measured in ch of the list pane:
+**PR list**, measured in ch of the list between the page's 24 px gutters (≈ 108 ch at 1440 px
+with the detail panel open):
 
-| # | Column | Width | Shown when |
-| --- | --- | --- | --- |
-| 1 | local-presence glyph | 2 ch (16 px) | always |
-| 2 | number `#1234` | 6 ch (45 px), right | always |
-| 3 | title | flex, min 32 ch | always |
-| 4 | author | **12 ch @ ≥ 70 ch · 16 ch @ ≥ 130 ch** | `REVIEW` tab |
-| 5 | `headRefName` | 12 ch (90 px), truncate-tail | pane ≥ 90 ch |
-| 6 | repo `owner/name` | 10 ch (75 px) | pane ≥ 110 ch **and** scope is multi-repo |
-| 7 | state badge | 8 ch (60 px) | always |
-| 8 | age | 7 ch (53 px), right | pane ≥ 52 ch |
+| # | Column | Head | Width | Shown when |
+| --- | --- | --- | --- | --- |
+| 1 | number `#1234` | `#` | 6 ch | always |
+| 2 | title + `has worktree` tag | Title | flex, min 24 ch | always |
+| 3 | author | Author | **12 ch @ ≥ 70 ch · 16 ch @ ≥ 130 ch** | review tab |
+| 4 | `headRefName` | Branch | 12 ch, truncate-tail | ≥ 100 ch (≥ 120 ch on the review tab) |
+| 5 | repo `owner/name` | Repository | 12 ch | ≥ 125 ch **and** scope is multi-repo |
+| 6 | PR chip (review state) | Status | 16 ch (fits `Needs changes`) | always |
+| 7 | checks | Checks | 10 ch | ≥ 70 ch |
+| 8 | age | Age | 5 ch, right | ≥ 52 ch |
+| 9 | `Open ⏎` · `⋯` | — | 14 ch, right, shown on hover or selection | ≥ 60 ch |
 
 **[D-5]** The two-step author breakpoint (12 ch / 16 ch) is preserved exactly; it is the one
 inventory ladder the px-only port lost.
@@ -559,7 +562,7 @@ Every string is built with the row in the Hub's projection; the panel only lays 
 | Repo | name, owner, `defaultBranch`, `path`, worktree count, live count, `hooks.prepare` (count + commands), `hooks.postCreate`, `url`, prepared copies `1/1 ready · refreshed 2m ago` |
 | Clone job | status, staging path, log path, `error` in red; `Enter` opens it in the Jobs panel |
 | Context (rail header focused) | name, `owners` joined, repo + worktree counts |
-| PR row | §3.5 PR detail table |
+| PR row | §3.5 PR detail |
 
 **Intentionally omitted:** `WorktreeId`, session name string, `host.ssh` / `swarmCommand`,
 absolute ISO timestamps, raw hook command lists for worktrees (a repo-level fact), full log tails.
@@ -580,103 +583,115 @@ buttons are pointer twins of those keys and act on the cursor row.
 **Purpose:** *What am I waiting on, what is waiting on me, and can I start on it in one key?*
 
 ```
- ▍buk 1   personal 2   oss 3                ⟳2  ◉3  ☾5  ⚑4                    ◍
- ────────────────────────────────────────────────────────────────────────────────
-  MINE 7      REVIEW 4                                       fetched 40s ago  ⟳
- ────────────────────────────────────────────────────────────────────────────────
-▌◉ #412  Fix RUT validation on payroll import   feat/rut-…   CI fail       2h
-  ☾ #408  Bump lazygit to 0.44                  chore/deps   Approved      1d
-  · #401  Draft: gpui vt spike                  spike/gpu…   Draft         3d
-  ✕  could not load REVIEW: gh: HTTP 502 upstream connect error…    r retry
+ Pull requests                                              [⌕ Filter /]  [⟳ Refresh r]
+ Open on GitHub for Acme · fetched 12s ago
+ Mine (3)   Waiting for my review (1)
+ ─────────────────────────────────────────────────────────────────────────────────────────
+ #     Title                                Branch     Status               Checks   Age
+▌#12   Add the worktree ticker [has worktree] feature  ✓ Approved           ✓ 6 / 6   3d  Open ⏎  ⋯
+ #13   Rework the hub header                hotfix     ⎇ Draft              ✕ 1 failing 5d
+ #4    Ship the settings dialog [has worktree] spike   ◉ In review          ⟳ running  1w
 ```
 
-Columns and breakpoints: §2.9.
+Columns and breakpoints: §2.9. The detail panel (§3.4) is on by default and shows the PR under
+the cursor.
 
 | Element | Content | Position | Why here | Why needed |
 | --- | --- | --- | --- | --- |
-| Tabs `MINE` / `REVIEW` | label + count; active = 2 px blue underline | row under the title bar | `Tab`/`h`/`l` toggle them; the counts answer "how much is queued" without entering | `PrTab`, §5 |
-| Fetch age | `fetched 40s ago` / `⟳ refreshing` / red error | same row, right | trust marker for cached data (`github.prTtlSeconds: 90`) | `PrRepoSlice.fetchedAt/loading/error` |
-| Local-presence glyph | §2.5 glyph if a worktree matches, `dot` 30 % if not | col 1 | decides whether `Enter` *opens* or *creates* — the highest-value bit on this screen | §5 "local presence glyph"; match rule §1 |
-| Number | `#{number}` | col 2 | the handle you say out loud | `PullRequest.number` |
-| Title | single line, tail-truncated | col 3 | — | `PullRequest.title` |
-| Author | `login` (null → `ghost`), `fg.muted` | col 4 | only meaningful in `REVIEW` | `PullRequest.author` |
-| Branch | `headRefName` mono; `git-fork` prefix when `isCrossRepository` | col 5 | ties the PR to the branch you will get | `PullRequest.headRefName` |
-| State badge | one icon + one word, priority draft → ci_fail → changes → ci_pending → approved → review | col 7 | collapses 3 raw fields into 1 glance | `PrState` priority, §1 |
+| Title | `Pull requests` (`page_title`) | page header | names the page | — |
+| Subtitle | `Open on GitHub for <repo \| context> · fetched 12s ago` / `⟳ refreshing…` / `never fetched` | under the title (`PageHeader`) | trust marker for cached data (`github.prTtlSeconds: 90`) | `PrRepoSlice.fetchedAt/loading/error` |
+| Filter | the page's `FilterField` with `/` (`prs.filter`); while the filter owns the keys it holds the live editor and `shown/total` | header, right | the pointer's way into §3.10 | — |
+| Refresh | secondary button with `r` (`prs.refresh`) | header, right | a refresh is the one thing this page does to itself | `prs::Refresh` |
+| Tabs `Mine` / `Waiting for my review` | sentence-case label + count pill; active = 2 px blue underline; the review count is amber when not zero (someone is waiting on you) | under the header | `Tab`/`h`/`l` or a click toggle them; the counts answer "how much is queued" without entering | `PrTab`, §5 |
+| Number | `#{number}`, mono, muted | col 1 | the handle you say out loud | `PullRequest.number` |
+| Title | single line, weight 500, tail-ellipsised, then a `has worktree` tag when a local worktree matches (a spinning `creating worktree` while `⏎`/`c` makes one) | col 2 | the tag decides whether opening is instant or creates — the highest-value bit on this screen | match rule §1 |
+| Author | `login` (null → `ghost`), muted | col 3 | only meaningful on the review tab | `PullRequest.author` |
+| Branch | `headRefName` mono; `git-fork` prefix when `isCrossRepository` | col 4 | ties the PR to the branch you will get | `PullRequest.headRefName` |
+| Repository | `owner/name`, muted | col 5 | disambiguates in `All` scope | `PullRequest.repoId` |
+| Status | the kit's PR chip (as on the worktrees page), reading the review state alone | col 6 | a failing check no longer hides an approval | `isDraft`, `reviewDecision` |
+| Checks | `✓ 6 / 6` green · `✕ 1 failing` red · spinner `running` · faint `—` | col 7 | CI state at a glance, separate from review | `checks`, `checksPassed/Total` |
 | Age | relative `updatedAt` | col 8 | staleness of the PR, not of the fetch | `PullRequest.updatedAt` |
+| Row actions | `Open ⏎` and `⋯`, on hover or on the selected row | col 9 | §5.1: hover reveals, the menu holds everything | — |
 
-**PR state badge — exact text (≤ 8 ch), exact icon, exact color**
+**Status chip — exact text, icon and tone** (draft first, then the review decision; the words are `PrBadgeState::chip_word`)
 
-| `PrState` | Icon | Color | Text |
+| State | Icon | Tone | Text |
 | --- | --- | --- | --- |
-| `draft` | `git-pull-request-draft` | `fg.faint` | `Draft` |
-| `ci_fail` | `circle-x` | red | `CI fail` |
-| `changes` | `message-square-warning` | amber | `Changes` |
-| `ci_pending` | `clock` | amber | `CI ···` |
-| `approved` | `circle-check` | green | `Approved` |
-| `review` | `eye` | `fg.muted` | `Review` |
-| merged (from inspection) | `git-merge` | green | `Merged` |
+| draft | `git-pull-request-draft` | faint | `Draft` |
+| changes requested | `message-square-warning` | amber | `Needs changes` |
+| approved | `circle-check` | green | `Approved` |
+| anything else | `eye` | accent | `In review` |
 
-**PR detail panel** (the §5 field list, enumerated — this was missing from all three proposals):
+**Row pointer (§5.1).** A click selects the row (and puts the keyboard on the list); a double-click
+is `⏎`. The `⋯` button and a right click open the same menu: `Open ⏎`, `Open, keep last awake O`,
+`Create worktree only c` (only when no worktree exists yet), `Check worktree I` (only when one
+does), then `Open in the browser b` and `Copy link y`. A verb that cannot work on the row is
+left out, not greyed.
+
+**PR detail panel:**
 
 ```
 ┌──────────────────────────────────────┐
-│ ⇱ #412  Fix RUT validation on payro… │ 34
-│   bukhr/payroll · dannyfuf           │ 20
-├──────────────────────────────────────┤
-│ target      main                     │
-│ diff        +142 −18                 │
-│ checks      fail · 2 of 9            │
-│ review      changes requested        │
-│ labels      payroll, needs-qa        │
-│ updated     2h ago                   │
-│ url         github.com/…/pull/412    │   y copies
-│                                      │
-│ WORKTREE                             │
-│  path       ~/.fleet/worktrees/…     │
-│  session    ◉ attached · claude      │
+│ acme/api #12 · by dannyfuf           │  mono, muted
+│ Add the worktree ticker              │  section title
+│ [✓ Approved] [feature → main]        │
+│ [ Open worktree ⏎ ] [GitHub b] [⋯]   │  one primary
+│ Changes   +184 −37                   │
+│ Checks    All 6 passing              │
+│ Review    Approved                   │
+│ Labels    [ui] [hub]                 │
+│ Updated   3d ago                     │
+│ ┌ Worktree ────────────────────────┐ │
+│ │ ⑂ api / feature      on this Mac │ │
+│ │ ○ no session                     │ │
+│ │ ~/.fleet/worktrees/acme/api/feat…│ │
+│ └──────────────────────────────────┘ │
 └──────────────────────────────────────┘
 ```
 
-For a PR with **no** local worktree the `WORKTREE` block is replaced by `WILL CREATE`:
+With a local worktree the primary button is `Open worktree ⏎` and the card names the worktree,
+where it lives (`on this Mac` or `on <host> · <link>`), its session and its path. Without one the
+primary is `Create worktree c` (`Creating worktree…`, disabled, while it runs) and the card says
+what opening will create:
 
 ```
-│ WILL CREATE                          │
-│  worktree   payroll/feat-payroll-fix │   ← exact proposed destination
-│  branch     feat-payroll-fix         │   same-repo: headRefName
-│  base       pull/412/head            │   pull ref persisted as baseRef
-│  fork       dannyfuf/payroll → pr/412│   cross-repo only: local branch pr/<n>
+│ │ Opening creates payroll/feat-rut from pull/412/head │
+│ │ Branch feat-rut                                     │   same-repo: headRefName
+│ │ Fork dannyfuf/payroll → pr/412                      │   cross-repo only: local branch pr/<n>
 ```
 
 **[D-6]** The proposed destination is mandatory: it is what `Enter` is about to create, the
-highest-stakes bit on this screen, and §5 requires it.
+highest-stakes bit on this screen, and §5 requires it. `GitHub b` opens the PR; the `⋯` menu is
+the row's menu.
 
-**Intentionally omitted from rows:** additions/deletions (a two-number stat is noise in a list;
-detail shows `+142 −18`), labels (detail), `baseRefName` (detail), `isCrossRepository` (folded
-into the `git-fork` prefix), `checks` and `reviewDecision` as separate columns (they *are* the
-badge), `url` (`y` / `b`), reviewer avatars, a merged/closed section, a third "All" tab.
+**Intentionally omitted from rows:** additions/deletions and labels (detail), `baseRefName`
+(detail, `head → base`), `url` (`y` / `b`), reviewer avatars, a merged/closed section, a third
+"All" tab.
 
 **States**
 
 | State | Rendering |
 | --- | --- |
-| Loading with cache | cached rows stay at full opacity; the tab count becomes `…` and the header reads `⟳ refreshing · fetched 4m ago` |
+| Loading with cache | cached rows stay at full opacity; the tab count becomes `…` and the subtitle reads `⟳ refreshing · fetched 4m ago` |
 | Loading cold | 6 skeleton rows at 30 % |
-| Empty MINE | `No open PRs authored by you in <scope>.` + faint `r refresh` |
-| Empty REVIEW | `No PRs waiting for your review in <scope>.` + faint `r refresh` |
-| Error | a **sticky row** at the top of the affected tab: `✕ <error, 120 ch> · r retry`; **stale rows stay listed** and the fetch-age stamp turns amber. The same error also occupies the status-bar sticky slot (`!`). Never a toast (§2.7) |
-| Creating a worktree from a PR | the presence glyph becomes `loader-circle`; the row does not move; leaving the screen does not stop the job |
+| Empty Mine | `No open PRs authored by you in <scope>.` + a `Refresh r` button |
+| Empty review tab | `No PRs waiting for your review in <scope>.` + a `Refresh r` button |
+| Error | a red **callout** under the tabs: `Could not load pull requests` over the error, with a `Retry r` button (`prs.retry`); **stale rows stay listed**. The same error also occupies the status-bar sticky slot (`!`). Never a toast (§2.7) |
+| Creating a worktree from a PR | the title's tag becomes a spinning `creating worktree`; the row does not move; leaving the screen does not stop the job |
 
 **Scope.** The PR screen scopes to the selected repo, or to every repo of the active context when
 `All` is selected. **[D-7]** In `All` scope the list is capped at **100** rows per tab, sorted by
-`updatedAt` desc, with a final faint row `+n more — select a repo to narrow` (the cap matches the
-§9 PR cap of 100 and never refuses).
+`updatedAt` desc, with a final ghost button `+n more — select a repo to narrow` (`prs.more`) that
+runs `g r` and puts the keyboard on the repositories (the cap matches the §9 PR cap of 100 and
+never refuses).
 
-**Icons:** the badge table above, plus `git-fork`, and the §2.5 session glyphs for presence.
+**Icons:** the chip table above, `circle-check` / `circle-x` / `loader-circle` for checks,
+`git-fork`, `git-branch`, `refresh-cw`, `ellipsis`.
 
 **Keyboard:** `Tab`/`S-Tab`/`h`/`l` tabs · `j`/`k`/`gg`/`G` · `Enter`/`o` open-or-create (sleeps
 previous) · `O` keep previous awake · `c` create without opening (KEYMAP A9) · `b` browser · `y` copy
 URL · `r` force refresh both tabs · `I` inspect the matching local worktree · `i` detail ·
-`/` filter · `p`/`q` back.
+`/` filter · `p`/`q` back. Every one of them is also a button or a menu item above.
 
 ---
 

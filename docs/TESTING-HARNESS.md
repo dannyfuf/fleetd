@@ -296,6 +296,7 @@ The names Fleet paints today, by surface:
 | Repositories rail | `repos.rail`, `repos.row[N]`. The rail's own `w` is the collapse oracle — 240 expanded, 44 collapsed — because `H` is its only collapse affordance and Fleet has no control to name. |
 | Hub lists | `worktrees.row[N]`, `prs.row[N]`, `jobs.row[N]`, `hub.tab[N]`, `prs.tab[N]` |
 | Worktrees page | `worktrees.new`, `worktrees.clone`, `worktrees.filter`, `worktrees.row[N].open`, `worktrees.row[N].menu`, `worktrees.row[N].log` |
+| Pull requests | `prs.filter`, `prs.refresh`, `prs.retry`, `prs.more`, `prs.row[N].open`, `prs.row[N].menu` |
 | Detail panel | `detail.open`, `detail.sleep`, `detail.menu`, `detail.copy_path`, `detail.inspect` |
 | Title bar | `titlebar.context`, `titlebar.command`, `titlebar.needs_you`, `titlebar.jobs`, `titlebar.update`, `titlebar.daemon`, `titlebar.help`, `titlebar.settings`, `titlebar.back`, `workspace.back`, `workspace.switcher`, `workspace.pr` |
 | Status bar | `statusbar.shortcuts`, `statusbar.commands` |
@@ -385,6 +386,16 @@ trigger or right-clicking its row) and awaits the target before clicking it. Onl
 at a time — opening another closes the first — so the name needs no surface prefix. An item whose
 action the surface cannot run is left out of the menu, not greyed, so `N` counts only what is
 shown.
+
+`prs.tab[N]` is the PR screen's tab (`0` Mine, `1` Waiting for my review); a click on it switches
+tabs as `Tab` does. `prs.filter` is the page header's filter field (`/`; while the filter owns
+the keys the field is `filter.input`). `prs.refresh` is the page header's Refresh (`r`); `prs.retry` is the Retry on
+the error callout and exists only while a fetch error is shown; `prs.more` is the
+`+n more — select a repo to narrow` button, only in `All` scope past the 100-row cap.
+`prs.row[N].open` (`Open ⏎`) and `prs.row[N].menu` (the `⋯` trigger) are the row's hover actions:
+painted on every visible row but visible only while it is hovered or selected, so a scenario
+clicks the row before them. A press on either first puts the cursor on that row; the menu's
+items are `menu.item[N]`, and a right click on `prs.row[N]` opens the same menu.
 
 `dialog.close` is the close ✕ in every dialog's header; clicking it runs the action `Esc` runs in
 that dialog, and so does a click on the scrim outside the card. `sheet.close` is the same ✕ on a

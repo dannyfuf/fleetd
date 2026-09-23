@@ -237,15 +237,27 @@ impl HubScreen {
                 let cache_key = cache::PrCacheKey::from_state(state);
                 let slice = hub.prs.slice_for(state.pr_tab, &cache_key);
                 let cache_matches_scope = hub.prs.matches(&cache_key);
+                let handlers = self
+                    .pr_handlers
+                    .clone()
+                    .unwrap_or_else(prs_screen::PrHandlers::inert);
                 prs_screen::render(
                     PrScreenProps {
-                        header_override: (state.hub_filter_owns_keys()
-                            && state.hub_pane == HubPane::List)
-                            .then(|| {
-                                dialogs::filter::bar(state, self.filter_input.clone())
-                                    .harness_target("filter.input")
-                                    .into_any_element()
-                            }),
+                        filter_slot: if state.hub_filter_owns_keys()
+                            && state.hub_pane == HubPane::List
+                        {
+                            let (shown, total) = crate::presentation::filter_counts(state);
+                            worktrees_list::FilterSlot::Editing {
+                                input: self.filter_input.clone(),
+                                query: SharedString::from(state.filter.query.clone()),
+                                shown,
+                                total,
+                            }
+                        } else {
+                            worktrees_list::FilterSlot::Idle(
+                                filter.clone().filter(|_| state.hub_pane == HubPane::List),
+                            )
+                        },
                         rows: model.prs.clone(),
                         cursor: pr_cursor(state),
                         focused: state.hub_pane == HubPane::List,
@@ -269,9 +281,14 @@ impl HubScreen {
                         hidden: model.pr_hidden,
                         pane_ch,
                         multi_repo: state.scope == RepoScope::All,
+                        covers: match &state.scope {
+                            RepoScope::All => context_name.clone(),
+                            RepoScope::Repo(repo) => SharedString::from(repo.to_string()),
+                        },
                         scope: scope_name,
                         filter: filter.filter(|_| state.hub_pane == HubPane::List),
                     },
+                    &handlers,
                     &self.pr_scroll,
                     now.saturating_sub(model.prepared_at),
                     cx,
@@ -400,6 +417,7 @@ impl HubScreen {
                         .iter()
                         .find(|status| status.worktree_id == worktree.id)
                 }),
+                creating: row.creating,
                 home: &home,
                 now,
             },
