@@ -40,7 +40,7 @@
 //!   query untypable, because bindings outrank the text input. Only `Esc` closes the palette;
 //!   see `docs/APP-CONTRACTS.md`.
 
-use fleet_ui_kit::text_input;
+use fleet_ui_kit::{menu_actions, text_input};
 use gpui::{Action, App, DummyKeyboardMapper, KeyBinding, KeyBindingContextPredicate, Keystroke};
 
 use crate::actions::fleet::Cancel;
@@ -858,6 +858,14 @@ key_table! {
     "n",             "Agent > AgentDecision > AgentPlan" => native_agent::Refine;
     "enter",         "Agent > AgentDecision > AgentPlan" => native_agent::Send;
 
+    // An open kit menu (ADR 0023): navigated like a list under a text field, so never `j`/`k`.
+    "down",   "FleetMenu" => menu_actions::SelectNext;
+    "ctrl-n", "FleetMenu" => menu_actions::SelectNext;
+    "up",     "FleetMenu" => menu_actions::SelectPrevious;
+    "ctrl-p", "FleetMenu" => menu_actions::SelectPrevious;
+    "enter",  "FleetMenu" => menu_actions::Confirm;
+    "escape", "FleetMenu" => menu_actions::Cancel;
+
     "left", "FleetTextInput" => text_input::MoveLeft;
     "right", "FleetTextInput" => text_input::MoveRight;
     "alt-left", "FleetTextInput" => text_input::MoveWordLeft;
@@ -1140,6 +1148,9 @@ mod tests {
     /// moment a field owns typing; full-window surfaces are here because they draw no editor;
     /// the `FleetTextInput` rows are the editor itself rather than a host around it.
     const NO_LIVE_EDITOR_CONTEXTS: &[&str] = &[
+        // An open kit menu holds only items today; a filter field in one would move it to the
+        // host list, which its non-printable keys already satisfy.
+        "FleetMenu",
         "FleetTextInput",
         "FleetTextInput && mode == multiline",
         "FleetTextInput && mode == multiline && enter == newline",

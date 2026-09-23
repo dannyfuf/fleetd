@@ -91,6 +91,7 @@ const CONTEXTS: &[(&str, Place, &str)] = &[
     ("Dialog > Help", Place::Dialog, "Help"),
     ("Dialog > Quit", Place::Dialog, "Quit"),
     ("Dialog > QuitDaemon", Place::Dialog, "Quit and stop fleetd"),
+    ("FleetMenu", Place::Dialog, "Open menu"),
     ("FleetTextInput", Place::EditingText, "Text fields"),
     (
         "FleetTextInput && mode == multiline",

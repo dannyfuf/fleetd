@@ -2016,6 +2016,39 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Keep fleetd running",
         "Cancel; nothing stops.",
     ),
+    // ── Open menus (a row's ⋯ or right-click menu, a dropdown's options) ──────────────────
+    e(
+        &["fleet_menu::SelectNext"],
+        P::Dialog,
+        G::Dialog,
+        "Next menu item",
+        "Highlight the next item of the open menu.",
+    )
+    .short("Next item"),
+    e(
+        &["fleet_menu::SelectPrevious"],
+        P::Dialog,
+        G::Dialog,
+        "Previous menu item",
+        "Highlight the previous item of the open menu.",
+    )
+    .short("Previous item"),
+    e(
+        &["fleet_menu::Confirm"],
+        P::Dialog,
+        G::Dialog,
+        "Choose the menu item",
+        "Close the menu and do what the highlighted item says.",
+    )
+    .short("Choose"),
+    e(
+        &["fleet_menu::Cancel"],
+        P::Dialog,
+        G::Dialog,
+        "Close the menu",
+        "Close the open menu without doing anything.",
+    )
+    .short("Close"),
     // ── Editing text ──────────────────────────────────────────────────────────────────────
     e(
         &["text_input::MoveLeft"],

@@ -495,6 +495,12 @@ impl Shell {
     }
 
     fn reconcile_focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+        // An open kit menu took the focus from the surface that opened it and hands it back when
+        // it closes; `AppState` does not model it, so a background update must not pull the
+        // keyboard out of it (`docs/APP-CONTRACTS.md` §3).
+        if fleet_ui_kit::menu_holds_focus(window, cx) {
+            return;
+        }
         let state = self.state.read(cx);
         let target = match focus_target(state) {
             FocusTarget::Native if !self.workspace.pane_owns_keyboard() => FocusTarget::Body,

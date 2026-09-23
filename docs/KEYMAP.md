@@ -59,6 +59,7 @@ unlabelled. Change a row here and its entry there in the same commit.
 | Palette | `Palette` | `:` | `Esc`, `Enter` |
 | Dialog | `Dialog > <name>` while browsing; `Dialog > <name>Editing` where the focused field owns typing | action | `Esc`, `Enter` |
 | Text input | `FleetTextInput` (`mode = single_line` \| `multiline`) | focusing a live `TextInput` | its container moves focus or closes |
+| Menu | `FleetMenu`, under the context that opened it | clicking a menu trigger, a dropdown, or right-clicking a row | `Esc`, `Enter`, clicking an item or anywhere outside |
 | Jobs | `Jobs` / `Jobs > Log` (overlay) | `J` anywhere in Normal, `ctrl-s J` in a terminal | `Esc`, `J`, `q` |
 | Daemon | `Daemon > Down` / `Daemon > Banner` / `Daemon > Doctor` | fleetd will not start (§3.12 B), fleetd died while attached (§3.12 C), doctor runs | daemon comes back, `Esc` (banner/doctor), `ctrl-q` |
 | FirstRun | `FirstRun` | no contexts and no repos exist | any key that creates or imports something |
@@ -586,6 +587,21 @@ exception: its query is a filter that never contains a space, so it always publi
 
 **`E` is context-scoped.** In `Hub` it edits the active context [A15]; in `Dialog > Settings` it
 opens `config.json` in a new terminal tab. The two never coexist in one key context.
+
+## Open menus (`FleetMenu`)
+
+A kit `Menu` — a row's ⋯ or right-click menu, the `+` new-tab menu, a dropdown's options — takes
+the focus while it is open and publishes `FleetMenu` beneath the context of the element that
+opened it. It is navigated like a list under a text field (ADR 0023), so `j` / `k` are not menu
+keys. Each item shows its own key as a chip; that key still works from the surface once the menu
+is closed. On close the focus goes back to where it was.
+
+| Key | Action |
+| --- | --- |
+| `↓` / `ctrl-n` | highlight the next item (stops at the last) |
+| `↑` / `ctrl-p` | highlight the previous item (stops at the first) |
+| `Enter` | close the menu and run the highlighted item, dispatched to the element that opened it |
+| `Esc` | close the menu without running anything |
 
 ## Filter mode (`/`)
 

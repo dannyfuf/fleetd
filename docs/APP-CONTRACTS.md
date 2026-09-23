@@ -189,6 +189,7 @@ is always `Fleet`.
 | Filter / Palette / Jobs | `Fleet > Filter` (`> BoardFilter` on the board) \| `Palette` \| `Jobs`, then the focused editor's `FleetTextInput` context for the first two |
 | Dialog browsing | `Fleet > Dialog > CardDetail` \| `BoardSettings` \| `CardPicker` \| `Settings` \| `Create` (or the dialog's other stable name) |
 | Dialog text editing | `Fleet > Dialog > CardDetailEditing` \| `BoardSettingsEditing` \| `SettingsEditing` \| `CreateEditing`, then the focused component's `FleetTextInput` context |
+| Open kit menu (⋯, `+`, right-click, dropdown) | the chain of the element that opened it, then `FleetMenu` — the menu is painted `deferred` inside that element and holds the focus until it closes, then hands it back (`DESIGN-SYSTEM.md` §6.8) |
 | Daemon banner showing (§3.12 C) | the base chain **plus** `Daemon > Banner`, innermost — unless a live editor owns the keyboard on that base chain, when the word is absent |
 | fleetd will not start (§3.12 B) | `Fleet > Daemon > Down` |
 | First run (§3.13) | `Fleet > FirstRun` |
@@ -224,6 +225,16 @@ Two consequences worth knowing:
   query is a filter that never contains a space, so it keeps the browsing word and `space` toggles
   the highlighted card. The rule is now complete: the `Dialog` container binds no editing key of
   its own, so there is no legacy editor row left for a dialog to fall back on.
+* **A kit menu owns the focus without being an `AppState` focus owner.** A `PopoverMenu`,
+  `ContextMenu` or `Dropdown` keeps its open menu in gpui element state, not in `AppState`, so
+  `focus_owner` does not change when one opens. The shell's focus reconciliation therefore asks
+  `fleet_ui_kit::menu_holds_focus` first and changes nothing while it is true: a daemon event that
+  re-renders the Hub must not pull the keyboard out of an open ⋯ menu, wherever the menu was
+  opened from (a row, the title bar). Closing a menu hands the focus back to the element that had
+  it, and the next reconciliation proceeds as before; an item's action is dispatched only after
+  that hand-back, so an action that opens a dialog finds the shell in its usual state. The price is
+  that a state change which wants the focus somewhere else — a dialog opened by a background event
+  — waits until the menu closes, which the next click anywhere or `esc` does.
 * Inside a native agent tab, `^s` never reaches gpui's two-key matcher. The shell's keystroke
   interceptor consumes it, resolves the second key against the *live* chain through
   `keymap::chord_action_for_chain`, and consumes that key too — running its row, or toasting
