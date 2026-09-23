@@ -13,7 +13,9 @@ use gpui::{AnyElement, App, IntoElement, SharedString, div, prelude::*};
 
 use crate::{
     actions::{hub, worktrees},
-    views::worktrees_list::{GitFacts, KnownGit, WorktreeDetail, WorktreeRow, label, row_menu},
+    views::worktrees_list::{
+        GitFacts, KnownGit, OPEN_KEY, WorktreeDetail, WorktreeRow, label, row_menu,
+    },
 };
 
 /// The primary button's label: the panel says what opening *is*.
@@ -108,6 +110,7 @@ fn actions(undo_available: bool, cx: &App) -> AnyElement {
                     .style(ButtonStyle::Primary)
                     .full_width()
                     .action(Box::new(worktrees::Open))
+                    .prefer_key(OPEN_KEY)
                     .harness_target("detail.open"),
             ),
         )

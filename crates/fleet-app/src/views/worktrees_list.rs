@@ -51,6 +51,8 @@ const HOOKS_FAILED: &str = "Setup hook failed";
 const VIEW_LOG: &str = "View log";
 /// The widest a row's name grows before it ellipsizes, in `ch`.
 const NAME_MAX_CH: f32 = 28.0;
+/// Of `worktrees::Open`'s keys, the one the page teaches (`Open ⏎`); `o` still works.
+pub(crate) const OPEN_KEY: &str = "enter";
 /// The accessible name of a row's `⋯` trigger.
 const MORE_ACTIONS: &str = "More actions";
 
@@ -516,6 +518,7 @@ fn hover_actions(ix: usize, undo_available: bool, cx: &App) -> AnyElement {
             Button::new(("wt-open", ix), label(&worktrees::Open))
                 .size(ButtonSize::Compact)
                 .action(Box::new(worktrees::Open))
+                .prefer_key(OPEN_KEY)
                 .harness_target(harness::name(|| format!("worktrees.row[{ix}].open"))),
         )
         .child(
