@@ -1347,3 +1347,31 @@ fn key_text(entry: &Entry) -> Option<String> {
             .join(" ")
     })
 }
+
+#[test]
+fn a_typed_query_ranks_the_command_for_the_screen_s_selection_first() {
+    // On Worktrees, "Delete this context" is the shorter label and so the better raw match for
+    // `del`; the row that works on the selected worktree is the one `Enter` should run.
+    let mut app = AppState::new("/tmp/fleet", Instant::now());
+    let mut snapshot = multi_session_snapshot(1);
+    snapshot.active_context = Some("platform".parse().unwrap_or_else(|error| panic!("{error}")));
+    app.snapshot = Some(snapshot);
+    app.displayed_hub.worktrees = displayed_worktrees(1);
+    app.daemon = crate::state::DaemonLink::Connected;
+    assert_eq!(app.screen, Screen::hub());
+
+    let commands: Vec<Run> = candidates(&app, "del", None, None, &[])
+        .into_iter()
+        .filter(|row| row.section == Section::Commands)
+        .map(|row| row.run)
+        .collect();
+    let at = |command| {
+        commands
+            .iter()
+            .position(|run| *run == Run::Command(command))
+    };
+    let worktree = at(Command::DeleteWorktree).unwrap_or_else(|| panic!("{commands:?}"));
+    let context = at(Command::DeleteContext).unwrap_or_else(|| panic!("{commands:?}"));
+    assert_eq!(worktree, 0, "{commands:?}");
+    assert!(worktree < context);
+}

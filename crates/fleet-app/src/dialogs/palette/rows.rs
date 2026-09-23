@@ -115,7 +115,7 @@ pub fn candidates(
     let mut rows = if needle.is_empty() {
         pool
     } else {
-        rank(pool, &needle)
+        rank(pool, &needle, here(state, card))
     };
     rows.truncate(RESULT_CAP);
     rows
@@ -165,12 +165,17 @@ fn idle_rows(state: &AppState, card: CardContext) -> Vec<Entry> {
 /// Scores every row against the query, drops the misses, and orders what is left.
 ///
 /// Rows keep their section; inside it they sort by score, and the sections sort by their best
-/// row, so the top of the list is always the single best match and `Enter` runs it. Ties keep
-/// the order the rows were built in, which is the order each section means something in (MRU
-/// sessions first, catalogue order for commands).
-fn rank(pool: Vec<Entry>, needle: &FuzzyQuery) -> Vec<Entry> {
+/// row, so the top of the list is always the single best match and `Enter` runs it. A command
+/// bound to a place in `here` — one that works on what the screen is showing — earns a bonus
+/// that settles a near tie between matches of the same kind but never lifts a weaker kind of
+/// match over a stronger one. Ties keep the order the rows were built in, which is the order
+/// each section means something in (MRU sessions first, catalogue order for commands).
+fn rank(pool: Vec<Entry>, needle: &FuzzyQuery, here: &[Place]) -> Vec<Entry> {
     /// A hit on the searchable extras only (a provider name, a repo) ranks under any label hit.
     const EXTRA_PENALTY: i32 = 500;
+    /// Well under the 1000 between a prefix, a word-boundary and a mid-word hit, and well over
+    /// the length and offset terms that separate two hits of the same kind.
+    const HERE_BONUS: i32 = 200;
     /// A section, its best score, and its scored rows.
     type Group = (Section, i32, Vec<(i32, Entry)>);
     let mut groups: Vec<Group> = Vec::new();
@@ -185,6 +190,10 @@ fn rank(pool: Vec<Entry>, needle: &FuzzyQuery) -> Vec<Entry> {
         };
         let Some((score, indices)) = hit else {
             continue;
+        };
+        let score = match entry.run {
+            Run::Command(command) if here.contains(&command.info().place) => score + HERE_BONUS,
+            _ => score,
         };
         entry.matches = indices;
         match groups

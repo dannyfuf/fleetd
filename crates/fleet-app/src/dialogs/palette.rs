@@ -369,7 +369,7 @@ mod rows;
 mod tests;
 
 pub use command::Command;
-use command::{CardContext, card_context};
+use command::{CardContext, card_context, here};
 use rows::candidates;
 pub(crate) use rows::session_rows;
 

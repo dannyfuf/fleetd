@@ -507,6 +507,30 @@ pub(super) struct CardContext {
     detail: bool,
 }
 
+/// The places whose commands act on what the surface under the palette is showing, most
+/// specific first.
+///
+/// A command bound to one of them works on the current selection — the selected worktree, the
+/// open card — so a typed query ranks it above a namesake that works on the whole context or
+/// anywhere: `del` on Worktrees is "Delete the worktree safely", not "Delete this context".
+pub(super) fn here(state: &AppState, card: CardContext) -> &'static [Place] {
+    if card.detail {
+        return &[Place::CardDetail, Place::Board];
+    }
+    match &state.screen {
+        Screen::Hub {
+            tab: HubTab::Worktrees,
+        } => &[Place::Worktrees],
+        Screen::Hub { tab: HubTab::Prs } => &[Place::PullRequests],
+        Screen::Hub { tab: HubTab::Board } => &[Place::Board, Place::CardDetail],
+        Screen::Workspace { .. } if state.board_pane_is_active() => {
+            &[Place::Board, Place::CardDetail]
+        }
+        Screen::Workspace { .. } if state.active_agent_thread().is_some() => &[Place::AgentThread],
+        Screen::Workspace { .. } => &[Place::Terminal],
+    }
+}
+
 pub(super) fn card_context(
     state: &AppState,
     behind: Option<Dialogs>,
