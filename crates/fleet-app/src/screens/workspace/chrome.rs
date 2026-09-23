@@ -234,7 +234,7 @@ fn close_other_tabs(
         state.update(cx, |app, cx| {
             let tabs = if kept == 1 { "tab" } else { "tabs" };
             app.toast_short(
-                format!("kept {kept} {tabs} with a running process; close with ^s x"),
+                format!("kept {kept} {tabs} open: each runs a process"),
                 Icon::Info,
                 Instant::now(),
             );
