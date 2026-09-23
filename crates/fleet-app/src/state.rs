@@ -207,6 +207,10 @@ pub struct AppState {
     pub jobs_focus: Option<JobId>,
     /// Initial palette query consumed when the palette next opens.
     pub palette_seed: Option<String>,
+    /// An action a surface that just closed asked to run on the surface behind it, by name:
+    /// Help's rows and step buttons. The shell dispatches it once the frame that gave the
+    /// keyboard back has painted, so it reaches the same listener its key would.
+    pub pending_action: Option<&'static str>,
     /// Last worktree trash entry returned by fleetd, for `u`.
     pub last_trash_entry: Option<String>,
     /// Pull-request badges shared by Hub and Workspace, keyed by repository and head branch.
@@ -296,6 +300,7 @@ impl AppState {
             seen_failed: HashSet::new(),
             jobs_focus: None,
             palette_seed: None,
+            pending_action: None,
             last_trash_entry: None,
             pr_badges: HashMap::new(),
             warn_before_quit: true,

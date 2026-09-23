@@ -363,17 +363,28 @@ impl Shell {
         &mut self,
         rendered_generation: u64,
         cx: &mut Context<Self>,
-    ) -> (Vec<KeyDownEvent>, bool) {
+    ) -> (Vec<KeyDownEvent>, bool, Option<&'static str>) {
         let mut keys = self.focus_owner_keys.borrow_mut();
         let (_, changed) = keys.sync_owner(focus_owner(self.state.read(cx)));
         let drained = keys.finish_render(rendered_generation);
+        // Only a frame of the current owner may run the pending action: an older one painted
+        // the surface the action was not meant for, and the newer frame will come back here.
+        let current = !keys.is_stale();
         let still_queued = keys.should_queue();
         drop(keys);
-        self.state.update(cx, |state, cx| {
-            state.harness.set_pending_frame(still_queued);
+        let action = self.state.update(cx, |state, cx| {
+            let action = if current {
+                runnable_pending_action(state).and_then(|_| state.pending_action.take())
+            } else {
+                None
+            };
+            state
+                .harness
+                .set_pending_frame(still_queued || state.pending_action.is_some());
             cx.notify();
+            action
         });
-        (drained, changed)
+        (drained, changed, action)
     }
 
     fn register_pointer_gate<Event: MouseEvent>(
@@ -621,7 +632,10 @@ impl Shell {
         if owner_changed {
             window.refresh();
         }
-        if self.focus_owner_keys.borrow().should_queue() {
+        // An action a closed surface asked to run (Help) waits for the same painted frame as a
+        // queued key, so it reaches the listener its key would, on the surface behind.
+        let action_waiting = runnable_pending_action(self.state.read(cx)).is_some();
+        if self.focus_owner_keys.borrow().should_queue() || action_waiting {
             let shell = cx.entity().downgrade();
             window
                 .on_next_frame(move |window, cx| replay_stale_keys(&shell, generation, window, cx));
@@ -651,7 +665,7 @@ fn replay_stale_keys(
     window: &mut Window,
     cx: &mut gpui::App,
 ) {
-    let Ok((queued, owner_changed)) = shell.update(cx, |shell, cx| {
+    let Ok((queued, owner_changed, action)) = shell.update(cx, |shell, cx| {
         shell.drain_stale_keys_after_render(generation, cx)
     }) else {
         return;
@@ -671,6 +685,19 @@ fn replay_stale_keys(
             window.dispatch_event(PlatformInput::KeyDown(event), cx);
         }
     }
+    if let Some(name) = action {
+        match cx.build_action(name, None) {
+            // Dispatched to the focused element of the frame that just painted: the surface the
+            // closed overlay gave the keyboard back to, exactly where the action's key lands.
+            Ok(action) => window.dispatch_action(action, cx),
+            Err(error) => tracing::warn!(action = name, %error, "a pending action has no type"),
+        }
+    }
+}
+
+/// The action waiting to run once no overlay covers the surface it is meant for.
+fn runnable_pending_action(state: &AppState) -> Option<&'static str> {
+    state.pending_action.filter(|_| state.overlay.is_none())
 }
 
 #[cfg(test)]

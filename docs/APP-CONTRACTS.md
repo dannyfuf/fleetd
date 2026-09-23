@@ -308,6 +308,14 @@ the gate stops propagation before reverse-order bubble handlers can resize, scro
 or send terminal input. Agent and Workspace terminal handlers additionally verify their exact live
 terminal owner.
 
+An overlay that runs an action *for the surface under it* — Help's rows and guide buttons — does
+not dispatch it from its own element: the overlay's dispatch path reaches the Shell root's
+listeners but none of the screen's. It closes itself and leaves the action's name in
+`AppState::pending_action`; the Shell dispatches it from the same next-frame replay as a queued key
+(`shell/root/focus.rs`), once the frame that handed the surface its keyboard back has painted, and
+only from a frame of the current owner. The action therefore lands exactly where its key would,
+and `await idle` waits for it through the harness's pending-frame flag.
+
 ### Arbitrations against `KEYMAP.md`
 
 * **`q` is not bound in Palette mode.** `KEYMAP.md` lists `Esc`, `q` for the palette, but gpui
