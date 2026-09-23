@@ -2161,6 +2161,55 @@ fn controls_section(cx: &mut App) -> AnyElement {
                     .collect(),
             ),
         ),
+        // `gallery_menus` has the keyboard, the right-click area and every item state.
+        LAYOUT.labeled(
+            "menu · dropdown",
+            &t,
+            strip(
+                &t,
+                vec![
+                    PopoverMenu::new("kit-more")
+                        .trigger_with(|open, _, _| {
+                            IconButton::new("kit-more-trigger", Icon::Ellipsis, "More actions")
+                                .selected(open)
+                        })
+                        .menu(move |menu, _, _| {
+                            menu.item(
+                                MenuItem::new("Open")
+                                    .icon(Icon::SquareTerminal)
+                                    .kbd(kbd("o"))
+                                    .on_select(|_, _| {}),
+                            )
+                            .item(MenuItem::new("Rename").kbd(kbd("r")).on_select(|_, _| {}))
+                            .separator()
+                            .item(
+                                MenuItem::new("Delete worktree")
+                                    .icon(Icon::Trash2)
+                                    .kbd(kbd("shift-d"))
+                                    .destructive(true)
+                                    .on_select(|_, _| {}),
+                            )
+                        })
+                        .into_any_element(),
+                    div()
+                        .w(px(220.0))
+                        .child(
+                            Dropdown::new("kit-dropdown", "Ask each time").menu(|menu, _, _| {
+                                ["Read only", "Ask each time", "Full access"]
+                                    .into_iter()
+                                    .fold(menu, |menu, label| {
+                                        menu.item(
+                                            MenuItem::new(label)
+                                                .checked(label == "Ask each time")
+                                                .on_select(|_, _| {}),
+                                        )
+                                    })
+                            }),
+                        )
+                        .into_any_element(),
+                ],
+            ),
+        ),
     ];
     LAYOUT.section("controls", &t, children)
 }
@@ -2237,6 +2286,7 @@ fn main() {
         (1280.0, 800.0),
         Quit,
         |cx| {
+            cx.bind_keys(menu_key_bindings());
             cx.bind_keys([
                 KeyBinding::new("t", ToggleTheme, None),
                 KeyBinding::new("q", Quit, None),

@@ -650,6 +650,8 @@ pub struct Metrics {
     pub sheet_expanded_w: Pixels,
     /// 320 px toast.
     pub toast_w: Pixels,
+    /// 240 px: the narrowest a [`crate::Menu`] draws. It grows to fit its widest item.
+    pub menu_min_w: Pixels,
     /// 640 px palette.
     pub palette_w: Pixels,
     /// y = 120 px: where the palette is anchored.
@@ -752,6 +754,7 @@ impl Default for Metrics {
             sheet_w: px(440.0),
             sheet_expanded_w: px(640.0),
             toast_w: px(320.0),
+            menu_min_w: px(240.0),
             palette_w: px(640.0),
             palette_top: px(120.0),
             mode_word_w: px(84.0),

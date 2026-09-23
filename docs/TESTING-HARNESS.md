@@ -297,6 +297,7 @@ The names Fleet paints today, by surface:
 | Dialogs | `dialog.field[N]`, `dialog.row[N]` |
 | Tabs | `tabs.tab[N]` for a process tab, `agents.tabs.tab[N]` for a conversation, sharing one numbering |
 | Toasts and errors | `toasts.toast[N]` (0 is the oldest, matching the `toasts` array), `sticky_error.retry` |
+| Menus | `menu.item[N]`: the items of the one open kit `Menu` (a ⋯, `+`, right-click or dropdown menu), numbered over the visible items in order, separators and headers skipped |
 | Native agents | `agents.popup`, `agents.popup.agent[N]` (the header's provider switch: 0 Claude, 1 Codex), `agents.popup.restart`, `agents.popup.hide`, `agents.transcript`, `agents.composer`, `agents.decision`, `agents.approval.allow_once`, `agents.approval.allow_always`, `agents.approval.deny`, `agents.approval.deny_and_stop`, `agents.approval.edit` |
 
 `dialog.field[N]` counts the dialog's **tab cycle**: create-worktree `0` branch / `1` base /
@@ -317,6 +318,12 @@ it sits on top of: a target is aimed at, and a `click` resolves to the centre of
 the rectangle has to be somewhere clicking does what the name says. Over the whole stack that
 centre falls in the metadata strip, where a mouse down reaches no editor and every keystroke after
 it is dropped in silence.
+
+`menu.item[N]` exists only while a menu is open, so a scenario opens one first (by clicking its
+trigger or right-clicking its row) and awaits the target before clicking it. Only one menu is open
+at a time — opening another closes the first — so the name needs no surface prefix. An item whose
+action the surface cannot run is left out of the menu, not greyed, so `N` counts only what is
+shown.
 
 `dialog.button[N]` is part of the vocabulary but is painted nowhere: Fleet's dialogs are confirmed
 from the keyboard and `Dialog::primary` renders text, not a control. It stays unpopulated until a

@@ -44,6 +44,7 @@ mod list_view;
 mod log_view;
 mod markdown;
 mod markdown_text;
+mod menu;
 mod mode_word;
 mod multiline_input;
 mod navigation;
@@ -134,6 +135,10 @@ pub use markdown::{
 };
 pub use markdown_text::{
     LIST_MARKER_CH, MAX_HEADING_LEVEL, MarkdownText, MdBlock, MdSpan, parse_markdown,
+};
+pub use menu::{
+    ContextMenu, Dropdown, MENU_ITEM_TARGET, MENU_KEY_CONTEXT, Menu, MenuAnchor, MenuItem,
+    PopoverMenu, menu_actions, menu_holds_focus, menu_key_bindings,
 };
 pub use mode_word::{Mode, ModeWord};
 pub use multiline_input::{

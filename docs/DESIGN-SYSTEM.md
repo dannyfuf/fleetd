@@ -278,7 +278,7 @@ list below is the complete inventory, in px unless marked `ch`; a unit test in
 | Layout columns | `sidebar_w 232` · `rail_w 240` · `detail_w 344` · `detail_overlay_w 320` · `sheet_w 440` · `sheet_expanded_w 640` · `sheet_w_detail 736` |
 | Rows and headers | `row_h 30` · `row_h_comfortable 44` · `pane_header_h 30` · `section_header_h 20` · `palette_row_h 34` · `job_row_h 44` · `job_key_w 20` |
 | Controls | `button_h 30` · `button_h_compact 26` · `kbd_h 18` · `kbd_h_small 16` · `chip_h 22` · `text_field_h 36` · `field_status_h 18` · `number_field_w 96` |
-| Dialogs and floating layers | `dialog_w 560` · `confirm_compact_w 480` · `dialog_header_h 44` · `dialog_footer_h 44` · `palette_w 640` · `palette_top 120` · `palette_input_h 44` · `overlay_help_w 640` · `toast_w 320` · `toast_inset 12` · `scroll_pill_w 176` |
+| Dialogs and floating layers | `dialog_w 560` · `confirm_compact_w 480` · `dialog_header_h 44` · `dialog_footer_h 44` · `palette_w 640` · `palette_top 120` · `palette_input_h 44` · `overlay_help_w 640` · `toast_w 320` · `toast_inset 12` · `scroll_pill_w 176` · `menu_min_w 240` |
 | Lines and marks | `hairline 1` · `focus_ring_w 2` · `scroll_thumb_w 3` · `dot_size 8` · `dot_size_small 6` |
 | Terminal | `cell_w 7.5` · `cell_h 18` · `terminal_tab_min_w 84` · `terminal_tab_max_w 200` · `new_terminal_tab_w 36` |
 | Detail and doctor columns | `fact_label_w 104` · `doctor_check_w 120` · `doctor_status_w 64` |
@@ -461,10 +461,13 @@ the focus and the timers, and passes them down each frame. That is deliberate �
 cannot hold state, and the alternative (an entity per component) would make cursor stability
 under background updates impossible to reason about.
 
-There are exactly three exceptions, and they are gpui **entities** the surface holds:
+There are exactly four exceptions, and they are gpui **entities**:
 `TextInput` (§6.4), which owns a caret, a selection, an undo history, a painted-layout cache and
 an IME session (ADR 0020), and `TranscriptList` and `MultilineInput` (§6.6), which own measured
-row geometry, a scroll machine, and — for the composer — the `TextInput` it wraps. Nothing else
+row geometry, a scroll machine, and — for the composer — the `TextInput` it wraps; and `Menu`
+(§6.8), which owns a `FocusHandle` and a highlight while it is open. The surface holds the first
+three; a menu is held by the wrapper that opened it (`PopoverMenu`, `ContextMenu`, `Dropdown`) in
+gpui element state keyed by the wrapper's id, so a screen keeps no field per menu. Nothing else
 in the kit implements `Render` except the view behind `Tooltip` (§6.8), which holds no state at
 all: gpui's tooltip slot takes an `AnyView`, so the tooltip is built as a throwaway entity each
 time it opens.
@@ -479,7 +482,8 @@ harness mode off is one flag read and one branch. Four components take typed ite
 elements, so their names live here instead of at the call site: `ToastStack` records
 `toasts.toast[N]`, `Palette` records `palette.input` and `palette.row[N]`,
 `TerminalTabStrip` records `tabs.tab[N]` and — past `TerminalTabStrip::agents_from` —
-`agents.tabs.tab[N]`, and the decision drawer records the approval controls. Two more take the
+`agents.tabs.tab[N]`, the decision drawer records the approval controls, and an open `Menu`
+records `menu.item[N]` over its visible items, separators and headers skipped. Two more take the
 name from the caller, because the same component appears under different surfaces:
 `SegmentedTabs::harness_tabs` and `FuzzyList::harness_rows`. A name is never invented here;
 `docs/TESTING-HARNESS.md` §3 is authoritative for the vocabulary.
@@ -554,10 +558,12 @@ Workspace keeps both bars at the same pixel positions as the Hub — same chrome
 
 #### `OverlayLayer`
 **Purpose.** The shared deferred-paint ordering for floating surfaces.
-**API.** `OverlayLayer::{Sheet, Anchored, Dialog, Toast}.priority()` resolves to
-`Sheet(100) → Anchored(200) → Dialog(300) → Toast(400)`.
+**API.** `OverlayLayer::{Sheet, Anchored, Dialog, Toast, Menu}.priority()` resolves to
+`Sheet(100) → Anchored(200) → Dialog(300) → Toast(400) → Menu(500)`.
 **Usage rule.** Never pass a literal deferred priority. This order encodes the Jobs sheet,
-anchored palette, blocking dialogs, and transient acknowledgements.
+anchored palette, blocking dialogs, transient acknowledgements, and the open menu the pointer is
+on — which closes on the next click anywhere, so nothing may slide over it. A menu opened inside
+a dialog or sheet is a nested `deferred` and paints after that surface regardless of the number.
 
 #### `SplitLayout`
 **Purpose.** A fixed region, a hairline, and a flexible region.
@@ -1578,9 +1584,10 @@ same components as a static overview in both themes.
 
 ### 6.8 Controls
 
-The four primitives every redesigned surface is built from (ADR 0023): a key chip that always
-says what the keymap says, a button that shows one, an icon-only button, and a tooltip. None of
-them is focusable. The keyboard path to a control is the key on its chip, so a click and a key
+The primitives every redesigned surface is built from (ADR 0023): a key chip that always says
+what the keymap says, a button that shows one, an icon-only button, a tooltip, and the menus a
+button or a right-click opens. No button, trigger or tooltip is focusable; a menu takes the focus
+only while it is open. The keyboard path to a control is the key on its chip, so a click and a key
 press are one dispatch, and `Tab`, `j`/`k` and pane focus keep their meaning.
 
 **How the app passes a key in.** The kit takes no domain type, but a gpui `Action` is not one: it
@@ -1680,11 +1687,92 @@ lacks, so it names an icon-only control and repeats its key.
 (`.tooltip(text)`), since its key is already on it. Never put the only statement of a fact in a
 tooltip.
 
+#### `Menu` / `MenuItem`
+**Purpose.** A floating list of verbs: a row's ⋯ menu, its right-click menu, the `+` new-tab
+menu, the context switcher, a dropdown's options. Never placed by hand: one of the three wrappers
+below opens it.
+**Anatomy.** `elevated` fill, `border_strong` hairline, `radii.popover`, `popover_shadow()`, `xs`
+padding, at least `menu_min_w` wide. An item is `row_h` tall, `sm` side padding, `radii.control`:
+`[icon] label [✓] [Kbd]`, icon 14 px, label `Ui` in `text_secondary` (`text` when highlighted),
+the chip small and right-aligned. The highlight is a `control_hover` fill. A header is a
+`SentenceLabel` in `text_muted`, `section_header_h` tall; a separator is a `border` hairline inset
+`sm` with `xs` above and below.
+**API.** `Menu::build(window, cx, |menu, window, cx| menu.header(..).item(..).separator())` (the
+wrappers call it); `MenuItem::new(label).icon(Icon).action(Box<dyn Action>)
+.on_select(Fn(&mut Window, &mut App)).kbd(Kbd).destructive(bool).checked(bool)`;
+`Menu::{item_labels, highlighted, is_empty, dismiss}`. Keys: `menu_actions::{SelectNext,
+SelectPrevious, Confirm, Cancel}` against `MENU_KEY_CONTEXT` (`FleetMenu`); `menu_key_bindings()`
+binds them for a gallery or a test, and `fleet-app`'s key table binds the same keys
+(`KEYMAP.md` § *Open menus*). `menu_holds_focus(window, cx)` says whether an open menu has the
+focus, for a shell that reconciles focus from its own state (`APP-CONTRACTS.md` §3).
+**States.** item: default · highlighted (hover or `↑`/`↓`) · destructive (icon and label in
+`danger`) · checked (a `✓`, announced as a radio item) · with or without icon and chip. No
+disabled item.
+**Behaviour.** Opening captures the focused element as the menu's origin and moves the focus into
+the menu. `↓`/`ctrl-n` and `↑`/`ctrl-p` move the highlight and stop at the ends; `⏎` activates;
+`esc` closes. Hover moves the highlight, a click activates, a mouse-down anywhere outside closes.
+Closing gives the focus back to the origin. Activating closes first, then runs the item's
+`on_select`, then dispatches its action to the origin with `window.dispatch_action` — the same
+dispatch its key makes. The chip is `Kbd::for_action_in(action, origin)`, so it names the key the
+action has *where the menu was opened*.
+**Usage rule.** An item carries the same action its key dispatches; `on_select` is for what is
+not an action (a dropdown option). An item whose action nothing on the origin's dispatch path
+handles is **left out** by `build`, and a header or separator left with nothing to head or
+separate goes with it (§4: hidden, never greyed). A menu opens with its checked item highlighted,
+else its first. Build it from an event, never before the window has painted: checking an action
+needs a painted dispatch tree. There is no `j`/`k` in a menu (§4). Each open item paints
+`menu.item[N]` (`TESTING-HARNESS.md` §3).
+
+#### `PopoverMenu`
+**Purpose.** A trigger that opens a `Menu` hanging below it.
+**API.** `PopoverMenu::new(id).trigger(impl IntoElement)` or `.trigger_with(|open, window, cx|
+..)`, `.menu(|menu, window, cx| ..)`, `.anchor(MenuAnchor::{BottomLeft, BottomRight})`,
+`.full_width()`. The id must be stable across frames: the open menu is kept under it.
+**Anatomy.** The menu paints through `anchored()` inside `deferred()` at `OverlayLayer::Menu`,
+`xs` below the trigger, its left edge under the trigger's (`BottomLeft`, the default) or its right
+edge under the trigger's right edge (`BottomRight`, for a trigger at the end of a row or header),
+and flips or snaps to stay `sm` inside the window.
+**States.** closed · open (`trigger_with` receives `open`, so an `IconButton` passes it to
+`.selected(open)` and stays pressed; the wrapper announces `aria-expanded`).
+**Usage rule.** The trigger is a `Button` or `IconButton` with **no** action of its own: the
+popover owns the click. Clicking the trigger of an open menu closes it. A popover is a way to
+*reach* actions that also have keys; it never holds the only path to one (ADR 0023).
+
+#### `ContextMenu`
+**Purpose.** A right-click menu for the row, card or pane it wraps.
+**API.** `ContextMenu::new(id, child).menu(|menu, window, cx| ..)`; a list keys the id by row,
+`("worktree-menu", ix)`.
+**Behaviour.** A right mouse-down anywhere in the child opens the menu with its top-left corner at
+the pointer (flipped or snapped to stay inside the window), and stops the event there. A second
+right-click elsewhere closes the first menu and opens the new one.
+**Usage rule.** Every verb in a right-click menu is also on a visible control — the row's ⋯
+`PopoverMenu`, its detail panel — and has a key; the ⋯ menu and the right-click menu of a row are
+built by the same function so they cannot drift.
+
+#### `Dropdown`
+**Purpose.** A field showing the current value and a chevron, opening a `Menu` of the options with
+a `✓` on the chosen one. It replaces the `Cycler`'s `‹ value ›` in Settings, Create worktree and
+the card detail.
+**Anatomy.** `text_field_h` tall, `md` side padding, `radii.control`, `bg` fill in a `border`
+hairline (`border_strong` on hover, `focus_ring` while open); the value in `Ui`, a 12 px
+`chevron-down` in `text_secondary`. An optional `SentenceLabel` above it, `xxs` apart.
+**API.** `Dropdown::new(id, value).label(text).menu(|menu, window, cx| ..).full_width()`; the
+caller builds one `MenuItem` per option with `.checked(is_current)` and an `.on_select(..)` (or an
+action).
+**States.** closed · hover · open. The list opens with the chosen option highlighted.
+**Usage rule.** A dropdown for a set longer than a segmented control holds and short enough to
+read whole; a `FuzzyList` under a text field for a set to search.
+
 **Gallery.** `examples/gallery_buttons.rs` binds a keymap and wires every button with
 `.action(..)`, so each chip there is resolved live and clicking or pressing the key reports the
 same action in the status bar; it shows every style × size with and without icon and chip, the
 disabled, selected and full-width states, an unbound action with no chip, icon buttons with their
-tooltips, and each `Kbd` spelling and tone. `kit_gallery`'s `controls` section is the overview.
+tooltips, and each `Kbd` spelling and tone. `examples/gallery_menus.rs` binds the menu keys and a
+keymap, and shows a row with a ⋯ `PopoverMenu` (`BottomRight`), a `+ New tab` button menu
+(`BottomLeft`, with a header, icons and `⌃S` chips), a right-click area, a labelled and a
+full-width `Dropdown`, an item whose action nothing handles (left out of every menu), and an
+always-open `Menu` showing a header, icon, chip, check, separator and destructive item at once.
+`kit_gallery`'s `controls` section is the overview.
 
 ---
 
@@ -1707,7 +1795,7 @@ tooltips, and each `Kbd` spelling and tone. `kit_gallery`'s `controls` section i
    adding it to §5.1 here.
 3. A new component gets its own module under `src/components/`, a `pub use` in
    `components/mod.rs`, an entry in §6 here, and a panel in the matching per-group gallery
-   (`gallery_structure`, `gallery_data`, `gallery_input`, `gallery_buttons`, `gallery_terminal`,
+   (`gallery_structure`, `gallery_data`, `gallery_input`, `gallery_buttons`, `gallery_menus`, `gallery_terminal`,
    `gallery_agent`, or `gallery_board`) showing **every** state. `kit_gallery` remains the combined overview. If a
    state is not in a gallery, it is not implemented.
 4. `cargo check -p fleet-ui-kit --examples` and

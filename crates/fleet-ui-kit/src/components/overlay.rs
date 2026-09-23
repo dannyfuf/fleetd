@@ -10,10 +10,10 @@ use gpui::{AnyElement, App, Pixels, Window, deferred, div, prelude::*};
 
 use crate::theme::ActiveTheme;
 
-/// Paint order of the four floating surfaces.
+/// Paint order of the five floating surfaces.
 ///
 /// gpui draws `deferred` elements after the rest of the frame, ordered by priority, so the
-/// four layers that can be on screen at the same time state their order **here, once**,
+/// five layers that can be on screen at the same time state their order **here, once**,
 /// instead of each one inventing a number. Higher paints later, i.e. on top.
 ///
 /// The order encodes three UX-spec rules:
@@ -21,9 +21,13 @@ use crate::theme::ActiveTheme;
 /// 1. A [`super::Sheet`] is lowest, because it is *about* the rows behind it (§3.7).
 /// 2. A [`super::Dialog`] is above a palette [`Overlay`], because a dialog ghosts the base
 ///    screen and a palette does not (§3.8, §3.9).
-/// 3. The [`super::ToastStack`] is highest, because §2.7 allows a toast while a dialog is
-///    open (the "dialog-close reassurance" row) and an unreadable acknowledgement is worse
-///    than none.
+/// 3. The [`super::ToastStack`] is above every surface, because §2.7 allows a toast while a
+///    dialog is open (the "dialog-close reassurance" row) and an unreadable acknowledgement is
+///    worse than none.
+/// 4. An open [`super::Menu`] is highest: it is what the pointer is on right now, it closes on
+///    the next click anywhere, and a toast sliding over the item being clicked would take the
+///    click. A menu opened inside a dialog or sheet is a nested `deferred` and paints after
+///    that surface whatever the number.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum OverlayLayer {
     /// The right-docked panel.
@@ -35,6 +39,8 @@ pub enum OverlayLayer {
     Dialog,
     /// The bottom-right toast stack.
     Toast,
+    /// An open menu, popover or dropdown list.
+    Menu,
 }
 
 impl OverlayLayer {
@@ -45,6 +51,7 @@ impl OverlayLayer {
             OverlayLayer::Anchored => 200,
             OverlayLayer::Dialog => 300,
             OverlayLayer::Toast => 400,
+            OverlayLayer::Menu => 500,
         }
     }
 }
