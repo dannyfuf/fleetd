@@ -258,6 +258,40 @@ pub(crate) fn open_worktree<T: SessionTransport>(
     ensure_worktree_session(id, true, true, state, transport, cx);
 }
 
+/// Opens a native agent thread: its tab when this window already shows its worktree, else its
+/// worktree's session first. The palette's `AGENTS` rows and the title bar's `1 needs you` both
+/// run this, so a thread opens the same way whichever of them was clicked.
+pub(crate) fn open_agent_thread<T: SessionTransport>(
+    thread: ThreadId,
+    state: &Entity<AppState>,
+    transport: &T,
+    cx: &mut App,
+) {
+    let reopen_transport = transport.clone();
+    let worktree = if crate::screens::workspace::reopen_agent_tab(
+        state,
+        thread,
+        move |command| reopen_transport.send(command.into()),
+        cx,
+    ) {
+        None
+    } else {
+        state.update(cx, |app, _| {
+            app.agents.summary(thread).and_then(|summary| {
+                let worktree = summary.worktree.clone();
+                // `select_agent_thread` also returns false when the combined strip is full.
+                // That refusal already showed its toast and must not fall through to
+                // EnsureSession, which could switch or wake an unrelated session.
+                (app.agents.is_attached(thread) || app.workspace_has_tab_capacity(&worktree))
+                    .then_some(worktree)
+            })
+        })
+    };
+    if let Some(worktree) = worktree {
+        open_agent_thread_worktree(worktree, thread, state, transport, cx);
+    }
+}
+
 /// Ensures a delegated thread's worktree session, then attaches and selects that thread.
 pub(crate) fn open_agent_thread_worktree<T: SessionTransport>(
     worktree: WorktreeId,

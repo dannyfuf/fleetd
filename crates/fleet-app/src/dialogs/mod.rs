@@ -34,8 +34,8 @@ pub use confirm::ConfirmRequest;
 pub use host::{ActiveDialog, request_confirm, request_edit_hooks};
 pub(crate) use host::{
     DialogHost, SessionTransport, dialog_fields, dialog_message, focused_input, notify,
-    open_agent_session, open_agent_thread_worktree, open_agents_picker, open_session,
-    open_worktree, read_host, retain_task, with_host,
+    open_agent_session, open_agent_thread, open_agents_picker, open_session, open_worktree,
+    read_host, retain_task, with_host,
 };
 #[cfg(test)]
 pub(crate) use host::{focused_input_text, hook_row_count};

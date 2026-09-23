@@ -19,7 +19,7 @@ use crate::{
     bridge::Bridge,
     dialogs::{
         ConfirmRequest, DialogHost, Dialogs, SessionTransport, notify, open_agent_session,
-        open_agent_thread_worktree, open_worktree, request_confirm, step, with_host,
+        open_agent_thread, open_worktree, request_confirm, step, with_host,
     },
     keymap,
     presentation::{FuzzyQuery, SnapshotIndex, pretty_keys, selected_worktree_id},
@@ -1443,32 +1443,7 @@ fn run_selected<T: SessionTransport>(
         cx.notify();
     });
     match entry.run {
-        Run::OpenAgentThread(thread) => {
-            let reopen_transport = transport.clone();
-            let worktree = if crate::screens::workspace::reopen_agent_tab(
-                state,
-                thread,
-                move |command| reopen_transport.send(command.into()),
-                cx,
-            ) {
-                None
-            } else {
-                state.update(cx, |app, _| {
-                    app.agents.summary(thread).and_then(|summary| {
-                        let worktree = summary.worktree.clone();
-                        // `select_agent_thread` also returns false when the combined strip is
-                        // full. That refusal already showed its toast and must not fall through
-                        // to EnsureSession, which could switch or wake an unrelated session.
-                        (app.agents.is_attached(thread)
-                            || app.workspace_has_tab_capacity(&worktree))
-                        .then_some(worktree)
-                    })
-                })
-            };
-            if let Some(worktree) = worktree {
-                open_agent_thread_worktree(worktree, thread, state, transport, cx);
-            }
-        }
+        Run::OpenAgentThread(thread) => open_agent_thread(thread, state, transport, cx),
         Run::OpenSession { agent, .. } => open_agent_session(agent, state, transport, cx),
         Run::OpenWorktree(id) => open_worktree(id, state, transport, cx),
         Run::SelectRepo(repo) => {
