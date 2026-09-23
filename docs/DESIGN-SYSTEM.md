@@ -390,7 +390,7 @@ if let Some(bytes) = fleet_ui_kit::kit_asset(path) { return Ok(Some(Cow::Borrowe
 An absent asset must return `Ok(None)`, never `Err`: `svg()` logs nothing, so an erroring source
 turns an invisible icon into an invisible crash.
 
-### 5.1 The closed icon set (75 glyphs)
+### 5.1 The closed icon set (81 glyphs)
 
 | Purpose | Icons |
 | --- | --- |
@@ -403,7 +403,7 @@ turns an invisible icon into an invisible crash.
 | Terminal | `terminal` `square-terminal` `chevrons-up` `command` `maximize-2` `plus` |
 | Dialogs | `trash` `scissors` `power` `x` `boxes` `arrow-right-left` `settings-2` `hourglass` |
 | Chrome | `flag` `circle-arrow-up` `circle-arrow-down` `search` `clipboard-check` `delete` `ellipsis` `check` `minus` `chevron-left` `chevron-right` `chevron-down` `sailboat` |
-| Native agent | `brain` `wrench` `square-pen` `paperclip` `minimize-2` `undo-2` |
+| Native agent | `brain` `wrench` `square-pen` `paperclip` `minimize-2` `undo-2` `copy` `external-link` `square` `square-check` `shield` `list-checks` |
 
 Two Lucide renames the UX spec predates: `circle-help` is now **`circle-question-mark`**, and
 `arrow-up-circle` is now **`circle-arrow-up`**. The kit keeps both `trash` and `trash-2`, since
