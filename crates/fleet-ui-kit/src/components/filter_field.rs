@@ -12,14 +12,21 @@
 //!   (built embedded: the field is the chrome), and the box draws it with the `shown/total`
 //!   count where the chip was — amber when the query hides every row.
 //!
+//! Either face can carry a clear `✕` ([`FilterField::on_clear`]) while a query is set, and a
+//! surface whose filter is not an action (a board header's own editor) opens it with
+//! [`FilterField::on_click`] instead of [`FilterField::action`]. The box is `filter_field_w`
+//! wide unless [`FilterField::width`] says otherwise.
+//!
 //! The editing face owns no keys: the surface's filter mode does, exactly as with
 //! [`super::FilterBar`], which stays the in-place form for a dense pane header. Use this one in
 //! a [`super::PageHeader`].
 
-use gpui::{Action, App, ElementId, Entity, SharedString, Window, div, prelude::*};
+use std::rc::Rc;
+
+use gpui::{Action, App, ElementId, Entity, Pixels, SharedString, Window, div, prelude::*};
 
 use super::{
-    TextInput, control,
+    ButtonSize, IconButton, TextInput, control,
     kbd::{Kbd, KbdSize},
 };
 use crate::{
@@ -39,7 +46,13 @@ pub struct FilterField {
     counts: Option<(usize, usize)>,
     action: Option<Box<dyn Action>>,
     kbd: Option<Kbd>,
+    width: Option<Pixels>,
+    on_click: Option<Handler>,
+    on_clear: Option<Handler>,
 }
+
+/// A press on the field or on its clear button.
+type Handler = Rc<dyn Fn(&mut Window, &mut App)>;
 
 impl FilterField {
     /// An idle field reading `placeholder` (`Filter`).
@@ -52,6 +65,9 @@ impl FilterField {
             counts: None,
             action: None,
             kbd: None,
+            width: None,
+            on_click: None,
+            on_clear: None,
         }
     }
 
@@ -85,6 +101,25 @@ impl FilterField {
         self
     }
 
+    /// Run `handler` when the idle field is clicked, for a surface whose filter is not an action.
+    /// With [`Self::action`] as well, the handler runs first.
+    pub fn on_click(mut self, handler: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self.on_click = Some(Rc::new(handler));
+        self
+    }
+
+    /// Draw a clear `✕` while a query is set (idle or editing), running `handler` when pressed.
+    pub fn on_clear(mut self, handler: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self.on_clear = Some(Rc::new(handler));
+        self
+    }
+
+    /// Override the `filter_field_w` width, e.g. to fill a narrow header.
+    pub fn width(mut self, width: Pixels) -> Self {
+        self.width = Some(width);
+        self
+    }
+
     /// Whether the field is drawing its editor.
     pub fn is_editing(&self) -> bool {
         self.editor.is_some()
@@ -106,6 +141,19 @@ impl RenderOnce for FilterField {
             self.action
                 .as_deref()
                 .and_then(|action| Kbd::for_action(action, window, cx))
+        });
+        let has_query = self.query.is_some()
+            || self
+                .editor
+                .as_ref()
+                .is_some_and(|editor| !editor.read(cx).text().is_empty());
+        let clear = self.on_clear.clone().filter(|_| has_query).map(|clear| {
+            IconButton::new("filter-field-clear", Icon::X, "Clear filter")
+                .size(ButtonSize::Compact)
+                .on_click(move |_, window, cx| {
+                    cx.stop_propagation();
+                    clear(window, cx);
+                })
         });
         let theme = cx.theme();
         let editing = self.editor.is_some();
@@ -149,7 +197,7 @@ impl RenderOnce for FilterField {
             .flex_none()
             .items_center()
             .gap(theme.space.sm)
-            .w(theme.metrics.filter_field_w)
+            .w(self.width.unwrap_or(theme.metrics.filter_field_w))
             .h(theme.metrics.button_h)
             .px(theme.space.sm)
             .rounded(theme.radii.control)
@@ -166,12 +214,17 @@ impl RenderOnce for FilterField {
             })
             .child(Icon::Search.el().size(IconSize::Small).color(icon_color))
             .child(body)
-            .children(trailing);
+            .children(trailing)
+            .children(clear);
         if editing {
             return field.into_any_element();
         }
         let action = self.action;
+        let on_click = self.on_click;
         control::on_click_named(field, self.placeholder, move |_, window, cx| {
+            if let Some(on_click) = &on_click {
+                on_click(window, cx);
+            }
             if let Some(action) = &action {
                 window.dispatch_action(action.boxed_clone(), cx);
             }

@@ -1402,7 +1402,7 @@ fn structure_section(cx: &mut App, filter_query: Entity<TextInput>) -> AnyElemen
                 .stale("2m"),
         ),
         LAYOUT.labeled(
-            "filter field · retained / editing / no match",
+            "filter field · retained / clearable, narrow / editing / no match",
             &t,
             strip(
                 &t,
@@ -1410,6 +1410,11 @@ fn structure_section(cx: &mut App, filter_query: Entity<TextInput>) -> AnyElemen
                     FilterField::new("kit-filter-kept", "Filter")
                         .query("rut")
                         .kbd(gallery_kbd("/"))
+                        .into_any_element(),
+                    FilterField::new("kit-filter-clear", "Filter cards")
+                        .query("login")
+                        .width(px(180.0))
+                        .on_clear(|_, _| {})
                         .into_any_element(),
                     FilterField::new("kit-filter-edit", "Filter")
                         .editor(filter_query.clone())

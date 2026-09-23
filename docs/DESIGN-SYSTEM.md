@@ -646,16 +646,22 @@ holds the page's own controls — a `FilterField`, secondary `Button`s, at most 
 `SectionHeader` (a block inside a panel).
 
 #### `FilterField`
-**Purpose.** A page toolbar's filter box: magnifier, the query or `Filter`, and the key that
-opens it; while editing, the live editor and `shown/total`.
-**API.** `FilterField::new(id, placeholder).query(text).editor(Entity<TextInput>)
-.counts(shown, total).action(Box<dyn Action>).kbd(Kbd)`; `.is_editing()`, `.count_tone()`.
-**States.** idle (placeholder, key chip; a click dispatches `action`) · retained (the query in
-body text) · editing (the embedded editor, a `focus_ring` border, `shown/total`) · no match
-(the count turns amber).
-**Usage rule.** One box, two faces, so opening the filter moves nothing. The editing face owns no
-keys — the surface's filter mode does, as with `FilterBar`, which stays the in-place form for a
-dense pane header. `filter_field_w` wide, `button_h` tall.
+**Purpose.** A page or board header's filter box: magnifier, the query or a placeholder, and the
+key that opens it; while editing, the live editor and `shown/total`. The one filter box of the
+redesigned surfaces — use it for the Worktrees page and the board header alike.
+**API.** `FilterField::new(id, placeholder)` then `.query(text)` (the retained value, shown idle)
+`.editor(Entity<TextInput>)` (the surface is editing: draw the editor) `.counts(shown, total)`
+`.action(Box<dyn Action>)` (a click dispatches it, and its live key is the chip) `.on_click(handler)`
+(a click runs it; for a filter that is not an action) `.kbd(Kbd)` (chip override)
+`.on_clear(handler)` (a `✕` while a query is set, idle or editing) `.width(Pixels)` (default
+`filter_field_w`); `.is_editing()`, `.count_tone()`.
+**States.** idle (placeholder, key chip) · retained (the query in body text) · clearable (`✕`) ·
+editing (the embedded editor, a `focus_ring` border, `shown/total`) · no match (the count turns
+amber).
+**Usage rule.** One box, two faces, so opening the filter moves nothing. The field takes no focus
+itself: the surface owns the editor (built with `TextInput::set_embedded`), focuses it when its
+filter mode opens, and owns the keys — as with `FilterBar`, which stays the in-place form for a
+dense pane header. `button_h` tall.
 
 #### `Sheet`
 **Purpose.** A docked panel (the Jobs panel; the board card detail).
