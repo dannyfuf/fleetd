@@ -18,7 +18,7 @@
 //! | `ctrl-i` | focus the branch field · `esc` leaves it |
 //! | `/` | focus the filter bar · `esc` leaves it, `esc` again clears it |
 //! | `:` | open the palette · `esc` closes it |
-//! | `d` / `D` | the compact / expanded confirm · `y` `Y` `n` `esc` answer it |
+//! | `d` / `D` | the compact / expanded confirm · `y` `Y` `n` `esc` answer it, `I` re-checks, and every button clicks |
 //! | `ctrl-n` `ctrl-p` `↓` `↑` | move the fuzzy / palette cursor (also while typing) |
 //! | `h` `l` | previous / next tab |
 //! | `←` `→` | cycle the host value |
@@ -57,7 +57,9 @@ actions!(
         ConfirmCompact,
         ConfirmExpanded,
         ConfirmYes,
+        ConfirmStrong,
         ConfirmNo,
+        ConfirmRecheck,
         CursorNext,
         CursorPrev,
         NextTab,
@@ -666,21 +668,33 @@ impl InputGallery {
         cx.notify();
     }
 
-    fn confirm_yes(&mut self, _: &ConfirmYes, window: &mut Window, cx: &mut Context<Self>) {
-        let required = match self.confirm {
-            ConfirmDemo::None => return,
-            ConfirmDemo::Compact => ConfirmKey::Lower,
-            ConfirmDemo::Expanded => ConfirmKey::Upper,
-        };
-        if required == ConfirmKey::Upper && !window.modifiers().shift {
-            return;
-        }
-        if self.confirm != ConfirmDemo::None {
-            self.answer = Some(match self.confirm {
-                ConfirmDemo::Expanded => "confirmed with Y".into(),
-                _ => SharedString::from("confirmed with y"),
-            });
+    /// `y`, or a click on the primary `Delete`: answers only the compact confirm.
+    fn confirm_yes(&mut self, _: &ConfirmYes, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.confirm == ConfirmDemo::Compact {
+            self.answer = Some("confirmed with y".into());
             self.confirm = ConfirmDemo::None;
+        }
+        cx.notify();
+    }
+
+    /// `Y`, or a click on the red `Delete anyway`: answers either confirm.
+    fn confirm_strong(&mut self, _: &ConfirmStrong, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.confirm != ConfirmDemo::None {
+            self.answer = Some("confirmed with Y".into());
+            self.confirm = ConfirmDemo::None;
+        }
+        cx.notify();
+    }
+
+    /// `I`, or a click on `Re-check`.
+    fn confirm_recheck(
+        &mut self,
+        _: &ConfirmRecheck,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.confirm != ConfirmDemo::None {
+            self.answer = Some("re-checked".into());
         }
         cx.notify();
     }
@@ -1268,6 +1282,20 @@ fn tabs_and_select_section(
                     ),
             ),
             LAYOUT.labeled(
+                "segmented \u{b7} one option unavailable (dimmed, not clickable)",
+                theme,
+                SegmentedControl::new(
+                    "gallery-segmented-unavailable",
+                    [
+                        Segment::new("local"),
+                        Segment::new("devbox"),
+                        Segment::new("archdev").disabled(true),
+                    ],
+                )
+                .active(Some(0))
+                .on_select(|_, _, _| {}),
+            ),
+            LAYOUT.labeled(
                 "segmented \u{b7} full width",
                 theme,
                 div().w(px(420.0)).child(
@@ -1353,38 +1381,43 @@ fn confirm_hint_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
 
 fn compact_confirm() -> ConfirmDialog {
     ConfirmDialog::new(
-        "Delete buk/payroll#fix-rut-validator?",
+        "Delete worktree fix-rut-validator?",
         FactList::from_facts([
             Fact::safe("clean"),
             Fact::safe("merged into origin/main"),
             Fact::safe("no session"),
         ]),
     )
-    .target("buk/payroll#fix-rut-validator")
+    .target("buk/payroll \u{b7} ~/worktrees/buk/payroll/fix-rut-validator")
     .icon(Icon::Trash)
-    .stamp(FreshnessStamp::new("checked", 8).action("I", "re-check"))
+    .stamp(FreshnessStamp::new("Checked", 8))
+    .recheck_action(Box::new(ConfirmRecheck))
     .consequence("Moves the copy to trash, then removes it in the background.")
-    .hints(KeyHintRow::new().key("I", "re-check"))
+    .dismiss_action(Box::new(ConfirmNo))
+    .accept_actions(Box::new(ConfirmYes), Box::new(ConfirmStrong))
     .action_label("Delete")
 }
 
 fn expanded_confirm() -> ConfirmDialog {
     ConfirmDialog::new(
-        "Delete worktree",
+        "Delete worktree feat-payroll-fix?",
         FactList::from_facts([
-            Fact::risk("12 uncommitted files"),
-            Fact::risk("3 commits not on origin/main"),
+            Fact::risk("12 uncommitted files").strong("12 uncommitted files"),
+            Fact::risk("3 commits not on origin/main").strong("3 commits"),
             Fact::risk("session attached \u{b7} claude, :3000 running"),
             Fact::unknown("unique commit count unavailable (gh unavailable)"),
             Fact::safe("PR #412 open (not merged)"),
         ]),
     )
-    .target("buk/payroll#feat-payroll-fix")
-    .stamp(FreshnessStamp::new("checked", 190).action("I", "re-check"))
+    .target("buk/payroll \u{b7} ~/worktrees/buk/payroll/feat-payroll-fix")
+    .stamp(FreshnessStamp::new("Checked", 190))
+    .recheck_action(Box::new(ConfirmRecheck))
     .consequence(
-        "Deleting kills the session and moves the copy to trash; commits that exist only here are lost.",
+        "The session is killed and the copy moves to the trash. The 3 unpushed commits and 12 \
+         uncommitted files exist only here and will be lost.",
     )
-    .hints(KeyHintRow::new().key("I", "re-check"))
+    .dismiss_action(Box::new(ConfirmNo))
+    .accept_actions(Box::new(ConfirmYes), Box::new(ConfirmStrong))
     .action_label("Delete")
 }
 
@@ -1436,6 +1469,8 @@ impl Render for InputGallery {
             .on_action(cx.listener(Self::confirm_expanded))
             .on_action(cx.listener(Self::confirm_yes))
             .on_action(cx.listener(Self::confirm_no))
+            .on_action(cx.listener(Self::confirm_strong))
+            .on_action(cx.listener(Self::confirm_recheck))
             .relative()
             .size_full()
             .flex()
@@ -1553,7 +1588,8 @@ fn main() {
                 KeyBinding::new("d", ConfirmCompact, Some("GalleryNormal")),
                 KeyBinding::new("shift-d", ConfirmExpanded, Some("GalleryNormal")),
                 KeyBinding::new("y", ConfirmYes, Some("GalleryNormal")),
-                KeyBinding::new("shift-y", ConfirmYes, Some("GalleryNormal")),
+                KeyBinding::new("shift-y", ConfirmStrong, Some("GalleryNormal")),
+                KeyBinding::new("shift-i", ConfirmRecheck, Some("GalleryNormal")),
                 KeyBinding::new("n", ConfirmNo, Some("GalleryNormal")),
                 KeyBinding::new("h", PrevTab, Some("GalleryNormal")),
                 KeyBinding::new("l", NextTab, Some("GalleryNormal")),

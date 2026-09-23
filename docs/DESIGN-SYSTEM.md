@@ -638,7 +638,11 @@ segmented control) and the close ✕ at the right; body = padded, or edge to edg
 footer = `footer_start` (a link-like control such as "Open config.json", after any legacy
 hints) on the left, the `actions` buttons right-aligned —
 secondary first, the one primary last, each with its key chip.
-**API.** `Dialog::new(title).icon(Icon).subtitle(..).width(Pixels).height(Pixels).tone(Tone)
+**Alert form.** `.alert()` draws the header as an alert (a confirm): the icon in an `alert_tile`
+square filled with the `tone`'s fill, the title beside it and the subtitle on its own line under
+the title, with no rule and no ✕ — the footer's `Cancel` and a click outside close it — and the
+body indented to the title's edge.
+**API.** `Dialog::new(title).alert().icon(Icon).subtitle(..).width(Pixels).height(Pixels).tone(Tone)
 .dismiss_action(Box<dyn Action>).on_dismiss(handler).header_fill(..).header_actions(..)
 .flush_body(bool).body(..)
 .footer_start(..).actions(Vec<Button>).error(..).warning(..)`. Deprecated while the dialogs
@@ -650,6 +654,7 @@ runs in that dialog; the pointer dispatches it to the focused element as the key
 ✕'s tooltip shows that key from the live keymap. `fleet-app` takes it from
 `Dialogs::dismiss_action()`, which a test holds to the keymap's `escape` rows.
 **Harness.** The ✕ paints `dialog.close`; footer buttons paint `dialog.button[N]`, `0` leftmost.
+An alert has no ✕, so it paints no `dialog.close`.
 **Widths.** 460 context/assign · 480 compact confirm · 520 quit · 560 create/clone/expanded
 confirm · 720 settings/prune · 880 card detail · 1040 help (clamped to the window).
 **States.** default · error (red footer line, dialog stays open).
@@ -837,7 +842,9 @@ Never two units, never an absolute timestamp in a row.
 
 #### `FreshnessStamp`
 **Purpose.** `checked 14s ago · I re-check`, with the §2.6 contrast ladder.
-**API.** `FreshnessStamp::new(verb, age_secs).action(key, label).error(message).refreshing(bool)`;
+**API.** `FreshnessStamp::new(verb, age_secs).action(key, label).trailing(element).error(message)
+.refreshing(bool)`; `trailing` puts a control after a `·` — the confirm's `Re-check` button, where
+a pointer-first surface drops the `action` key hint;
 `Freshness::{from_secs, tone, derived_opacity, draws_derived_mark}`.
 **Variants.** ≤ 60 s normal · ≤ 10 min secondary · > 10 min amber (derived marks drop to 55 %) ·
 errored red with the message verbatim.
@@ -857,7 +864,11 @@ paraphrased.
 
 #### `Fact` / `FactList`
 **Purpose.** Risks first, safe facts after, and the decision of which confirm to show.
-**API.** `Fact::{safe, risk, unknown}(text)`;
+**API.** `Fact::{safe, risk, unknown}(text).strong(lead)` — `strong` sets the leading words in
+bold (the `section_title` weight), the number a reader scans for (`**3 uncommitted files**`,
+`**2 commits** not on origin/main`), and is ignored unless the text starts with `lead`. A risk
+reads in `text` beside an amber `triangle-alert`; a safe fact in `text_secondary` beside a green
+`check`;
 `FactList::{new, from_facts}().fact(Fact).loading(bool)`,
 `.ordered()`, `.is_compact()`, `.risk_count()`, `.unknown_count()`,
 `.confirm_key() -> ConfirmKey`.
@@ -1100,20 +1111,33 @@ rows at full opacity.
 `TextInput` for a searchable set.
 
 #### `ConfirmDialog`
-**Purpose.** Show exactly what will be lost, in facts, with their age.
-**Anatomy.** compact 480 px (title carries the target, one line of `✓` facts, stamp,
-consequence) · expanded 560 px (`⚠` title tone, target on its own line, one line per fact,
-stamp, consequence).
+**Purpose.** Show exactly what will be lost, in facts, with their age — and how dangerous the
+action is, in the colour of its button rather than the case of its key.
+**Anatomy.** The `Dialog` alert form: the icon tile (neutral when compact, amber when expanded),
+the title question, the target as the subtitle (`acme/api · ~/worktrees/acme/api/hotfix`), then
+the facts, the stamp with its `Re-check` link button, and the consequence sentence. compact 480 px
+(every fact known and safe, on one line) · expanded 560 px (one line per fact, risks first).
+Footer: `Cancel` and the action button. Where `y` confirms, the action is a **primary** button
+(`Delete`, chip `y`; `Enter` also confirms); where `Y` is required, a **danger** button (`Delete
+anyway`, or a caller's stronger verb such as `Delete repository`, chip `⇧Y`; `Enter` does not
+confirm).
 **API.** `ConfirmDialog::new(title, FactList).target(..).consequence(..).stamp(FreshnessStamp)
-.icon(Icon).hints(KeyHintRow).action_label(..).width(Pixels).body(..).error(..)
-.force_confirm_key(ConfirmKey).dismiss_action(..).on_dismiss(..)`, the last two passed to its
-`Dialog`; `.is_compact()`, `.confirm_key()`, `.resolved_width(&Theme)`.
+.recheck_action(Box<dyn Action>).icon(Icon).accept_actions(lower, strong).accept_disabled(bool)
+.action_label(..).strong_label(..).width(Pixels).body(..).footer_start(..).error(..)
+.force_confirm_key(ConfirmKey).dismiss_action(..).on_dismiss(..)`; `.is_compact()`,
+`.confirm_key()`, `.button_label()`, `.resolved_width(&Theme)`. Every button dispatches the
+action its key does and shows that key from the live keymap: `Cancel` the dismiss action, the
+action button `lower` or `strong` as the key rule asks, `Re-check` the recheck action. Without
+`accept_actions` the footer states the key as a bold label only.
+**States.** compact · expanded (primary) · expanded with an unknown fact (danger) · facts loading
+(`checking…`, the action button disabled) · error line · multi-target body (prune: `Delete` and
+`Keep` sections, a `Show kept` toggle button in `footer_start`).
 **Keyboard.** `y`/`Y`/`Enter` confirm · `n`/`Esc`/`q` cancel · `I` re-check (delete) · `s` toggle
 the KEEP list (prune). Nothing else is bound, so muscle memory cannot misfire.
 **Usage rule.** No "don't ask again" checkbox, no second confirmation step, no countdown, no
 typed-name confirmation, no disabled-button delay. The **compact form** is the real answer to
 confirm fatigue. Users confirm the *consequence sentence*, so state it in plain future tense
-and name the irreversibility.
+and name exactly what is lost (`The 2 unpushed commits exist only here and will be lost.`).
 
 #### `Palette`
 **Purpose.** Jump to anything by name, or do the thing whose key you do not remember.
@@ -1957,8 +1981,9 @@ keymap, and shows a row with a ⋯ `PopoverMenu` (`BottomRight`), a `+ New tab` 
 (`BottomLeft`, with a header, icons and `⌃S` chips), a right-click area, a labelled and a
 full-width `Dropdown`, an item whose action nothing handles (left out of every menu), and an
 always-open `Menu` showing a header, icon, chip, check, separator and destructive item at once.
-`examples/gallery_input.rs` shows every `SegmentedControl`, `Switch`, `Cycler` form and `Toggle`
-state, with the host and step cyclers, the segmented control and the first toggle live under the
+`examples/gallery_input.rs` shows every `SegmentedControl`, `Switch`, `Checkbox`, `Callout`,
+`Cycler` form and `Toggle` state, the confirm in its compact and danger forms with every button
+live, with the host and step cyclers, the segmented control and the first toggle live under the
 pointer. `kit_gallery`'s `controls` section is the overview.
 
 ---

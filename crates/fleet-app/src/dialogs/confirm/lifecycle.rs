@@ -3,6 +3,9 @@ use super::*;
 /// Takes the published request and asks the daemon for the facts behind it.
 pub(crate) fn seed(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
     let request = with_host(state, cx, |host| host.pending_confirm.take());
+    let subtitle = request
+        .as_ref()
+        .and_then(|request| subtitle_for(request, state.read(cx)));
     let seq = with_host(state, cx, |host| {
         let seq = host.confirm.seq.wrapping_add(1);
         host.confirm = ConfirmState {
@@ -12,6 +15,7 @@ pub(crate) fn seed(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
                 Some(ConfirmRequest::DeleteWorktree { .. } | ConfirmRequest::Prune { .. })
             ),
             seq,
+            subtitle,
             ..ConfirmState::default()
         };
         seq
@@ -21,6 +25,27 @@ pub(crate) fn seed(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
         Some(ConfirmRequest::Prune { repo }) => dry_run(repo, seq, state, bridge, cx),
         _ => {}
     }
+}
+
+/// `acme/api · ~/worktrees/acme/api/hotfix` for a worktree delete: the repository and the copy
+/// on disk, the two things that tell two same-named worktrees apart.
+pub(super) fn subtitle_for(request: &ConfirmRequest, app: &AppState) -> Option<String> {
+    let ConfirmRequest::DeleteWorktree { id } = request else {
+        return None;
+    };
+    let path = app
+        .snapshot
+        .as_ref()?
+        .worktrees
+        .iter()
+        .find(|worktree| &worktree.id == id)
+        .map(|worktree| worktree.path.clone())?;
+    let home = crate::presentation::home_dir();
+    Some(format!(
+        "{} \u{00b7} {}",
+        id.repo(),
+        crate::presentation::tilde(&path, home.as_deref())
+    ))
 }
 
 /// Runs `inspect` and swaps the values in place when it answers.

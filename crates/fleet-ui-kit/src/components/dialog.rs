@@ -54,6 +54,7 @@ pub struct Dialog {
     primary: Option<SharedString>,
     footer_note: Option<(SharedString, Tone)>,
     dismiss: Option<Dismiss>,
+    alert: bool,
 }
 
 impl Dialog {
@@ -76,7 +77,17 @@ impl Dialog {
             primary: None,
             footer_note: None,
             dismiss: None,
+            alert: false,
         }
+    }
+
+    /// Draw the header as an alert: the icon in a tinted tile (the [`Self::tone`]'s fill), the
+    /// title beside it and the [`Self::subtitle`] on its own line under the title, with no rule
+    /// and no close ✕ — the footer's `Cancel` and a click outside close it. The body indents to
+    /// the title's edge. A confirm draws this way ([`super::ConfirmDialog`]).
+    pub fn alert(mut self) -> Self {
+        self.alert = true;
+        self
     }
 
     dismiss_builders!();
@@ -212,40 +223,78 @@ impl RenderOnce for Dialog {
                 .harness_target("dialog.close")
         });
 
-        let header = div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap(theme.space.sm)
-            .h(theme.metrics.dialog_header_h)
-            .pl(theme.space.lg)
-            .map(|el| {
-                if close.is_some() {
-                    el.pr(theme.space.sm)
-                } else {
-                    el.pr(theme.space.lg)
-                }
-            })
-            .border_b(theme.metrics.hairline)
-            .border_color(theme.colors.border)
-            .map(|header| match self.header_fill {
-                Some(fill) => header.child(div().flex().flex_1().min_w_0().child(fill)),
-                None => header
-                    .children(
-                        self.icon
-                            .map(|icon| icon.el().size(IconSize::Large).color(tone_color)),
-                    )
-                    .child(Text::title(self.title).color(tone_color))
+        let alert = self.alert;
+        let indent = if alert && self.icon.is_some() {
+            theme.metrics.alert_tile + theme.space.md
+        } else {
+            gpui::Pixels::ZERO
+        };
+        let header =
+            if alert {
+                let tile = self.icon.map(|icon| {
+                    div()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .justify_center()
+                        .size(theme.metrics.alert_tile)
+                        .rounded(theme.radii.md)
+                        .bg(self.tone.fill(theme))
+                        .child(icon.el().size(IconSize::Large).color(tone_color))
+                });
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(theme.space.md)
+                    .px(theme.space.lg)
+                    .pt(theme.space.lg)
+                    .children(tile)
                     .child(
                         div()
                             .flex()
+                            .flex_col()
                             .flex_1()
                             .min_w_0()
+                            .gap(theme.space.xxs)
+                            .child(Text::title(self.title))
                             .children(self.subtitle.map(|s| Text::ui(s).muted().ellipsize())),
-                    ),
-            })
-            .children(self.header_actions)
-            .children(close);
+                    )
+                    .children(self.header_actions)
+            } else {
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(theme.space.sm)
+                    .h(theme.metrics.dialog_header_h)
+                    .pl(theme.space.lg)
+                    .map(|el| {
+                        if close.is_some() {
+                            el.pr(theme.space.sm)
+                        } else {
+                            el.pr(theme.space.lg)
+                        }
+                    })
+                    .border_b(theme.metrics.hairline)
+                    .border_color(theme.colors.border)
+                    .map(|header| match self.header_fill {
+                        Some(fill) => header.child(div().flex().flex_1().min_w_0().child(fill)),
+                        None => header
+                            .children(
+                                self.icon
+                                    .map(|icon| icon.el().size(IconSize::Large).color(tone_color)),
+                            )
+                            .child(Text::title(self.title).color(tone_color))
+                            .child(
+                                div().flex().flex_1().min_w_0().children(
+                                    self.subtitle.map(|s| Text::ui(s).muted().ellipsize()),
+                                ),
+                            ),
+                    })
+                    .children(self.header_actions)
+                    .children(close)
+            };
 
         let error_line = self.footer_note.map(|(note, tone)| {
             div()
@@ -354,7 +403,9 @@ impl RenderOnce for Dialog {
                                 .min_h_0()
                                 .overflow_hidden()
                                 .when(!self.flush_body, |body| {
-                                    body.p(theme.space.lg).gap(theme.space.md)
+                                    body.p(theme.space.lg)
+                                        .pl(theme.space.lg + indent)
+                                        .gap(theme.space.md)
                                 })
                                 .children(self.body),
                         )

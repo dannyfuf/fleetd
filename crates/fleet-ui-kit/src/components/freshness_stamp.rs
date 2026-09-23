@@ -90,6 +90,7 @@ pub struct FreshnessStamp {
     action: Option<(SharedString, SharedString)>,
     error: Option<SharedString>,
     refreshing: Option<ElementId>,
+    trailing: Option<gpui::AnyElement>,
 }
 
 impl FreshnessStamp {
@@ -102,12 +103,20 @@ impl FreshnessStamp {
             action: None,
             error: None,
             refreshing: None,
+            trailing: None,
         }
     }
 
     /// The re-check affordance, e.g. `("I", "re-check")`.
     pub fn action(mut self, key: impl Into<SharedString>, label: impl Into<SharedString>) -> Self {
         self.action = Some((key.into(), label.into()));
+        self
+    }
+
+    /// A control after the stamp, behind a `·`: the re-check [`super::Button`] a pointer-first
+    /// surface draws in place of [`FreshnessStamp::action`]'s key hint.
+    pub fn trailing(mut self, trailing: impl IntoElement) -> Self {
+        self.trailing = Some(trailing.into_any_element());
         self
     }
 
@@ -155,6 +164,9 @@ impl RenderOnce for FreshnessStamp {
             )
             .child(Text::hint(body).tone(tone))
             .children(self.action.map(|(key, label)| KeyHint::labeled(key, label)))
+            .when_some(self.trailing, |el, trailing| {
+                el.child(Text::hint("\u{00b7}").faint()).child(trailing)
+            })
     }
 }
 

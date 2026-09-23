@@ -48,7 +48,10 @@ pub(crate) fn render(view: &Lazygit, cx: &mut Context<Lazygit>) -> Option<AnyEle
                 .dismiss_action(Box::new(actions::lg_confirm::Cancel))
                 .target(confirm.target.clone())
                 .action_label(confirm.title.clone())
-                .hints(KeyHintRow::new().key("y", "yes"));
+                .accept_actions(
+                    Box::new(actions::lg_confirm::Accept),
+                    Box::new(actions::lg_confirm::Accept),
+                );
             if confirm.danger {
                 dialog = dialog.icon(Icon::TriangleAlert);
             } else {

@@ -100,6 +100,10 @@ pub struct ConfirmState {
     /// Bumps on every seed and re-check.
     pub(crate) seq: u64,
     pub(crate) list: Option<gpui::ListState>,
+    /// The subtitle under the title, when the request's own target is not enough: a worktree
+    /// delete names its repository and where the copy is on disk. Read from the snapshot when
+    /// the dialog opens, so render only reads it.
+    pub(crate) subtitle: Option<String>,
     /// The child this window is being asked to cancel, staged by the transcript's `x`.
     pub(crate) delegation_cancel: Option<DelegationCancelDraft>,
     /// The card run this window is being asked to cancel, staged by the board's `X`.
@@ -259,6 +263,10 @@ fn card_run_cancel_card(
                 FactList::new().fact(Fact::risk(pending.fact)),
             )
             .dismiss_action(crate::dialogs::Dialogs::Confirm.dismiss_action())
+            .accept_actions(
+                Box::new(confirm_actions::Accept),
+                Box::new(confirm_actions::AcceptStrong),
+            )
             .consequence(CARD_RUN_CANCEL_CONSEQUENCE)
             .icon(Icon::CircleX)
             .action_label("Cancel run")
@@ -302,6 +310,10 @@ fn delegation_cancel_card(
                 ))),
             )
             .dismiss_action(crate::dialogs::Dialogs::Confirm.dismiss_action())
+            .accept_actions(
+                Box::new(confirm_actions::Accept),
+                Box::new(confirm_actions::AcceptStrong),
+            )
             .target(pending.id.to_string())
             .consequence(DELEGATION_CANCEL_CONSEQUENCE)
             .icon(Icon::CircleX)

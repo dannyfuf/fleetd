@@ -918,8 +918,10 @@ key_table! {
     "alt-enter",    "Dialog > Create" => create_worktree::CreateWithoutOpening;
     "alt-enter",    "Dialog > CreateEditing" => create_worktree::CreateWithoutOpening;
 
-    "y",            "Dialog > Confirm" => confirm::Accept;
+    // `enter` first: the later row is the higher-precedence binding, and that is the one the
+    // action button's key chip shows — the confirm teaches `y`, and `enter` still works.
     "enter",        "Dialog > Confirm" => confirm::Accept;
+    "y",            "Dialog > Confirm" => confirm::Accept;
     "Y",            "Dialog > Confirm" => confirm::AcceptStrong;
     "n",            "Dialog > Confirm" => confirm::Reject;
     "q",            "Dialog > Confirm" => confirm::Reject;
@@ -1805,6 +1807,18 @@ mod tests {
                 "{keys} must reach the agent PTY"
             );
         }
+    }
+
+    /// The confirm's action button shows the highest-precedence binding of `confirm::Accept`,
+    /// which is the later row: it must teach `y`, the key §3.8.3 names, not `enter`.
+    #[test]
+    fn the_confirm_teaches_y_and_still_accepts_enter() {
+        let accept: Vec<&str> = table()
+            .iter()
+            .filter(|spec| spec.context == "Dialog > Confirm" && spec.action == "confirm::Accept")
+            .map(|spec| spec.keys)
+            .collect();
+        assert_eq!(accept, ["enter", "y"]);
     }
 
     #[test]

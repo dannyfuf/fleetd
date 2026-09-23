@@ -22,7 +22,7 @@ use gpui::{
     UniformListScrollHandle, WeakEntity, Window, actions, div, px,
 };
 
-actions!(kit_gallery, [ToggleTheme, Quit]);
+actions!(kit_gallery, [ToggleTheme, Quit, ConfirmYes, ConfirmStrong]);
 
 struct Gallery {
     focus_handle: FocusHandle,
@@ -1810,32 +1810,39 @@ fn overlays_section(
         &t,
         px(220.0),
         ConfirmDialog::new(
-            "Delete buk/payroll#fix-rut-validator?",
+            "Delete worktree fix-rut-validator?",
             FactList::from_facts([
                 Fact::safe("clean"),
                 Fact::safe("merged into origin/main"),
                 Fact::safe("no session"),
             ]),
         )
-        .stamp(FreshnessStamp::new("checked", 8).action("I", "re-check"))
-        .consequence("Moves the copy to trash, then removes it in the background."),
+        .target("buk/payroll · ~/worktrees/buk/payroll/fix-rut-validator")
+        .stamp(FreshnessStamp::new("Checked", 8))
+        .consequence("Moves the copy to trash, then removes it in the background.")
+        .on_dismiss(|_, _| {})
+        .accept_actions(Box::new(ConfirmYes), Box::new(ConfirmStrong)),
     );
 
-    let confirm_expanded = box_of(&t,
+    let confirm_expanded = box_of(
+        &t,
         px(320.0),
         ConfirmDialog::new(
-            "Delete worktree",
+            "Delete worktree feat-payroll-fix?",
             FactList::from_facts([
-                Fact::risk("12 uncommitted files"),
-                Fact::risk("3 commits not on origin/main"),
+                Fact::risk("12 uncommitted files").strong("12 uncommitted files"),
+                Fact::risk("3 commits not on origin/main").strong("3 commits"),
                 Fact::unknown("unique commit count unavailable (gh unavailable)"),
                 Fact::safe("PR #412 open (not merged)"),
             ]),
         )
-        .target("buk/payroll#feat-payroll-fix")
-        .stamp(FreshnessStamp::new("checked", 180).action("I", "re-check"))
-        .consequence("Deleting kills the session and moves the copy to trash; commits that exist only here are lost.")
-        .hints(KeyHintRow::new().key("I", "re-check")),
+        .target("buk/payroll · ~/worktrees/buk/payroll/feat-payroll-fix")
+        .stamp(FreshnessStamp::new("Checked", 180))
+        .consequence(
+            "The 3 unpushed commits and 12 uncommitted files exist only here and will be lost.",
+        )
+        .on_dismiss(|_, _| {})
+        .accept_actions(Box::new(ConfirmYes), Box::new(ConfirmStrong)),
     );
 
     let palette = box_of(

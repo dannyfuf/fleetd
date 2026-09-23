@@ -85,17 +85,13 @@ pub enum ConfirmRequest {
 }
 
 impl ConfirmRequest {
-    /// The title §3.8.3 gives this action.
-    ///
-    /// The delete-worktree confirm has two, because it has two shapes: the compact form puts
-    /// the full `WorktreeId` in the title, the expanded form puts it on row 1 of the body and
-    /// the title falls back to `Delete worktree` — printing the id in both places says the
-    /// same long string twice and pushes the facts down.
+    /// The title §3.8.3 gives this action: a question naming the thing, in both forms. The
+    /// full id and the path are the subtitle ([`ConfirmRequest::target`]), so a long id never
+    /// pushes the facts down.
     #[must_use]
-    pub fn title(&self, compact: bool) -> String {
+    pub fn title(&self) -> String {
         match self {
-            Self::DeleteWorktree { id } if compact => format!("Delete {}?", id.as_str()),
-            Self::DeleteWorktree { .. } => "Delete worktree".to_owned(),
+            Self::DeleteWorktree { id } => format!("Delete worktree {}?", id.slug()),
             Self::DeleteRepo { repo, .. } => format!("Delete repository {}?", repo.as_str()),
             Self::DeleteContext { name, .. } => format!("Delete context \"{name}\"?"),
             Self::DeleteCard { key, .. } => format!("Delete {key}?"),
@@ -114,16 +110,14 @@ impl ConfirmRequest {
         match self {
             Self::DeleteWorktree { .. } => {
                 if facts.risky {
-                    "Deleting kills the session and moves the copy to trash; commits that exist \
-                     only here are lost."
-                        .to_owned()
+                    facts.losses.sentence()
                 } else {
                     "Moves the copy to trash, then removes it in the background.".to_owned()
                 }
             }
             Self::DeleteRepo { worktrees, .. } => format!(
-                "Also deletes {worktrees} worktrees and their sessions. The base clone and every \
-                 copy go to trash."
+                "Also deletes {} and their sessions. The base clone and every copy go to trash.",
+                plural(*worktrees as u64, "worktree")
             ),
             Self::DeleteContext {
                 repos,
@@ -201,6 +195,17 @@ impl ConfirmRequest {
             Self::Prune { .. } => format!("Prune {prune_count}"),
             Self::KillSession { .. } => "Kill".to_owned(),
             Self::CloseTerminal { .. } => "Close".to_owned(),
+        }
+    }
+
+    /// The verb on the red button where `Y` is required. A cascade that is always strong names
+    /// what it deletes; an escalation on unknown facts says `anyway`.
+    #[must_use]
+    pub fn strong_label(&self) -> String {
+        match self {
+            Self::DeleteRepo { .. } => "Delete repository".to_owned(),
+            Self::DeleteContext { .. } => "Delete context".to_owned(),
+            other => format!("{} anyway", other.action_label(0)),
         }
     }
 

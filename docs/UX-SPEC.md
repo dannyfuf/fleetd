@@ -1087,7 +1087,10 @@ scrim outside the card both dispatch the action `Esc` runs in that dialog (`dial
 dialog's own `Reject` / `Close`), so a dialog whose `Esc` steps back in stages steps the same way
 under the pointer (ADR 0023). The kit frame also draws a right-aligned button footer — `Cancel`,
 then the one primary, each with its key chip — and each dialog moves its footer onto it when that
-dialog is rebuilt; until then its footer is the hint row and label described here.
+dialog is rebuilt; until then its footer is the hint row and label described here. Create worktree
+and every Confirm are on the button footer. A Confirm draws the kit's **alert** header instead of
+the 44 px bar: its icon in a tinted tile, the title question beside it and the target under the
+title, with no ✕ — `Cancel` and a click outside close it.
 
 | Dialog | Width × height | Icon |
 | --- | --- | --- |
@@ -1226,47 +1229,52 @@ search request, never a started clone).
 
 **Purpose:** *Show me exactly what I will lose, in facts, with their age.*
 
-Two sizes, chosen by the facts. This is §1.7 made literal.
+Two sizes, chosen by the facts. This is §1.7 made literal. Both are alerts: the icon in a tinted
+tile, the title as a question, the target under it, and a footer of two buttons.
 
 **Compact** — every decisive fact is known **and** benign:
 
 ```
 ┌────────────────────────────────────────────────────────┐
-│ Delete buk/payroll#fix-rut-validator?                  │
-│ ✓ clean   ✓ merged into origin/main   ✓ no session     │
-│ checked 8s ago · I re-check · trash, then removed      │
-│                                     y delete · n cancel│
+│ [🗑] Delete worktree fix-rut-validator?                │
+│      buk/payroll · ~/worktrees/buk/payroll/fix-rut-…   │
+│      ✓ clean   ✓ merged into origin/main   ✓ no session│
+│      Checked 8s ago · Re-check I                       │
+│      Moves the copy to trash, then removes it in the   │
+│      background.                                       │
+├────────────────────────────────────────────────────────┤
+│                          [Cancel esc]  [Delete y]      │  primary
 └────────────────────────────────────────────────────────┘
 ```
 
 **Expanded** — any risk fact is true, **or** any decisive fact is unknown:
 
 ```
-┌ ⚠ Delete worktree ─────────────────────────── 560 px ─┐
-│ buk/payroll#feat-payroll-fix                          │
-│                                                       │
-│ ⚠ 12 uncommitted files                                │
-│ ⚠ 3 commits not on origin/main                        │
-│ ⚠ session attached · claude, :3000 running            │
-│ ⚠ unique commit count unavailable (gh unavailable)    │
-│ ✓ PR #412 open (not merged)                           │
-│                                                       │
-│ checked 3m ago · I re-check                           │
-│ Deleting kills the session and moves the copy to      │
-│ trash; commits that exist only here are lost.         │
-├───────────────────────────────────────────────────────┤
-│ I re-check · n cancel                       Y  Delete │
-└───────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────── 560 px ─┐
+│ [⚠] Delete worktree feat-payroll-fix?                     │  amber tile
+│     buk/payroll · ~/worktrees/buk/payroll/feat-payroll-fix│
+│     ⚠ **12 uncommitted files**                            │
+│     ⚠ **3 commits** not on origin/main                    │
+│     ⚠ session attached · claude, :3000 running            │
+│     ⚠ unique commit count unavailable (gh unavailable)    │
+│     ✓ PR #412 open (not merged)                           │
+│     Checked 3m ago · Re-check I                           │
+│     The session is killed and the copy moves to the trash.│
+│     The 3 unpushed commits and 12 uncommitted files exist │
+│     only here and will be lost.                           │
+├───────────────────────────────────────────────────────────┤
+│                     [Cancel esc]  [Delete anyway ⇧Y]      │  red: `Y` required
+└───────────────────────────────────────────────────────────┘
 ```
 
 | Element | Content | Position | Why here |
 | --- | --- | --- | --- |
-| Target | full `WorktreeId` (compact: in the title; expanded: row 1) | top | deleting the wrong copy is the top failure mode |
-| Fact list | one line each — dirty (with file count), unique commits, published, merged/PR, session + running labels | body, `⚠` risks first, `✓` safe after | ordered so the eye lands on the reason to stop |
+| Header | icon tile (neutral compact, amber expanded) · the title question · the target as the subtitle: a worktree's repo and its path on disk, otherwise the full id when the title does not already carry it | top | deleting the wrong copy is the top failure mode |
+| Fact list | one line each — dirty (with file count), unique commits, published, merged/PR, session + running labels | body, amber `⚠` risks first with their numbers in **bold**, green `✓` safe after | ordered so the eye lands on the reason to stop |
 | Unknown facts | `⚠ <exact inspect warning string>` | with the facts | §1.3, and it explains why the key is `Y` |
-| **Freshness** | `checked <age> ago · I re-check` | above the consequence line | **mandatory on every facts confirm** — the confirm is the only place where freshness decides an outcome |
-| Consequence | plain future tense, irreversibility and background-ness | above the key row | users confirm the *sentence*, not the title |
-| Key row | `y` or `Y` confirm · `n` cancel · `I` re-check | footer | KEYMAP confirm convention |
+| **Freshness** | `Checked <age> ago · Re-check I` — `Re-check` is a link button showing its key | above the consequence line | **mandatory on every facts confirm** — the confirm is the only place where freshness decides an outcome |
+| Consequence | plain future tense, naming exactly what is lost (`The 2 unpushed commits exist only here and will be lost.`) | above the buttons | users confirm the *sentence*, not the title |
+| Buttons | `Cancel esc`, then the action: a primary `Delete y` where `y` confirms (and `Enter` does too), a **red** `Delete anyway ⇧Y` where `Y` is required (a cascade names itself: `Delete repository`); disabled while the facts are still loading | footer | how dangerous the action is shows in the button's colour, not in letter case (KEYMAP confirm convention) |
 
 **Escalation rule. [D-10]** `y` confirms when every decisive fact (`dirty`, `uniqueCommits`,
 `published`, `session`) is **known**. `Y` (shift) is required when any is unknown or the
@@ -1277,34 +1285,40 @@ variant". `Enter` is accepted wherever `y` is; `Enter` is **not** accepted where
 
 | Action | Title | Consequence line | Key |
 | --- | --- | --- | --- |
-| Delete worktree, clean | `Delete buk/payroll#fix-rut-validator?` | `Moves the copy to trash, then removes it in the background.` | `y` |
-| Delete worktree, risky | `Delete worktree` | `Deleting kills the session and moves the copy to trash; commits that exist only here are lost.` | `y` / `Y` |
-| Delete repo | `Delete repository buk/payroll?` | `Also deletes 8 worktrees and their sessions. The base clone and every copy go to trash.` | `Y` |
-| Delete context | `Delete context "buk"?` | `Also deletes 4 repositories, 23 worktrees and every session in them.` | `Y` |
+| Delete worktree, clean | `Delete worktree fix-rut-validator?` (both forms; the id and path are the subtitle) | `Moves the copy to trash, then removes it in the background.` | `y` |
+| Delete worktree, risky | `Delete worktree feat-payroll-fix?` | `The session is killed and the copy moves to the trash.` (`The copy moves to the trash.` with no session), then `The <n> unpushed commits and <m> uncommitted files exist only here and will be lost.` naming what applies, or `Commits that exist only here would be lost.` when the count is unknown | `y` / `Y` |
+| Delete repo | `Delete repository buk/payroll?` | `Also deletes 8 worktrees and their sessions. The base clone and every copy go to trash.` | `Y` (`Delete repository`) |
+| Delete context | `Delete context "buk"?` | `Also deletes 4 repositories, 23 worktrees and every session in them.` | `Y` (`Delete context`) |
 | Prune | `Prune buk/payroll — 3 of 8 worktrees` | `Deletes the 3 listed below. The 5 skipped ones are kept, with the reason shown.` | `y` |
 | Kill session | `Kill session payroll/feat-payroll-fix?` | `Kills 3 terminals at once. nvim has unsaved changes; claude and the server on :3000 are killed too. Nothing is saved.` | `Y` when unsaved or keep-alive present, else `y` |
 | Close terminal | `Close terminal 2 "cc"?` | `claude is running in it and will be killed.` | `y` |
 | Sleep | *no confirm* | toast `Slept · kept cc (claude)` | — |
 
-**Prune dialog** — a multi-target confirm, so it gets its own body:
+**Prune dialog** — a multi-target confirm, so it gets its own body on the same alert frame:
 
 ```
-┌ ✂ Prune buk/payroll — 3 of 8 ─────────────────────────── 720 px ─┐
-│ DELETE                                                           │
-│  ✓ fix-rut-validator    merged · clean · no session              │
-│  ✓ chore-deps           merged · clean · no session              │
-│  ✓ spike-cache          merged · clean · slept                   │
-│ KEEP                                                             │
-│  ⚠ feat-payroll-fix     2 unique commits, not merged             │
-│  ⚠ api-poc              session attached                         │
-│  ⚠ hotfix-vat           12 uncommitted files                     │
-│  ⚠ old-spike            session has running commands: claude, :3000│
-│  ? devbox/ledger-sync   status unknown (host offline)            │
-│  ⚠ legacy-import        unique commit count unavailable          │
-├──────────────────────────────────────────────────────────────────┤
-│ dry run · fetched 6s ago                     y prune 3 · n cancel│
-└──────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────── 720 px ─┐
+│ [✂] Prune buk/payroll — 3 of 8                                       │  amber tile
+│     DELETE                                             3 worktrees   │
+│     ✓ fix-rut-validator                                              │
+│     ✓ chore-deps                                                     │
+│     ✓ spike-cache                                                    │
+│     KEEP                                               5 worktrees   │
+│     ⚠ feat-payroll-fix     2 unique commits, not merged              │
+│     ⚠ api-poc              session attached                          │
+│     ⚠ old-spike            session has running commands: claude, :3000│
+│     ⚠ devbox/ledger-sync   status unknown (host offline)             │
+│     ⚠ legacy-import        unique commit count unavailable           │
+│     dry run · fetched 6s ago · Re-check I                            │
+│     Deletes the ones listed below. The skipped ones are kept, …      │
+├──────────────────────────────────────────────────────────────────────┤
+│ [Hide kept s]                           [Cancel esc]  [Prune 3 y]    │
+└──────────────────────────────────────────────────────────────────────┘
 ```
+
+`Show kept s` / `Hide kept s` is a toggle button for the KEEP section (the `s` key), shown when
+anything was skipped. The action button is disabled while the dry run is still running or a
+re-check is required, and red (`Prune 3 anyway ⇧Y`) when `Y` is.
 
 The KEEP reasons are the **verbatim** skip reasons of §3 prune (`error`, `dirty`,
 `attached/unknown session`, `unknown required unique count`, `unmerged`, running labels —
@@ -1321,15 +1335,17 @@ commit set.
 
 **Intentionally omitted from every confirm:** a "don't ask again" checkbox (the *compact* form is
 the real answer to confirm fatigue), a second "are you sure" step, a countdown or a disabled
-button delay, a typed-name confirmation (typing trains people to type), diff previews, the
-worktree path.
+button delay, a typed-name confirmation (typing trains people to type), diff previews. The
+worktree path is shown once, as the delete confirm's subtitle, because it is what tells two
+same-named copies apart.
 
-**States:** *facts loading* → values render as `…` and the dialog is confirmable with `Y` only;
+**States:** *facts loading* → `checking…` above the facts already known, and the action button is
+disabled (red, `Y`) until the inspection answers — no key confirms before then;
 a background `inspect --no-fetch` swaps values in place, with no highlight or flash
 (DESIGN-SYSTEM §2.7). *facts errored* → amber line with the exact warning text and `Y`.
 *prune dry-run running* → the body shows
-`⟳ checking 8 worktrees…` and `y` is inert (not styled disabled — it simply does nothing until
-facts exist). *nothing eligible to prune* → the dialog does **not** open; a 3.2 s toast says
+`⟳ checking 8 worktrees…` and the action button is disabled until facts exist (it is a button
+now, and a button that does nothing when clicked must say so). *nothing eligible to prune* → the dialog does **not** open; a 3.2 s toast says
 `Nothing to prune in payroll — 11 skipped · J for reasons`.
 
 **Keyboard:** `y`/`Y`/`Enter` confirm · `n`/`Esc`/`q` cancel · `I` re-check (delete) · `s` toggle

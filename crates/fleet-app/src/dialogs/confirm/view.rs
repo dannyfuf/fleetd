@@ -70,27 +70,34 @@ pub(super) fn facts_card(request: &ConfirmRequest, draft: &ConfirmState) -> AnyE
     let compact = facts.list.is_compact();
     let policy = confirmation_policy(draft, now);
 
-    let mut hints = KeyHintRow::new();
-    if request.rechecks() {
-        hints = hints.key("I", "re-check");
-    }
-    let title = request.title(compact);
-    let target = request.target();
-    let show_target = !title.contains(&target);
+    let title = request.title();
+    // §3.8.3 names the target in exactly one place: the subtitle, unless the title already says
+    // it in full.
+    let subtitle = draft.subtitle.clone().or_else(|| {
+        let target = request.target();
+        (!title.contains(&target)).then_some(target)
+    });
     let consequence = request.consequence(&facts);
     let mut card = ConfirmDialog::new(title, facts.list)
         .dismiss_action(crate::dialogs::Dialogs::Confirm.dismiss_action())
+        .accept_actions(
+            Box::new(confirm_actions::Accept),
+            Box::new(confirm_actions::AcceptStrong),
+        )
         .consequence(consequence)
         .icon(request.icon(compact))
-        .hints(hints)
-        .action_label(request.action_label(0));
-    // §3.8.3 puts the full id in exactly one place: the title, or row 1 of the expanded body.
-    if show_target {
-        card = card.target(target);
+        .action_label(request.action_label(0))
+        .strong_label(request.strong_label())
+        .force_confirm_key(policy.key)
+        .accept_disabled(!policy.authorized);
+    if let Some(subtitle) = subtitle {
+        card = card.target(subtitle);
     }
-    card = card.force_confirm_key(policy.key);
     if let Some(age) = facts.age_secs {
-        card = card.stamp(FreshnessStamp::new("checked", age).action("I", "re-check"));
+        card = card.stamp(FreshnessStamp::new("Checked", age));
+    }
+    if request.rechecks() {
+        card = card.recheck_action(Box::new(confirm_actions::Recheck));
     }
     card.into_any_element()
 }
@@ -112,28 +119,35 @@ pub(super) fn facts_for(request: &ConfirmRequest, draft: &ConfirmState, now: i64
             ..
         } => kill_facts(*terminals, running, *unsaved),
         ConfirmRequest::CloseTerminal { running, .. } => close_terminal_facts(running.as_deref()),
-        ConfirmRequest::DeleteRepo { worktrees, .. } => Facts {
-            list: FactList::new()
-                .fact(Fact::risk(format!(
-                    "{worktrees} worktrees are deleted with it"
-                )))
-                .fact(Fact::risk("the pristine clone is moved to trash")),
-            risky: true,
-            age_secs: None,
-        },
+        ConfirmRequest::DeleteRepo { worktrees, .. } => {
+            let lead = plural(*worktrees as u64, "worktree");
+            Facts {
+                list: FactList::new()
+                    .fact(Fact::risk(format!("{lead} deleted with it")).strong(&lead))
+                    .fact(Fact::risk("the pristine clone is moved to trash")),
+                risky: true,
+                ..Facts::default()
+            }
+        }
         ConfirmRequest::DeleteContext {
             repos,
             worktrees,
             sessions,
             ..
-        } => Facts {
-            list: FactList::new()
-                .fact(Fact::risk(format!("{repos} repositories")))
-                .fact(Fact::risk(format!("{worktrees} worktrees")))
-                .fact(Fact::risk(format!("{sessions} running sessions"))),
-            risky: true,
-            age_secs: None,
-        },
+        } => {
+            let strong = |count: usize, one: &str, many: &str| {
+                let lead = format!("{count} {}", if count == 1 { one } else { many });
+                Fact::risk(lead.clone()).strong(&lead)
+            };
+            Facts {
+                list: FactList::new()
+                    .fact(strong(*repos, "repository", "repositories"))
+                    .fact(strong(*worktrees, "worktree", "worktrees"))
+                    .fact(strong(*sessions, "running session", "running sessions")),
+                risky: true,
+                ..Facts::default()
+            }
+        }
         _ => Facts::default(),
     };
     if let Some(error) = draft.error.as_ref() {
@@ -142,95 +156,119 @@ pub(super) fn facts_for(request: &ConfirmRequest, draft: &ConfirmState, now: i64
     facts
 }
 
-/// The 720 px multi-target prune body (§3.8.3).
+/// One row of a prune section: the worktree, and why it is kept when it is.
+fn prune_row(slug: &str, reason: Option<(&str, bool)>, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let (icon, tone) = match reason {
+        Some(_) => (Icon::TriangleAlert, Tone::Warning),
+        None => (Icon::Check, Tone::Success),
+    };
+    div()
+        .flex()
+        .items_center()
+        .gap(theme.space.sm)
+        .h(theme.metrics.row_h)
+        .w_full()
+        .child(icon.el().size(IconSize::Medium).color(tone.color(theme)))
+        .child(Text::data(slug.to_owned()).flex_none())
+        .children(reason.map(|(reason, unknown)| {
+            Text::ui(reason.to_owned())
+                .tone(if unknown { Tone::Warning } else { Tone::Muted })
+                .ellipsize()
+        }))
+        .into_any_element()
+}
+
+/// The 720 px multi-target prune confirm (§3.8.3): a `Delete` and a `Keep` section, each row
+/// with its reason, on the same alert frame and buttons as every other confirm.
 pub(super) fn prune_card(
     request: &ConfirmRequest,
     draft: &ConfirmState,
     host: Entity<crate::dialogs::host::DialogHost>,
     cx: &App,
 ) -> AnyElement {
-    let gap = cx.theme().space.xs;
     let (deleted, skipped) = draft.prune.as_ref().map_or((0, 0), |result| {
         (result.deleted.len(), result.skipped.len())
     });
     let total = deleted + skipped;
-    let mut body = div().flex().flex_col().gap(gap);
+    let mut body = div().flex().flex_col().gap(cx.theme().space.xs);
     if draft.loading {
         body = body.child(SpinnerWithLabel::new(
             "prune-dry-run",
             "checking worktrees…",
         ));
-    } else {
-        if let Some(list) = &draft.list {
-            body = body.child(
-                gpui::list(list.clone(), move |index, _, cx| {
-                    let draft = &host.read(cx).confirm;
-                    let Some(result) = &draft.prune else {
-                        return div().into_any_element();
-                    };
-                    if index == 0 {
-                        return SectionHeader::new("DELETE").into_any_element();
-                    }
-                    if let Some(id) = result.deleted.get(index - 1) {
-                        return FactList::new()
-                            .fact(Fact::safe(id.slug().to_owned()))
-                            .into_any_element();
-                    }
-                    if index == result.deleted.len() + 1 {
-                        return SectionHeader::new("KEEP").into_any_element();
-                    }
-                    let Some(entry) = result.skipped.get(index - result.deleted.len() - 2) else {
-                        return div().into_any_element();
-                    };
-                    let label = format!("{}   {}", entry.worktree_id.slug(), entry.reason);
-                    FactList::new()
-                        .fact(if entry.reason.contains("unknown") {
-                            Fact::unknown(label)
-                        } else {
-                            Fact::risk(label)
-                        })
-                        .into_any_element()
-                })
-                .h(cx.theme().metrics.row_h * draft.list_len().clamp(1, 10) as f32),
-            );
-        }
-        if !draft.show_keep {
-            body = body
-                .child(KeyHintRow::new().key("s", format!("show the {skipped} kept worktrees")));
-        }
+    } else if let Some(list) = &draft.list {
+        body = body.child(
+            gpui::list(list.clone(), move |index, _, cx| {
+                let draft = &host.read(cx).confirm;
+                let Some(result) = &draft.prune else {
+                    return div().into_any_element();
+                };
+                if index == 0 {
+                    return SectionHeader::new("Delete")
+                        .trailing(Text::hint(format!("{} worktrees", result.deleted.len())))
+                        .into_any_element();
+                }
+                if let Some(id) = result.deleted.get(index - 1) {
+                    return prune_row(id.slug(), None, cx);
+                }
+                if index == result.deleted.len() + 1 {
+                    return SectionHeader::new("Keep")
+                        .trailing(Text::hint(format!("{} worktrees", result.skipped.len())))
+                        .into_any_element();
+                }
+                let Some(entry) = result.skipped.get(index - result.deleted.len() - 2) else {
+                    return div().into_any_element();
+                };
+                prune_row(
+                    entry.worktree_id.slug(),
+                    Some((&entry.reason, entry.reason.contains("unknown"))),
+                    cx,
+                )
+            })
+            .h(cx.theme().metrics.row_h * draft.list_len().clamp(1, 10) as f32),
+        );
     }
     let age = draft
         .checked_at
         .map_or(0, |at| i64::try_from(at.elapsed().as_secs()).unwrap_or(0));
-    let mut body = body.child(FreshnessStamp::new("dry run · fetched", age));
     let policy = confirmation_policy(draft, now_unix());
-    let primary = if policy.authorized {
-        format!(
-            "{}  Prune {deleted}",
-            if policy.key == ConfirmKey::Upper {
-                "Y"
-            } else {
-                "y"
-            }
-        )
-    } else {
-        "re-check required".to_owned()
-    };
-    if let Some(error) = draft.error.as_ref() {
-        body = body.child(Text::ui(error.clone()).tone(Tone::Danger));
+    let mut card = ConfirmDialog::new(
+        format!("{} \u{2014} {deleted} of {total}", request.title()),
+        FactList::new(),
+    )
+    .dismiss_action(crate::dialogs::Dialogs::Confirm.dismiss_action())
+    .accept_actions(
+        Box::new(confirm_actions::Accept),
+        Box::new(confirm_actions::AcceptStrong),
+    )
+    .icon(Icon::Scissors)
+    .width(crate::dialogs::Dialogs::Settings.width(cx))
+    .body(body)
+    .stamp(FreshnessStamp::new("dry run \u{00b7} fetched", age))
+    .recheck_action(Box::new(confirm_actions::Recheck))
+    .consequence(request.consequence(&Facts::default()))
+    .action_label(request.action_label(deleted))
+    .force_confirm_key(policy.key)
+    .accept_disabled(!policy.authorized);
+    if skipped > 0 && !draft.loading {
+        card = card.footer_start(
+            Button::new(
+                "prune-show-kept",
+                if draft.show_keep {
+                    "Hide kept"
+                } else {
+                    "Show kept"
+                },
+            )
+            .style(ButtonStyle::Ghost)
+            .size(ButtonSize::Compact)
+            .selected(draft.show_keep)
+            .action(Box::new(confirm_actions::ToggleKeep)),
+        );
     }
-    Dialog::new(format!("{} — {deleted} of {total}", request.title(true)))
-        .dismiss_action(crate::dialogs::Dialogs::Confirm.dismiss_action())
-        .icon(Icon::Scissors)
-        .width(crate::dialogs::Dialogs::Settings.width(cx))
-        .tone(Tone::Warning)
-        .body(body)
-        .hint_row(
-            KeyHintRow::new()
-                .key("I", "re-check")
-                .key("s", "keep list")
-                .key("n", "cancel"),
-        )
-        .primary(primary)
-        .into_any_element()
+    if let Some(error) = draft.error.as_ref() {
+        card = card.error(error.clone());
+    }
+    card.into_any_element()
 }

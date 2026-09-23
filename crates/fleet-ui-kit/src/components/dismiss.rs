@@ -12,7 +12,7 @@ use std::rc::Rc;
 
 use gpui::{Action, App, ElementId, Window};
 
-use super::button::IconButton;
+use super::button::{Button, IconButton};
 use crate::icons::Icon;
 
 /// A dismiss callback. `Rc` because one surface hands it to two elements, its ✕ and its scrim.
@@ -41,6 +41,20 @@ impl Dismiss {
     /// The header's close ✕. An action-backed one shows the action's live key in its tooltip.
     pub(super) fn close_button(&self, id: impl Into<ElementId>) -> IconButton {
         let button = IconButton::new(id, Icon::X, "Close");
+        match self {
+            Dismiss::Action(action) => button.action(action.boxed_clone()),
+            Dismiss::Handler(handler) => {
+                let handler = handler.clone();
+                button.on_click(move |_, window, cx| handler(window, cx))
+            }
+        }
+    }
+}
+
+impl Dismiss {
+    /// A footer `Cancel` button that closes the way the ✕ does, showing the action's live key.
+    pub(super) fn cancel_button(&self, id: impl Into<ElementId>) -> Button {
+        let button = Button::new(id, "Cancel");
         match self {
             Dismiss::Action(action) => button.action(action.boxed_clone()),
             Dismiss::Handler(handler) => {
