@@ -1,6 +1,7 @@
 # docs/KEYMAP.md §Hub — `a` / `A` open the floating Claude / Codex agent popup [A21]
 # docs/KEYMAP.md §Agent popup — `^s` is the popup's one-shot prefix and `^s q` hides it
 # docs/NATIVE-AGENTS.md §10 — the popup is the *terminal* fallback: a PTY, not a native thread
+# docs/UX-SPEC.md §3.6.1 — the window header's provider switch, Restart and Hide, and the scrim
 #
 # The `agents` preset installs `fleet-harness agent` under the vendor's own name, so the popup
 # starts a scripted process with no vendor CLI, no network and no token.
@@ -12,8 +13,29 @@ assert screen == Hub && agents.popup absent
 key a
 await agents.popup == Terminal 10000
 assert screen == Hub && mode == Terminal && key_contexts[0] == Agent && key_contexts[1] == Terminal && focused == agents.popup
+assert targets["agents.popup.agent[0]"] exists && targets["agents.popup.agent[1]"] exists && targets["agents.popup.restart"] exists && targets["agents.popup.hide"] exists
 shot claude-popup
 dump claude-popup
+
+# The header's Hide button is `ctrl-q`: it hides and hands the Hub back, the session untouched.
+click agents.popup.hide
+await agents.popup absent 10000
+assert screen == Hub && mode == Normal && focused == worktrees.row[0]
+
+# The provider switch's Codex segment is `^s A`: it switches in place, the popup staying up.
+key a
+await agents.popup == Terminal 10000
+click agents.popup.agent[1]
+await targets["agents.popup.hide"] exists 10000
+assert agents.popup == Terminal && focused == agents.popup
+shot codex-popup-switched
+
+# A press on the scrim outside the card hides the popup too; hiding never stops the session.
+click 4 4
+await agents.popup absent 10000
+assert screen == Hub && mode == Normal && focused == worktrees.row[0]
+key a
+await agents.popup == Terminal 10000
 
 # `^s q` hides it and hands the Hub back its own selection. The Hub underneath never moved.
 key ctrl-s q

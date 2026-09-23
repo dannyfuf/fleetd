@@ -297,7 +297,7 @@ The names Fleet paints today, by surface:
 | Dialogs | `dialog.field[N]`, `dialog.row[N]` |
 | Tabs | `tabs.tab[N]` for a process tab, `agents.tabs.tab[N]` for a conversation, sharing one numbering |
 | Toasts and errors | `toasts.toast[N]` (0 is the oldest, matching the `toasts` array), `sticky_error.retry` |
-| Native agents | `agents.popup`, `agents.transcript`, `agents.composer`, `agents.decision`, `agents.approval.allow_once`, `agents.approval.allow_always`, `agents.approval.deny`, `agents.approval.deny_and_stop`, `agents.approval.edit` |
+| Native agents | `agents.popup`, `agents.popup.agent[N]` (the header's provider switch: 0 Claude, 1 Codex), `agents.popup.restart`, `agents.popup.hide`, `agents.transcript`, `agents.composer`, `agents.decision`, `agents.approval.allow_once`, `agents.approval.allow_always`, `agents.approval.deny`, `agents.approval.deny_and_stop`, `agents.approval.edit` |
 
 `dialog.field[N]` counts the dialog's **tab cycle**: create-worktree `0` branch / `1` base /
 `2` host (absent on a single-host daemon); new and edit context `0` name / `1` owners;

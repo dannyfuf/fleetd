@@ -117,10 +117,11 @@ fn agent_key_hints(state: &AppState) -> Option<fleet_ui_kit::KeyHintRow> {
     use crate::screens::agent_thread::presentation::{decision_hints, key_hints};
     use fleet_core::agents::AgentKind;
 
-    // §9: the floating fallback shadows every workspace binding while it is up — the mode word
-    // already reads `TERMINAL` — so the bar mirrors the popup's keys, not the tab's.
+    // §9: the floating fallback shadows every workspace binding while it is up, so the tab's
+    // keys would name commands that do not fire. The popup's own keys are on its header's
+    // buttons (UX-SPEC §3.6.1), so the bar advertises nothing rather than repeating them.
     if state.agent_popup.is_some() {
-        return Some(crate::screens::agent_popup::chrome::key_hints());
+        return None;
     }
     let thread = state.active_agent_thread()?;
     let projection = state.agents.projection(thread);
@@ -294,19 +295,17 @@ mod tests {
     }
 
     #[test]
-    fn the_status_bar_mirrors_the_popups_keys_while_the_popup_is_up() {
+    fn the_status_bar_advertises_no_keys_while_the_popup_is_up() {
         let now = std::time::Instant::now();
         let mut state = AppState::new("/tmp/fleet", now);
         assert!(agent_key_hints(&state).is_none());
 
         state.toggle_agent_popup(fleet_core::config::Agent::Claude, None);
         assert_eq!(state.mode().word().word(), "TERMINAL");
-        let hints = agent_key_hints(&state).expect("the popup advertises its own keys");
-        assert_eq!(
-            hints.pairs(),
-            crate::screens::agent_popup::chrome::key_hints().pairs(),
-            "§9: the bar names the keys that actually fire, and while the popup owns the \
-             keyboard those are the popup's — not `⏎ send · ⇧⇥ plan mode · …`"
+        assert!(
+            agent_key_hints(&state).is_none(),
+            "§9: the popup's keys are on its header's buttons, and the tab's keys underneath do \
+             not fire while the popup owns the keyboard"
         );
 
         state.hide_agent_popup();

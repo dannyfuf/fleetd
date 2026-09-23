@@ -247,6 +247,8 @@ unlisted key goes to the agent PTY. Mouse selection, wheel routing, and Scroll m
 Workspace terminal; direct viewport keystrokes remain PTY input unless Scroll mode is entered.
 While the daemon is still ensuring the popup session, the same tracked card shows `attaching…`:
 `ctrl-s`, `ctrl-q`, `ctrl-s q`, and the `ctrl-s a` / `ctrl-s A` switch-or-hide actions remain live.
+The header's Claude/Codex switch, Restart and Hide buttons dispatch these same actions and show
+their keys as chips, and a press on the scrim outside the card is `ctrl-q` (UX-SPEC §3.6.1).
 
 | Key | Action |
 | --- | --- |

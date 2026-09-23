@@ -923,13 +923,41 @@ composer context (implement / refine / send the current draft).
 ### 3.6.1 Agent popup (terminal fallback)
 
 The Claude/Codex agent is a window-wide `AppFrame.overlay` surface above the current Hub or
-Workspace, centered at **90 % of window width × 85 % of window height** with the dialog scrim.
-The base screen remains mounted and rendering: its list selection, active tab, native pane, and
-terminal attachment do not change. A 44 px header shows `claude` or `codex`, the fixed session
-id, and a status dot driven by the shared agent-activity source: amber while working, green while
-idle or otherwise live, and red when exited or unreachable. It ends with
-`^s q hide · ^s a/A switch · ctrl-q hide`. The body is the same
-`TerminalGrid` used by Workspace, sized from its measured popup area and resized with the window.
+Workspace, centered at **90 % of window width × 85 % of window height** over the dialog scrim,
+in a rounded frame at the **popover** elevation (DESIGN-SYSTEM §2.6) so it reads as a window of
+its own. The base screen remains mounted and rendering: its list selection, active tab, native
+pane, and terminal attachment do not change.
+
+A `title_bar_h` (44 px) window header reads, left to right:
+
+```
+[✦ Claude] [▣ Codex ⌃S A]   ● agent-claude · idle · runs in fleetd, hiding keeps it alive   [Restart ⌃S r] [Hide ⌃Q]
+```
+
+- **Provider switch.** `Claude | Codex` as two segments; the showing provider is the selected
+  one and has no action (its key would hide the popup). The other segment switches to it and
+  carries `^s a` / `^s A` as its chip. A config still naming OpenCode labels the second segment
+  `OpenCode`.
+- **Session line.** A status dot driven by the shared agent-activity source (amber while
+  working, green while idle or otherwise live, red when exited or unreachable), the fixed session
+  id in muted data type, then `· <idle|working|starting|exited|fleetd unreachable> · runs in
+  fleetd, hiding keeps it alive`, which answers "will hiding kill it?" before it is asked.
+- **Restart** (`^s r`) — ghost, drawn disabled until the agent's process has exited, because the
+  daemon restarts only an exited command. **Hide** (`ctrl-q`) — secondary.
+- **While attaching** (the daemon is still ensuring the session) the header keeps the provider
+  switch and Hide, without the session line or Restart, above the `attaching…` body — so a
+  pointer can switch away from, or put away, a session that is slow to start.
+
+There is no "Open as tab": no action moves the popup's PTY session into a Workspace tab, and a
+native thread (`^s a` in a terminal) is a different session. The header states no key hints of
+its own and the status bar mirrors none while the popup is up — every key is on the control that
+does the same thing. The body is the same `TerminalGrid` used by Workspace, sized from its
+measured popup area and resized with the window.
+
+**Pointer.** A left press on the scrim — anywhere outside the card — hides the popup exactly as
+`ctrl-q` does (it dispatches the same action). Hiding never kills the session, so a stray click
+costs nothing: `a` or `^s a` brings back the same PTY. A press while Help or a quit confirmation
+is open above the popup belongs to that dialog, not to the scrim.
 
 Hiding releases only the popup's attachment claim (leaving an identical underlying Workspace
 claim intact); it never kills or sleeps the daemon session. Reopening therefore restores the same

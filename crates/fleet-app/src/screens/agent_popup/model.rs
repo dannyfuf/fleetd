@@ -1,8 +1,13 @@
+use gpui::SharedString;
+
 use super::*;
 
 pub(super) struct Model {
     pub(super) agent: Agent,
-    pub(super) session: SessionId,
+    /// The fixed session id as the header prints it, formatted here rather than per frame.
+    pub(super) session_label: SharedString,
+    /// The header's words after the session id; see [`super::chrome::status_line`].
+    pub(super) status_line: SharedString,
     pub(super) mode: AgentPopupMode,
     pub(super) terminal: Option<TerminalId>,
     pub(super) base_terminal: Option<TerminalId>,
@@ -60,15 +65,18 @@ impl Model {
             TerminalStatus::Starting | TerminalStatus::Running => None,
         });
         let activity = app.session_agent_activity(&session);
+        let reachable = app.daemon.is_connected();
         Some(Self {
             agent: popup.agent,
-            session,
+            session_label: SharedString::from(session.to_string()),
+            status_line: super::chrome::status_line(terminal_state, activity, reachable),
+
             mode: popup.mode,
             terminal,
             base_terminal,
             generation: app.link_generation,
             primed: grid.is_some_and(|grid| grid.primed),
-            reachable: app.daemon.is_connected(),
+            reachable,
             cols: grid.map(|grid| grid.cols),
             history_epoch: grid.map(|grid| grid.viewport.history_epoch),
             alt_screen: grid.is_some_and(|grid| grid.modes.alt_screen),
