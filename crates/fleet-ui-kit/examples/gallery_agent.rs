@@ -400,9 +400,19 @@ fn tool_states(cx: &mut App) -> AnyElement {
                summary: &'static str,
                result: Option<&'static str>,
                body: bool| {
-        let mut row = ToolRow::new(label, "bash", summary).icon(icon).state(state);
+        let mut row = ToolRow::new(label, "Run", summary)
+            .icon(icon)
+            .state(state)
+            // Hover a row for its verbs; right-click it for the same ones as a menu.
+            .actions(RowActions {
+                copy: true,
+                ..RowActions::default()
+            });
         if let Some(result) = result {
             row = row.result(result);
+        }
+        if state != ToolRowState::Running {
+            row = row.detail("1.2s");
         }
         if body {
             row = row.body("the first meaningful line of output");
@@ -410,9 +420,12 @@ fn tool_states(cx: &mut App) -> AnyElement {
         LAYOUT.labeled(
             label,
             &theme,
-            div()
-                .w_full()
-                .child(ToolRowElement::new(row, key).into_any_element()),
+            div().w_full().child(
+                ToolRowElement::new(row, key)
+                    .on_toggle(|_, _| {})
+                    .on_action(|_, _, _| {})
+                    .into_any_element(),
+            ),
         )
     };
     let children = vec![
@@ -431,7 +444,7 @@ fn tool_states(cx: &mut App) -> AnyElement {
             ToolRowState::Done,
             Icon::Terminal,
             "cargo test",
-            Some("exit 0 · 1.2s"),
+            Some("passed \u{b7} 14 tests"),
             true,
         ),
         row(
@@ -471,18 +484,42 @@ fn tool_states(cx: &mut App) -> AnyElement {
             true,
         ),
         LAYOUT.labeled(
-            "expanded",
+            "waiting for you",
             &theme,
             div().w_full().child(
                 ToolRowElement::new(
-                    ToolRow::new("t-x", "edit", "crates/fleet-core/src/payroll.rs")
+                    ToolRow::new("t-w", "Edit", "README.md")
+                        .icon(Icon::FilePen)
+                        .state(ToolRowState::Running)
+                        .result("waiting for you")
+                        .result_tone(Tone::Warning),
+                    7,
+                )
+                .into_any_element(),
+            ),
+        ),
+        LAYOUT.labeled(
+            "expanded · focused",
+            &theme,
+            div().w_full().child(
+                ToolRowElement::new(
+                    ToolRow::new("t-x", "Edit", "crates/fleet-core/src/payroll.rs")
                         .icon(Icon::FilePen)
                         .state(ToolRowState::Done)
                         .result(format_file_delta(14, 3))
                         .body("crates/fleet-core/src/payroll.rs\ncrates/fleet-core/src/tax.rs")
+                        .actions(RowActions {
+                            copy: true,
+                            diff: true,
+                            open: true,
+                            revert: false,
+                        })
                         .expanded(true),
                     6,
                 )
+                .focused(true)
+                .on_toggle(|_, _| {})
+                .on_action(|_, _, _| {})
                 .into_any_element(),
             ),
         ),
@@ -642,13 +679,16 @@ impl Render for AgentGallery {
                             .children(decision.map(|decision| {
                                 let patch = matches!(decision.kind, DecisionKind::Approval(_))
                                     && decision.id == "gate-approval-codex";
+                                // The app resolves each chip from its live keymap; the
+                                // gallery has no keymap, so it spells the canvas's keys.
                                 let dock = DecisionDock::new(decision)
-                                    .on_action(|_action, _window, _cx| {});
+                                    .on_action(|_action, _window, _cx| {})
+                                    .kbd_for(|action, _window, _cx| gallery_kbd(action));
                                 // The diff slot: the real one is a `fleet_lazygit::DiffView`,
                                 // which the kit cannot reach (ADR 0010), so the owner hands one
                                 // in. This stand-in shows the bounded height it lands at.
                                 if patch {
-                                    dock.diff(
+                                    dock.diff_header("src/payroll.rs  +1 \u{2212}1").diff(
                                         div()
                                             .id("dock-diff")
                                             .w_full()
@@ -682,15 +722,30 @@ impl Render for AgentGallery {
                                     .px(theme.space.md)
                                     .py(theme.space.sm)
                                     .child(self.composer.clone())
+                                    // The settings strip the app composes under the editor:
+                                    // model and access chips, the context meter, the facts.
                                     .child(
-                                        MetadataRow::new(segments, fit)
-                                            .trailing(vec![
-                                                MetadataSegment::new("34%"),
-                                                MetadataSegment::new("$0.42"),
-                                                MetadataSegment::new("48s"),
-                                            ])
-                                            .on_target(|_, _, _| {}),
-                                    ),
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(theme.space.xs)
+                                            .child(ComposerChip::new(
+                                                "g-model",
+                                                "gpt-5 \u{b7} high",
+                                            ))
+                                            .child(
+                                                ComposerChip::new("g-access", "asks before edits")
+                                                    .icon(Icon::Shield),
+                                            )
+                                            .child(
+                                                ComposerChip::new("g-access-open", "open")
+                                                    .open(true),
+                                            )
+                                            .child(div().flex_1())
+                                            .child(ContextMeter::new(34, "34%"))
+                                            .child(Text::hint("$0.42 \u{b7} 48s").faint()),
+                                    )
+                                    .child(MetadataRow::new(segments, fit).on_target(|_, _, _| {})),
                             )
                             .children(
                                 self.trigger
@@ -700,6 +755,26 @@ impl Render for AgentGallery {
                     ),
             )
     }
+}
+
+/// The canvas's key for each decision control, for a gallery with no keymap to read.
+fn gallery_kbd(action: &DecisionAction) -> Option<Kbd> {
+    let key = match action {
+        DecisionAction::AllowOnce | DecisionAction::Implement => "y",
+        DecisionAction::AllowSession => "a",
+        DecisionAction::Deny | DecisionAction::Refine => "n",
+        DecisionAction::Edit => "e",
+        DecisionAction::DenyAndStop => "escape",
+        DecisionAction::Choose(0) => "1",
+        DecisionAction::Choose(1) => "2",
+        DecisionAction::Choose(2) => "3",
+        DecisionAction::Choose(3) => "4",
+        DecisionAction::Choose(_) => "5",
+        DecisionAction::Toggle => "space",
+        DecisionAction::Answer => "enter",
+        DecisionAction::Previous => "p",
+    };
+    Kbd::parse(key).ok()
 }
 
 fn main() {

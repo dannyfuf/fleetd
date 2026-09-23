@@ -301,7 +301,7 @@ The native-agent canvas has its own constants, and they live in `components::age
 rather than in `Metrics`: `AGENT_CONTENT_W 760` · `AGENT_TOOL_KIND_W 60` · `AGENT_CARET_H 17` ·
 `AGENT_BODY_MAX_H 240` · `AGENT_WELL_MAX_H 66` · `AGENT_LIST_OVERDRAW 256` ·
 `AGENT_SCROLLBAR_INSET 3` · `AGENT_FOLLOW_REARM_PX 40` · `AGENT_USER_MAX_W 456` ·
-`AGENT_PREVIEW_MAX_H 144` · `AGENT_PLAN_PREVIEW_H 180`. `Metrics` is the density ladder a theme
+`AGENT_PREVIEW_MAX_H 144` · `AGENT_PLAN_PREVIEW_H 180` · `AGENT_CONTEXT_METER_W 36`. `Metrics` is the density ladder a theme
 may restate; these are fixed product decisions from `NATIVE-AGENTS.md` §5 that no theme may
 move, which is exactly why they are constants and not tokens. They are still exported from
 `fleet_ui_kit`, so no app-side copy of `760` exists.
@@ -1356,14 +1356,15 @@ holds their copy — `format_duration`, `format_token_count`, `format_file_delta
 `format_retrying`, `format_compacted`, `format_resumed`, and `MINUS`, the U+2212 the design uses
 for a removed-line count — and `components::agent::group` holds the group summarizer
 (`ToolGroupCounts` + `format_group_summary`: `read 3 files and ran 2 commands`, with named MCP
-servers hoisted to the front). Keycaps are never inside those strings: they are `KeyHint`s drawn
-by the row that owns them.
+servers hoisted to the front). Keycaps are never inside those strings: a control carries its key
+as a `Kbd` chip the owner resolves from the live keymap (ADR 0023).
 
 #### `TranscriptList`
 **Purpose.** The bottom-anchored, variable-height conversation.
 **API.** Entity. `TranscriptList::new(&mut Context<Self>)`, `set_rows(Vec<TranscriptRow>, cx)`,
 `patch_row(usize, TranscriptRow, cx)`, `set_thread(Vec<TranscriptRow>, cx)`,
-`set_row_body(RowBodyRenderer, cx)`; the scroll machine —
+`set_row_body(RowBodyRenderer, cx)`, `set_row_action_kbd(RowActionKbd, cx)` (the owner's lookup
+for the row verbs' chips); the scroll machine —
 `scroll_to_latest(cx)`, `scroll_to_end(cx)`, `anchor_new_turn(cx)`, `release_anchor(cx)`,
 `gesture(Gesture, cx) -> bool`, `scroll_mode(bool, cx)`, `scroll_rows(f32, cx)`,
 `scroll_viewports(f32, cx)`, `scroll_to_top(cx)`; the row focus — `focus_row(Option<usize>, cx)`,
@@ -1389,7 +1390,10 @@ not three mounts; `TranscriptRowId::Item` is shared by a `Work` row, the `Diff` 
 frozen, a row focused) · streaming (caret and shimmer) · empty.
 The floating `jump to latest` chip is offset from the bottom by one tokenized chip height plus
 standard spacing, reserving the newest turn footer and its `[u] revert turn` hint.
-**Events.** `TranscriptEvent::{Toggle, RowAction, ReachedOldest}`. `ReachedOldest` fires when the
+**Events.** `TranscriptEvent::{Toggle, RowAction, ReachedOldest}`. A row verb pressed with the
+pointer — a tool row's hover button or menu item, a turn footer's button — emits the same
+`RowAction { row, action }` its key emits on the focused row, and a click on an expandable line or
+a delegation row emits the same `Toggle` as `⏎`, so the owner has one path for both. `ReachedOldest` fires when the
 reader comes within `OLDEST_PREFETCH_ROWS` of the top of the rows in hand, **once per row set**:
 the transcript cannot know whether older history exists — that is the owner's page cursor — so it
 reports the gesture and nothing else, and the owner's answer is itself a new row set, which is
@@ -1420,26 +1424,39 @@ flash while a thread switch settles. An animation runs only for a row inside the
 
 #### `ToolRow`
 **Purpose.** The 30 px row every tool call is drawn as.
-**Anatomy.** state glyph · 60 px kind column (`AGENT_TOOL_KIND_W`) · one-line summary
-(`flex_1 min_w_0`, ellipsized) · right-aligned result · expand hint. Children indent behind a
-1 px left divider; an expanded body is capped at `AGENT_BODY_MAX_H` and scrolls inside the row.
-**API.** `ToolRow::new(id, kind, summary).icon(Icon).state(ToolRowState).result(..).body(..)
-.expanded(bool)`; `.is_expandable()`; `ToolRowElement::new(row, key).focused(bool).body(..)
-.children(..).on_toggle(..)`; `expand_hint(bool)`. `key` is the row's list index, not an
-`ElementId`: the row needs three stable ids and `("tool-line", key)` tuples produce them with no
-per-frame `String`.
+**Anatomy.** state glyph · 60 px kind column (`AGENT_TOOL_KIND_W`, a verb: `Read`, `Edit`,
+`Run`) · one-line summary (`flex_1 min_w_0`, ellipsized) · result `Chip` (filled, toned) ·
+duration · hover verbs · chevron. A pointer-first row (ADR 0023): `sm` inset, `radii.sm`, a
+`row_hover` band under the pointer and the pointer cursor when it can expand — never over the
+focus ring the keyboard set. Children indent behind a 1 px left divider; an expanded body is
+capped at `AGENT_BODY_MAX_H` and scrolls inside the row.
+**API.** `ToolRow::new(id, kind, summary).icon(Icon).state(ToolRowState).result(..)
+.result_tone(Tone).detail(..).body(..).expanded(bool).actions(RowActions)`; `.is_expandable()`;
+`ToolRowElement::new(row, key).focused(bool).body(..).children(..).on_toggle(..)
+.on_action(Fn(RowAction, ..)).action_kbd(RowActionKbd).harness_part("agents.tool")`;
+`RowActions { copy, diff, open, revert }` with `.list()` / `.any()`; `RowAction::{label, icon}`;
+`expand_hint(bool)`. `key` is the row's list index, not an `ElementId`: the row needs several
+stable ids and `("tool-line", key)` tuples produce them with no per-frame `String`.
 **States.** `ToolRowState::{Running, Done, Failed, Denied, Stopped, Severe}` → `.glyph(kind,
 dimmed)` gives the icon, tone, opacity and whether it spins; `.heading_tone()` and
-`.is_severe()` give the summary's voice.
+`.is_severe()` give the summary's voice; `.result_tone()` the chip's default (danger for a
+failure, warning for a denial, secondary otherwise) unless the projection names one (`waiting for
+you` in warning). Pointer: hovered (verbs shown as compact `IconButton`s, their chips only where
+the owner's lookup resolves one) · right-clicked (a `ContextMenu` with the same verbs).
 **Usage rule (five states plus one).** `Severe` is reserved for a runtime error or a broken side
 effect — *the turn or a core side effect broke, not that a command exited nonzero*. A `git grep`
-finding nothing is not red, and an exit status is a structured field (`format_exit`), never a
-colour. Fleet never substring-matches English error text to infer failure.
+finding nothing is not red, and an exit status is a structured field (`format_exit`) carried in
+the chip, never the heading's colour. Fleet never substring-matches English error text to infer
+failure.
 **Usage rule (geometry).** The geometry does not change while the row streams — a row that grows
 under the reader is how a transcript starts to jitter. The click target is **the 30 px line
-only**, so clicking inside an expanded body or a nested child never folds the row; the expand
-chevron is `invisible`, not absent, when a row cannot expand, so alignment never shifts. A
-`Failed` row is always expandable, so its truncated label can be read in full.
+only**, so clicking inside an expanded body or a nested child never folds the row; a verb button
+stops its click from reaching the line. The chevron is `invisible`, not absent, when a row cannot
+expand, so alignment never shifts. A `Failed` row is always expandable, so its truncated label can
+be read in full.
+**Usage rule (verbs).** A row offers only the verbs its projection can honour, and every hover
+verb is also in the row's right-click menu and on its key while the row holds the focus — hover
+reveals, it never hides the only way (ADR 0023).
 
 #### `DelegationRow` / `DelegationResultCard`
 **Purpose.** Keep a native child reachable at its caller item and render the one result delivered
@@ -1448,40 +1465,52 @@ back to the caller without making it look user-authored.
 `DelegationRowStatus::{Starting, Working, Blocked, Done, Incomplete, Failed, Cancelled}`;
 `DelegationResultCard { header, body, collapsible, expanded, hint }`.
 **States.** The live row uses a spinner for starting/working, amber for blocked, and frozen terminal
-marks/durations. The result card uses `⏎ show` / `⏎ hide`; Enter only folds it and never attaches.
+marks/durations; its line is a pointer-first click target whose click reports the row's toggle,
+which the owner answers by attaching the child, as `⏎` does. The result card uses `⏎ show` /
+`⏎ hide`; Enter only folds it and never attaches.
 
 #### `DecisionDock`
-**Purpose.** A permission approval or a model question, in a drawer docked to the top edge of the
-composer. Nothing is ever a modal, and an approval is never a transcript card: a card can be
-scrolled off screen while it owns the keyboard, which is a modal with the chrome removed.
-**Anatomy.** `AGENT_CONTENT_W` wide, panel background, a 2 px amber bar flush left, rounded on
-its **top** corners only, overlapping the composer by one hairline and masking the border they
-share, so the two read as one panel rather than a card stacked on a field. Title, `1/N` counter,
-body, then a row of `KeyHint`s.
-**API.** `DecisionDock::new(Decision).diff(..).payload_focus(FocusHandle).on_action(..)`.
+**Purpose.** A permission approval, a model question or a ready plan, in a drawer docked to the top
+edge of the composer. Nothing is ever a modal, and an approval is never a transcript card: a card
+can be scrolled off screen while it owns the keyboard, which is a modal with the chrome removed.
+**Anatomy.** `AGENT_CONTENT_W` wide, panel background, rounded (`radii.lg`) on its **top** corners
+only, a `border_strong` hairline, overlapping the composer by one hairline and masking the border
+they share, so the two read as one panel rather than a card stacked on a field. A header — the
+occupant's amber glyph (`lock`, `message-square-warning`, `list-checks`), the title, the `1 of N`
+counter — then the body, then a row of `Button`s: the first verb `Primary`, the rest `Secondary`,
+and `Deny and stop` a `GhostDanger` set apart at the far right. An approval's body is the payload
+well, a one-line caution, and the diff under a file header (`README.md  +1 −1`); a question's is
+its header, prompt and one clickable option row per option, each led by its digit's `Kbd` and, on
+a multi-select question, a `square` / `square-check` box; a plan's is its title and body.
+**API.** `DecisionDock::new(Decision).diff(..).diff_header(..).payload_focus(FocusHandle)
+.on_action(Fn(DecisionAction, ..)).kbd_for(Fn(&DecisionAction, &Window, &App) -> Option<Kbd>)`.
 `Decision::new(id, title, DecisionKind).queued(index, total).answering(bool)`;
 `Decision::head(&[Decision])`, `.options()`, `.key_hints()`,
 `.action_for_key(&str) -> Option<DecisionAction>`.
 **Variants.** `DecisionKind::{Approval(ApprovalRequest), Question(QuestionSet), PlanReady{title,
 markdown}}`, in that strict priority order — one slot, one occupant, and **no "approve all"**.
 The proposed plan itself is a transcript row (`TranscriptRowKind::Plan`) with no actions of its
-own; its verbs live here.
-**States.** approval (with and without `[e]`, with a caution) · question (single, multi-select,
-free-text) · wizard at `i+1/n` with `[p]` · plan ready · queued `1/N` · `answering…`.
+own; its verbs — **Implement** and **Refine** — are this dock's buttons.
+**States.** approval (with and without **Edit**, with a caution, with a diff) · question (single,
+multi-select with checkboxes, free-text) · wizard at `i+1 of n` with **Previous** · plan ready ·
+queued `1 of N` · `answering…` (every control disabled) · option row hovered / selected.
 **Usage rule (keys).** The type owns the key *vocabulary*; the surface holding the focus handle
-owns the key *event* and routes it here. That split is what stops one thread from answering
-another thread's request, and it is why the status bar mirrors `key_hints()` — the bar can never
-advertise a scope the drawer does not offer. **`⏎` is not bound on an approval**: a queued Return
-keystroke must never approve a shell command. While a reply is in flight nothing is claimed.
-**Usage rule (copy).** An action always spells out its effective scope — `allow once`, `allow
-for this session`. The word "always" never appears, and there is no directory or project scope in
-v1. `[e]` is drawn only where the harness accepts an amended invocation.
+owns the key *event* and routes it here, and a click on a control reports the very
+`DecisionAction` its key resolves to — one path. The chips come from the owner's `kbd_for`, which
+reads the live keymap in the decision's own context, never a hand-typed key. That split is what
+stops one thread from answering another thread's request. **`⏎` is not bound on an approval**: a
+queued Return keystroke must never approve a shell command. While a reply is in flight nothing is
+claimed and nothing dispatches.
+**Usage rule (copy).** An action always spells out its effective scope in sentence case —
+`Allow once`, `Allow for this session`. The word "always" never appears, and there is no directory
+or project scope in v1. **Edit** is drawn only where the harness accepts an amended invocation.
 **Usage rule (payload).** The payload well is the **invocation**, never the model's prose about
-it, because it is what `[e]` seeds the composer with. It is bounded by `AGENT_WELL_MAX_H`, scrolls
-in both axes, and is **never truncated and never line-clamped**.
+it, because it is what **Edit** seeds the composer with. It is bounded by `AGENT_WELL_MAX_H`,
+scrolls in both axes, and is **never truncated and never line-clamped**.
 
 #### `MetadataRow`
-**Purpose.** The composer's ordered strip of harness-reported blocks.
+**Purpose.** An ordered strip of blocks that collapses from the right: in the agent tab, the muted
+link line above the composer — the caller or the card a thread works for.
 **API.** `MetadataRow::new(Vec<MetadataSegment>, MetadataFitResult).trailing(..)`;
 `MetadataSegment::new(text)` / `::pinned(text)` / `.target(id)` / `.width(px)`; the owner holds a `MetadataFit`
 and calls `fit(available, revision, &segments, gap, overflow)`, or the free `metadata_fit` for a
@@ -1493,18 +1522,38 @@ across frames, never recomputed per frame. **The model segment never collapses; 
 losing which model is answering is worse than losing its name's tail. No segment is ever
 invented: a tab that has not published an effort has three blocks, not four.
 
+#### `ComposerChip` / `ContextMeter`
+**Purpose.** The composer's settings strip. A `ComposerChip` is a value and a chevron that opens a
+menu — `gpt-5 · high ⌄`, a shield and `asks before edits ⌄` — used as a `PopoverMenu` trigger; a
+`ContextMeter` is how much of the model's window the thread has used, a short track and `34%`.
+**Anatomy.** Chip: `button_h_compact` tall, `sm` side padding, `radii.control`, no fill or border
+until hovered or open (`control_hover` / `control_border`), `text_secondary` value and chevron,
+optional leading icon. Meter: an `AGENT_CONTEXT_METER_W` × `space.xs` track in `control`, filled
+`accent` to the fraction, then the prepared label in the hint role.
+**API.** `ComposerChip::new(id, label).icon(Icon).open(bool).tooltip(text, Option<Kbd>)`;
+`ContextMeter::new(percent, label)`.
+**States.** chip: rest · hover · open (holds the hover look, announced expanded) · with a tooltip
+naming what it changes and its key. Meter: 0–100.
+**Usage rule.** Use a `Dropdown` for a labelled form field; a composer chip is chrome inside the
+composer, so it draws nothing until the pointer is on it. The chip knows nothing about models or
+modes: the owner builds the menu, with a check on the value the next send carries.
+
 #### `MultilineInput`
 **Purpose.** The docked composer: a thin owner of a shared multi-line `TextInput` that adds the
 prompt glyph, submission, prompt history and completion-trigger reporting.
 **API.** Entity. `MultilineInput::new(&mut Context<Self>, placeholder)`, `text(cx)`, `is_empty(cx)`,
 `is_composing(cx)`,
 `set_text(.., cx)`, `clear(cx)`, `set_placeholder(.., cx)`, `set_focus_visible(bool, cx)`,
-`set_read_only(bool, cx)`, `submit(cx)`, `push_history(..)`, `active_trigger(cx)`,
+`set_read_only(bool, cx)`, `set_framed(bool, cx)`, `submit(cx)`, `push_history(..)`,
+`active_trigger(cx)`,
 `focus_handle()`, readers `buffer(cx)` and `history()`, and the three `-> bool` motions an owner
 falls through on — `recall_previous(cx)`, `caret_up(cx)`, `caret_down(cx)`, each answering
 whether it moved; emits `MultilineInputEvent::{Submit(String), Trigger(Trigger), Changed,
 Escape}` under `MULTILINE_INPUT_KEY_CONTEXT`. `buffer(cx)` returns the inner `InputBuffer`;
 `PromptHistory` owns the last `HISTORY_LIMIT` (100) prompts plus the draft `↑` opened from.
+**Framing.** Framed by default: its own fill, hairline, focus border and `❯` prompt. The agent
+composer calls `set_framed(false, cx)` and frames the editor together with its settings strip, so
+the fill, border and focus border are the container's and there is no prompt glyph.
 **States.** empty (placeholder) · typing · multi-line (grows one visual row at a time, to eight) ·
 capped (internal scroll thumb; wheel is consumed) · IME composition · read-only · dimmed while a
 decision owns the bare keys.

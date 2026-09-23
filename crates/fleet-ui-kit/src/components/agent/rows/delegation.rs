@@ -15,9 +15,17 @@ use crate::{
 use super::super::metrics::AGENT_PREVIEW_MAX_H;
 
 /// One native child delegation.
-pub(super) fn delegation(row: &DelegationRow, ctx: &RowContext, cx: &App) -> AnyElement {
+///
+/// The line is a click target: a click reports the row's toggle, which the owner answers by
+/// attaching the child — the same thing `⏎` does on the focused row. It never expands itself.
+pub(super) fn delegation(
+    row: &DelegationRow,
+    id: &TranscriptRowId,
+    ctx: &RowContext,
+    cx: &App,
+) -> AnyElement {
     let theme = cx.theme();
-    let line = header(("delegation", ctx.index), false, None, theme)
+    let line = header(("delegation", ctx.index), true, ctx.toggle_for(id), theme)
         .child(Text::ui(SharedString::new_static("↳")).muted().flex_none())
         .child(
             row.provider_glyph

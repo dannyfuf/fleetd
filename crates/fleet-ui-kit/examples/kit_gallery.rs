@@ -2173,6 +2173,22 @@ fn controls_section(cx: &mut App) -> AnyElement {
             ),
         ),
         LAYOUT.labeled(
+            "composer chips · context meter",
+            &t,
+            strip(
+                &t,
+                vec![
+                    ComposerChip::new("kit-composer-model", "gpt-5 \u{b7} high")
+                        .tooltip("Switch the agent's model", Some(kbd("ctrl-s m")))
+                        .into_any_element(),
+                    ComposerChip::new("kit-composer-access", "asks before edits")
+                        .icon(Icon::Shield)
+                        .into_any_element(),
+                    ContextMeter::new(34, "34%").into_any_element(),
+                ],
+            ),
+        ),
+        LAYOUT.labeled(
             "icon button · tooltip",
             &t,
             strip(

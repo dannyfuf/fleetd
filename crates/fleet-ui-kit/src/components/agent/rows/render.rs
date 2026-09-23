@@ -12,6 +12,7 @@ use gpui::{AnyElement, App, Pixels, SharedString, Stateful, Window, div, prelude
 use super::{TranscriptRhythm, TranscriptRow, TranscriptRowId, TranscriptRowKind};
 use crate::{
     components::KeyHint,
+    harness::HarnessTargetExt as _,
     icons::{Icon, IconSize},
     text::Text,
     theme::{ActiveTheme, Theme},
@@ -19,9 +20,16 @@ use crate::{
 };
 
 use super::super::metrics::{AGENT_BODY_MAX_H, AGENT_CONTENT_W};
+use super::super::transcript_list::{RowAction, RowActionKbd};
 
 /// What an expand toggle reports back to the transcript's owner.
 pub(crate) type ToggleFn = Rc<dyn Fn(SharedString, &mut Window, &mut App) + 'static>;
+
+/// What a row-verb control reports back to the transcript's owner.
+pub(crate) type ActionFn = Rc<dyn Fn(SharedString, RowAction, &mut Window, &mut App) + 'static>;
+
+/// One row's own verb handler, with its key already bound in.
+pub(crate) type RowActionFn = Rc<dyn Fn(RowAction, &mut Window, &mut App) + 'static>;
 
 /// One row's own toggle, with its key already bound in.
 pub(super) type RowToggleFn = Rc<dyn Fn(&mut Window, &mut App) + 'static>;
@@ -41,6 +49,10 @@ pub(crate) struct RowContext {
     pub body: Option<AnyElement>,
     /// What a click on an expandable row's header reports.
     pub toggle: Option<ToggleFn>,
+    /// What a row-verb control — a hover button or a right-click menu item — reports.
+    pub action: Option<ActionFn>,
+    /// The owner's key-chip lookup for those controls.
+    pub action_kbd: Option<RowActionKbd>,
 }
 
 impl RowContext {
@@ -54,8 +66,26 @@ impl RowContext {
     }
 }
 
+impl RowContext {
+    /// The verb handler for the row with `id`, or `None` when nobody is listening.
+    pub(super) fn action_for(&self, id: &TranscriptRowId) -> Option<RowActionFn> {
+        let action = self.action.clone()?;
+        let key = id.key();
+        Some(Rc::new(
+            move |verb: RowAction, window: &mut Window, cx: &mut App| {
+                action(key.clone(), verb, window, cx);
+            },
+        ))
+    }
+}
+
 /// Draw one row, including the air it leaves under itself.
-pub(crate) fn row_element(row: &TranscriptRow, ctx: RowContext, cx: &mut App) -> AnyElement {
+pub(crate) fn row_element(
+    row: &TranscriptRow,
+    ctx: RowContext,
+    window: &Window,
+    cx: &mut App,
+) -> AnyElement {
     let rhythm = row.rhythm();
     let index = ctx.index;
     let visible = ctx.visible;
@@ -71,13 +101,15 @@ pub(crate) fn row_element(row: &TranscriptRow, ctx: RowContext, cx: &mut App) ->
         TranscriptRowKind::WorkLive(live) => super::work::work_live(live, index, visible, cx),
         TranscriptRowKind::WorkGroup(group) => super::work::work_group(group, &row.id, &ctx, cx),
         TranscriptRowKind::Delegation(delegation) => {
-            super::delegation::delegation(delegation, &ctx, cx)
+            super::delegation::delegation(delegation, &row.id, &ctx, cx)
         }
         TranscriptRowKind::DelegationResult(result) => {
             super::delegation::delegation_result(result, &row.id, &ctx, cx)
         }
         TranscriptRowKind::TurnFold(fold) => super::chrome::turn_fold(fold, &row.id, &ctx, cx),
-        TranscriptRowKind::TurnFooter(footer) => super::chrome::turn_footer(footer, cx),
+        TranscriptRowKind::TurnFooter(footer) => {
+            super::chrome::turn_footer(footer, &row.id, &ctx, window, cx)
+        }
         TranscriptRowKind::Checkpoint(checkpoint) => super::chrome::checkpoint(checkpoint, cx),
         TranscriptRowKind::Notice(notice) => super::chrome::notice(notice, cx),
         TranscriptRowKind::Error(error) => super::chrome::error(error, index, cx),
@@ -92,11 +124,14 @@ pub(crate) fn row_element(row: &TranscriptRow, ctx: RowContext, cx: &mut App) ->
     };
 
     let theme = cx.theme();
+    // `agents.row[N]` is the whole row, `N` its index in the transcript: a scenario clicks a
+    // collapsed group, fold or delegation line by it, because collapsed, the row is its line.
     div()
         .w_full()
         .flex()
         .pb(pad(rhythm, theme))
         .child(div().w_full().max_w(AGENT_CONTENT_W).child(content))
+        .harness_target_indexed("agents.row", index)
         .into_any_element()
 }
 
@@ -113,13 +148,16 @@ fn pad(rhythm: TranscriptRhythm, theme: &Theme) -> Pixels {
 
 /// The header line of a collapsible row: 30 px tall, and clickable only when it can expand.
 ///
-/// The click belongs to this line only, so a click inside the body it opens never folds it.
+/// The click belongs to this line only, so a click inside the body it opens never folds it. A
+/// clickable line is a pointer-first row: the pointer cursor and a `row_hover` band under the
+/// pointer, inset by the same `sm` a tool line is, so every row line in a turn starts at one x.
 pub(super) fn header(
     key: (&'static str, usize),
     expandable: bool,
     on_toggle: Option<RowToggleFn>,
     theme: &Theme,
 ) -> Stateful<gpui::Div> {
+    let hover = theme.colors.row_hover;
     div()
         .id(key)
         .h(theme.metrics.row_h)
@@ -127,8 +165,11 @@ pub(super) fn header(
         .flex()
         .items_center()
         .gap(theme.space.sm)
+        .px(theme.space.sm)
+        .rounded(theme.radii.sm)
         .when_some(on_toggle.filter(|_| expandable), |el, toggle| {
             el.cursor_pointer()
+                .hover(move |style| style.bg(hover))
                 .on_click(move |_, window, cx| toggle(window, cx))
         })
 }

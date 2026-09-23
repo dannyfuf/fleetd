@@ -52,3 +52,6 @@ pub const AGENT_PREVIEW_MAX_H: Pixels = px(144.0);
 /// 180 px: ten data lines — the preview a collapsed plan card shows (it collapses at > 900
 /// chars or > 20 lines).
 pub const AGENT_PLAN_PREVIEW_H: Pixels = px(180.0);
+
+/// The track of the composer's context meter — `34%` of the window used — beside its number.
+pub const AGENT_CONTEXT_METER_W: Pixels = px(36.0);

@@ -185,7 +185,7 @@ fn the_wizard_advances_and_only_offers_previous_once_there_is_one() {
         .into_iter()
         .map(|option| option.label)
         .collect();
-    assert!(labels.iter().any(|label| label == "next"));
+    assert!(labels.iter().any(|label| label == "Next"));
 
     let second = wizard(1);
     assert_eq!(second.action_for_key("p"), Some(DecisionAction::Previous));
@@ -194,7 +194,7 @@ fn the_wizard_advances_and_only_offers_previous_once_there_is_one() {
     assert!(
         last.options()
             .into_iter()
-            .any(|option| option.label == "answer")
+            .any(|option| option.label == "Answer")
     );
 }
 

@@ -70,16 +70,28 @@ pub(super) fn reasoning(
 }
 
 /// One settled tool call, drawn by [`ToolRowElement`].
+///
+/// The 30 px line is `agents.tool[N]`, `N` the row's index in the transcript, so a scenario
+/// can click a call the way a hand would — the line, not the row, so the name stays on the
+/// click target when the row is expanded.
 pub(super) fn work(row: &ToolRow, id: &TranscriptRowId, ctx: RowContext) -> AnyElement {
     let toggle = ctx.toggle_for(id);
-    let mut element = ToolRowElement::new(row.clone(), ctx.index).focused(ctx.focused);
+    let action = ctx.action_for(id);
+    let index = ctx.index;
+    let mut element = ToolRowElement::new(row.clone(), index).focused(ctx.focused);
     if let Some(body) = ctx.body {
         element = element.body(body);
     }
     if let Some(toggle) = toggle {
         element = element.on_toggle(move |window, cx| toggle(window, cx));
     }
-    element.into_any_element()
+    if let Some(action) = action {
+        element = element.on_action(move |verb, window, cx| action(verb, window, cx));
+    }
+    if let Some(resolve) = ctx.action_kbd {
+        element = element.action_kbd(resolve);
+    }
+    element.harness_part("agents.tool").into_any_element()
 }
 
 /// The single in-place live row, present-tense by rule.

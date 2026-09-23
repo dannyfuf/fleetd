@@ -2,16 +2,17 @@
 //! between sessions, the harness's own notices, a severe failure, the live working row, and the
 //! empty thread.
 
-use gpui::{AnyElement, App, SharedString, div, prelude::*};
+use gpui::{AnyElement, App, SharedString, Window, div, prelude::*};
 
 use super::super::metrics::{AGENT_BODY_MAX_H, AGENT_CONTENT_W};
+use super::super::transcript_list::RowAction;
 use super::render::{RowContext, chevron, hairline, header, separator};
 use super::{
     CheckpointRow, EmptyRow, ErrorRow, NoticeRow, TranscriptRowId, TurnFoldRow, TurnFooterRow,
 };
 use super::{WorkingPhase, WorkingRow};
 use crate::{
-    components::{KeyHint, KeyHintRow, Spinner},
+    components::{Button, ButtonSize, ButtonStyle, KeyHint, KeyHintRow, Spinner},
     icons::{Icon, IconSize},
     text::Text,
     theme::ActiveTheme,
@@ -38,8 +39,15 @@ pub(super) fn turn_fold(
 /// One right-aligned line after the terminal assistant message of a settled turn.
 ///
 /// Turn metadata is withheld until the turn completes, so this row never grows a segment
-/// mid-stream and shoves everything above it.
-pub(super) fn turn_footer(row: &TurnFooterRow, cx: &App) -> AnyElement {
+/// mid-stream and shoves everything above it. Its two verbs are compact ghost buttons that
+/// report the row's own `Diff` and `Revert`, exactly as `d` and `u` do on the focused footer.
+pub(super) fn turn_footer(
+    row: &TurnFooterRow,
+    id: &TranscriptRowId,
+    ctx: &RowContext,
+    window: &Window,
+    cx: &App,
+) -> AnyElement {
     let theme = cx.theme();
     let mut children: Vec<AnyElement> = Vec::new();
     for (index, segment) in row.segments.iter().enumerate() {
@@ -53,6 +61,22 @@ pub(super) fn turn_footer(row: &TurnFooterRow, cx: &App) -> AnyElement {
                 .into_any_element(),
         );
     }
+    let on_action = ctx.action_for(id);
+    let verb = |action: RowAction, label: &'static str, icon: Icon| {
+        let chip = ctx
+            .action_kbd
+            .as_ref()
+            .and_then(|resolve| resolve(action, window, cx));
+        let on_action = on_action.clone();
+        Button::new((footer_id(action), ctx.index), label)
+            .style(ButtonStyle::Ghost)
+            .size(ButtonSize::Compact)
+            .icon(icon)
+            .when_some(chip, Button::kbd)
+            .when_some(on_action, |button, on_action| {
+                button.on_click(move |_, window, cx| on_action(action, window, cx))
+            })
+    };
     div()
         .w_full()
         .flex()
@@ -60,11 +84,27 @@ pub(super) fn turn_footer(row: &TurnFooterRow, cx: &App) -> AnyElement {
         .justify_end()
         .gap(theme.space.sm)
         .children(children)
-        // §5: `[u]` is drawn only where a checkpoint exists. A drawn affordance that does
-        // nothing is worse than an absent one.
-        .children(row.diff.then(|| KeyHint::labeled("⏎", "diff")))
-        .children(row.revert.then(|| KeyHint::labeled("u", "revert turn")))
+        .children(
+            row.diff
+                .then(|| verb(RowAction::Diff, "Diff", Icon::FileDiff)),
+        )
+        // §5: `Revert turn` is drawn only where a checkpoint exists. A drawn affordance that
+        // does nothing is worse than an absent one.
+        .children(
+            row.revert
+                .then(|| verb(RowAction::Revert, "Revert turn", Icon::Undo2)),
+        )
         .into_any_element()
+}
+
+/// The element-id prefix of one footer verb.
+const fn footer_id(action: RowAction) -> &'static str {
+    match action {
+        RowAction::Diff => "footer-diff",
+        RowAction::Revert => "footer-revert",
+        RowAction::Copy => "footer-copy",
+        RowAction::Open => "footer-open",
+    }
 }
 
 /// A centred separator: a compaction boundary or a resume.

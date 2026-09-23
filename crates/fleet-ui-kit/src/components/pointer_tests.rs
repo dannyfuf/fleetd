@@ -373,6 +373,36 @@ fn open_controls(
     (cx, recorded)
 }
 
+/// A decision dock whose controls only record the action they report.
+struct Dock {
+    decision: crate::components::Decision,
+    log: Rc<RefCell<Vec<crate::components::DecisionAction>>>,
+}
+
+impl Render for Dock {
+    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        harness::begin_frame(window);
+        let log = self.log.clone();
+        div().size_full().child(
+            crate::components::DecisionDock::new(self.decision.clone())
+                .on_action(move |action, _, _| log.borrow_mut().push(action)),
+        )
+    }
+}
+
+fn dock(
+    cx: &mut TestAppContext,
+    decision: crate::components::Decision,
+) -> (
+    VisualTestContext,
+    Rc<RefCell<Vec<crate::components::DecisionAction>>>,
+) {
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let recorded = log.clone();
+    let cx = open(cx, move || Dock { decision, log });
+    (cx, recorded)
+}
+
 #[gpui::test]
 fn a_click_on_a_segment_asks_for_its_index(cx: &mut TestAppContext) {
     let (mut cx, log) = open_controls(cx, false);
@@ -410,4 +440,49 @@ fn a_long_cycler_lists_its_options_and_a_click_picks_one(cx: &mut TestAppContext
     let option = centre(&mut cx, "menu.item[3]");
     press(&mut cx, option, MouseButton::Left, 1);
     assert_eq!(*log.borrow(), vec!["cycler 3".to_owned()]);
+}
+
+#[gpui::test]
+fn an_approval_button_reports_the_action_its_key_resolves_to(cx: &mut TestAppContext) {
+    use crate::components::{ApprovalRequest, Decision, DecisionAction, DecisionKind};
+    let decision = Decision::new(
+        "g1",
+        "codex wants to edit README.md",
+        DecisionKind::Approval(ApprovalRequest::new("edit", "apply the edit to README.md")),
+    );
+    for (target, key) in [
+        ("agents.approval.allow_once", "y"),
+        ("agents.approval.allow_always", "a"),
+        ("agents.approval.deny", "n"),
+        ("agents.approval.deny_and_stop", "escape"),
+    ] {
+        let (mut cx, log) = dock(cx, decision.clone());
+        let at = centre(&mut cx, target);
+        press(&mut cx, at, MouseButton::Left, 1);
+        let expected: Vec<DecisionAction> = decision.action_for_key(key).into_iter().collect();
+        assert!(!expected.is_empty(), "`{key}` answers an approval");
+        assert_eq!(
+            *log.borrow(),
+            expected,
+            "{target} reports what `{key}` does"
+        );
+    }
+}
+
+#[gpui::test]
+fn a_decision_in_flight_reports_nothing(cx: &mut TestAppContext) {
+    use crate::components::{ApprovalRequest, Decision, DecisionKind};
+    let decision = Decision::new(
+        "g1",
+        "codex wants to run a command",
+        DecisionKind::Approval(ApprovalRequest::new("bash", "cargo test")),
+    )
+    .answering(true);
+    let (mut cx, log) = dock(cx, decision);
+    let at = centre(&mut cx, "agents.approval.allow_once");
+    press(&mut cx, at, MouseButton::Left, 1);
+    assert!(
+        log.borrow().is_empty(),
+        "an answer in flight is not sent twice"
+    );
 }
