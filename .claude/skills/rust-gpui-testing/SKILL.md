@@ -265,15 +265,18 @@ instead of bare `unwrap()`; `#[ignore = "…"]` with a reason; RAII child-proces
 suite outgrows the file, use a sibling module — `crates/fleet-app/src/dialogs/input/tests.rs`,
 `crates/fleet-daemon/src/services/sessions/tests.rs`, `crates/fleet-core/src/board/sync/tests/`.
 Cross-crate or binary-launching suites go in `crates/<crate>/tests/`
-(`crates/fleet-daemon/tests/` has 28 files, `crates/fleet-app/tests/` has 2 plus `common/`).
-Never add a `mod.rs`.
+(`crates/fleet-daemon/tests/` has 32 files plus `infra/`, `crates/fleet-app/tests/` has 3 plus
+`common/`). Never add a `mod.rs`.
 
-**The 44 separate integration binaries are a real cost.** Each file under `crates/*/tests/`
-links its own binary and there is not one `[[test]]` stanza in the workspace. When you add
-a suite to `fleet-daemon`, prefer extending an existing file over adding a 29th; if you
-consolidate, follow Zed's shape — `[[test]] name = "integration"`,
-`required-features = ["test-support"]`, `path = "tests/integration/<crate>.rs"` with `mod`
-declarations (`zed/crates/project/Cargo.toml:16-19`). Incremental, not a sweep.
+**One integration binary per crate.** Every crate with more than one file in `tests/` sets
+`autotests = false` and a single `[[test]] name = "integration"` whose root,
+`tests/integration.rs`, declares each file as a `mod` and each shared helper (`infra`,
+`common`, `support`) once — a file reaches a helper with `use crate::infra;`, never its own
+`mod infra;`. A new test file is a new `mod` line there; `workspace_layering`
+(`crates/fleet-core/tests/`) fails on a file that is not declared, because with
+`autotests = false` it would silently never compile. Filter by module:
+`cargo test -p fleet-daemon --test integration pty_holder::`. Each file used to be its own
+binary linking the whole dependency graph (52 of them, 220–400 MB each).
 
 **Only `fleet-daemon` exports a `test-support` feature** (`crates/fleet-daemon/Cargo.toml:16`).
 `fleet-core`, `fleet-git` and `fleet-client` have none, so `fleet-app` tests cannot borrow

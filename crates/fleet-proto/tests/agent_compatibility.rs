@@ -16,7 +16,7 @@
 //! 4. **Legacy-peer fixtures**, proving a payload written before the window fields, before Codex,
 //!    before the sequenced log, and before delegation still decodes.
 
-mod support;
+use crate::support;
 
 #[path = "agent_compatibility/legacy.rs"]
 mod legacy;

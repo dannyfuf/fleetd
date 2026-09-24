@@ -3,12 +3,12 @@ use std::{
     time::Duration,
 };
 
+use crate::support;
 use fleet_git::{
     CommitOptions, ConflictChoice, DiffSide, FetchRequest, GitError, HunkSelection, MergeOptions,
     MoveDirection, ObjectId, PatchAction, PatchSelection, PullRequest, PushRequest, Ref,
     Repository, ResetMode, SnapshotOptions, StashOptions, watch::RepoWatcher,
 };
-mod support;
 use support::{TestRepo, git, git_output, test_runner};
 
 #[tokio::test]

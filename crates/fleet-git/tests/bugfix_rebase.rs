@@ -10,8 +10,7 @@ use std::{
 
 use fleet_git::{CommandKind, MoveDirection};
 
-#[allow(dead_code)]
-mod support;
+use crate::support;
 use support::{TestRepo, git_output};
 
 fn sequence_editor() -> &'static Path {

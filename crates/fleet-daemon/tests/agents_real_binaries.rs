@@ -1,6 +1,6 @@
 //! Handshake tests against the **real** harness binaries.
 //!
-//! Opt-in: `cargo test -p fleet-daemon --features real-agents --test agents_real_binaries`.
+//! Opt-in: `cargo test -p fleet-daemon --features real-agents --test integration agents_real_binaries::`.
 //! The default `make test` run spawns neither `claude` nor `codex` — every other agent test
 //! drives a scripted `/bin/sh` mock peer — because a test suite that needs two vendor CLIs
 //! installed is a test suite that silently skips on the machine that most needs it.

@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use fleet_git::{CommandOutcome, DiffSide, Ref, SnapshotOptions};
 
-mod support;
+use crate::support;
 use support::{TestRepo, git, git_output};
 
 #[tokio::test]

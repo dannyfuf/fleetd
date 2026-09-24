@@ -844,12 +844,21 @@ fn isolated_test(name: &str) -> bool {
     true
 }
 
+/// libtest names a test by its path below the crate root, and this file is a module of the
+/// crate's one integration binary (`tests/integration.rs`), so `--exact` needs that path.
+fn test_path(name: &str) -> String {
+    match module_path!().split_once("::") {
+        Some((_, module)) => format!("{module}::{name}"),
+        None => name.to_owned(),
+    }
+}
+
 fn run_isolated_child(name: &str) -> Result<(), String> {
     let home = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
     let output = std::process::Command::new(
         std::env::current_exe().unwrap_or_else(|error| panic!("{error}")),
     )
-    .args(["--exact", name, "--nocapture"])
+    .args(["--exact", &test_path(name), "--nocapture"])
     .env_clear()
     // The child's own executable is this test harness, so it cannot find `fleetd` on its own;
     // every terminal it creates needs a holder started from the binary this suite was built with.

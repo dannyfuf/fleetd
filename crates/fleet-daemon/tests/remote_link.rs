@@ -32,7 +32,7 @@ use tokio::{
 };
 use tokio_util::codec::Framed;
 
-mod infra;
+use crate::infra;
 
 const BACKOFF_FLOOR: Duration = Duration::from_millis(100);
 

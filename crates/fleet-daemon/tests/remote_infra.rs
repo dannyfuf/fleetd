@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use fleet_daemon::machines::MachineProvider;
 
-mod infra;
+use crate::infra;
 
 #[tokio::test]
 async fn loopback_command_machine_probes_a_real_fleetd_binary() {

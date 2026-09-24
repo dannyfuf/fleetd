@@ -15,7 +15,7 @@ use fleet_core::{
     paths::{FleetHome, pty_socket_path},
 };
 
-mod infra;
+use crate::infra;
 
 /// Ceiling on every wait here; a holder that misses it has a bug, not a slow machine.
 const DEADLINE: Duration = Duration::from_secs(10);

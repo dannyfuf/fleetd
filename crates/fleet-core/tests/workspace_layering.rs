@@ -67,6 +67,65 @@ fn crate_manifests_inherit_lints_and_dependency_versions() {
     );
 }
 
+/// A crate's integration tests are one binary (`tests/integration.rs`) whose modules are the
+/// other files in `tests/`. With `autotests = false` a file nobody declares is never compiled,
+/// so its tests would silently stop running; a second top-level file without it would fork a
+/// second binary that links the whole dependency graph again.
+#[test]
+fn integration_tests_are_one_binary_per_crate() {
+    let mut violations = Vec::new();
+    for manifest in crate_manifests() {
+        let crate_dir = manifest
+            .parent()
+            .unwrap_or_else(|| panic!("{} has a parent", manifest.display()));
+        let tests = crate_dir.join("tests");
+        let mut files: Vec<String> = match std::fs::read_dir(&tests) {
+            Ok(entries) => entries
+                .map(|entry| {
+                    entry.unwrap_or_else(|error| panic!("read {}: {error}", tests.display()))
+                })
+                .filter_map(|entry| {
+                    let path = entry.path();
+                    if path.extension()? != "rs" {
+                        return None;
+                    }
+                    path.file_stem()?.to_str().map(str::to_owned)
+                })
+                .collect(),
+            Err(_) => continue,
+        };
+        files.sort();
+        let text = std::fs::read_to_string(&manifest)
+            .unwrap_or_else(|error| panic!("read {}: {error}", manifest.display()));
+        let name = crate_dir.display();
+        if !text.lines().any(|line| line.trim() == "autotests = false") {
+            if files.len() > 1 {
+                violations.push(format!(
+                    "{name}: {} test files are {} binaries; set `autotests = false` and declare \
+                     them in tests/integration.rs",
+                    files.len(),
+                    files.len()
+                ));
+            }
+            continue;
+        }
+        let root = tests.join("integration.rs");
+        let root_text = std::fs::read_to_string(&root)
+            .unwrap_or_else(|error| panic!("read {}: {error}", root.display()));
+        for file in files.iter().filter(|file| *file != "integration") {
+            if !root_text
+                .lines()
+                .any(|line| line.trim() == format!("mod {file};"))
+            {
+                violations.push(format!(
+                    "{name}: tests/{file}.rs is not declared in tests/integration.rs and never runs"
+                ));
+            }
+        }
+    }
+    assert_eq!(violations, Vec::<String>::new());
+}
+
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()

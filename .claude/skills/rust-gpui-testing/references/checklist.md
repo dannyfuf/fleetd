@@ -147,7 +147,8 @@ Zed references are tag v1.18.1; fleetd paths are repo-relative.
 - [ ] **Is the test in the right place?**
       Inline `#[cfg(test)] mod tests` by default (343 modules); a sibling `tests.rs` /
       `tests/` module when the suite outgrows the file; `crates/<crate>/tests/` only for
-      cross-crate or binary-launching suites. Never a `mod.rs` for a module (the
+      cross-crate or binary-launching suites, declared as a `mod` in that crate's
+      `tests/integration.rs`. Never a `mod.rs` for a module (the
       `tests/common/mod.rs` form is Cargo's requirement for shared integration helpers and is
       the exception).
 

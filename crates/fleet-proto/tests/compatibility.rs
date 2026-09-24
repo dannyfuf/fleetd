@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 
 use fleet_core::{
     agents::AttentionKind,

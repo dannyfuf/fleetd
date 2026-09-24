@@ -63,7 +63,7 @@ Fix: pass the data in as a plain type / `SharedString` / closure instead.
 **Does the layering test still pass, and does the PR add its new prohibition to it?**
 Why: a legal-but-wrong edge is invisible in review. Zed enforces its equivalent as a CI
 test (`zed/tooling/xtask/src/workspace.rs:23-70`).
-Fix: run `cargo test -p fleet-app --test workspace_layering`; add the pair to `FORBIDDEN`
+Fix: run `cargo test -p fleet-core --test integration workspace_layering::`; add the pair to `FORBIDDEN`
 when the PR establishes a new rule.
 
 **Did model or plumbing logic migrate into a UI crate to avoid plumbing a type?**
