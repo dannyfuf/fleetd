@@ -1,0 +1,59 @@
+# UX-SPEC.md §3.6 "Changes panel" and KEYMAP.md `ctrl-s g`: the strip's *Changes* opens a column
+# listing what this worktree changed against its base — committed and uncommitted files with
+# their status letter and line counts, and the commits ahead — and it follows the worktree as
+# files change, with no key pressed. A file's row opens its diff in a sheet. TESTING-HARNESS.md §3
+# for `lists.changes`, `lists["changes.commits"]`, `tabs.changes` and `changes.file[N]`.
+#
+# The worktree is changed from a shell tab in it, the way an agent's edits reach it: one commit,
+# one uncommitted edit, then a new file while the panel is open.
+fixture: one-repo
+await idle
+key o
+await screen == Workspace 20000
+await lists.tabs.rows[2] exists 20000
+assert targets["tabs.changes"] exists && targets["changes.panel"] absent
+
+# A plain shell tab to change the worktree from. The one `wait` is terminal-text.scenario's:
+# Fleet types `clear` into a new shell once its prompt looks ready, at most 500 ms after spawn.
+key ctrl-s c
+await lists.tabs.rows[3] exists 20000
+await lists.tabs.selected.id == 4 20000
+wait 1500
+await terminal.text ~= \S 20000
+type printf 'fn run() {}\n' > run.rs && git add run.rs && git -c user.name=fleet -c user.email=fleet@example.test commit -qm 'add the runner' && printf 'more\n' >> README.md && echo change-$((6*7))
+key enter
+await terminal.text ~= "\nchange-42" 20000
+
+# The panel, by pointer: the committed file and the edited one, and the commit ahead.
+click tabs.changes
+await targets["changes.panel"] exists 10000
+await lists.changes.rows[1] exists 20000
+assert lists.changes.rows[0].label == README.md && lists.changes.rows[0].badges[0] == M
+assert lists.changes.rows[0].badges[1] == "+1"
+assert lists.changes.rows[1].label == run.rs && lists.changes.rows[1].badges[0] == A
+assert lists["changes.commits"].rows[0].label == "add the runner"
+assert lists.changes.filter == origin/main
+shot changes-panel
+
+# An edit while the panel is open reaches it through the watcher, with no key pressed.
+type printf 'n\n' > notes.md && echo note-$((6*7))
+key enter
+await terminal.text ~= "\nnote-42" 20000
+await lists.changes.rows[2] exists 20000
+assert lists.changes.rows[1].label == notes.md && lists.changes.rows[1].badges[0] == A
+shot changes-panel-updated
+
+# A file's row opens its diff against the base in a sheet; `Esc` closes it.
+click changes.file[0]
+await dialog.name == ChangesDiff 10000
+await idle
+shot changes-diff
+key escape
+await overlay absent 10000
+
+# `ctrl-s g` is the same toggle: the panel closes, and the strip button says so.
+key ctrl-s g
+await targets["changes.panel"] absent 10000
+assert lists.changes absent && screen == Workspace
+dump changes-panel
+quit
