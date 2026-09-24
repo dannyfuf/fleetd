@@ -280,7 +280,7 @@ list below is the complete inventory, in px unless marked `ch`; a unit test in
 | Group | Tokens |
 | --- | --- |
 | Window chrome | `title_bar_h 44` · `status_bar_h 28` · `traffic_light_inset 84` · `command_field_w 340` · `filter_field_w 220` · `monogram_size 18` · `mode_word_w 84` · `banner_h 28` · `frame_banner_h 40` · `strip_h 22` |
-| Layout columns | `sidebar_w 232` · `sidebar_min_w 200` · `sidebar_max_w 320` · `sidebar_collapsed_w 44` · `resize_handle_w 6` · `detail_w 344` · `detail_overlay_w 320` · `sheet_w 440` · `sheet_expanded_w 640` · `sheet_w_detail 736` · `sheet_detail_props_w 268` · `first_run_w 560` |
+| Layout columns | `sidebar_w 232` · `sidebar_min_w 200` · `sidebar_max_w 320` · `sidebar_collapsed_w 44` · `resize_handle_w 6` · `detail_w 344` · `changes_w 300` · `detail_overlay_w 320` · `sheet_w 440` · `sheet_expanded_w 640` · `sheet_w_detail 736` · `sheet_detail_props_w 268` · `first_run_w 560` |
 | Rows and headers | `row_h 30` · `row_h_comfortable 44` · `pane_header_h 30` · `section_header_h 20` · `palette_row_h 34` · `palette_tile 22` · `job_row_h 44` · `progress_bar_h 4` |
 | Controls | `button_h 30` · `button_h_compact 26` · `kbd_h 18` · `kbd_h_small 16` · `chip_h 22` · `tile_chip_h 18` · `avatar_size 20` · `text_field_h 36` · `field_status_h 18` · `number_field_w 96` · `segment_h 24` · `switch_w 34` · `switch_h 20` · `checkbox_size 16` · `step_badge 28` |
 | Dialogs and floating layers | `dialog_w 560` · `confirm_compact_w 480` · `dialog_header_h 44` · `dialog_footer_h 44` · `palette_w 640` · `palette_top 120` · `prefix_menu_w 900` · `palette_input_h 44` · `overlay_help_w 640` · `toast_w 320` · `toast_inset 12` · `scroll_pill_w 176` · `menu_min_w 240` · `alert_tile 34` |

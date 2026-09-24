@@ -692,6 +692,8 @@ pub struct Metrics {
     pub resize_handle_w: Pixels,
     /// 344 px detail panel.
     pub detail_w: Pixels,
+    /// 300 px Changes panel at the right of the Workspace: files and commits against the base.
+    pub changes_w: Pixels,
     /// 736 px right-side sheet showing a full detail (a board card).
     pub sheet_w_detail: Pixels,
     /// 268 px property column inside the `sheet_w_detail` card sheet.
@@ -828,6 +830,7 @@ impl Default for Metrics {
             sidebar_collapsed_w: px(44.0),
             resize_handle_w: px(6.0),
             detail_w: px(344.0),
+            changes_w: px(300.0),
             sheet_w_detail: px(736.0),
             sheet_detail_props_w: px(268.0),
             sheet_w: px(440.0),
