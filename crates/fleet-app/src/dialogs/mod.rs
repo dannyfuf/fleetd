@@ -5,6 +5,7 @@ mod board_settings;
 mod card_create;
 pub(crate) mod card_detail;
 pub(crate) mod card_picker;
+mod changes_diff;
 mod clone_repo;
 mod confirm;
 mod context;
@@ -110,6 +111,8 @@ pub enum Dialogs {
     Quit,
     /// §3.8.9 Quit and stop the daemon (`ctrl-shift-q`).
     QuitDaemon,
+    /// §3.6 One file's diff against the base, from the Workspace's Changes panel.
+    ChangesDiff,
 }
 
 impl Dialogs {
@@ -135,6 +138,7 @@ impl Dialogs {
             Self::Help => "Help",
             Self::Quit => "Quit",
             Self::QuitDaemon => "QuitDaemon",
+            Self::ChangesDiff => "ChangesDiff",
         }
     }
 
@@ -157,7 +161,7 @@ impl Dialogs {
             }
             Self::Settings => SETTINGS_W,
             // A sheet, not a card: it docks to the right of the board (UX-SPEC § Card detail).
-            Self::CardDetail => cx.theme().metrics.sheet_w_detail,
+            Self::CardDetail | Self::ChangesDiff => cx.theme().metrics.sheet_w_detail,
             Self::Help => HELP_W,
             Self::Quit => PROMPT_W,
         }
@@ -185,7 +189,8 @@ impl Dialogs {
             | Self::AssignRepo
             | Self::EditHooks
             | Self::Settings
-            | Self::RenameTerminal => Box::new(actions::dialog::Cancel),
+            | Self::RenameTerminal
+            | Self::ChangesDiff => Box::new(actions::dialog::Cancel),
         }
     }
 
@@ -236,6 +241,7 @@ impl Dialogs {
             Self::Help => help::render(state, focus, host, window, cx),
             Self::Quit => quit::render_quit(state, focus, window, cx),
             Self::QuitDaemon => quit::render_quit_daemon(state, focus, window, cx),
+            Self::ChangesDiff => changes_diff::render(state, focus, host, window, cx),
         }
     }
 }
@@ -261,6 +267,7 @@ pub(crate) fn seed(dialog: &Dialogs, state: &Entity<AppState>, bridge: &Bridge, 
         Dialogs::Settings => settings::seed(state, bridge, cx),
         Dialogs::RenameTerminal => rename_terminal::seed(state, cx),
         Dialogs::Help => help::seed(state, cx),
+        Dialogs::ChangesDiff => changes_diff::refresh(state, cx),
         Dialogs::Quit | Dialogs::QuitDaemon => {}
     }
 }
@@ -305,6 +312,7 @@ mod tests {
             Dialogs::Help,
             Dialogs::Quit,
             Dialogs::QuitDaemon,
+            Dialogs::ChangesDiff,
         ] {
             assert!(!dialog.context_name().is_empty());
         }
@@ -337,6 +345,7 @@ mod tests {
             Dialogs::Help,
             Dialogs::Quit,
             Dialogs::QuitDaemon,
+            Dialogs::ChangesDiff,
         ] {
             let own = format!("Dialog > {}", dialog.context_name());
             let expected = escape_in(&own)

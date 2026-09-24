@@ -430,6 +430,12 @@ impl WorkspaceScreen {
         };
         let root = {
             let state = state.clone();
+            root.on_action(move |_: &prefix::ToggleChanges, _, cx| {
+                super::changes::toggle(&state, cx);
+            })
+        };
+        let root = {
+            let state = state.clone();
             let bridge = bridge.clone();
             root.on_action(move |_: &prefix::DismissWatch, _, cx| {
                 crate::views::watch_pane::dismiss_selected(&state, &bridge, cx)

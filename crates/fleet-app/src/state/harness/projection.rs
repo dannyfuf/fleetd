@@ -76,6 +76,8 @@ struct ProjectionKey {
     settling_mutations: u32,
     link_opening: bool,
     renamed_terminals: HashSet<TerminalId>,
+    /// The Changes panel's rows (`lists.changes`, `lists["changes.commits"]`).
+    changes: u64,
 }
 
 /// The identity and generation of the mirror grid the snapshot reports.
@@ -215,6 +217,7 @@ impl AppState {
             settling_mutations: self.harness.settling_mutations(),
             link_opening: matches!(self.daemon, DaemonLink::Starting),
             renamed_terminals: self.renamed_terminals.clone(),
+            changes: self.changes.revision(),
         }
     }
 
@@ -774,6 +777,10 @@ impl AppState {
                 },
             );
         }
+        if let Some((files, commits)) = self.changes_rows() {
+            lists.insert("changes".to_owned(), files);
+            lists.insert("changes.commits".to_owned(), commits);
+        }
         if matches!(self.overlay, Some(Overlay::Palette)) {
             let rows = self.palette_rows();
             lists.insert(
@@ -786,6 +793,57 @@ impl AppState {
             );
         }
         lists
+    }
+
+    /// The Changes panel's files and commits, while it shows a reading of the Workspace's
+    /// worktree. `filter` carries the base both lists are read against.
+    fn changes_rows(&self) -> Option<(ListSnapshot, ListSnapshot)> {
+        let Screen::Workspace { .. } = &self.screen else {
+            return None;
+        };
+        let reading = self.changes.reading()?;
+        if !self.changes.is_open(&reading.worktree) {
+            return None;
+        }
+        let crate::state::ReadingBody::Ready(model) = &reading.body else {
+            return None;
+        };
+        let files = model
+            .files
+            .iter()
+            .map(|file| RowSnapshot {
+                id: file.label.to_string(),
+                label: file.label.to_string(),
+                badges: std::iter::once(file.letter.to_string())
+                    .chain(file.added.iter().map(ToString::to_string))
+                    .chain(file.removed.iter().map(ToString::to_string))
+                    .collect(),
+                marks: Vec::new(),
+            })
+            .collect();
+        let commits = model
+            .commits
+            .iter()
+            .map(|commit| RowSnapshot {
+                id: commit.short.to_string(),
+                label: commit.subject.to_string(),
+                badges: Vec::new(),
+                marks: Vec::new(),
+            })
+            .collect();
+        let base = reading.base.to_string();
+        Some((
+            ListSnapshot {
+                rows: files,
+                selected: None,
+                filter: base.clone(),
+            },
+            ListSnapshot {
+                rows: commits,
+                selected: None,
+                filter: base,
+            },
+        ))
     }
 
     /// The repos rail, exactly as the Hub last prepared it.

@@ -226,6 +226,7 @@ alone preserves them.
 | `V` | dismiss the selected exited watch; if running, hide pane and show `watch still running; pane hidden` |
 | `N` | next watch in the visible session's start order, wrapping; show the pane if hidden |
 | `P` | previous watch in the visible session's start order, wrapping; show the pane if hidden |
+| `g` | show/hide the Changes panel: what this worktree changed against its base (toggle, kept per worktree); an agent session is told `Changes are shown for worktree sessions` |
 | `!` | focus the sticky error slot [A18] |
 | `J` | jobs panel |
 | `?` | help overlay listing this table |
@@ -321,6 +322,7 @@ scroll mode or owned by a decision card preserves that mode's keyboard owner ins
 | every agent-thread sub-mode | `ctrl-s W` · `ctrl-s u` · `ctrl-s d` | session switcher · select the caller (attaching it first) · agent picker seeded with `!` |
 | every agent-thread sub-mode | `ctrl-s c` · `ctrl-s b` · `ctrl-s y` · `ctrl-s z` | new terminal tab · this worktree's board tab · copy the worktree path · zoom |
 | every agent-thread sub-mode | `ctrl-s v` · `ctrl-s V` · `ctrl-s N` · `ctrl-s P` | the subagent watch pane: show/hide · dismiss · next · previous |
+| every agent-thread sub-mode | `ctrl-s g` | the Changes panel: show/hide |
 | every agent-thread sub-mode | `ctrl-s !` · `ctrl-s J` · `ctrl-s ?` · `ctrl-s k` · `ctrl-s Esc` | sticky error · jobs panel · help · command palette (⌘K too on macOS) · cancel the prefix |
 | both | `Esc` | close a picker, else abandon a gate draft, else leave scroll mode, else interrupt — and nothing at all on an idle thread |
 | `Agent > AgentDecision > AgentPermission` | `y` · `a` · `n` · `e` · `Esc` | allow once · allow for this session · deny · edit the command · deny and stop |

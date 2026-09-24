@@ -99,6 +99,8 @@ pub(crate) struct DialogHost {
     /// Help's search field.
     pub(super) help_input: Option<Entity<TextInput>>,
     pub(super) help_input_subscription: Option<Subscription>,
+    /// The Changes diff sheet's diff surface.
+    pub(super) changes_diff: changes_diff::ChangesDiffState,
     /// What the next Confirm dialog asks about, published by whoever opens it.
     pub pending_confirm: Option<ConfirmRequest>,
     /// Repository the next hook editor should load.
@@ -443,6 +445,12 @@ fn watch(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
         ) {
             card_detail::refresh(&state, cx);
         }
+        if matches!(
+            state.read(cx).overlay,
+            Some(Overlay::Dialog(Dialogs::ChangesDiff))
+        ) {
+            changes_diff::refresh(&state, cx);
+        }
         // The branch preview names the worktree the create would produce, and whether that
         // worktree already exists is a snapshot fact: a create that landed elsewhere has to
         // turn this dialog's `Create` into `Open` without a keystroke.
@@ -749,6 +757,7 @@ fn close_with(state: &Entity<AppState>, preserve_card_detail: bool, cx: &mut App
             ..Default::default()
         };
         host.context = Default::default();
+        host.changes_diff = Default::default();
         host.assign = Default::default();
         host.edit_hooks = Default::default();
         host.rename_terminal = Default::default();

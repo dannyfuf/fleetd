@@ -2,6 +2,7 @@
 
 pub mod board_card_detail;
 pub mod board_screen;
+pub(crate) mod changes_panel;
 pub mod detail;
 pub mod doctor_view;
 pub mod first_run;

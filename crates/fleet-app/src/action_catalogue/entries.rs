@@ -1225,6 +1225,15 @@ pub(super) const ENTRIES: &[Entry] = &[
     )
     .short("Watch pane"),
     e(
+        &["prefix::ToggleChanges"],
+        P::Terminal,
+        G::Panels,
+        "Show or hide the Changes panel",
+        "List what this worktree changed against its base: files, commits ahead, and each file's diff.",
+    )
+    .featured(52)
+    .short("Changes"),
+    e(
         &["prefix::NextWatch"],
         P::Terminal,
         G::Panels,

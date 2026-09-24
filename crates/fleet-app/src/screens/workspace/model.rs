@@ -81,6 +81,18 @@ pub(super) struct Model {
     pub(super) popup_terminal: Option<TerminalId>,
     /// The daemon asked for the active terminal to be attached again (§3 `TerminalReattach`).
     pub(super) reattach: bool,
+    /// The worktree whose Changes panel is open, and the base it is read against.
+    pub(super) changes: Option<ChangesWanted>,
+}
+
+/// What the Changes panel reads, when the session's worktree has it open (UX-SPEC §3.6).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ChangesWanted {
+    pub(super) worktree: WorktreeId,
+    /// Local worktrees only: this app runs `git` on its own machine alone (§12).
+    pub(super) path: Option<PathBuf>,
+    /// The ref the worktree was created from.
+    pub(super) base: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -217,6 +229,16 @@ impl Model {
             popup_owns_terminal,
             popup_terminal,
             reattach: terminal.is_some_and(|id| app.reattach_pending.contains(&id)),
+            changes: worktree
+                .filter(|worktree| app.changes.is_open(&worktree.id))
+                .map(|worktree| ChangesWanted {
+                    worktree: worktree.id.clone(),
+                    path: worktree
+                        .host
+                        .is_none()
+                        .then(|| PathBuf::from(&worktree.path)),
+                    base: worktree.base_ref.clone(),
+                }),
         }
     }
 }

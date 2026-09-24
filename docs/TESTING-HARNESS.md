@@ -227,11 +227,12 @@ must not assume the viewport's last row exists in `terminal.rows`. `jobs[].statu
 `cancelling`, which is a real daemon job state.
 
 The list names are `repos`, `worktrees`, `prs`, `jobs`, `tabs`, `palette`, `board`,
-`board.cards`, `board.summary`, `card.runs`, `card.properties` and `settings.columns`. The last
-four are additive version-1 lists and each is absent unless its surface has something to say:
-`board.summary` while the board states a run count, `card.runs` while the card detail is open on
-a card that has run, `card.properties` while the card detail is open, `settings.columns` while
-Board settings is open. While the agent picker is
+`board.cards`, `board.summary`, `card.runs`, `card.properties`, `settings.columns`, `changes` and
+`changes.commits`. The last six are additive version-1 lists and each is absent unless its
+surface has something to say: `board.summary` while the board states a run count, `card.runs`
+while the card detail is open on a card that has run, `card.properties` while the card detail is
+open, `settings.columns` while Board settings is open, `changes` and `changes.commits` while the
+Workspace's Changes panel shows a completed reading. While the agent picker is
 open, `lists.palette` projects its native-thread rows:
 `id` is the thread id; `label` is the rendered picker label; `badges` are provider,
 `caller`/`child`, and worktree id; and `marks` are attention, `go`/`attach`, and
@@ -314,7 +315,7 @@ The names Fleet paints today, by surface:
 | Sheets | `sheet.close` |
 | Card detail | `card_detail.close` (the sheet's ✕, also `sheet.close`), `card_detail.title` (a click edits the title, as `i`), `card_detail.menu` (the header's ⋯), `card_detail.property[N]` (the property column's rows, `0` Status, numbered as `card.properties`), `card_detail.comment` (the composer's *Add a comment…*, as `c`), `card_detail.edit.save` and `card_detail.edit.cancel` (an open title, description or comment edit's *Save* / *Comment* and *Cancel*, as `ctrl-enter` and `esc`, painted only while that edit is open), and on the run card `card_detail.run.attach`, `card_detail.run.rerun` and `card_detail.run.cancel`, each painted only while its action can work on the card |
 | Jobs panel | `jobs.row[N].retry`, `jobs.row[N].cancel`, `jobs.row[N].log`, `jobs.filter[N]`, `jobs.clear`, `jobs.more`, `jobs.log.back`, `jobs.log.follow`, `jobs.log.end` |
-| Tabs | `tabs.tab[N]` for a process tab, `agents.tabs.tab[N]` for a conversation, sharing one numbering; `tabs.tab[N].close` / `agents.tabs.tab[N].close` (the tab's `✕`), `tabs.new` (the `+`), `tabs.fallback`, `tabs.watch`, `tabs.zoom` |
+| Tabs | `tabs.tab[N]` for a process tab, `agents.tabs.tab[N]` for a conversation, sharing one numbering; `tabs.tab[N].close` / `agents.tabs.tab[N].close` (the tab's `✕`), `tabs.new` (the `+`), `tabs.fallback`, `tabs.watch`, `tabs.zoom`, `tabs.changes` |
 | Toasts and errors | `toasts.toast[N]` (0 is the oldest, matching the `toasts` array), `toasts.toast[N].action`, `toasts.toast[N].close`, `sticky_error.retry`, `sticky_error.close` |
 | Daemon banner | `banner.button[N]` (`0` Reconnect now, `1` Open log), `banner.close` |
 | First run | `first_run.step[N]` (`0` Create a context, `1` Clone a repository, `2` Start a worktree and an agent), `first_run.import`, `first_run.help`, `first_run.settings` |
@@ -354,7 +355,15 @@ laid out, until the tab is hovered or active, so a scenario clicks it on the act
 *Terminal fallback* on an agent tab. A right-click on a tab selects it and opens its menu:
 *Rename* and, on an exited PTY, *Restart command* for a terminal, then *Close* and, with more than
 one tab, *Close others*. `tabs.zoom` is always painted; `tabs.watch` only while the session has a
-subagent watch; `tabs.fallback` only on an agent tab.
+subagent watch; `tabs.fallback` only on an agent tab; `tabs.changes` on a worktree session.
+
+The Changes panel (UX-SPEC §3.6) paints `changes.panel` (the whole column), `changes.file[N]` (the
+file row at model position `N`, a virtualized row) and `changes.lazygit` (*Open in Lazygit*) while
+it is open. A click on `changes.file[N]` opens the `ChangesDiff` dialog, a sheet whose close is the
+`sheet.close` every sheet paints. Its two lists are `changes` — one row per file, `id` and `label`
+the path, `badges` the status letter then `+n` and `−n` as drawn — and `changes.commits` — one row
+per listed commit ahead, `id` the short id and `label` the subject. Both carry the base in
+`filter` and are present only while the panel shows a completed reading.
 
 `prefix_menu` is the ⌃S command menu's panel, painted only once a held prefix has waited out
 `motion.prefix_hint_delay` — a scenario awaits it rather than assuming it. `prefix_menu.item[N]`

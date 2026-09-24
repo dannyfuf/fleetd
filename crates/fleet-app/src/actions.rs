@@ -428,6 +428,8 @@ pub mod prefix {
             ToggleZoom,
             /// `ctrl-s v` — hide/show the read-only watch split.
             ToggleWatchPane,
+            /// `ctrl-s g` — hide/show the Changes panel: what this worktree changed against its base.
+            ToggleChanges,
             /// `ctrl-s N` — select the next watch, wrapping in start order.
             NextWatch,
             /// `ctrl-s P` — select the previous watch, wrapping in start order.

@@ -104,7 +104,7 @@ impl ActiveDialog {
 // dialogs/mod.rs
 pub enum Dialogs { CreateWorktree, CloneRepo, Confirm, NewContext, EditContext, AssignRepo,
                    EditHooks, Settings, RenameTerminal, Help, Quit, QuitDaemon,
-                   CardDetail, CardCreate, CardPicker, BoardSettings }
+                   CardDetail, CardCreate, CardPicker, BoardSettings, ChangesDiff }
 impl Dialogs {
     pub const fn context_name(&self) -> &'static str;   // the `Dialog > <name>` word
     fn render(/* state, bridge, focus, window, cx */) -> AnyElement;   // called by ActiveDialog

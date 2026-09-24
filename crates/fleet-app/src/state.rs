@@ -33,6 +33,7 @@ use crate::{
 
 mod agents;
 mod board;
+mod changes;
 mod connection;
 mod harness;
 mod jobs_filter;
@@ -45,6 +46,10 @@ mod test_support;
 
 pub use agents::{AgentCounts, AgentThreads};
 pub use board::{BoardFocus, BoardScope, BoardState, GroupBy, WORKTREE_BOARDS_UNSUPPORTED};
+pub use changes::{
+    ChangesDiff, ChangesModel, ChangesPanel, ChangesReading, CommitRow, DiffBody, FileRow,
+    ReadingBody,
+};
 pub use connection::{DaemonLink, DaemonLossReason, daemon_log_path, reconnect_backoff};
 use harness::HarnessCache;
 pub use harness::{
@@ -247,6 +252,8 @@ pub struct AppState {
     /// The git facts of the worktree the Workspace shows, from its last inspection: the title
     /// bar's `↑2 ↓0` and `3 files changed` chips (UX-SPEC §3.6).
     pub workspace_git: Option<WorkspaceGit>,
+    /// The Workspace's Changes panel: where it is open and what it last read (UX-SPEC §3.6).
+    pub changes: ChangesPanel,
     /// `config.jobs.warnBeforeQuit`, mirrored so `ctrl-q` can decide without a round trip.
     pub warn_before_quit: bool,
     /// How many PRs the `review` tab holds. The PR screen owns the fetch, the context bar
@@ -340,6 +347,7 @@ impl AppState {
             last_trash_entry: None,
             pr_badges: HashMap::new(),
             workspace_git: None,
+            changes: ChangesPanel::default(),
             warn_before_quit: true,
             review_pr_count: 0,
             update_version: None,

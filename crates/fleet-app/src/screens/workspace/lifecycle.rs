@@ -306,6 +306,9 @@ impl WorkspaceScreen {
             return;
         }
         self.local.borrow_mut().state.git_inspected = Some(worktree.clone());
+        // The Changes panel rides the same cadence, so it catches up even where the
+        // filesystem watcher could not start.
+        super::changes::refresh(&self.local, worktree);
         let reply = bridge.request(RequestBody::InspectWorktrees {
             ids: vec![worktree.clone()],
             repo: None,
@@ -393,7 +396,12 @@ impl WorkspaceScreen {
             let mut local = self.local.borrow_mut();
             local.state.git_inspected = None;
             local.state.git_task = None;
+            // The Changes worker reads only while its panel is on screen.
+            local.state.changes = None;
             drop(local);
+            if state.read(cx).changes.reading().is_some() {
+                state.update(cx, |app, _| app.changes.begin(None));
+            }
             self.model = None;
             return;
         }
@@ -434,6 +442,7 @@ impl WorkspaceScreen {
         self.arm_prefix_menu(&model, state, cx);
         self.lookup_pr(&model, bridge, state, cx);
         self.inspect_git(&model, bridge, state, cx);
+        self.sync_changes(&model, state, cx);
         self.sync_panes(&model, bridge, state, window, cx);
         self.sync_board_scope(&model, bridge, state, cx);
         self.sync_agent_views(&model, bridge, state, window, cx);

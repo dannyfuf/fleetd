@@ -105,13 +105,21 @@ impl WorkspaceScreen {
                     .harness_target("tabs.watch"),
             );
         }
-        strip
-            .trailing(
-                strip_button("tabs-zoom", "Zoom", keys.zoom.clone())
-                    .action(Box::new(prefix::ToggleZoom))
-                    .harness_target("tabs.zoom"),
-            )
-            .into_any_element()
+        strip = strip.trailing(
+            strip_button("tabs-zoom", "Zoom", keys.zoom.clone())
+                .action(Box::new(prefix::ToggleZoom))
+                .harness_target("tabs.zoom"),
+        );
+        // Changes exists for a worktree session: it reads what that worktree changed.
+        if model.worktree.is_some() {
+            strip = strip.trailing(
+                strip_button("tabs-changes", "Changes", keys.changes.clone())
+                    .selected(model.changes.is_some())
+                    .action(Box::new(prefix::ToggleChanges))
+                    .harness_target("tabs.changes"),
+            );
+        }
+        strip.into_any_element()
     }
 
     /// The screen with no session behind it, which only happens between two snapshots.

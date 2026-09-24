@@ -7,6 +7,7 @@ use crate::terminal::surface::*;
 
 mod actions;
 mod agent;
+mod changes;
 mod chrome;
 mod lifecycle;
 mod model;
@@ -183,6 +184,26 @@ impl WorkspaceScreen {
         } else {
             terminal
         };
+        let body = match self.changes_panel(model, bridge, state, cx) {
+            Some(panel) => div()
+                .flex()
+                .flex_row()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .child(body),
+                )
+                .child(panel)
+                .into_any_element(),
+            None => body,
+        };
         let theme = cx.theme().clone();
 
         let mut root = div()
@@ -233,5 +254,8 @@ struct WorkspaceState {
     board_claim: Option<BoardClaim>,
     pending_selection_scroll: Option<PendingSelectionScroll>,
     watch_scroll: UniformListScrollHandle,
+    /// The git worker reading the open Changes panel's worktree, and the loop draining it.
+    changes: Option<changes::ChangesSource>,
+    changes_scroll: UniformListScrollHandle,
 }
 type Local = TerminalSurface<WorkspaceState>;

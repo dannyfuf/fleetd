@@ -757,7 +757,7 @@ what is running elsewhere.*
 │ ← Worktrees / buk/payroll / ⎇ feat-payroll-fix ⌄  ↑2 ↓0  3 files changed  ◷ #412 CI fail   [⌕ Search…]  ? ⚙ │ 44  title bar
 ├─────────────────────────────────────────────────────────────────────────────┤
 │ ╭──────────╮                                                                │
-│ │>_ nvim  ✕│ >_ cc ● │ ⎇ lg │ >_ test exited 1 │ ✦ fix README needs you │ + Watch Zoom │ 40  tab strip
+│ │>_ nvim  ✕│ >_ cc ● │ ⎇ lg │ >_ test exited 1 │ ✦ fix README needs you │ + Watch Zoom Changes │ 40  tab strip
 ├─╯          ╰────────────────────────────────────────────────────────────────┤
 │ ❯ claude                                                                    │
 │ ⏺ Reading src/payroll/rounding.rb…                       ┌────────────────┐ │
@@ -791,7 +791,7 @@ what is running elsewhere.*
 | Close `✕` | on the active tab and on a hovered one; a middle-click does the same | tab, right end | the pointer twin of `^s x`, with its confirm when a keep-alive process runs | — |
 | Tab menu | right-click: *Rename* `⌃S ,` · *Restart command* `⌃S r` (an exited PTY) · *Close* `⌃S x` · *Close others* (a tab running a keep-alive process stays open, and a toast says how many); the right-click selects the tab first | at the pointer | every tab verb in one place, each showing its key | — |
 | `+` | a menu: *Terminal* `⌃S c` · *Claude thread* `⌃S a` · *Codex thread* `⌃S A` · *Board* `⌃S b`; then *Lazygit* (selects the git tab, or opens one) and, on an agent tab, *Terminal fallback* `⌃S F` | after the last tab | what can be opened here, with its key | — |
-| Strip toggles | *Open as terminal* `⌃S F` on an agent tab · *Watch* `⌃S v`, pressed while the watch split shows, only while the session has a subagent watch · *Zoom* `⌃S z` | strip, right | the pointer twins of the Workspace's panel keys | — |
+| Strip toggles | *Open as terminal* `⌃S F` on an agent tab · *Watch* `⌃S v`, pressed while the watch split shows, only while the session has a subagent watch · *Zoom* `⌃S z` · *Changes* `⌃S g`, pressed while the Changes panel shows, on a worktree session | strip, right | the pointer twins of the Workspace's panel keys | — |
 | Native child tab | `↳ <provider> — <title>` | in the same numbered strip, immediately after its caller and older attached siblings | the arrow is the sole child-specific tab chrome; no provider or `child` badge is added | `AgentThreadSummary.parent`, the window-local attached set |
 | Terminal area | painted cell grid, 8 px padding, no border | fills | maximum rows; chrome is the 40 px strip | — |
 | Native pane | the Fleet-drawn view for this tab, filling the terminal area exactly | replaces the grid | the tab is a tab: same strip, same bars, same pixel positions | `Terminal.kind = Native`, `Worktree.path` |
@@ -811,6 +811,34 @@ keys go to the PTY except `ctrl-s` and the standard `cmd-c` / `cmd-v` clipboard 
 bare-key hints (`r restart`, `l log`, `⏎ start now`) are forbidden anywhere in this screen; they
 are written `^s r`, `^s l`, `^s ⏎`.
 
+**Changes panel (`ctrl-s g`, the strip's *Changes*).** An optional 300 px column
+(`metrics.changes_w`) at the right of the Workspace body, beside whatever tab is showing — a
+terminal, a Fleet-drawn pane or an agent thread — answering *what has this worktree changed?*
+while an agent works in it. Whether it shows is kept per worktree for the life of the app, and
+closed is the default. From the top:
+
+| Element | Content |
+| --- | --- |
+| Header | `Changes`, and `vs <base>` — the ref the worktree was created from (`Worktree.base_ref`) |
+| Files | one 30 px row per path that differs from the merge base of `HEAD` and the base, working tree included (committed, staged, unstaged and untracked alike): the status letter (`M` amber, `A` green, `D` red, `R` blue), the path, then `+n` green and `−n` red (a binary file has no counts; nothing removed shows no `−0`). A click opens the file's diff. The list scrolls when it is longer than the panel |
+| Commits ahead | the label and the total; the five newest commits `HEAD` has that the base lacks, short id and subject; `and n more` beyond five; `Nothing committed beyond <base> yet.` when there are none |
+| Footer | *Open in Lazygit* — selects the worktree's git tab, or opens one, as the `+` menu's *Lazygit* does. There is no *Create PR*: nothing in Fleet creates a pull request |
+
+States: `Reading changes…` until the first reading; `No changes against <base>.` in place of
+the files; `<base> is not a commit in this repository, so there is nothing to compare.`; a red
+callout with git's sentence when a first read fails (a failed *refresh* keeps the rows it had);
+and, for a worktree on another machine, a sentence saying changes are read on this one, because
+the app runs `git` only locally (§12) — Lazygit, a PTY there, still shows them. The panel reads
+when it opens, again 300 ms after a burst of file changes in the worktree goes quiet (an agent's
+edit, a commit, a checkout), and on the Workspace's 30 s git-chip cadence. Zoom hides it with the
+tab strip.
+
+**Changes diff.** A click on a file opens a right-side sheet over the dimmed Workspace
+(`sheet_w_detail`, `Dialog > ChangesDiff`): the path, `vs <base>`, and the file's unified diff
+against the same merge base in the embedded diff view the agent thread uses, never folded. `Esc`,
+the ✕ and a click on the scrim close it. `This file no longer differs from the base.` when the
+file was reverted in the meantime.
+
 **Zoom (`ctrl-s z`)** hides the tab strip; a 2 px amber bar on the window's top edge remains as
 the only reminder that chrome is hidden. The title bar, with its breadcrumb, and the status bar
 always stay, because they carry the way back, the daemon and the ⌃S buttons.
@@ -819,7 +847,7 @@ always stay, because they carry the way back, the daemon and the ⌃S buttons.
 terminal was never renamed), shell PID, `foreground_command`, cwd, latency readout, a permanent key
 cheat sheet, a scrollbar, per-tab byte counters, pane splitting, the tab index on the tab (it is in
 the tooltip), the session's status glyph and a Workspace jobs chip (the title bar's jobs button
-counts every job), and a *Changes* toggle until the Changes panel exists.
+counts every job).
 
 **States**
 

@@ -302,6 +302,7 @@ const AGENT_SESSION_ROWS: &[SharedRow] = &[
     ("ctrl-s y", || Box::new(prefix::CopyWorktreePath)),
     ("ctrl-s z", || Box::new(prefix::ToggleZoom)),
     ("ctrl-s v", || Box::new(prefix::ToggleWatchPane)),
+    ("ctrl-s g", || Box::new(prefix::ToggleChanges)),
     ("ctrl-s V", || Box::new(prefix::DismissWatch)),
     ("ctrl-s N", || Box::new(prefix::NextWatch)),
     ("ctrl-s P", || Box::new(prefix::PrevWatch)),
@@ -718,6 +719,7 @@ key_table! {
     "F",            "Workspace > Prefix" => native_agent::TerminalFallback;
     "z",            "Workspace > Prefix" => prefix::ToggleZoom;
     "v",            "Workspace > Prefix" => prefix::ToggleWatchPane;
+    "g",            "Workspace > Prefix" => prefix::ToggleChanges;
     "V",            "Workspace > Prefix" => prefix::DismissWatch;
     "N",            "Workspace > Prefix" => prefix::NextWatch;
     "P",            "Workspace > Prefix" => prefix::PrevWatch;
@@ -1734,6 +1736,7 @@ mod tests {
             ("ctrl-s y", "prefix::CopyWorktreePath"),
             ("ctrl-s z", "prefix::ToggleZoom"),
             ("ctrl-s v", "prefix::ToggleWatchPane"),
+            ("ctrl-s g", "prefix::ToggleChanges"),
             ("ctrl-s V", "prefix::DismissWatch"),
             ("ctrl-s N", "prefix::NextWatch"),
             ("ctrl-s P", "prefix::PrevWatch"),
