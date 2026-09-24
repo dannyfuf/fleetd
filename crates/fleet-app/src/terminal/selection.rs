@@ -337,8 +337,10 @@ fn append_selected_row(
             continue;
         }
         let cell_end = col.saturating_add(width);
-        if col < end && cell_end > start {
-            text.push_str(cell.text.as_str());
+        let overlap_start = col.max(start);
+        let overlap_end = cell_end.min(end);
+        if overlap_start < overlap_end {
+            append_normalized_cell_text(text, cell, overlap_end - overlap_start);
         }
         col = cell_end;
         if col >= end {
@@ -414,6 +416,28 @@ fn cell_columns(cell: &ProtoCell) -> usize {
         ProtoWidth::Narrow => 1,
         ProtoWidth::Wide => 2,
         ProtoWidth::Spacer => 0,
+    }
+}
+
+/// Appends one terminal cell's selected columns as plain text.
+///
+/// The terminal protocol represents an unset cell with an empty grapheme. It still occupies
+/// columns, so each selected column becomes a space. A real grapheme is emitted once even when it
+/// is wide, while its zero-width spacer cell emits nothing.
+pub(crate) fn append_normalized_cell_text(
+    text: &mut String,
+    cell: &ProtoCell,
+    selected_columns: usize,
+) {
+    if selected_columns == 0 || cell.width == ProtoWidth::Spacer {
+        return;
+    }
+    if cell.text.is_empty() {
+        for _ in 0..selected_columns {
+            text.push(' ');
+        }
+    } else {
+        text.push_str(cell.text.as_str());
     }
 }
 
