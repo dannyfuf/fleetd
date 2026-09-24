@@ -68,6 +68,10 @@ pub trait Git: Send + Sync {
     async fn status_porcelain(&self, cwd: &Path) -> DaemonResult<String>;
     /// Returns plain porcelain status for Fleet's source-update preflight.
     async fn update_status(&self, cwd: &Path) -> DaemonResult<String>;
+    /// Returns porcelain status of tracked files only: changes a checkout could overwrite.
+    async fn tracked_changes(&self, cwd: &Path) -> DaemonResult<String>;
+    /// Points a ref at a revision with `git update-ref`.
+    async fn update_ref(&self, cwd: &Path, name: &str, revision: &str) -> DaemonResult<()>;
     /// Checks whether a path is inside a Git work tree.
     async fn is_inside_work_tree(&self, cwd: &Path) -> DaemonResult<bool>;
     /// Pulls `origin main` with fast-forward only.
@@ -426,6 +430,21 @@ impl<S: Shell + ?Sized> Git for ShellGit<S> {
     async fn update_status(&self, cwd: &Path) -> DaemonResult<String> {
         self.checked(cwd, ["status", "--porcelain"], "update status")
             .await
+    }
+
+    async fn tracked_changes(&self, cwd: &Path) -> DaemonResult<String> {
+        self.checked(
+            cwd,
+            ["status", "--porcelain", "--untracked-files=no"],
+            "tracked status",
+        )
+        .await
+    }
+
+    async fn update_ref(&self, cwd: &Path, name: &str, revision: &str) -> DaemonResult<()> {
+        self.checked(cwd, ["update-ref", name, revision], "update ref")
+            .await
+            .map(drop)
     }
 
     async fn is_inside_work_tree(&self, cwd: &Path) -> DaemonResult<bool> {

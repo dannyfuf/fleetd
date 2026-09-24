@@ -12,6 +12,9 @@ use crate::{
     model::Context,
 };
 
+mod brief_review;
+mod queue;
+
 const NOW: &str = "2026-09-20T12:00:00Z";
 const EARLIER: &str = "2026-09-20T11:00:00Z";
 const LATER: &str = "2026-09-20T13:00:00Z";
@@ -140,6 +143,7 @@ fn working(cards: &mut [Card], card: &CardId) {
         files_changed: 0,
         cost_usd: None,
         tokens: None,
+        worktree_id: None,
     });
 }
 

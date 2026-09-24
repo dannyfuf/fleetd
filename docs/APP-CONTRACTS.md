@@ -181,6 +181,7 @@ is always `Fleet`.
 | Hub, worktrees list focused | `Fleet > Hub > Worktrees` |
 | Hub, PR screen focused | `Fleet > Hub > Prs` |
 | Hub, board tab (independent of repo pane selection) | `Fleet > Hub > Board` |
+| Hub, PR screen Review tab on a daemon with `board.reviews` | `Fleet > Hub > Prs > Board` — nests under `Hub > Prs`, and binds the `Hub > Board` table with the differences `KEYMAP.md` lists |
 | Workspace, PTY tab | `Fleet > Workspace > Terminal` \| `Prefix` \| `Scroll` |
 | Workspace, `fleet://` tab | `Fleet > Workspace > Native`, then the embedded view's own chain (`> Lazygit > Panels > Files`, …) |
 | Workspace, `fleet://board` tab | `Fleet > Workspace > Native > Board` — the board is Fleet-drawn, so the word is Fleet's own and every `Hub > Board` row is repeated on it |

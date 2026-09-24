@@ -769,6 +769,22 @@ fn run_command<T: SessionTransport>(
         Command::BoardPickBlockedBy => window.dispatch_action(Box::new(board::PickBlockedBy), cx),
         Command::BoardPickAgent => window.dispatch_action(Box::new(board::PickAgent), cx),
         Command::BoardColumns => window.dispatch_action(Box::new(board::Columns), cx),
+        Command::BoardSchedules => window.dispatch_action(Box::new(board::Schedules), cx),
+        Command::BoardRunSchedules => window.dispatch_action(Box::new(board::RunSchedules), cx),
+        // Over the detail the keys act on the detail's own card, so the sheet comes back
+        // first, as the `Card detail:` rows bring it back.
+        Command::BoardOpenPullRequest => {
+            if behind == Some(Dialogs::CardDetail) {
+                open(Dialogs::CardDetail, cx);
+            }
+            window.dispatch_action(Box::new(board::OpenPullRequest), cx);
+        }
+        Command::BoardCopyPullRequestUrl => {
+            if behind == Some(Dialogs::CardDetail) {
+                open(Dialogs::CardDetail, cx);
+            }
+            window.dispatch_action(Box::new(board::CopyPullRequestUrl), cx);
+        }
         Command::CardDetailClose => {
             // Like every other row here: the dialog comes back, and `Close` then does to it
             // exactly what `Esc` would — cancel the open edit, or close the dialog.

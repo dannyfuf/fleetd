@@ -39,13 +39,17 @@ mod harness;
 mod jobs_filter;
 mod navigation;
 mod notifications;
+mod schedules;
 mod snapshot;
 mod terminal;
 #[cfg(test)]
 mod test_support;
 
 pub use agents::{AgentCounts, AgentThreads};
-pub use board::{BoardFocus, BoardScope, BoardState, GroupBy, WORKTREE_BOARDS_UNSUPPORTED};
+pub use board::{
+    BoardFocus, BoardScope, BoardState, GroupBy, REVIEW_BOARDS_UNSUPPORTED,
+    WORKTREE_BOARDS_UNSUPPORTED,
+};
 pub use changes::{
     ChangesDiff, ChangesModel, ChangesPanel, ChangesReading, CommitRow, DiffBody, FileRow,
     ReadingBody,
@@ -68,6 +72,7 @@ pub use navigation::{
 pub use notifications::{
     LiveToast, StickyError, ToastTarget, dwell_for, expire_toasts, latest_failed_job, running_jobs,
 };
+pub use schedules::{BoardSchedules, SchedulesMirror};
 pub use snapshot::{ChipCounts, breadcrumb};
 pub use terminal::MirrorGrid;
 
@@ -162,6 +167,12 @@ pub struct AppState {
     /// Set when the request goes out, not when it answers: the board re-renders on every
     /// frame, and a flag cleared by a failure would ask the daemon again sixty times a second.
     board_backends_asked: bool,
+    /// Every board's schedules the app has asked for, keyed by board (BOARD §12).
+    ///
+    /// Kept beside the board mirror rather than inside the settings dialog, because the board
+    /// header's schedules strip reads it too. Filled by `ListSchedules` and marked stale by
+    /// `SchedulesChanged`; empty on a daemon without the `schedules` capability.
+    pub schedules: SchedulesMirror,
     /// Which Hub pane owns the cursor.
     pub hub_pane: HubPane,
     /// Which PR tab is selected.
@@ -261,7 +272,8 @@ pub struct AppState {
     /// `config.jobs.warnBeforeQuit`, mirrored so `ctrl-q` can decide without a round trip.
     pub warn_before_quit: bool,
     /// How many PRs the `review` tab holds. The PR screen owns the fetch, the context bar
-    /// owns the chip, so the count is published here (§2.3).
+    /// owns the chip, so the count is published here (§2.3). On a daemon that advertises
+    /// `board.reviews` it is the Reviews board's count of cards waiting on you instead.
     pub review_pr_count: usize,
     /// The version of an available Fleet update, for the `↑<version>` chip (§2.3, D-2).
     pub update_version: Option<String>,
@@ -315,6 +327,7 @@ impl AppState {
             board_generation: 0,
             board_backends: Vec::new(),
             board_backends_asked: false,
+            schedules: SchedulesMirror::default(),
             hub_pane: HubPane::List,
             pr_tab: PrTab::Mine,
             scope: RepoScope::All,
@@ -371,6 +384,57 @@ impl AppState {
     #[must_use]
     pub fn detail_visible(&self, wide: bool) -> bool {
         self.detail_open.unwrap_or(wide)
+    }
+
+    /// Whether the connected daemon serves Reviews boards (`board.reviews`, from Hello).
+    #[must_use]
+    pub fn supports_review_boards(&self) -> bool {
+        self.daemon_capabilities
+            .contains(fleet_proto::response::BOARD_REVIEWS_CAPABILITY)
+    }
+
+    /// Whether the shown board can have schedules: see [`Self::board_schedules_refusal`].
+    #[must_use]
+    pub fn board_takes_schedules(&self) -> bool {
+        self.supports_schedules() && self.shown_board_host().is_none()
+    }
+
+    /// Whether the connected daemon serves schedules (`schedules`, from Hello).
+    #[must_use]
+    pub fn supports_schedules(&self) -> bool {
+        self.daemon_capabilities
+            .contains(fleet_proto::response::SCHEDULES_CAPABILITY)
+    }
+
+    /// The host that stores the shown board, when it is the board of a worktree on another
+    /// machine. `None` for a local worktree's board, a context's or Reviews board, and a
+    /// worktree the snapshot does not list.
+    #[must_use]
+    pub fn shown_board_host(&self) -> Option<&HostId> {
+        let worktree = self.board()?.board.worktree_id.as_ref()?;
+        self.snapshot
+            .as_ref()?
+            .worktrees
+            .iter()
+            .find(|candidate| &candidate.id == worktree)?
+            .host
+            .as_ref()
+    }
+
+    /// Why the shown board can have no schedules, or `None` when it can.
+    ///
+    /// Schedules live on the daemon that runs them (BOARD §12): a daemon without `schedules`
+    /// has none, and a worktree board stored on another host is one this daemon refuses to
+    /// schedule (`invalid board_id`), so its Schedules section, the header strip, `T`, `R` and
+    /// their palette rows are withheld there.
+    #[must_use]
+    pub fn board_schedules_refusal(&self) -> Option<String> {
+        if !self.supports_schedules() {
+            return Some(crate::dialogs::SCHEDULES_UNSUPPORTED.to_owned());
+        }
+        self.shown_board_host().map(|host| {
+            format!("this board is stored on {host}; schedules run only on this machine's boards")
+        })
     }
 
     /// Mirrors the Jobs panel's own cursor and filter. Returns true if anything changed.

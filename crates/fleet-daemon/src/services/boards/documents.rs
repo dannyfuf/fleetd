@@ -28,6 +28,9 @@ impl Boards {
 
     /// The board this context already owns, if the store holds one.
     ///
+    /// Only a Tasks board answers: a context's Reviews board shares its scope (a context, no
+    /// worktree), and the Hub's context board must never resolve to it (`docs/BOARD.md` §4).
+    ///
     /// A document this build cannot read belongs to some other context until proven otherwise:
     /// propagating its error here would take every context's board down with one bad file.
     /// A board is named after the context that owns it, so `ensure` and `create` still load
@@ -37,17 +40,37 @@ impl Boards {
         // read. `ensure` is the app's refresh path after every `BoardChanged`: scanning, parsing
         // and re-validating every board in the home on each card edit is the cost the
         // `summaries` memo was built to avoid, and this path bypasses it.
-        if let Ok(id) = BoardId::try_from(context.as_str())
-            && self.scan_load(&id).is_some_and(|doc| {
-                doc.board.context_id == *context && doc.board.worktree_id.is_none()
-            })
+        let fast = BoardId::try_from(context.as_str()).ok();
+        self.scoped_board(fast, |board| {
+            board.context_id == *context && board.worktree_id.is_none() && board.kind.is_tasks()
+        })
+    }
+
+    /// The context's Reviews board, if the store holds one.
+    ///
+    /// The derived `reviews-<context>` id is only the fast path, exactly as a context board's
+    /// is: the persisted scope and kind identify the document, so a suffixed id still counts.
+    pub(super) fn reviews_board(&self, context: &ContextId) -> DaemonResult<Option<BoardId>> {
+        self.scoped_board(Some(reviews_board_id(context)), |board| {
+            board.context_id == *context
+                && board.worktree_id.is_none()
+                && board.kind == BoardKind::Reviews
+        })
+    }
+
+    /// The first board `owns` accepts: the derived id first, then every document in the store.
+    fn scoped_board(
+        &self,
+        derived: Option<BoardId>,
+        owns: impl Fn(&Board) -> bool,
+    ) -> DaemonResult<Option<BoardId>> {
+        if let Some(id) = derived
+            && self.scan_load(&id).is_some_and(|doc| owns(&doc.board))
         {
             return Ok(Some(id));
         }
         for id in self.store.list()? {
-            if self.scan_load(&id).is_some_and(|doc| {
-                doc.board.context_id == *context && doc.board.worktree_id.is_none()
-            }) {
+            if self.scan_load(&id).is_some_and(|doc| owns(&doc.board)) {
                 return Ok(Some(id));
             }
         }
@@ -180,7 +203,7 @@ impl Boards {
         {
             card.worktree_id = None;
         }
-        scrub_repo(&state, &board.context_id, &mut card.repo_id);
+        scrub_repo(&state, card_repo_context(board), &mut card.repo_id);
         Ok(card)
     }
 

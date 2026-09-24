@@ -27,8 +27,12 @@ struct ProjectionKey {
     /// The branch and pull request of every worktree a card links, which live in the snapshot
     /// and the PR badge cache rather than in the board.
     links: Vec<(WorktreeId, board_screen::LinkedBranch)>,
-    /// The wall clock's minute while a run is live, so `working 4m` ticks once a minute and a
-    /// board with nothing running is never rebuilt by the clock at all.
+    /// `SchedulesMirror::revision` and the `schedules` capability, which the header strip is
+    /// built from (BOARD §11.8).
+    schedules: (u64, bool),
+    /// The wall clock's minute while a run is live or the board has schedules, so `working 4m`
+    /// and the strip's `next 14:05` tick once a minute and a board with neither is never
+    /// rebuilt by the clock at all.
     minute: Option<i64>,
 }
 
@@ -47,6 +51,9 @@ pub(super) fn prepare(
     let backend = state
         .board()
         .map(|view| state.backend_label(&view.board.backend.kind));
+    let has_schedules = state
+        .board()
+        .is_some_and(|view| !state.schedules.for_board(&view.board.id).is_empty());
     let key = ProjectionKey {
         source: state.board.revision,
         board: state.board().map(|view| view.board.id.clone()),
@@ -54,13 +61,19 @@ pub(super) fn prepare(
         backend: backend.clone(),
         marks: state.board.marks.revision,
         links: links(state),
-        minute: (state.board.marks.working > 0).then_some(now / 60),
+        schedules: (state.schedules.revision, state.board_takes_schedules()),
+        minute: (state.board.marks.working > 0 || has_schedules).then_some(now / 60),
     };
     if cache.key.as_ref() != Some(&key) {
         let mut marks = marks(state);
         marks.links = key.links.iter().cloned().collect();
         cache.model = Rc::new(state.board().map_or_else(BoardModel::default, |view| {
             board_screen::build(view, &state.board.filter, backend.as_deref(), now, &marks)
+                .with_schedules(board_screen::ScheduleStrip::of(
+                    state.board_takes_schedules(),
+                    state.schedules.for_board(&view.board.id),
+                    now,
+                ))
         }));
         cache.key = Some(key);
     }

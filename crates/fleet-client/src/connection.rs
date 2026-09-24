@@ -21,8 +21,9 @@ use fleet_proto::{
     event::{Event, EventKind, ToastLevel},
     request::{Request, RequestBody},
     response::{
-        BOARD_AUTOMATION_CAPABILITY, BOARD_WORKTREE_CAPABILITY, DaemonIdentity, HelloResponse,
-        PongResponse, Response, ResponseBody, StampedResponse,
+        BOARD_AUTOMATION_CAPABILITY, BOARD_REVIEWS_CAPABILITY, BOARD_WORKTREE_CAPABILITY,
+        DaemonIdentity, HelloResponse, PongResponse, Response, ResponseBody, SCHEDULES_CAPABILITY,
+        StampedResponse,
     },
 };
 use futures_util::{SinkExt, StreamExt, stream::SplitSink, stream::SplitStream};
@@ -862,7 +863,7 @@ async fn establish(
 
     reconcile_daemon_identity(state, read_daemon_identity(home));
 
-    let subscriptions = subscriptions_for_peer(&state.subscriptions, &state.capabilities);
+    let subscriptions = negotiated_subscriptions(&state.subscriptions, &state.capabilities);
 
     exchange(
         &mut transport,
@@ -917,11 +918,15 @@ fn hello_client(client_id: &str) -> fleet_proto::request::HelloClient {
     fleet_proto::request::HelloClient {
         client_id: Some(client_id.to_owned()),
         // A client that never names `board.automation` is hidden from every card-called
-        // delegation: the daemon filters those events and listing rows per peer capability.
+        // delegation, and one that never names `board.reviews` from every Reviews board: the
+        // daemon filters those events, snapshots and listing rows per peer capability.
         capabilities: fleet_proto::AGENT_CAPABILITIES
             .iter()
             .map(|capability| (*capability).to_owned())
             .chain(std::iter::once(BOARD_AUTOMATION_CAPABILITY.to_owned()))
+            .chain(std::iter::once(
+                fleet_proto::response::BOARD_REVIEWS_CAPABILITY.to_owned(),
+            ))
             .chain(std::iter::once(TERMINAL_CLIPBOARD_CAPABILITY.to_owned()))
             .collect(),
         ..fleet_proto::request::HelloClient::default()
@@ -1152,19 +1157,27 @@ fn all_event_kinds() -> Vec<EventKind> {
         EventKind::TerminalReattach,
         EventKind::Toast,
         EventKind::DaemonShuttingDown,
+        EventKind::SchedulesChanged,
     ]
 }
 
-fn subscriptions_for_peer(
-    requested: &[EventKind],
+/// The kinds this daemon can decode out of the ones the connection wants.
+///
+/// An event kind added after a daemon was built is an unknown variant to it, and one unknown kind
+/// fails the whole `Subscribe`; so a kind that arrived with a capability is only named to a
+/// daemon that advertises it. The full set stays in the state, so a reconnect to a newer daemon
+/// subscribes to it again.
+fn negotiated_subscriptions(
+    wanted: &[EventKind],
     capabilities: &HashSet<String>,
 ) -> Vec<EventKind> {
-    requested
+    wanted
         .iter()
         .copied()
-        .filter(|kind| {
-            *kind != EventKind::TerminalClipboard
-                || capabilities.contains(TERMINAL_CLIPBOARD_CAPABILITY)
+        .filter(|kind| match kind {
+            EventKind::SchedulesChanged => capabilities.contains(SCHEDULES_CAPABILITY),
+            EventKind::TerminalClipboard => capabilities.contains(TERMINAL_CLIPBOARD_CAPABILITY),
+            _ => true,
         })
         .collect()
 }
@@ -1196,6 +1209,14 @@ fn required_capability(body: &RequestBody) -> Option<&'static str> {
         RequestBody::CardRunStart { .. }
         | RequestBody::CardRunCancel { .. }
         | RequestBody::CardRunWait { .. } => Some(BOARD_AUTOMATION_CAPABILITY),
+        RequestBody::EnsureReviewsBoard { .. } | RequestBody::UpsertPullRequestCard { .. } => {
+            Some(BOARD_REVIEWS_CAPABILITY)
+        }
+        RequestBody::ListSchedules { .. }
+        | RequestBody::CreateSchedule { .. }
+        | RequestBody::UpdateSchedule { .. }
+        | RequestBody::DeleteSchedule { .. }
+        | RequestBody::RunScheduleNow { .. } => Some(SCHEDULES_CAPABILITY),
         _ => None,
     }
 }
@@ -1205,10 +1226,11 @@ fn required_capability(body: &RequestBody) -> Option<&'static str> {
 /// Each capability owns its own sentence: "board automation" and "worktree boards" name different
 /// verbs, and a user reading either one should learn which of them this daemon is too old for.
 fn capability_error(capability: &str) -> ProtoError {
-    if capability == BOARD_AUTOMATION_CAPABILITY {
-        board_automation_capability_error()
-    } else {
-        worktree_board_capability_error()
+    match capability {
+        BOARD_AUTOMATION_CAPABILITY => board_automation_capability_error(),
+        BOARD_REVIEWS_CAPABILITY => board_reviews_capability_error(),
+        SCHEDULES_CAPABILITY => schedules_capability_error(),
+        _ => worktree_board_capability_error(),
     }
 }
 
@@ -1225,6 +1247,21 @@ pub(crate) fn board_automation_capability_error() -> ProtoError {
         kind: ErrorKind::Validation,
         message: "this daemon does not support board automation; run `fleet daemon restart`"
             .to_owned(),
+    }
+}
+
+pub(crate) fn board_reviews_capability_error() -> ProtoError {
+    ProtoError {
+        kind: ErrorKind::Validation,
+        message: "this daemon does not support review boards; run `fleet daemon restart`"
+            .to_owned(),
+    }
+}
+
+pub(crate) fn schedules_capability_error() -> ProtoError {
+    ProtoError {
+        kind: ErrorKind::Validation,
+        message: "this daemon does not support schedules; run `fleet daemon restart`".to_owned(),
     }
 }
 
@@ -1374,11 +1411,11 @@ mod tests {
         let requested = all_event_kinds();
         assert!(requested.contains(&EventKind::TerminalClipboard));
         assert!(
-            !subscriptions_for_peer(&requested, &HashSet::new())
+            !negotiated_subscriptions(&requested, &HashSet::new())
                 .contains(&EventKind::TerminalClipboard)
         );
         assert!(
-            subscriptions_for_peer(
+            negotiated_subscriptions(
                 &requested,
                 &HashSet::from([TERMINAL_CLIPBOARD_CAPABILITY.to_owned()])
             )
@@ -1652,6 +1689,28 @@ mod tests {
             state.subscriptions.is_empty(),
             "Unsubscribe is the only way to clear the set"
         );
+    }
+
+    #[test]
+    fn schedules_changed_is_only_named_to_a_daemon_that_advertises_schedules() {
+        let wanted = all_event_kinds();
+        let clipboard = HashSet::from([TERMINAL_CLIPBOARD_CAPABILITY.to_owned()]);
+        let old = negotiated_subscriptions(&wanted, &clipboard);
+        assert!(!old.contains(&EventKind::SchedulesChanged));
+        assert_eq!(
+            old.len(),
+            wanted.len() - 1,
+            "only the gated kind is dropped"
+        );
+
+        let current = negotiated_subscriptions(
+            &wanted,
+            &HashSet::from([
+                SCHEDULES_CAPABILITY.to_owned(),
+                TERMINAL_CLIPBOARD_CAPABILITY.to_owned(),
+            ]),
+        );
+        assert_eq!(current, wanted);
     }
 
     fn resize(
@@ -2011,6 +2070,79 @@ mod tests {
         "card-12"
             .parse()
             .unwrap_or_else(|error| panic!("a valid card id: {error}"))
+    }
+
+    fn schedule_id() -> fleet_core::ids::ScheduleId {
+        "sch-0a1b2c3d"
+            .parse()
+            .unwrap_or_else(|error| panic!("a valid schedule id: {error}"))
+    }
+
+    #[test]
+    fn the_review_requests_need_the_board_reviews_capability() {
+        let board: fleet_core::ids::BoardId = "reviews-work"
+            .parse()
+            .unwrap_or_else(|error| panic!("a valid board id: {error}"));
+        for body in [
+            RequestBody::EnsureReviewsBoard {
+                context_id: "work"
+                    .parse()
+                    .unwrap_or_else(|error| panic!("a valid context id: {error}")),
+            },
+            RequestBody::UpsertPullRequestCard {
+                board_id: board,
+                draft: fleet_core::board::CardDraft {
+                    title: "Review".to_owned(),
+                    ..fleet_core::board::CardDraft::default()
+                },
+                requested_at: None,
+            },
+        ] {
+            assert_eq!(
+                required_capability(&body),
+                Some(BOARD_REVIEWS_CAPABILITY),
+                "{body:?}"
+            );
+        }
+        assert_eq!(
+            capability_error(BOARD_REVIEWS_CAPABILITY).message,
+            "this daemon does not support review boards; run `fleet daemon restart`"
+        );
+    }
+
+    #[test]
+    fn the_five_schedule_requests_need_the_schedules_capability() {
+        let draft = fleet_core::schedule::ScheduleDraft {
+            board_id: "work"
+                .parse()
+                .unwrap_or_else(|error| panic!("a valid board id: {error}")),
+            name: "GitHub reviews".to_owned(),
+            prompt: "List my review requests".to_owned(),
+            cadence: fleet_core::schedule::Cadence::Every { minutes: 15 },
+            agent: None,
+            enabled: None,
+            timeout_minutes: None,
+        };
+        for body in [
+            RequestBody::ListSchedules { board_id: None },
+            RequestBody::CreateSchedule { draft },
+            RequestBody::UpdateSchedule {
+                id: schedule_id(),
+                patch: fleet_core::schedule::SchedulePatch::default(),
+            },
+            RequestBody::DeleteSchedule { id: schedule_id() },
+            RequestBody::RunScheduleNow { id: schedule_id() },
+        ] {
+            assert_eq!(
+                required_capability(&body),
+                Some(SCHEDULES_CAPABILITY),
+                "{body:?}"
+            );
+        }
+        assert_eq!(
+            capability_error(SCHEDULES_CAPABILITY).message,
+            "this daemon does not support schedules; run `fleet daemon restart`"
+        );
     }
 
     #[test]

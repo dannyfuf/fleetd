@@ -21,6 +21,9 @@ pub struct Board {
     /// Worktree id when this board is scoped to one worktree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_id: Option<WorktreeId>,
+    /// What the board tracks: tasks, or pull requests to review.
+    #[serde(default, skip_serializing_if = "BoardKind::is_tasks")]
+    pub kind: BoardKind,
     /// Name.
     pub name: String,
     /// Identifier prefix; `FLT` → `FLT-12`. Uppercase, 1..=8 chars, [A-Z0-9].
@@ -51,6 +54,71 @@ pub struct Board {
     pub created_at: String,
     /// Updated at.
     pub updated_at: String,
+}
+
+/// What a board tracks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BoardKind {
+    /// Work items; every board before review boards.
+    #[default]
+    Tasks,
+    /// Pull requests waiting for the user's review.
+    Reviews,
+}
+impl BoardKind {
+    /// Whether this is an ordinary task board.
+    #[must_use]
+    pub fn is_tasks(&self) -> bool {
+        matches!(self, Self::Tasks)
+    }
+}
+
+/// Where a board's automated runs execute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RunLocation {
+    /// Every run executes in the board's own worktree.
+    #[default]
+    BoardWorktree,
+    /// Each run executes in its card's worktree, created from the card's pull request when missing.
+    CardWorktree,
+}
+impl RunLocation {
+    /// Whether runs execute in the board's own worktree.
+    #[must_use]
+    pub fn is_board_worktree(&self) -> bool {
+        matches!(self, Self::BoardWorktree)
+    }
+}
+
+/// A GitHub pull request a card is about.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PullRequestRef {
+    /// Repository, `owner/name`.
+    pub repo: RepoId,
+    /// Pull request number.
+    pub number: u64,
+    /// Normalised URL, `https://github.com/<owner>/<name>/pull/<n>`.
+    pub url: String,
+}
+impl PullRequestRef {
+    /// The board-unique key, `owner/name#number`.
+    #[must_use]
+    pub fn key(&self) -> String {
+        format!("{}#{}", self.repo, self.number)
+    }
+
+    /// Whether `other` names the same pull request.
+    ///
+    /// GitHub owner and repository names are case-insensitive, so `Acme/API#7` and `acme/api#7`
+    /// are one pull request: a chat link and `gh` output often differ in case, and the board
+    /// must still hold only one card for it.
+    #[must_use]
+    pub fn same_pull_request(&self, other: &PullRequestRef) -> bool {
+        self.number == other.number && self.repo.as_str().eq_ignore_ascii_case(other.repo.as_str())
+    }
 }
 
 /// Which backend mirrors this board. `kind` is a registry key ("local", "jira", "notion").
@@ -319,6 +387,9 @@ pub struct Card {
     /// Worktree id.
     #[serde(default)]
     pub worktree_id: Option<WorktreeId>,
+    /// The pull request this card reviews; never changes after creation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request: Option<PullRequestRef>,
     /// Properties.
     #[serde(default)]
     pub properties: BTreeMap<String, PropertyValue>,
@@ -481,6 +552,9 @@ pub struct CardRun {
     /// Tokens, when the provider reported them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokens: Option<u64>,
+    /// The worktree this run executed in; `None` on runs recorded before review boards.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_id: Option<WorktreeId>,
 }
 impl CardRun {
     /// Whether this run has not ended yet.
@@ -651,6 +725,9 @@ pub struct BoardSettings {
     /// same worktree. Validated `1..=MAX_LIVE_RUNS_PER_BOARD`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_live_runs: Option<u32>,
+    /// Where this board's runs execute.
+    #[serde(default, skip_serializing_if = "RunLocation::is_board_worktree")]
+    pub run_location: RunLocation,
 }
 impl BoardSettings {
     /// Live runs allowed at once across this board; one when unset.
@@ -716,6 +793,9 @@ pub struct BoardSummary {
     /// Worktree id when this board is scoped to one worktree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_id: Option<WorktreeId>,
+    /// What the board tracks, so a client can tell a context's task board from its Reviews board.
+    #[serde(default, skip_serializing_if = "BoardKind::is_tasks")]
+    pub kind: BoardKind,
     /// Name.
     pub name: String,
     /// Prefix.
@@ -736,6 +816,10 @@ pub struct BoardSummary {
     /// Cards whose last run is waiting on a human.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub attention_count: u32,
+    /// Cards standing idle in a `Started`-category column: no live or owed run, and not
+    /// counted in `attention_count`, so the two add up to the cards waiting on a person.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub idle_started: u32,
     /// Last synced at.
     pub last_synced_at: Option<String>,
     /// Last error.
@@ -786,18 +870,29 @@ pub struct BoardDocument {
     pub cards: Vec<Card>,
 }
 /// Newest board persistence schema version this build writes.
-pub const BOARD_DOCUMENT_VERSION: u32 = 2;
+pub const BOARD_DOCUMENT_VERSION: u32 = 3;
 /// Oldest board persistence schema version this build reads.
 pub const BOARD_DOCUMENT_MIN_VERSION: u32 = 1;
+/// The version that introduced column automation, card links and runs.
+const AUTOMATION_DOCUMENT_VERSION: u32 = 2;
 
 /// The version a document holding this board and these cards must be written at.
 ///
 /// The bump is lazy on purpose: a board that never opts into automation keeps writing 1, so a
 /// daemon from before this feature goes on reading it. A board that has opted in keeps writing
 /// 2 for as long as any card still carries a link or a run — an older daemon cannot represent
-/// either, and would silently drop the history on its next save.
+/// either, and would silently drop the history on its next save. Only a board that uses a
+/// review field — a reviews kind, card-worktree runs, a card's pull request or a run's
+/// worktree — writes 3; a board that never uses one keeps writing 2 or 1.
 #[must_use]
 pub fn document_version(board: &Board, cards: &[Card]) -> u32 {
+    let board_reviews = !board.kind.is_tasks() || !board.settings.run_location.is_board_worktree();
+    let cards_reviews = cards.iter().any(|card| {
+        card.pull_request.is_some() || card.runs.iter().any(|run| run.worktree_id.is_some())
+    });
+    if board_reviews || cards_reviews {
+        return BOARD_DOCUMENT_VERSION;
+    }
     let board_opted_in = board.settings.max_live_runs.is_some()
         || board.statuses.iter().any(|s| s.automation.is_some());
     let cards_opted_in = cards.iter().any(|card| {
@@ -808,7 +903,7 @@ pub fn document_version(board: &Board, cards: &[Card]) -> u32 {
             || card.comments.iter().any(|c| c.run_id.is_some())
     });
     if board_opted_in || cards_opted_in {
-        BOARD_DOCUMENT_VERSION
+        AUTOMATION_DOCUMENT_VERSION
     } else {
         BOARD_DOCUMENT_MIN_VERSION
     }
@@ -822,6 +917,7 @@ impl Default for BoardSettings {
             conflict_policy: ConflictPolicy::default(),
             push_new_cards: false,
             max_live_runs: None,
+            run_location: RunLocation::default(),
         }
     }
 }

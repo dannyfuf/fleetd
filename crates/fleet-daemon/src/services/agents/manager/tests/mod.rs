@@ -44,6 +44,7 @@ use crate::{
 
 use super::*;
 
+mod board_start;
 mod controls;
 mod lifecycle;
 mod mirror;
@@ -91,6 +92,13 @@ struct FakeScript {
     restart_fails: AtomicBool,
     /// The cursor every started provider reports, as the real adapters do at `start`.
     cursor: StdMutex<Option<String>>,
+    /// One deterministic pause after the manager reaches a provider send.
+    send_gate: StdMutex<Option<Arc<SendGate>>>,
+}
+
+struct SendGate {
+    reached: tokio_util::sync::CancellationToken,
+    release: tokio_util::sync::CancellationToken,
 }
 
 impl FakeScript {
@@ -110,6 +118,7 @@ impl FakeScript {
             restarts_on_control: AtomicBool::new(false),
             restart_fails: AtomicBool::new(false),
             cursor: StdMutex::new(None),
+            send_gate: StdMutex::new(None),
         })
     }
 
@@ -172,6 +181,18 @@ impl FakeScript {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(thread, events);
+    }
+
+    fn block_next_send(&self) -> Arc<SendGate> {
+        let gate = Arc::new(SendGate {
+            reached: tokio_util::sync::CancellationToken::new(),
+            release: tokio_util::sync::CancellationToken::new(),
+        });
+        *self
+            .send_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&gate));
+        gate
     }
 
     /// Pushes one normalized event into the newest provider's stream.
@@ -293,6 +314,16 @@ impl AgentProvider for FakeProvider {
 
     async fn send(&mut self, turn: TurnId, input: UserInput) -> ProviderResult<Submitted> {
         self.script.record(FakeCall::Send(turn, input.text));
+        let gate = self
+            .script
+            .send_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(gate) = gate {
+            gate.reached.cancel();
+            gate.release.cancelled().await;
+        }
         if let Some(answer) = self
             .script
             .submission_answers
@@ -417,6 +448,7 @@ pub(crate) struct Harness {
     home: PathBuf,
     manager: AgentSessionManager,
     config: Arc<ConfigStore>,
+    state: Arc<StateStore>,
     events: BroadcastBus,
     worktrees: Worktrees,
     worktree: WorktreeId,
@@ -509,6 +541,7 @@ impl Harness {
             home,
             manager,
             config,
+            state,
             events,
             worktrees,
             worktree,

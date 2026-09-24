@@ -4,7 +4,7 @@ use fleet_core::{
     agents::{DelegationId, DelegationStatus},
     board::{
         BlockedTone as CoreBlockedTone, Board, BoardView, Card, CardRun, PENDING_AMBER_AFTER_SECS,
-        PendingRun, RunOutcome, attention, blocked,
+        PendingRun, RunOutcome, StatusCategory, attention, blocked,
     },
     config::NATIVE_BOARD,
     ids::CardId,
@@ -20,6 +20,12 @@ use fleet_ui_kit::{BlockedTone, RunMark};
 pub const WORKTREE_BOARDS_UNSUPPORTED: &str =
     "this daemon does not support worktree boards; run `fleet daemon restart`";
 
+/// What the app says when the connected daemon serves no Reviews boards (`board.reviews`).
+///
+/// Word for word the CLI's refusal, for the same reason as [`WORKTREE_BOARDS_UNSUPPORTED`].
+pub const REVIEW_BOARDS_UNSUPPORTED: &str =
+    "this daemon does not support review boards; run `fleet daemon restart`";
+
 /// Which board the single mirror is pointed at (BOARD §8).
 ///
 /// The Hub and the Workspace are never visible at the same time, so one [`BoardState`] with a
@@ -32,6 +38,12 @@ pub enum BoardScope {
     Context(ContextId),
     /// One worktree's board — `EnsureWorktreeBoard(worktree)`.
     Worktree(WorktreeId),
+    /// The context's Reviews board — EnsureReviewsBoard(context).
+    ///
+    /// Only the Pull requests screen's Review tab sets it, and it points the mirror back at the
+    /// context when it goes away, so — like a worktree scope — the scope itself says a surface
+    /// is drawing the board.
+    Reviews(ContextId),
 }
 
 /// Keyboard selection within the board's status columns.
@@ -83,6 +95,12 @@ pub struct CardMarks {
     pub waiting: u32,
     /// Cards waiting on a person (`ops::query::attention`).
     pub needs_you: u32,
+    /// Cards the Review tab counts as waiting on the user: those `ops::query::attention` flags,
+    /// plus those standing in a `Started` column with no live or owed run. It is the rule the
+    /// daemon's summary splits into `attention_count + idle_started`, so the Hub's count reads
+    /// the same with the board held and without it (UX-SPEC §2.2). A child parked on a question
+    /// is a live run here, as it is in the summary; `needs_you` is where it is counted.
+    pub waiting_on_you: u32,
     /// Bumped only when the map or a counter actually differs.
     ///
     /// The board projection is keyed on it, so a tick that changes no mark must not rebuild a
@@ -167,14 +185,23 @@ impl AppState {
     /// A worktree's board is recognised by its worktree; a context's board is the one with that
     /// context and **no** worktree, which is the daemon's own rule (BOARD §0) and the reason a
     /// worktree board can never land in the Hub's slot although both name the same context.
+    /// The context's Reviews board names that context and no worktree too, so the board's kind
+    /// is what keeps it out of the Hub's slot and the task board out of the Review tab's.
     #[must_use]
     fn board_scope_admits(&self, view: &BoardView) -> bool {
         match self.board_scope() {
             Some(BoardScope::Context(context)) => {
-                view.board.context_id == context && view.board.worktree_id.is_none()
+                view.board.context_id == context
+                    && view.board.worktree_id.is_none()
+                    && view.board.kind.is_tasks()
             }
             Some(BoardScope::Worktree(worktree)) => {
                 view.board.worktree_id.as_ref() == Some(&worktree)
+            }
+            Some(BoardScope::Reviews(context)) => {
+                view.board.context_id == context
+                    && view.board.worktree_id.is_none()
+                    && !view.board.kind.is_tasks()
             }
             None => false,
         }
@@ -341,6 +368,13 @@ impl AppState {
         // One walk of the delegation mirror for the whole board, not one per card: the mirror
         // holds every session's delegations and the fold below already visits every card.
         let live_children = self.agents.live_card_runs(&view.board.id);
+        let started: HashSet<_> = view
+            .board
+            .statuses
+            .iter()
+            .filter(|status| status.category == StatusCategory::Started)
+            .map(|status| &status.id)
+            .collect();
         for card in view.cards.iter().filter(|card| !card.archived) {
             // The card stays the authority on a run it has already finished: a mirror row that
             // has not caught up with its own terminal event says nothing about it.
@@ -367,8 +401,14 @@ impl AppState {
             // parked on a person's answer: only the delegation mirror knows, and the tile already
             // says `needs you` from it (BOARD.md §11.8). The header counts what the tiles say.
             let parked = live && run == Some(RunMark::NeedsYou);
-            if parked || attention(card, &stamp) {
+            let wants_you = attention(card, &stamp);
+            if parked || wants_you {
                 marks.needs_you = marks.needs_you.saturating_add(1);
+            }
+            let idle_started =
+                !live && card.pending_run.is_none() && started.contains(&card.status_id);
+            if wants_you || idle_started {
+                marks.waiting_on_you = marks.waiting_on_you.saturating_add(1);
             }
             if run.is_some() || blocked.is_some() {
                 marks
@@ -530,6 +570,33 @@ impl AppState {
         true
     }
 
+    /// Points the board at the context's Reviews board, or refuses when this daemon has none.
+    ///
+    /// The refusal is [`enter_worktree_board_scope`](Self::enter_worktree_board_scope)'s, word
+    /// for word in shape: a toast carrying [`REVIEW_BOARDS_UNSUPPORTED`], the mirror left where
+    /// it was, and nothing sent. When the mirror is already on a Reviews board — a daemon
+    /// downgraded under a Review tab that was drawing one — it is dropped and the same sentence
+    /// is written to [`BoardState::error`], so the pane never draws a board it can no longer
+    /// load. Returns whether the mirror moved, so an observation that calls this on every notify
+    /// only notifies when something changed.
+    pub(crate) fn enter_reviews_board_scope(&mut self, context: ContextId, now: Instant) -> bool {
+        if !self.supports_review_boards() {
+            self.toast(
+                Toast::new(REVIEW_BOARDS_UNSUPPORTED).icon(Icon::Info),
+                now,
+                dwell_for(ToastDuration::Normal),
+            );
+            if matches!(self.board.scope, Some(BoardScope::Reviews(_))) {
+                self.invalidate_board();
+                self.board.scope = Some(BoardScope::Reviews(context));
+                self.board_stale = false;
+                self.board.error = Some(REVIEW_BOARDS_UNSUPPORTED.to_owned());
+            }
+            return false;
+        }
+        self.point_board_at(Some(BoardScope::Reviews(context)))
+    }
+
     /// Whether a `ListBoardBackends` request should go out now, marking it as issued.
     pub(crate) fn begin_backends_load(&mut self) -> bool {
         if self.board_backends_asked || self.refuses_mutations() {
@@ -592,13 +659,33 @@ impl AppState {
 
     /// Whether a surface that draws the board is showing.
     ///
-    /// The Hub's tab is one. A worktree scope is the other: only the Workspace's board pane
+    /// The Hub's tab is one. A worktree scope is another: only the Workspace's board pane
     /// sets one, and it points the mirror back at the context when it goes away, so the scope
-    /// itself says whether that pane is there to draw the answer.
+    /// itself says whether that pane is there to draw the answer. A Reviews scope is the third,
+    /// for the same reason: only the Pull requests screen's Review tab sets it.
     #[must_use]
     pub(super) fn board_is_shown(&self) -> bool {
         matches!(self.screen, Screen::Hub { tab: HubTab::Board })
-            || matches!(self.board.scope, Some(BoardScope::Worktree(_)))
+            || matches!(
+                self.board.scope,
+                Some(BoardScope::Worktree(_) | BoardScope::Reviews(_))
+            )
+    }
+
+    /// Whether the shown board runs its cards, which is what the three run keys and their
+    /// palette rows need (contracts §5.5).
+    ///
+    /// A worktree board and a Reviews board do; a context board does only once its runs go to
+    /// each card's own worktree, since a context has no worktree of its own to run in.
+    #[must_use]
+    pub(crate) fn board_runs_cards(&self) -> bool {
+        match &self.board.scope {
+            Some(BoardScope::Worktree(_) | BoardScope::Reviews(_)) => true,
+            Some(BoardScope::Context(_)) => self
+                .board()
+                .is_some_and(|view| !view.board.settings.run_location.is_board_worktree()),
+            None => false,
+        }
     }
 
     /// Whether the Workspace's `fleet://board` tab is the surface drawing the board.
@@ -740,7 +827,8 @@ impl AppState {
         self.overlay.is_none()
             && self.agent_popup.is_none()
             && (matches!(self.screen, Screen::Hub { tab: HubTab::Board })
-                || self.board_pane_is_active())
+                || self.board_pane_is_active()
+                || self.review_board_is_shown())
             && self.board.filter_editing
     }
 

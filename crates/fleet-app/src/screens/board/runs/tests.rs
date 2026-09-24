@@ -85,6 +85,7 @@ fn run(card: &Card, outcome: Option<RunOutcome>, thread: Option<ThreadId>) -> Ca
         files_changed: 0,
         cost_usd: None,
         tokens: None,
+        worktree_id: None,
     }
 }
 

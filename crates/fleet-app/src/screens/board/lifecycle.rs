@@ -33,8 +33,15 @@ pub(super) fn synchronize(state: &Entity<AppState>, bridge: &Bridge, cx: &mut Ap
 /// One request per stale flag: [`AppState::begin_board_load`] clears it and refuses a second
 /// claim, so a batch of twenty events costs one `EnsureWorktreeBoard`, and a batch that touched
 /// no board costs two field reads.
+///
+/// The Pull requests screen's Review tab is the second surface with no observation of its own
+/// that would claim the load: a review card's run records itself, and a schedule files new
+/// cards, without this app asking. A Reviews scope is only ever set while that tab draws the
+/// board, so the scope is what says the reload is owed, and it re-asks `EnsureReviewsBoard`.
 pub(crate) fn refresh_after_daemon_change(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
-    if !state.read(cx).board_pane_is_active() {
+    let app = state.read(cx);
+    let reviews = matches!(app.board.scope, Some(BoardScope::Reviews(_)));
+    if !reviews && !app.board_pane_is_active() {
         return;
     }
     ensure_current(state, bridge, cx);
@@ -50,6 +57,36 @@ pub(crate) fn enter_context_scope(state: &Entity<AppState>, bridge: &Bridge, cx:
         }
     });
     ensure_current(state, bridge, cx);
+}
+
+/// Points the board at the context's Reviews board and loads it (the PR screen's Review tab),
+/// or refuses with [`REVIEW_BOARDS_UNSUPPORTED`](crate::state::REVIEW_BOARDS_UNSUPPORTED) on a
+/// daemon without `board.reviews`. Returns whether the scope was entered.
+///
+/// Safe to call from an observation of [`AppState`] on every notify, as
+/// [`enter_context_scope`] is: it notifies only when the mirror moved or a refusal was spoken,
+/// and [`ensure_current`] sends nothing unless the slot is stale. A refusal sends nothing at
+/// all, so the Review tab should gate on `AppState::supports_review_boards` before it calls
+/// this rather than toast the sentence on every frame.
+pub(crate) fn enter_reviews_scope(
+    context: fleet_core::ids::ContextId,
+    state: &Entity<AppState>,
+    bridge: &Bridge,
+    cx: &mut App,
+) -> bool {
+    let supported = state.read(cx).supports_review_boards();
+    state.update(cx, |app, cx| {
+        let moved = app.enter_reviews_board_scope(context, Instant::now());
+        // A refusal toasts, and the toast has to be painted; a move repaints the pane. A
+        // re-entry into the scope the mirror already holds changes nothing and stays quiet.
+        if moved || !supported {
+            cx.notify();
+        }
+    });
+    if supported {
+        ensure_current(state, bridge, cx);
+    }
+    supported
 }
 
 /// Points the board at one worktree's board and loads it, or refuses and says why.
@@ -80,6 +117,7 @@ pub(crate) fn enter_worktree_scope(
 /// Ensures the board the mirror is pointed at, through the ordinary asynchronous reply channel.
 pub(super) fn ensure_current(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
     ensure_backends(state, bridge, cx);
+    ensure_schedules(state, bridge, cx);
     let Some((scope, generation)) = state.update(cx, |state, _| state.begin_board_load()) else {
         return;
     };
@@ -92,8 +130,12 @@ pub(super) fn ensure_current(state: &Entity<AppState>, bridge: &Bridge, cx: &mut
         BoardScope::Worktree(worktree_id) => RequestBody::EnsureWorktreeBoard {
             worktree_id: worktree_id.clone(),
         },
+        BoardScope::Reviews(context_id) => RequestBody::EnsureReviewsBoard {
+            context_id: context_id.clone(),
+        },
     });
-    let state = state.clone();
+    // Weak: a reply the daemon never sends must not keep the app state alive with it.
+    let state = state.downgrade();
     cx.spawn(async move |cx| {
         let result = match reply.recv().await {
             Ok(Ok(ResponseBody::Board(view))) => Ok(view),
@@ -101,12 +143,40 @@ pub(super) fn ensure_current(state: &Entity<AppState>, bridge: &Bridge, cx: &mut
             Ok(Err(error)) => Err(error.message),
             Err(error) => Err(format!("Board request channel closed: {error}")),
         };
-        state.update(cx, |state, cx| {
+        if let Err(error) = state.update(cx, |state, cx| {
             state.finish_board_load(&scope, generation, result);
             cx.notify();
-        });
+        }) {
+            // The app state is released only at shutdown, when no board is waiting for this.
+            tracing::debug!(%error, "a board answer arrived after the app state was released");
+        }
     })
     .detach();
+}
+
+/// Asks for the shown board's schedules the first time it is drawn, so the header strip
+/// (BOARD §11.8) has something to say before Board settings is ever opened.
+///
+/// Only a board the mirror has never asked about is loaded here, or one whose last load
+/// failed when it becomes the board shown again: this runs from observations of `AppState`
+/// on every notify, and a failed answer notifies, so a failure is retried once per activation
+/// and never per notify ([`SchedulesMirror::wants_header_load`]). After that a
+/// `SchedulesChanged` marks the entry stale and the event loop re-reads it, Board settings
+/// asks again on opening, and a connection change clears the mirror so the next frame asks
+/// again. Nothing on a daemon without `schedules`.
+///
+/// [`SchedulesMirror::wants_header_load`]: crate::state::SchedulesMirror::wants_header_load
+fn ensure_schedules(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
+    let wanted = state.update(cx, |app, _| {
+        if !app.board_takes_schedules() {
+            return None;
+        }
+        let board = app.board().map(|view| view.board.id.clone())?;
+        app.schedules.wants_header_load(&board).then_some(board)
+    });
+    if let Some(board) = wanted {
+        dialogs::load_schedules(board, state, bridge, cx);
+    }
 }
 
 /// Fetches the daemon's backend registry once per connection.
@@ -120,18 +190,22 @@ fn ensure_backends(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
         return;
     }
     let reply = bridge.request(RequestBody::ListBoardBackends {});
-    let state = state.clone();
+    // Weak, as in `ensure_current`: an unanswered ask must not keep the app state alive.
+    let state = state.downgrade();
     cx.spawn(async move |cx| {
-        let Ok(Ok(ResponseBody::BoardBackends(backends))) = reply.recv().await else {
+        let released = match reply.recv().await {
+            Ok(Ok(ResponseBody::BoardBackends(backends))) => state.update(cx, |app, cx| {
+                app.apply_backends(backends);
+                cx.notify();
+            }),
             // The ask is made once per connection and the flag was set before it went out, so
             // a failure has to release it or this connection never asks again.
-            state.update(cx, |app, _| app.backends_load_failed());
-            return;
+            _ => state.update(cx, |app, _| app.backends_load_failed()),
         };
-        state.update(cx, |app, cx| {
-            app.apply_backends(backends);
-            cx.notify();
-        });
+        if let Err(error) = released {
+            // The app state is released only at shutdown, when nobody reads the registry.
+            tracing::debug!(%error, "the backend registry arrived after the app state was released");
+        }
     })
     .detach();
 }
@@ -366,3 +440,6 @@ pub(crate) fn request_worktree_reporting(
     })
     .detach();
 }
+
+#[cfg(test)]
+mod tests;

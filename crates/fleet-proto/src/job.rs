@@ -11,8 +11,13 @@ use fleet_core::ids::JobId;
 pub const BACKGROUND_INSPECTION_TARGET_PREFIX: &str = "background-inspect-";
 
 /// Kind of durable daemon background work.
+///
+/// Every kind but [`JobKind::ScheduledTask`] is spelt as its snake_case name. That one travels
+/// through the `Custom` extension point, as `{"custom":"scheduled_task"}`: jobs reach every peer
+/// in the snapshot and in `JobUpdated`, and a peer built before schedules existed decodes a
+/// custom kind but would drop the connection on an unknown unit variant (ADR 0025).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(from = "WireJobKind", into = "WireJobKind")]
 pub enum JobKind {
     /// Clone a pristine repository.
     Clone,
@@ -42,8 +47,83 @@ pub enum JobKind {
     Update,
     /// Import compatible configuration and state from swarm.
     Import,
+    /// Run one fire of a scheduled agent task; the target is the schedule id.
+    ScheduledTask,
     /// Extension point for daemon-specific jobs.
     Custom(String),
+}
+
+/// The `Custom` name [`JobKind::ScheduledTask`] travels under.
+const SCHEDULED_TASK_WIRE: &str = "scheduled_task";
+
+/// [`JobKind`] as it is spelt on the wire.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum WireJobKind {
+    Clone,
+    PoolBuild,
+    PoolRefresh,
+    CreateWorktree,
+    DeleteWorktree,
+    DeleteRepo,
+    Prune,
+    Inspect,
+    PostCreateHooks,
+    PrFetch,
+    RepoFetch,
+    RepoDiscovery,
+    Update,
+    Import,
+    /// Never written; read so a bare `"scheduled_task"` still decodes.
+    ScheduledTask,
+    Custom(String),
+}
+
+impl From<JobKind> for WireJobKind {
+    fn from(kind: JobKind) -> Self {
+        match kind {
+            JobKind::Clone => Self::Clone,
+            JobKind::PoolBuild => Self::PoolBuild,
+            JobKind::PoolRefresh => Self::PoolRefresh,
+            JobKind::CreateWorktree => Self::CreateWorktree,
+            JobKind::DeleteWorktree => Self::DeleteWorktree,
+            JobKind::DeleteRepo => Self::DeleteRepo,
+            JobKind::Prune => Self::Prune,
+            JobKind::Inspect => Self::Inspect,
+            JobKind::PostCreateHooks => Self::PostCreateHooks,
+            JobKind::PrFetch => Self::PrFetch,
+            JobKind::RepoFetch => Self::RepoFetch,
+            JobKind::RepoDiscovery => Self::RepoDiscovery,
+            JobKind::Update => Self::Update,
+            JobKind::Import => Self::Import,
+            JobKind::ScheduledTask => Self::Custom(SCHEDULED_TASK_WIRE.to_owned()),
+            JobKind::Custom(name) => Self::Custom(name),
+        }
+    }
+}
+
+impl From<WireJobKind> for JobKind {
+    fn from(kind: WireJobKind) -> Self {
+        match kind {
+            WireJobKind::Clone => Self::Clone,
+            WireJobKind::PoolBuild => Self::PoolBuild,
+            WireJobKind::PoolRefresh => Self::PoolRefresh,
+            WireJobKind::CreateWorktree => Self::CreateWorktree,
+            WireJobKind::DeleteWorktree => Self::DeleteWorktree,
+            WireJobKind::DeleteRepo => Self::DeleteRepo,
+            WireJobKind::Prune => Self::Prune,
+            WireJobKind::Inspect => Self::Inspect,
+            WireJobKind::PostCreateHooks => Self::PostCreateHooks,
+            WireJobKind::PrFetch => Self::PrFetch,
+            WireJobKind::RepoFetch => Self::RepoFetch,
+            WireJobKind::RepoDiscovery => Self::RepoDiscovery,
+            WireJobKind::Update => Self::Update,
+            WireJobKind::Import => Self::Import,
+            WireJobKind::ScheduledTask => Self::ScheduledTask,
+            WireJobKind::Custom(name) if name == SCHEDULED_TASK_WIRE => Self::ScheduledTask,
+            WireJobKind::Custom(name) => Self::Custom(name),
+        }
+    }
 }
 
 /// Lifecycle of a daemon background job.
@@ -106,6 +186,7 @@ mod tests {
         for kind in [
             JobKind::Clone,
             JobKind::Import,
+            JobKind::ScheduledTask,
             JobKind::Custom("other".to_owned()),
         ] {
             assert_round_trip(kind);
@@ -114,6 +195,24 @@ mod tests {
             error: "boom".to_owned(),
         });
         assert_round_trip(JobStatus::Cancelling);
+    }
+
+    /// A schedule's job reaches an older peer as a custom kind it can decode, and a bare
+    /// `"scheduled_task"` still reads back.
+    #[test]
+    fn a_scheduled_task_travels_as_a_custom_kind() {
+        assert_eq!(
+            serde_json::to_value(JobKind::ScheduledTask).unwrap(),
+            serde_json::json!({"custom": "scheduled_task"})
+        );
+        assert_eq!(
+            serde_json::from_value::<JobKind>(serde_json::json!("scheduled_task")).unwrap(),
+            JobKind::ScheduledTask
+        );
+        assert_eq!(
+            serde_json::to_value(JobKind::Clone).unwrap(),
+            serde_json::json!("clone")
+        );
     }
 
     #[test]

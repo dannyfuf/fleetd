@@ -8,6 +8,9 @@ use crate::{
 use serde::{Serialize, de::DeserializeOwned};
 use std::{collections::BTreeMap, fmt::Debug};
 
+mod review_fields;
+mod reviews;
+
 fn board() -> Board {
     new_board(
         &Context {
@@ -531,6 +534,7 @@ fn a_card_carrying_agent_links_a_pending_run_and_a_run_round_trips() {
         files_changed: 3,
         cost_usd: Some(0.42),
         tokens: Some(1_200),
+        worktree_id: None,
     }];
     card.comments.push(Comment {
         id: "comment-1".into(),
@@ -568,6 +572,7 @@ fn a_live_run_is_one_without_an_outcome_and_a_failed_start_has_no_thread() {
         files_changed: 0,
         cost_usd: None,
         tokens: None,
+        worktree_id: None,
     };
 
     assert!(run.is_live());
@@ -715,6 +720,7 @@ fn any_one_automation_field_alone_takes_the_document_to_version_2() {
         files_changed: 0,
         cost_usd: None,
         tokens: None,
+        worktree_id: None,
     }];
     assert_eq!(document_version(&base, &[ran]), 2);
 
@@ -727,5 +733,5 @@ fn any_one_automation_field_alone_takes_the_document_to_version_2() {
         remote_id: None,
         run_id: Some(DelegationId::new()),
     });
-    assert_eq!(document_version(&base, &[reported]), BOARD_DOCUMENT_VERSION);
+    assert_eq!(document_version(&base, &[reported]), 2);
 }

@@ -102,6 +102,11 @@ pub struct PrCache {
     freshness: PrFreshness,
     config_loading: bool,
     config_loaded: bool,
+    /// Whether the Review tab is the context's Reviews board, so `gh` is asked for Mine alone
+    /// (UX-SPEC §3.5). Set from `board.reviews` before every fetch decision.
+    review_retired: bool,
+    /// The Reviews board's facts the Review tab and the chip draw, folded outside render.
+    pub(super) review_board: ReviewBoardFacts,
 }
 
 impl PrCache {
@@ -156,17 +161,46 @@ impl PrCache {
     #[must_use]
     pub fn needs_fetch(&self, now: Instant) -> bool {
         self.mine_fetch.needs_fetch(now, self.freshness)
-            || self.review_fetch.needs_fetch(now, self.freshness)
+            || (!self.review_retired && self.review_fetch.needs_fetch(now, self.freshness))
     }
 
     fn refresh_deadline(&self) -> Option<Instant> {
         [
-            self.mine_fetch.deadline(self.freshness),
-            self.review_fetch.deadline(self.freshness),
+            Some(self.mine_fetch.deadline(self.freshness)),
+            (!self.review_retired).then(|| self.review_fetch.deadline(self.freshness)),
         ]
         .into_iter()
         .flatten()
+        .flatten()
         .min()
+    }
+
+    /// Whether the Review tab's `gh` fetch is retired because the daemon serves Reviews boards.
+    #[must_use]
+    pub fn review_retired(&self) -> bool {
+        self.review_retired
+    }
+
+    /// Retires (or restores) the Review tab's `gh` fetch. Retiring drops whatever the old list
+    /// held, so neither the tab nor the worktree badges keep a slice nothing refreshes.
+    pub(super) fn set_review_retired(&mut self, retired: bool) {
+        if self.review_retired == retired {
+            return;
+        }
+        self.review_retired = retired;
+        if retired {
+            self.review = None;
+            self.review_fetch = PrTabFetch::default();
+        }
+    }
+
+    /// The tabs one fetch asks `gh` for: Mine alone once the Review tab is a board.
+    fn fetched_tabs(&self) -> &'static [PrTab] {
+        if self.review_retired {
+            &[PrTab::Mine]
+        } else {
+            &[PrTab::Mine, PrTab::Review]
+        }
     }
 
     fn begin_config_fetch(&mut self) -> bool {
@@ -200,7 +234,7 @@ impl PrCache {
         self.slice(tab).is_none()
     }
 
-    pub(super) fn begin_fetch(&mut self, key: PrCacheKey, now: Instant) -> [(PrTab, u64); 2] {
+    pub(super) fn begin_fetch(&mut self, key: PrCacheKey, now: Instant) -> Vec<(PrTab, u64)> {
         if self.key.as_ref() != Some(&key) {
             self.mine = None;
             self.review = None;
@@ -208,7 +242,8 @@ impl PrCache {
             self.review_fetch = PrTabFetch::default();
             self.key = Some(key);
         }
-        let mut requests = [(PrTab::Mine, 0), (PrTab::Review, 0)];
+        let mut requests: Vec<(PrTab, u64)> =
+            self.fetched_tabs().iter().map(|tab| (*tab, 0)).collect();
         for (tab, request) in &mut requests {
             self.sequence = self.sequence.wrapping_add(1);
             *request = self.sequence;
@@ -258,6 +293,210 @@ impl PrCache {
             Err(error) => self.fetch_mut(tab).error = Some(error),
         }
         true
+    }
+}
+
+/// What the Review tab and the context bar's Review chip read from the Reviews board, folded in
+/// the Hub's observation of [`AppState`] and never in render (UX-SPEC §2.2, §3.5).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct ReviewBoardFacts {
+    key: Option<ReviewFoldKey>,
+    /// Reviews waiting on the user: the chip and the Review tab's count.
+    pub(super) waiting: usize,
+    /// `Some` while the mirror holds the Reviews board and it has no cards: `No reviews yet.`,
+    /// with `true` when the GitHub review schedule is offered beside it.
+    pub(super) empty: Option<bool>,
+}
+
+/// Every input [`review_board_facts`] reads, as revisions and cheap values.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReviewFoldKey {
+    context: Option<ContextId>,
+    snapshot: u64,
+    board: u64,
+    marks: u64,
+    schedules: u64,
+    held: Option<fleet_core::ids::BoardId>,
+    offers_schedules: bool,
+}
+
+impl ReviewFoldKey {
+    fn of(state: &AppState) -> Self {
+        Self {
+            context: state.active_context().cloned(),
+            snapshot: state.snapshot_revision,
+            board: state.board.revision,
+            marks: state.board.marks.revision,
+            schedules: state.schedules.revision,
+            held: state.board().map(|view| view.board.id.clone()),
+            offers_schedules: state.supports_schedules(),
+        }
+    }
+}
+
+/// The active context's Reviews board, when the mirror is the one holding it.
+fn held_reviews_board(state: &AppState) -> Option<&fleet_core::board::BoardView> {
+    let context = state.active_context()?;
+    state
+        .board()
+        .filter(|view| !view.board.kind.is_tasks() && &view.board.context_id == context)
+}
+
+/// Reviews waiting on the user, and the empty state, from what the app already holds.
+///
+/// One rule answers on both sides: a card counts when it wants the user
+/// (`ops::query::attention`), or when it stands in a `Started` column with no live or owed run.
+/// With the Reviews board in the mirror the card marks fold it
+/// ([`CardMarks::waiting_on_you`](crate::state::CardMarks)); anywhere else the snapshot's summary
+/// carries the same rule split in two, `attention_count + idle_started`, so the count does not
+/// jump when the Review tab opens or closes (UX-SPEC §2.2).
+pub(super) fn review_board_facts(state: &AppState) -> (usize, Option<bool>) {
+    if let Some(view) = held_reviews_board(state) {
+        let waiting = usize::try_from(state.board.marks.waiting_on_you).unwrap_or(usize::MAX);
+        let empty = view.cards.iter().all(|card| card.archived);
+        let offer = state.supports_schedules()
+            && state.schedules.entry(&view.board.id).is_some_and(|entry| {
+                !entry.loading && entry.error.is_none() && entry.schedules.is_empty()
+            });
+        return (waiting, empty.then_some(offer));
+    }
+    let waiting = state
+        .active_context()
+        .zip(state.snapshot.as_ref())
+        .and_then(|(context, snapshot)| {
+            // Found by its kind, not by a derived id: the app never derives a board id (§0),
+            // and a Reviews board whose natural id was taken lives under another one.
+            snapshot.boards.iter().find(|board| {
+                board.worktree_id.is_none()
+                    && !board.kind.is_tasks()
+                    && &board.context_id == context
+            })
+        })
+        .map_or(0, |summary| {
+            usize::try_from(summary.attention_count.saturating_add(summary.idle_started))
+                .unwrap_or(usize::MAX)
+        });
+    (waiting, None)
+}
+
+impl HubBridge {
+    /// The daemon bridge the board mirror's loaders take, when this Hub has a live one.
+    fn live(&self) -> Option<&Bridge> {
+        match self {
+            Self::Live(bridge) => Some(bridge),
+            #[cfg(test)]
+            Self::Test(_) => None,
+        }
+    }
+}
+
+impl HubCtx {
+    /// The Review tab's half of the Hub's observation (UX-SPEC §3.5).
+    ///
+    /// While the tab draws the Reviews board it owns the board mirror: the scope is
+    /// `Reviews(active context)`, the list pane has the keyboard (the rail is hidden), and the
+    /// board's schedules are asked for once so the empty state knows whether to offer one.
+    /// Leaving the tab gives the mirror back to the context scope the Hub's Board tab shows,
+    /// which is also what stops the loader asking for a board nothing draws. The count the chip
+    /// and the tab read is folded here, on a daemon that serves Reviews boards.
+    pub(super) fn synchronize_review_board(&self, cx: &mut App) {
+        let (shown, context, holds_reviews, supported) = {
+            let state = self.state.read(cx);
+            (
+                state.review_board_is_shown(),
+                state.active_context().cloned(),
+                matches!(
+                    state.board.scope,
+                    Some(crate::state::BoardScope::Reviews(_))
+                ),
+                state.supports_review_boards(),
+            )
+        };
+        self.hub.update(cx, |hub, _| {
+            hub.observe_review_schedule_activation(shown, context.as_ref());
+        });
+        if shown {
+            self.state.update(cx, |state, cx| {
+                if state.hub_pane != HubPane::List {
+                    state.hub_pane = HubPane::List;
+                    cx.notify();
+                }
+            });
+            if let (Some(context), Some(bridge), true) = (context, self.bridge.live(), supported) {
+                // Notifies only when the mirror moved and sends nothing when the slot is
+                // current, so it is safe on every notify; gated on the capability so an old
+                // daemon's refusal is not toasted once per frame.
+                crate::screens::board::enter_reviews_scope(context, &self.state, bridge, cx);
+            }
+            self.load_review_schedules(cx);
+        } else if holds_reviews {
+            let on_board_tab = matches!(
+                self.state.read(cx).screen,
+                Screen::Hub { tab: HubTab::Board }
+            );
+            if let (false, Some(bridge)) = (on_board_tab, self.bridge.live()) {
+                crate::screens::board::enter_context_scope(&self.state, bridge, cx);
+            }
+        }
+        if supported {
+            self.fold_review_board(cx);
+        }
+    }
+
+    /// Folds the Reviews board into the chip's and the tab's count and the empty state.
+    fn fold_review_board(&self, cx: &mut App) {
+        let key = ReviewFoldKey::of(self.state.read(cx));
+        if self.hub.read(cx).prs.review_board.key.as_ref() == Some(&key) {
+            return;
+        }
+        let (waiting, empty) = review_board_facts(self.state.read(cx));
+        let changed = self.hub.update(cx, |hub, _| {
+            let facts = &mut hub.prs.review_board;
+            facts.key = Some(key);
+            let changed = facts.waiting != waiting || facts.empty != empty;
+            facts.waiting = waiting;
+            facts.empty = empty;
+            changed
+        });
+        self.state.update(cx, |state, cx| {
+            if state.review_pr_count != waiting || changed {
+                state.review_pr_count = waiting;
+                cx.notify();
+            }
+        });
+    }
+
+    /// Asks for the shown Reviews board's schedules once per activation, so `No reviews yet.`
+    /// can say whether the GitHub review schedule is still to be added.
+    fn load_review_schedules(&self, cx: &mut App) {
+        let board = {
+            let state = self.state.read(cx);
+            if !state.supports_schedules() || state.refuses_mutations() {
+                return;
+            }
+            let Some(view) = held_reviews_board(state) else {
+                return;
+            };
+            view.board.id.clone()
+        };
+        let Some(bridge) = self.bridge.live() else {
+            return;
+        };
+        let activated = self
+            .hub
+            .update(cx, |hub, _| hub.take_review_schedule_activation());
+        let wanted = self
+            .state
+            .read(cx)
+            .schedules
+            .entry(&board)
+            .is_none_or(|entry| activated && entry.error.is_some() && !entry.loading);
+        if !wanted {
+            return;
+        }
+        // The dialog's loader: one request in flight per board, and an answer the entry is
+        // still stale after (a `SchedulesChanged` landed while it was in flight) reads again.
+        crate::dialogs::load_schedules(board, &self.state, bridge, cx);
     }
 }
 
@@ -528,17 +767,23 @@ impl HubCtx {
         );
     }
 
-    /// Fetches both tabs. `force` is `r`; otherwise the daemon's TTL decides.
+    /// Fetches both tabs, or Mine alone when the daemon serves Reviews boards (§3.5): the
+    /// Review tab is the board then, and an old daemon keeps the old list. `force` is `r`;
+    /// otherwise the daemon's TTL decides.
     pub(super) fn fetch_pull_requests(&self, force: bool, cx: &mut App) {
         if self.state.read(cx).daemon.is_lost() {
             return;
         }
-        let key = {
+        let (key, retired) = {
             let state = self.state.read(cx);
-            PrCacheKey::from_state(state)
+            (
+                PrCacheKey::from_state(state),
+                state.supports_review_boards(),
+            )
         };
         let requests = self.hub.update(cx, |hub, _| {
             hub.invalidate();
+            hub.prs.set_review_retired(retired);
             hub.prs.begin_fetch(key.clone(), Instant::now())
         });
         // `HubState` is its own entity and the shell only observes `AppState`, so a mutation
@@ -610,7 +855,10 @@ impl HubCtx {
                 })
                 .collect::<Vec<_>>();
             (
-                hub.prs.review.as_ref().map_or(0, |slice| slice.prs.len()),
+                // Once the Review tab is a board its count is the board's, folded in
+                // `fold_review_board`; the `gh` list only counts on a daemon without it.
+                (!hub.prs.review_retired())
+                    .then(|| hub.prs.review.as_ref().map_or(0, |slice| slice.prs.len())),
                 badges,
             )
         });
@@ -637,7 +885,9 @@ impl HubCtx {
                 .unwrap_or_default()
         });
         self.state.update(cx, |state, cx| {
-            state.review_pr_count = review;
+            if let Some(review) = review {
+                state.review_pr_count = review;
+            }
             replace_pr_badges(&mut state.pr_badges, &scoped_repos, badges);
             cx.notify();
         });
@@ -663,11 +913,17 @@ impl HubCtx {
             });
             return;
         }
-        let wanted = {
+        let (key, retired) = {
             let state = self.state.read(cx);
-            let key = PrCacheKey::from_state(state);
-            self.hub.read(cx).prs.needs_fetch_for(&key, Instant::now())
+            (
+                PrCacheKey::from_state(state),
+                state.supports_review_boards(),
+            )
         };
+        let wanted = self.hub.update(cx, |hub, _| {
+            hub.prs.set_review_retired(retired);
+            hub.prs.needs_fetch_for(&key, Instant::now())
+        });
         if wanted {
             self.fetch_pull_requests(false, cx);
         } else {
@@ -737,6 +993,9 @@ impl HubCtx {
             true
         });
         self.tick_inspection_sweep(reconciled_snapshot, cx);
+        // Before the visibility check: leaving the Hub leaves the Review tab too, and the
+        // chip's count is read wherever the context bar is.
+        self.synchronize_review_board(cx);
         let visible = matches!(self.state.read(cx).screen, Screen::Hub { .. });
         if !visible {
             self.hub.update(cx, |hub, _| {

@@ -1,0 +1,38 @@
+# plans/pr-review-boards-2026-09-22-phase-4-plan.md P4-T07 · UX-SPEC.md §3.5 "Hub — Pull requests
+# screen" · BOARD.md §8 (the `Reviews(context)` scope) · TESTING-HARNESS.md §7 — the Review tab
+# is the context's Reviews board, not a list of `gh` results.
+#
+# On a daemon that advertises `board.reviews`, `tab` on the Pull requests screen enters the
+# `Reviews(context)` board scope and sends `EnsureReviewsBoard`; the pane that answers is the
+# same kanban every other board draws, under the `Hub > Prs > Board` chain. The `reviews` preset
+# (§4) has already asked for that board once, so the columns this file reads are the daemon's
+# own derivation — `fleet_core::board::reviews_preset` — and not a fixture's copy of them.
+#
+# What each column row carries, so a failure names a cause:
+#   label     the five review columns, in the order the preset defines them.
+#   `action`  Reviewing and Review published start a run on arrival; Pending review only
+#             routes (`advance_when_unblocked`), and Reviewed and Dismissed are human.
+#   badge     the one seeded card sits in Reviewed, the column that neither routes nor runs.
+#
+# Headless: virtual-lane only, because of its `shot`. Every other line runs headless (§7).
+fixture: reviews
+await idle 30000
+
+# `g p` is the Hub-wide jump; the screen opens on Mine, which is still the `gh` list.
+key g p
+await hub_tab == Prs 15000
+assert key_contexts[0] == "Hub" && key_contexts[1] == "Prs"
+
+# `tab` is the Review tab, and the Review tab is a board.
+key tab
+await key_contexts[2] == "Board" 20000
+await lists.board.rows[0].label == "Pending review" 20000
+assert lists.board.rows[1].label == "Reviewing" && lists.board.rows[1].marks[0] == "action"
+assert lists.board.rows[2].label == "Reviewed" && lists.board.rows[2].badges[0] == "1"
+assert lists.board.rows[3].label == "Review published" && lists.board.rows[3].marks[0] == "action"
+assert lists.board.rows[4].label == "Dismissed" && lists.board.rows[5] absent
+assert lists.board.rows[0].marks[0] absent && lists.board.rows[4].marks[0] absent
+assert hub_tab == Prs && overlay absent && sticky_error absent
+await idle 20000
+shot review-board
+quit

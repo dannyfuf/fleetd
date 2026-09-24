@@ -310,10 +310,8 @@ impl HubCtx {
 
     /// Whether the Hub is showing the board, whose own keys own the screen (BOARD §8).
     pub(super) fn on_board(&self, cx: &App) -> bool {
-        matches!(
-            self.state.read(cx).screen,
-            Screen::Hub { tab: HubTab::Board }
-        )
+        let state = self.state.read(cx);
+        matches!(state.screen, Screen::Hub { tab: HubTab::Board }) || state.review_board_is_shown()
     }
 
     pub(crate) fn move_by(&self, delta: isize, _window: &mut Window, cx: &mut App) {

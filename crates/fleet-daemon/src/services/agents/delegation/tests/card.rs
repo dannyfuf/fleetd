@@ -30,7 +30,7 @@ use crate::{
 };
 
 use super::{
-    super::{CardRunRequest, CompleteRequest, RunDeliveryHook, worker::drain},
+    super::{CardRunRequest, CompleteRequest, CreatingGuard, RunDeliveryHook, worker::drain},
     worker::Harness,
 };
 
@@ -537,4 +537,41 @@ async fn a_card_run_carries_no_caller_turn_or_item() {
             "no transcript carries a delegation row for a card run",
         );
     }
+}
+
+/// A drain pass that lands between a start's reservation and its child's creation must keep the
+/// reservation: the child is missing because it is being made, and releasing the row would leave
+/// the run with no delegation to deliver it (the card would stay working for good).
+#[tokio::test(start_paused = true)]
+async fn a_drain_during_child_creation_keeps_the_reservation() {
+    let harness = Harness::start().await;
+    let delegation = card_delegation("work", "REV-19", DelegationStatus::Starting);
+    let creating = CreatingGuard::new(&harness.service, delegation.id);
+    insert_with_token(&harness, &delegation, TOKEN).await;
+
+    drain(&harness.service)
+        .await
+        .expect("drain during creation");
+    assert!(
+        harness
+            .store
+            .delegation(delegation.id)
+            .await
+            .expect("read the reservation")
+            .is_some(),
+        "a reservation whose child is still being created is not an orphan"
+    );
+
+    // Once creation has answered, a row still naming no child really is one.
+    drop(creating);
+    drain(&harness.service).await.expect("drain after creation");
+    assert!(
+        harness
+            .store
+            .delegation(delegation.id)
+            .await
+            .expect("read the reservation")
+            .is_none(),
+        "a reservation whose child never came is still released"
+    );
 }

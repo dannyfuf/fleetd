@@ -13,6 +13,7 @@ mod automation;
 mod cards;
 mod patches;
 mod query;
+mod upsert;
 mod validation;
 
 const NOW: &str = "2026-09-06T12:00:00Z";

@@ -1130,6 +1130,44 @@ async fn a_host_without_the_worktree_board_capability_is_refused_by_name() {
 }
 
 #[tokio::test]
+async fn a_host_without_the_review_board_capability_is_refused_by_name() {
+    let host = host("alpha");
+    let (router, remote) = router_with_remote(host.clone());
+    remote.set_hello(fleet_daemon::machines::RemoteHello {
+        version: "fleetd old".to_owned(),
+        daemon_id: "old".to_owned(),
+        build_commit: None,
+        capabilities: vec![fleet_proto::REMOTE_MACHINES_CAPABILITY.to_owned()],
+    });
+
+    let error = router
+        .forward(
+            &host,
+            RequestBody::UpsertPullRequestCard {
+                board_id: board("reviews-personal"),
+                draft: fleet_core::board::CardDraft {
+                    title: "Review acme/api#7".to_owned(),
+                    pull_request: Some(
+                        fleet_core::board::PullRequestRef::parse("acme/api#7")
+                            .expect("a pull request reference"),
+                    ),
+                    ..Default::default()
+                },
+                requested_at: None,
+            },
+        )
+        .await
+        .expect_err("an un-upgraded owner cannot serve a pull request upsert");
+
+    assert!(
+        matches!(&error, fleet_daemon::DaemonError::Unsupported(message)
+            if message == "host alpha: this daemon does not support review boards; run `fleet daemon restart`"),
+        "{error:?}"
+    );
+    assert!(remote.requests().is_empty());
+}
+
+#[tokio::test]
 async fn a_down_host_keeps_answering_board_ownership_through_the_mirror_until_ready() {
     let host = host("alpha");
     let (router, remote) = router_with_remote(host.clone());
@@ -1173,6 +1211,7 @@ fn board_summary(id: &BoardId, worktree: Option<&WorktreeId>) -> BoardSummary {
         id: id.clone(),
         context_id: "personal".parse().expect("context id"),
         worktree_id: worktree.cloned(),
+        kind: Default::default(),
         name: "board".to_owned(),
         prefix: "FLT".to_owned(),
         backend_kind: "local".to_owned(),
@@ -1182,6 +1221,7 @@ fn board_summary(id: &BoardId, worktree: Option<&WorktreeId>) -> BoardSummary {
         conflict_count: 0,
         working_count: 0,
         attention_count: 0,
+        idle_started: 0,
         last_synced_at: None,
         last_error: None,
     }
@@ -1205,6 +1245,7 @@ fn board_view(id: &BoardId, worktree: Option<&WorktreeId>, cards: &[CardId]) -> 
             sync: SyncState::default(),
             created_at: "2026-09-20T12:00:00Z".to_owned(),
             updated_at: "2026-09-20T12:00:00Z".to_owned(),
+            kind: Default::default(),
         },
         cards: cards
             .iter()
@@ -1238,6 +1279,7 @@ fn board_view(id: &BoardId, worktree: Option<&WorktreeId>, cards: &[CardId]) -> 
                 runs: Vec::new(),
                 created_at: "2026-09-20T12:00:00Z".to_owned(),
                 updated_at: "2026-09-20T12:00:00Z".to_owned(),
+                pull_request: None,
             })
             .collect(),
         live_runs: Vec::new(),

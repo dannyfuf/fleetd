@@ -8,8 +8,8 @@
 //!
 //! Three lines, top to bottom: the **key line** (priority bars, the key, and at its right end the
 //! one state pill the card has — its run, or what blocks it), the **title** (two lines at most),
-//! and the **meta row** (labels, estimate, due date, the linked branch and pull request, then the
-//! state's own button and the assignee's avatar at its right end). Everything but the key and the
+//! and the **meta row** (labels, estimate, due date, the linked branch and pull request, the card's
+//! [`CardTile::reference`], then the state's own button and the assignee's avatar at its right end). Everything but the key and the
 //! title is **zero-suppressed** (§1.2): a tile with only a key and a title is two lines tall.
 //!
 //! **Pointer** (UX-SPEC §5.1). A press selects ([`CardTile::on_click`]), the second press of a
@@ -178,6 +178,7 @@ pub struct CardTile {
     worktree: bool,
     branch: Option<SharedString>,
     pr: Option<(u64, PrBadgeState)>,
+    reference: Option<SharedString>,
     dirty: bool,
     conflict: bool,
     selected: bool,
@@ -215,6 +216,7 @@ impl CardTile {
             worktree: false,
             branch: None,
             pr: None,
+            reference: None,
             dirty: false,
             conflict: false,
             selected: false,
@@ -280,6 +282,17 @@ impl CardTile {
     /// The linked branch's pull request, as a [`PrBadge`] beside the branch.
     pub fn pr(mut self, pr: Option<(u64, PrBadgeState)>) -> Self {
         self.pr = pr;
+        self
+    }
+
+    /// A short identifier the card points at (`acme/api#412`), drawn muted in mono in the meta
+    /// row after the branch.
+    ///
+    /// The tile does not know what it names: the caller folds whatever external thing the card
+    /// is about into one line. Unlike [`Self::pr`], which is the *branch's* pull request with its
+    /// state, this is the card's own subject and carries no state of its own.
+    pub fn reference(mut self, reference: Option<SharedString>) -> Self {
+        self.reference = reference;
         self
     }
 
@@ -425,6 +438,7 @@ impl CardTile {
             || self.worktree
             || self.branch.is_some()
             || self.pr.is_some()
+            || self.reference.is_some()
             || self.dirty
             || self.conflict
             || !self.extras.is_empty()
@@ -555,6 +569,10 @@ impl RenderOnce for CardTile {
                                 .color(theme.colors.text_secondary)
                         }))
                         .children(self.pr.map(|(number, state)| PrBadge::new(number, state)))
+                        .children(
+                            self.reference
+                                .map(|reference| Text::data_small(reference).faint().ellipsize()),
+                        )
                         .children(self.dirty.then(|| StatusDot::small(Tone::Warning)))
                         .children(self.conflict.then(|| StatusDot::small(Tone::Danger)))
                         .children(
@@ -743,6 +761,20 @@ mod tests {
                 .blocked(2, BlockedTone::Warning)
                 .key_mark(),
             Some(KeyMark::Blocked(2, BlockedTone::Warning))
+        );
+    }
+
+    #[test]
+    fn a_reference_alone_draws_the_meta_row() {
+        assert!(
+            !CardTile::new("card", "FLT-1", "t")
+                .reference(None)
+                .has_meta()
+        );
+        assert!(
+            CardTile::new("card", "FLT-1", "t")
+                .reference(Some("acme/api#412".into()))
+                .has_meta()
         );
     }
 

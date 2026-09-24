@@ -56,6 +56,11 @@ pub(super) async fn drain(service: &DelegationService) -> anyhow::Result<()> {
     // here makes the worker's startup order deterministic: every ProviderExited transition and
     // its Recover row exist before this pass reads the outbox.
     for delegation in service.inner.store.live_delegations(None).await? {
+        // A start between reserving this row and creating its child: the child is missing
+        // because it is being made, not because a restart lost it.
+        if service.is_creating(delegation.id) {
+            continue;
+        }
         match service.inner.manager.projection(delegation.child).await {
             Ok(_) => {}
             Err(error) if error.kind == ErrorKind::NotFound => {

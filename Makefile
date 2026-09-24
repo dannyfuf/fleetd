@@ -33,7 +33,7 @@ LANE ?= virtual
 # and no other, so the two selectors cannot drift apart.
 HARNESS_PIXEL_BOUND := ^[[:space:]]*(shot|clipboard)([[:space:]]|$$)
 
-.PHONY: run run-release restart daemon build release timings build-info check test test-scripts smoke-workflow harness harness-headless harness-one harness-prune fmt fmt-check clippy lint ci clean clean-release clean-incremental prune fresh bootstrap doctor help
+.PHONY: run run-release restart daemon build release timings build-info check test test-scripts smoke-workflow smoke-reviews harness harness-headless harness-one harness-prune fmt fmt-check clippy lint ci clean clean-release clean-incremental prune fresh bootstrap doctor help
 
 run: restart ## Build, restart fleetd, and open Fleet (ARGS="..." supported)
 	$(RUNTIME_ENV) "$(FLEET)" $(ARGS)
@@ -93,6 +93,11 @@ smoke-workflow: build ## Drive a board-workflow chain end to end against a priva
 	# never touches $(FLEET_HOME) or the daemon running there (docs/BOARD.md section 6).
 	FLEET="$(FLEET)" FLEETD="$(FLEETD)" HARNESS="$(HARNESS)" ./scripts/board-workflow-smoke.sh
 
+smoke-reviews: build ## Drive a Reviews board and a schedule end to end against a private daemon
+	# Hermetic like smoke-workflow: its own FLEET_HOME and PATH, scripted agents, a scripted gh,
+	# a local git origin carrying refs/pull/<n>/head. It never touches $(FLEET_HOME).
+	FLEET="$(FLEET)" FLEETD="$(FLEETD)" HARNESS="$(HARNESS)" ./scripts/reviews-smoke.sh
+
 harness: build ## Run the whole GUI corpus in the virtual lane (HARNESS_ARGS=--update-baselines)
 	$(HARNESS_ENV) "$(HARNESS)" run "$(HARNESS_DIR)" --lane virtual $(HARNESS_ARGS)
 
@@ -140,7 +145,7 @@ clippy: ## Run Clippy with warnings denied
 
 lint: fmt-check clippy ## Run formatting and Clippy checks
 
-ci: lint test test-scripts smoke-workflow ## Run lint and test targets
+ci: lint test test-scripts smoke-workflow smoke-reviews ## Run lint and test targets
 
 clean: ## Remove every build artifact (the next build is a cold one)
 	cargo clean

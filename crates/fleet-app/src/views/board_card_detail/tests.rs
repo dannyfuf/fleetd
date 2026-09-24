@@ -196,6 +196,7 @@ fn run_on(card: &Card, outcome: Option<RunOutcome>) -> CardRun {
         files_changed: 0,
         cost_usd: None,
         tokens: None,
+        worktree_id: None,
     }
 }
 
@@ -620,4 +621,85 @@ fn the_remote_row_opens_the_issue_and_a_locked_row_takes_no_click() {
     let mut locked = row(&rows, "Status").clone();
     locked.locked = true;
     assert!(!is_clickable(&locked));
+}
+
+/// `fixture`'s card, reviewing `acme/api#412`.
+fn reviewing() -> (Board, Card) {
+    let (board, mut card) = fixture();
+    card.pull_request = Some(fleet_core::board::PullRequestRef {
+        repo: "acme/api".parse().unwrap_or_else(|error| panic!("{error}")),
+        number: 412,
+        url: "https://github.com/acme/api/pull/412".into(),
+    });
+    (board, card)
+}
+
+/// A review card's pull request sits under Worktree, as a link in the same mono face.
+#[test]
+fn a_review_card_gains_a_pull_request_row_under_worktree() {
+    let (board, card) = reviewing();
+    let rows = property_rows(&board, std::slice::from_ref(&card), &card, 0);
+    let labels: Vec<&str> = rows.iter().map(|row| row.label.as_ref()).collect();
+    assert_eq!(
+        labels[labels.len() - 2..],
+        ["Worktree", "Pull request"],
+        "the row follows Worktree: {labels:?}"
+    );
+    let pull_request = row(&rows, "Pull request");
+    assert_eq!(
+        pull_request.value.as_ref(),
+        "acme/api#412 \u{b7} open \u{2197}"
+    );
+    assert_eq!(pull_request.target, PropertyTarget::PullRequest);
+    assert_eq!(pull_request.tone, Tone::Default);
+    assert!(pull_request.mono);
+    assert!(is_clickable(pull_request));
+}
+
+/// A task card has no pull request, and no dash for one either.
+#[test]
+fn a_card_without_a_pull_request_has_no_pull_request_row() {
+    let (board, card) = fixture();
+    let rows = property_rows(&board, std::slice::from_ref(&card), &card, 0);
+    assert!(rows.iter().all(|row| row.label.as_ref() != "Pull request"));
+}
+
+/// The row lays out and paints in the Worktree row's style, selected and focused.
+#[gpui::test]
+fn the_pull_request_row_draws(cx: &mut gpui::TestAppContext) {
+    struct Empty;
+
+    impl gpui::Render for Empty {
+        fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+            div()
+        }
+    }
+
+    let (board, card) = reviewing();
+    let rows = property_rows(&board, std::slice::from_ref(&card), &card, 0);
+    let pull_request = row(&rows, "Pull request").clone();
+    cx.update(|cx| cx.set_global(fleet_ui_kit::Theme::dark()));
+    let window = cx.add_window(|_, _| Empty);
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    visual.draw(
+        gpui::point(gpui::px(0.0), gpui::px(0.0)),
+        gpui::size(
+            gpui::AvailableSpace::Definite(gpui::px(480.0)),
+            gpui::AvailableSpace::MinContent,
+        ),
+        |_, cx| {
+            let theme = cx.theme().clone();
+            property_row(
+                &pull_request,
+                PropertyRowProps {
+                    index: 0,
+                    selected: true,
+                    focused: true,
+                    kbd: None,
+                    on_click: None,
+                },
+                &theme,
+            )
+        },
+    );
 }

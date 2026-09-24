@@ -204,7 +204,7 @@ impl Router {
         if endpoint.state() == LinkState::Down {
             return Err(unreachable(host));
         }
-        if let Some(refusal) = worktree_board_refusal(endpoint.as_ref(), host, &body) {
+        if let Some(refusal) = capability_refusal(endpoint.as_ref(), host, &body) {
             return Err(refusal);
         }
         self.pump_endpoint(host.clone(), Arc::clone(&endpoint));
@@ -675,35 +675,41 @@ fn remote_event_bytes(event: &Event) -> usize {
     }
 }
 
-/// Refuses a worktree-board request the owner's daemon is too old to serve.
+/// Refuses a request the owner's daemon is too old to serve: a worktree-board request, or a
+/// pull request upsert onto a Reviews board another host owns.
 ///
-/// An un-upgraded peer has no `EnsureWorktreeBoard`, so forwarding one yields a bare protocol
-/// error with no way for the user to know what to do. `None` hello means the link is still
+/// An un-upgraded peer has no such variant, so forwarding one yields a bare protocol error with
+/// no way for the user to know what to do. The sentence is the one the client's own gate uses
+/// against its local daemon, prefixed with the host. `None` hello means the link is still
 /// handshaking and the capability set is not known yet — the request proceeds and is answered,
 /// or fails, on its own.
-fn worktree_board_refusal(
+fn capability_refusal(
     endpoint: &dyn RemoteEndpoint,
     host: &HostId,
     body: &RequestBody,
 ) -> Option<DaemonError> {
-    if !matches!(
-        body,
-        RequestBody::EnsureWorktreeBoard { .. } | RequestBody::CreateWorktreeBoard { .. }
-    ) {
-        return None;
-    }
+    let (capability, feature) = match body {
+        RequestBody::EnsureWorktreeBoard { .. } | RequestBody::CreateWorktreeBoard { .. } => (
+            fleet_proto::response::BOARD_WORKTREE_CAPABILITY,
+            "worktree boards",
+        ),
+        RequestBody::UpsertPullRequestCard { .. } => (
+            fleet_proto::response::BOARD_REVIEWS_CAPABILITY,
+            "review boards",
+        ),
+        _ => return None,
+    };
     let hello = endpoint.hello()?;
     (!hello
         .capabilities
         .iter()
-        .any(|capability| capability == fleet_proto::response::BOARD_WORKTREE_CAPABILITY))
+        .any(|advertised| advertised == capability))
     .then(|| {
         annotate_remote_error(
             host,
-            DaemonError::Unsupported(
-                "this daemon does not support worktree boards; run `fleet daemon restart`"
-                    .to_owned(),
-            ),
+            DaemonError::Unsupported(format!(
+                "this daemon does not support {feature}; run `fleet daemon restart`"
+            )),
         )
     })
 }

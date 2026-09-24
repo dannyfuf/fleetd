@@ -1,19 +1,25 @@
 use super::{Result, expect_ack, unexpected};
 use crate::{
     Client,
-    connection::{board_automation_capability_error, worktree_board_capability_error},
+    connection::{
+        board_automation_capability_error, board_reviews_capability_error,
+        worktree_board_capability_error,
+    },
 };
 use fleet_core::{
     board::{
         BackendDescriptor, BackendRef, BackendSchema, BoardPatch, BoardSummary, BoardView, Card,
-        CardDraft, CardPatch, ConflictResolution,
+        CardDraft, CardPatch, ConflictResolution, UpsertOutcome,
     },
     ids::{BoardId, CardId, ContextId, HostId, JobId, RepoId, StatusId, WorktreeId},
     model::Worktree,
 };
 use fleet_proto::{
     request::RequestBody,
-    response::{BOARD_AUTOMATION_CAPABILITY, BOARD_WORKTREE_CAPABILITY, ResponseBody},
+    response::{
+        BOARD_AUTOMATION_CAPABILITY, BOARD_REVIEWS_CAPABILITY, BOARD_WORKTREE_CAPABILITY,
+        ResponseBody,
+    },
 };
 
 impl Client {
@@ -41,6 +47,18 @@ impl Client {
         {
             ResponseBody::Board(value) => Ok(value),
             response => Err(unexpected("ensure_board", response)),
+        }
+    }
+
+    /// Returns the context's Reviews board, creating it when the context has none.
+    pub async fn ensure_reviews_board(&self, context_id: ContextId) -> Result<BoardView> {
+        self.require_board_reviews_capability()?;
+        match self
+            .request(RequestBody::EnsureReviewsBoard { context_id })
+            .await?
+        {
+            ResponseBody::Board(value) => Ok(value),
+            response => Err(unexpected("ensure_reviews_board", response)),
         }
     }
 
@@ -139,6 +157,33 @@ impl Client {
         }
     }
 
+    /// Creates a pull request card, or answers the card already tracking that pull request.
+    ///
+    /// `draft.pull_request` must be set; `requested_at` is the RFC 3339 time the review was
+    /// requested. Matched without case, an open card answers `Existing`; a completed or archived
+    /// card is reopened when `requested_at` is later than its last move (its newest
+    /// `Moved`/`AutoMoved` activity, else `updated_at`); a dismissed card, or one whose run is
+    /// still live or starting, never is.
+    pub async fn upsert_pull_request_card(
+        &self,
+        board_id: BoardId,
+        draft: CardDraft,
+        requested_at: Option<String>,
+    ) -> Result<(Card, UpsertOutcome)> {
+        self.require_board_reviews_capability()?;
+        match self
+            .request(RequestBody::UpsertPullRequestCard {
+                board_id,
+                draft,
+                requested_at,
+            })
+            .await?
+        {
+            ResponseBody::CardUpsert { card, outcome } => Ok((card, outcome)),
+            response => Err(unexpected("upsert_pull_request_card", response)),
+        }
+    }
+
     /// Applies a patch to one card.
     pub async fn update_card(&self, card_id: CardId, patch: CardPatch) -> Result<Card> {
         match self
@@ -205,6 +250,14 @@ impl Client {
         {
             ResponseBody::Card(value) => Ok(value),
             response => Err(unexpected("card_run_wait", response)),
+        }
+    }
+
+    fn require_board_reviews_capability(&self) -> Result<()> {
+        if self.supports_capability(BOARD_REVIEWS_CAPABILITY) {
+            Ok(())
+        } else {
+            Err(board_reviews_capability_error())
         }
     }
 

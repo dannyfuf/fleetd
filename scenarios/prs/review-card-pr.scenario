@@ -1,0 +1,44 @@
+# plans/pr-review-boards-2026-09-22-phase-4-plan.md P4-T07 (FEA-24) · UX-SPEC.md §Board ("Card
+# detail") · DESIGN-SYSTEM.md §6 (`CardTile::reference`) · TESTING-HARNESS.md §3 — a review card
+# says which pull request it is about, on the tile and in the detail.
+#
+# The `reviews` preset (§4) puts one card on the context's Reviews board through
+# `UpsertPullRequestCard`, the request a review schedule's run sends, naming `acme/api#1`. It
+# sits in Reviewed, so nothing runs on it and the column is the third one: two `l` from Pending
+# review.
+#
+# Two projections say it:
+#   `board.cards`       a row's badges are the card's key, then the pull request's
+#                       `owner/name#number` — the text the tile's `reference` slot draws.
+#   `card.properties`   the detail's property column, where the `Pull request` row follows
+#                       Worktree and reads `acme/api#1 · open ↗`.
+#
+# `B` (open) and `y` (copy) are not driven here: one launches the developer's browser and the
+# other needs a clipboard no lane has (§1). Both are pinned by the gpui tests in
+# `screens/board/actions.rs`.
+#
+# No `shot`: this is a keyboard scenario, so it runs in the headless lane too (§7).
+fixture: reviews
+await idle 30000
+key g p
+await hub_tab == Prs 15000
+key tab
+await key_contexts[2] == "Board" 20000
+await lists.board.rows[2].label == "Reviewed" 20000
+
+# The card is on the tile with its pull request beside its key.
+key l l
+await lists.board.selected.label == "Reviewed" 10000
+assert lists["board.cards"].rows[0].label == "Review the retry budget"
+assert lists["board.cards"].rows[0].badges[0] == "REV-1" && lists["board.cards"].rows[0].badges[1] == "acme/api#1"
+
+# `⏎` opens the card, and its property column carries the `Pull request` row under Worktree.
+key enter
+await dialog.name == CardDetail 15000
+assert lists["card.properties"].rows[8].label == "Worktree"
+assert lists["card.properties"].rows[9].label == "Pull request" && lists["card.properties"].rows[9].badges[0] == "acme/api#1 · open ↗"
+assert lists["card.properties"].rows[10] absent
+key escape
+await dialog absent 10000
+assert key_contexts[2] == "Board"
+quit

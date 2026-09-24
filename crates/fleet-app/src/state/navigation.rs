@@ -396,15 +396,25 @@ impl AppState {
                     AgentPopupMode::Scroll => "Scroll",
                 },
             ],
-            (None, Screen::Hub { tab }) => vec![
-                "Hub",
-                match (self.hub_pane, tab) {
-                    (_, HubTab::Board) => "Board",
-                    (HubPane::Repos, _) => "Repos",
-                    (HubPane::List, HubTab::Worktrees) => "Worktrees",
-                    (HubPane::List, HubTab::Prs) => "Prs",
-                },
-            ],
+            (None, Screen::Hub { tab }) => {
+                let mut chain = vec![
+                    "Hub",
+                    match (self.hub_pane, tab) {
+                        (_, HubTab::Board) => "Board",
+                        (HubPane::Repos, _) => "Repos",
+                        (HubPane::List, HubTab::Worktrees) => "Worktrees",
+                        (HubPane::List, HubTab::Prs) => "Prs",
+                    },
+                ];
+                // The Review tab draws the context's Reviews board a third word deep, so the
+                // PR screen's own rows stay reachable underneath it (KEYMAP § Review board).
+                if matches!((self.hub_pane, tab), (HubPane::List, HubTab::Prs))
+                    && self.review_board_is_shown()
+                {
+                    chain.push("Board");
+                }
+                chain
+            }
             // An agent tab owns the whole `Agent > …` chain of §9; the terminal sub-modes
             // belong to the tabs that really are terminals.
             (None, Screen::Workspace { .. }) => self.agent_context_chain().unwrap_or_else(|| {
@@ -750,7 +760,8 @@ impl AppState {
     pub fn cancel(&mut self) -> bool {
         if self.overlay.is_none()
             && self.agent_popup.is_none()
-            && matches!(self.screen, Screen::Hub { tab: HubTab::Board })
+            && (matches!(self.screen, Screen::Hub { tab: HubTab::Board })
+                || self.review_board_is_shown())
             && self.board_filter_escape()
         {
             return true;

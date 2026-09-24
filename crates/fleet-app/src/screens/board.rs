@@ -47,6 +47,7 @@ mod lifecycle;
 mod navigation;
 mod projection;
 mod runs;
+mod schedules;
 #[cfg(test)]
 mod tests;
 
@@ -57,6 +58,10 @@ pub(crate) use actions::{
     pick_labels, pick_priority, pick_status, readonly_message, refuses, reload, remote_url,
     settings, sync,
 };
+// The two keys that act on a review card's pull request (BOARD §11.9).
+pub(crate) use actions::{copy_pull_request_url, open_pull_request};
+// `R` — run every enabled schedule of the shown board now (BOARD §11.8).
+pub(crate) use schedules::run_schedules;
 // The three keys that act on a card's run rather than its fields (contracts §5.5).
 pub(crate) use runs::{attach_run, cancel_run, run_now};
 // The refusal `o` answers in the Workspace's board pane, where the card can name the worktree
@@ -68,10 +73,11 @@ pub(crate) use lifecycle::{
     send_card_reporting,
 };
 use lifecycle::{ensure_current, fail, request_worktree, send_card, syncing};
-// The two scope triggers. The Hub reaches `enter_context_scope` through its own observation;
-// the Workspace's board pane calls both, from `sync_board_scope` and `release_board_scope`,
-// and `ctrl-s b` calls the second one before the tab it opens exists.
-pub(crate) use lifecycle::{enter_context_scope, enter_worktree_scope};
+// The scope triggers. The Hub reaches `enter_context_scope` through its own observation, and
+// the PR screen's Review tab reaches `enter_reviews_scope` through its; the Workspace's board
+// pane calls the context and worktree ones, from `sync_board_scope` and `release_board_scope`,
+// and `ctrl-s b` calls `enter_worktree_scope` before the tab it opens exists.
+pub(crate) use lifecycle::{enter_context_scope, enter_reviews_scope, enter_worktree_scope};
 use navigation::{board_id, leave_filter_input, on_click, step_focus};
 pub(crate) use navigation::{
     focus_card, jump_rows, move_rows, next_card, next_column, prev_card, prev_column, selected_card,
@@ -220,7 +226,7 @@ impl BoardScreen {
             filter_input: self.filter_input.clone(),
             focus: (app.board.focus.column, app.board.focus.row),
             syncing: syncing(app),
-            runs: matches!(app.board.scope, Some(BoardScope::Worktree(_))),
+            runs: app.board_runs_cards(),
             drag: &self.drag,
         };
         // The focused card, not only its coordinates: a refresh that inserts a card above it

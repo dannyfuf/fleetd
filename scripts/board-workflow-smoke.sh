@@ -5,7 +5,8 @@
 # What it proves, in one command and with no network: a worktree board given the workflow
 # preset runs a four-card diamond — A blocks B and C, B and C both block D — from Ready to
 # Done by itself, one live run at a time, with every run started, briefed, reported and
-# routed by the daemon rather than by this script.
+# routed by the daemon rather than by this script. The head of the chain is released the way
+# every other card is: moved into Ready with nothing blocking it, it starts at once.
 #
 # Hermetic by construction, because a smoke target that touches the developer's world is a
 # target nobody runs twice:
@@ -233,14 +234,15 @@ d=$(new_card 'Ship the workflow' --blocked-by "$b" --blocked-by "$c")
 say "cards: $a blocks $b and $c; $b and $c block $d"
 
 say "releasing the chain"
-# The dependants wait in Ready, where `advance_when_unblocked` will collect them. The head of
-# the chain is moved into the action column by hand, because nothing else can move it: the
-# engine only ever advances the *dependants* of a card it has just visited, so a card nothing
-# blocks is released by nothing (docs/BOARD.md section 11.7).
+# The dependants go into Ready first. Their blockers still stand in Todo, so they stay there
+# until `advance_when_unblocked` collects each one as its last blocker finishes. The head goes
+# into Ready last: nothing blocks it, so entering Ready advances it to the action column at once
+# (rule 0, docs/BOARD.md section 11.7). Moving it any earlier would start a run before the
+# dependants were in place.
 fleet_board card move "$b" "$READY_COLUMN" >/dev/null
 fleet_board card move "$c" "$READY_COLUMN" >/dev/null
 fleet_board card move "$d" "$READY_COLUMN" >/dev/null
-fleet_board card move "$a" "$ACTION_COLUMN" >/dev/null
+fleet_board card move "$a" "$READY_COLUMN" >/dev/null
 
 # A card's own column, read out of a `--json` envelope.
 #

@@ -154,6 +154,13 @@ pub fn to_remote(
         | ResolveCardConflict { .. }
         | DescribeBoardBackend { .. }
         | ListBoardBackends {}
+        | EnsureReviewsBoard { .. }
+        | UpsertPullRequestCard { .. }
+        | ListSchedules { .. }
+        | CreateSchedule { .. }
+        | UpdateSchedule { .. }
+        | DeleteSchedule { .. }
+        | RunScheduleNow { .. }
         | AppendWatchOutput { .. }
         | FinishWatch { .. }
         | TailWatch { .. }
@@ -244,7 +251,7 @@ pub fn response_to_local(mut body: ResponseBody, host: &HostId, ids: &RemoteIds)
                 );
             }
         }
-        Card(card) => ids.register_card(&card.board_id, card.id.clone()),
+        Card(card) | CardUpsert { card, .. } => ids.register_card(&card.board_id, card.id.clone()),
         CardWorktree { card, worktree, .. } => {
             ids.register_card(&card.board_id, card.id.clone());
             translate_worktree(worktree, host, ids);
@@ -312,6 +319,8 @@ pub fn response_to_local(mut body: ResponseBody, host: &HostId, ids: &RemoteIds)
         | Doctor(_)
         | Pong
         | Version { .. }
+        | Schedules(_)
+        | Schedule(_)
         | ShuttingDown => {}
     }
     body
@@ -360,6 +369,8 @@ pub fn event_to_local(mut event: Event, host: &HostId, ids: &RemoteIds) -> Optio
         Event::AgentResync { thread, .. }
         | Event::AgentSynchronized { thread }
         | Event::AgentWindow { thread } => ids.register_thread(host, *thread),
+        // Schedules run on the daemon that owns them and are never mirrored across hosts.
+        Event::SchedulesChanged { .. } => return None,
         Event::BoardChanged { .. }
         // Delegation events are emitted by the local owner and carry globally unique ids.
         | Event::DelegationChanged(_)
@@ -726,6 +737,13 @@ pub(crate) fn unavailable_fanout_response(
         | RequestBody::ResolveCardConflict { .. }
         | RequestBody::DescribeBoardBackend { .. }
         | RequestBody::ListBoardBackends {}
+        | RequestBody::EnsureReviewsBoard { .. }
+        | RequestBody::UpsertPullRequestCard { .. }
+        | RequestBody::ListSchedules { .. }
+        | RequestBody::CreateSchedule { .. }
+        | RequestBody::UpdateSchedule { .. }
+        | RequestBody::DeleteSchedule { .. }
+        | RequestBody::RunScheduleNow { .. }
         | RequestBody::StartWatch { .. }
         | RequestBody::AppendWatchOutput { .. }
         | RequestBody::FinishWatch { .. }
@@ -1207,6 +1225,7 @@ mod tests {
             id,
             context_id: context("personal"),
             worktree_id: worktree.map(|id| WorktreeId::try_from(id).expect("worktree id")),
+            kind: Default::default(),
             name: "board".to_owned(),
             prefix: "FLT".to_owned(),
             backend_kind: "local".to_owned(),
@@ -1216,6 +1235,7 @@ mod tests {
             conflict_count: 0,
             working_count: 0,
             attention_count: 0,
+            idle_started: 0,
             last_synced_at: None,
             last_error: None,
         }
@@ -1247,6 +1267,7 @@ mod tests {
                 sync: SyncState::default(),
                 created_at: "2026-09-20T12:00:00Z".to_owned(),
                 updated_at: "2026-09-20T12:00:00Z".to_owned(),
+                kind: Default::default(),
             },
             cards: cards
                 .iter()
@@ -1287,6 +1308,7 @@ mod tests {
             runs: Vec::new(),
             created_at: "2026-09-20T12:00:00Z".to_owned(),
             updated_at: "2026-09-20T12:00:00Z".to_owned(),
+            pull_request: None,
         }
     }
 

@@ -705,6 +705,7 @@ mod parsing {
             fields,
             blocked_by,
             blocks,
+            ..
         } = command
         else {
             panic!("expected new")
@@ -1291,11 +1292,19 @@ mod parsing {
         let mut worktree = context.clone();
         worktree.id = "wt-feature".parse().unwrap();
         worktree.worktree_id = Some("acme/api#feature".parse().unwrap());
-        let text = human::boards(&[context, worktree]);
+        let mut reviews = context.clone();
+        reviews.id = "reviews-work".parse().unwrap();
+        reviews.kind = fleet_core::board::BoardKind::Reviews;
+        let text = human::boards(&[context, worktree, reviews]);
         assert!(text.lines().next().unwrap().contains("SCOPE"), "{text}");
         assert!(text.lines().nth(1).unwrap().contains("context"), "{text}");
         assert!(
             text.lines().nth(2).unwrap().contains("acme/api#feature"),
+            "{text}"
+        );
+        let reviews_row = text.lines().nth(3).unwrap();
+        assert!(
+            reviews_row.contains(" reviews ") && !reviews_row.contains(" context "),
             "{text}"
         );
     }
@@ -1798,6 +1807,8 @@ mod parsing {
 }
 
 mod orchestration {
+    mod reviews;
+
     use crate::args::{Cli, Command};
     use crate::commands::board::*;
     use clap::Parser;
@@ -3513,6 +3524,101 @@ mod orchestration {
         .unwrap();
     }
 
+    /// A start the daemon refused is recorded as a run that never began: `card run` prints its
+    /// sentence without the error-kind prefixes, and fails.
+    #[tokio::test]
+    async fn a_refused_start_prints_its_sentence_and_fails() {
+        let view = view_with_runs();
+        let mut card = view.cards[0].clone();
+        let mut refused: fleet_core::board::CardRun = serde_json::from_value(json!({
+            "id": "7a1c0d7e-3f7c-4a53-9a55-0d5c6fd1c0de", "statusId": "in-progress",
+            "action": {"kind": "prompt"}, "provider": "claude",
+            "startedAt": "2026-09-06T12:00:00Z", "endedAt": "2026-09-06T12:00:00Z",
+            "outcome": "failed",
+        }))
+        .unwrap();
+        refused.detail = Some(
+            "validation failed: invalid automation: acme/lib is not a Fleet repository; clone it into this context first"
+                .to_owned(),
+        );
+        card.runs.push(refused);
+        let output = run_with_capabilities(
+            &["card", "run", "FLT-12", "--board", "work"],
+            vec![BOARD_AUTOMATION_CAPABILITY.to_owned()],
+            vec![
+                (get_board(), Ok(ResponseBody::Board(view.clone()))),
+                (
+                    RequestBody::CardRunStart {
+                        card_id: "Card-12".parse().unwrap(),
+                    },
+                    Ok(ResponseBody::Card(card)),
+                ),
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.exit_code, 1, "{}", output.text);
+        assert!(
+            output.text.starts_with(
+                "run 7a1c0d7e-3f7c-4a53-9a55-0d5c6fd1c0de failed: acme/lib is not a Fleet repository; clone it into this context first\n"
+            ),
+            "{}",
+            output.text
+        );
+    }
+
+    /// On a card already holding its twenty runs, a refused start drops the oldest one: the
+    /// list is no longer, but the newest run is new, and its sentence is still the answer.
+    #[tokio::test]
+    async fn a_refused_start_at_the_run_cap_prints_its_sentence_and_fails() {
+        let view = view_with_runs();
+        let run_at = |index: usize, outcome: &str| -> fleet_core::board::CardRun {
+            serde_json::from_value(json!({
+                "id": format!("7a1c0d7e-3f7c-4a53-9a55-{index:012}"), "statusId": "in-progress",
+                "action": {"kind": "prompt"}, "provider": "claude",
+                "startedAt": "2026-09-06T12:00:00Z", "endedAt": "2026-09-06T12:00:00Z",
+                "outcome": outcome,
+            }))
+            .unwrap()
+        };
+        let mut before = view.clone();
+        before.cards[0].runs = (0..fleet_core::board::MAX_RUNS_PER_CARD)
+            .map(|index| run_at(index, "succeeded"))
+            .collect();
+        let mut card = before.cards[0].clone();
+        card.runs.remove(0);
+        let mut refused = run_at(99, "failed");
+        refused.detail = Some(
+            "validation failed: invalid automation: The worktree for acme/api#7 has local changes; commit or discard them before the review runs."
+                .to_owned(),
+        );
+        card.runs.push(refused);
+        assert_eq!(card.runs.len(), before.cards[0].runs.len());
+        let output = run_with_capabilities(
+            &["card", "run", "FLT-12", "--board", "work"],
+            vec![BOARD_AUTOMATION_CAPABILITY.to_owned()],
+            vec![
+                (get_board(), Ok(ResponseBody::Board(before))),
+                (
+                    RequestBody::CardRunStart {
+                        card_id: "Card-12".parse().unwrap(),
+                    },
+                    Ok(ResponseBody::Card(card)),
+                ),
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.exit_code, 1, "{}", output.text);
+        assert!(
+            output.text.starts_with(
+                "run 7a1c0d7e-3f7c-4a53-9a55-000000000099 failed: The worktree for acme/api#7 has local changes; commit or discard them before the review runs.\n"
+            ),
+            "{}",
+            output.text
+        );
+    }
+
     /// The three run verbs that write send one request each and print what the daemon answered;
     /// `wait` carries its timeout in milliseconds and exits 0 only for a run that has ended.
     #[tokio::test]
@@ -3694,12 +3800,12 @@ mod orchestration {
         assert_eq!(
             lines[0],
             format!(
-                "{DONE_RUN}\tIn Progress\tsucceeded\tcodex\tgpt-5.6-sol\thigh\t2m 30s\t1200\t$0.50\t{DONE_THREAD}"
+                "{DONE_RUN}\tIn Progress\tsucceeded\tcodex\tgpt-5.6-sol\thigh\t2m 30s\t1200\t$0.50\t{DONE_THREAD}\t\u{2014}"
             )
         );
         // The live run takes its word from the join, and what nobody reported is an em dash.
         let live: Vec<&str> = lines[1].split('\t').collect();
-        assert_eq!(live.len(), 10);
+        assert_eq!(live.len(), 11);
         assert_eq!(live[0], LIVE_RUN);
         assert_eq!(live[2], "running");
         assert_eq!(&live[4..6], ["\u{2014}", "\u{2014}"]);

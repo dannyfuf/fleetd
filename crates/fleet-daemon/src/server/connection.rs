@@ -20,9 +20,9 @@ use fleet_proto::{
     event::{Event, EventKind},
     request::{HelloClient, Request, RequestBody, agent_request_is_serialized},
     response::{
-        BOARD_AUTOMATION_CAPABILITY, BOARD_WORKTREE_CAPABILITY, DaemonIdentity, HelloResponse,
-        PRUNE_REVIEWED_IDS_CAPABILITY, PongResponse, Response, ResponseBody,
-        SNAPSHOT_REVISION_CAPABILITY, StampedResponse,
+        BOARD_AUTOMATION_CAPABILITY, BOARD_REVIEWS_CAPABILITY, BOARD_WORKTREE_CAPABILITY,
+        DaemonIdentity, HelloResponse, PRUNE_REVIEWED_IDS_CAPABILITY, PongResponse, Response,
+        ResponseBody, SCHEDULES_CAPABILITY, SNAPSHOT_REVISION_CAPABILITY, StampedResponse,
     },
 };
 use futures_util::{SinkExt, StreamExt, stream::FuturesUnordered};
@@ -364,7 +364,10 @@ impl Connection {
                 }
                 event = events.recv() => {
                     match event {
-                        Ok(event) if event_visible(&event, &subscriptions, &attached, &client) => {
+                        Ok(mut event) if event_visible(&event, &subscriptions, &attached, &client) => {
+                            if let Event::SnapshotChanged(snapshot) = &mut event {
+                                hide_reviews_boards_from_peer(&mut snapshot.boards, &client);
+                            }
                             shutdown_announced |= matches!(event, Event::DaemonShuttingDown);
                             if let Event::Agent { thread, event: seq_event } = &event {
                                 agent_cursors.insert(*thread, seq_event.seq);
@@ -899,12 +902,34 @@ fn hide_card_callers_from_peer(
     }
 }
 
+/// Hides Reviews boards from a peer that never named [`BOARD_REVIEWS_CAPABILITY`].
+///
+/// A client from before Reviews boards takes a context's board to be the first unscoped summary
+/// it is sent, and `reviews-<context>` sorts before most context ids: it would show the Reviews
+/// board's counts as the context board's. A new daemon must not change what an old client
+/// computes, so such a peer never learns the Reviews board exists.
+fn hide_reviews_boards_from_peer(
+    boards: &mut Vec<fleet_core::board::BoardSummary>,
+    client: &HelloClient,
+) {
+    if !client.supports(BOARD_REVIEWS_CAPABILITY) {
+        boards.retain(|board| board.kind != fleet_core::board::BoardKind::Reviews);
+    }
+}
+
 async fn enqueue_response(
     outbound: &mpsc::Sender<Outbound>,
     mut response: StampedResponse,
     client: &HelloClient,
 ) -> DaemonResult<()> {
     hide_card_callers_from_peer(&mut response.response.result, client);
+    match &mut response.response.result {
+        Ok(ResponseBody::Snapshot(snapshot)) => {
+            hide_reviews_boards_from_peer(&mut snapshot.boards, client);
+        }
+        Ok(ResponseBody::Boards(boards)) => hide_reviews_boards_from_peer(boards, client),
+        _ => {}
+    }
     let message = if matches!(&response.response.result, Ok(ResponseBody::Pong)) {
         Outbound::Pong(PongResponse {
             response: response.response,
@@ -951,6 +976,8 @@ async fn write_response(
                 .chain(std::iter::once(SNAPSHOT_REVISION_CAPABILITY.to_owned()))
                 .chain(std::iter::once(BOARD_WORKTREE_CAPABILITY.to_owned()))
                 .chain(std::iter::once(BOARD_AUTOMATION_CAPABILITY.to_owned()))
+                .chain(std::iter::once(BOARD_REVIEWS_CAPABILITY.to_owned()))
+                .chain(std::iter::once(SCHEDULES_CAPABILITY.to_owned()))
                 .chain(std::iter::once(
                     fleet_proto::REMOTE_MACHINES_CAPABILITY.to_owned(),
                 ))
@@ -1058,6 +1085,8 @@ mod tests {
                 .chain(std::iter::once(SNAPSHOT_REVISION_CAPABILITY.to_owned()))
                 .chain(std::iter::once(BOARD_WORKTREE_CAPABILITY.to_owned()))
                 .chain(std::iter::once(BOARD_AUTOMATION_CAPABILITY.to_owned()))
+                .chain(std::iter::once(BOARD_REVIEWS_CAPABILITY.to_owned()))
+                .chain(std::iter::once(SCHEDULES_CAPABILITY.to_owned()))
                 .chain(std::iter::once(
                     fleet_proto::REMOTE_MACHINES_CAPABILITY.to_owned(),
                 ))
@@ -1081,6 +1110,8 @@ mod tests {
                 "snapshot.revision",
                 "board.worktree",
                 "board.automation",
+                "board.reviews",
+                "schedules",
                 "remote-machines",
                 "terminal.clipboard",
                 "agent.window",
@@ -1188,6 +1219,37 @@ mod tests {
         let mut fetched = Ok(ResponseBody::Delegation(card_called.clone()));
         hide_card_callers_from_peer(&mut fetched, &delegations_only);
         assert_eq!(fetched, Ok(ResponseBody::Delegation(card_called)));
+    }
+
+    /// An older client is never shown a Reviews board, so its "first unscoped board of the
+    /// context" is still the context's task board; a client that named `board.reviews` sees both.
+    #[test]
+    fn a_peer_without_the_capability_never_sees_a_reviews_board() {
+        let summary = |id: &str, kind: &str| -> fleet_core::board::BoardSummary {
+            let mut value = serde_json::json!({
+                "id": id, "contextId": "work", "name": id, "prefix": "FLT",
+                "backendKind": "local", "cardCount": 0, "openCount": 0, "dirtyCount": 0,
+                "conflictCount": 0, "lastSyncedAt": null, "lastError": null,
+            });
+            if kind == "reviews" {
+                value["kind"] = serde_json::json!("reviews");
+            }
+            serde_json::from_value(value).expect("a board summary")
+        };
+        let boards = vec![summary("reviews-work", "reviews"), summary("work", "tasks")];
+        let old = HelloClient::default();
+        let aware = HelloClient {
+            capabilities: vec![BOARD_REVIEWS_CAPABILITY.to_owned()],
+            ..HelloClient::default()
+        };
+
+        let mut shown = boards.clone();
+        hide_reviews_boards_from_peer(&mut shown, &old);
+        assert_eq!(shown, vec![summary("work", "tasks")]);
+
+        let mut shown = boards.clone();
+        hide_reviews_boards_from_peer(&mut shown, &aware);
+        assert_eq!(shown, boards);
     }
 
     #[test]

@@ -403,6 +403,31 @@ impl RecordedRequests {
             })
             .collect()
     }
+
+    /// Answers the oldest recorded request and returns its body.
+    pub(crate) fn respond_next(&self, response: Result<ResponseBody, ProtoError>) -> RequestBody {
+        self.respond_next_with(|_| response)
+    }
+
+    /// Answers the oldest recorded request from its body and returns that body.
+    pub(crate) fn respond_next_with(
+        &self,
+        response: impl FnOnce(&RequestBody) -> Result<ResponseBody, ProtoError>,
+    ) -> RequestBody {
+        let command = self
+            .0
+            .try_recv()
+            .unwrap_or_else(|_| panic!("expected a recorded request"));
+        let Command::Request { body, reply, .. } = command else {
+            panic!("expected a request command");
+        };
+        let response = response(&body);
+        let reply = reply.unwrap_or_else(|| panic!("expected a request with a reply channel"));
+        reply
+            .try_send(response)
+            .unwrap_or_else(|_| panic!("recorded request receiver should still be live"));
+        *body
+    }
 }
 
 enum Command {

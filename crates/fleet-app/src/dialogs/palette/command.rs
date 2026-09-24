@@ -65,6 +65,14 @@ pub enum Command {
     BoardPickAgent,
     /// Board settings, on its Columns section.
     BoardColumns,
+    /// Board settings, on its Schedules section.
+    BoardSchedules,
+    /// Run every enabled schedule of the board now.
+    BoardRunSchedules,
+    /// Open the review card's pull request in the browser.
+    BoardOpenPullRequest,
+    /// Copy the review card's pull request URL.
+    BoardCopyPullRequestUrl,
     /// Close.
     CardDetailClose,
     /// Edit title.
@@ -171,6 +179,10 @@ impl Command {
         Self::BoardPickBlockedBy,
         Self::BoardPickAgent,
         Self::BoardColumns,
+        Self::BoardSchedules,
+        Self::BoardRunSchedules,
+        Self::BoardOpenPullRequest,
+        Self::BoardCopyPullRequestUrl,
         Self::CardDetailClose,
         Self::CardDetailEditTitle,
         Self::CardDetailEditDescription,
@@ -252,6 +264,10 @@ impl Command {
             Self::BoardPickBlockedBy => Icon::CircleSlash,
             Self::BoardPickAgent => Icon::Bot,
             Self::BoardColumns => Icon::Boxes,
+            Self::BoardSchedules => Icon::Clock,
+            Self::BoardRunSchedules => Icon::Zap,
+            Self::BoardOpenPullRequest => Icon::GitPullRequest,
+            Self::BoardCopyPullRequestUrl => Icon::Copy,
             Self::CardDetailClose => Icon::X,
             Self::CardDetailEditTitle => Icon::FilePen,
             Self::CardDetailEditDescription => Icon::FilePen,
@@ -327,6 +343,10 @@ impl Command {
             Self::BoardPickBlockedBy => "board::PickBlockedBy",
             Self::BoardPickAgent => "board::PickAgent",
             Self::BoardColumns => "board::Columns",
+            Self::BoardSchedules => "board::Schedules",
+            Self::BoardRunSchedules => "board::RunSchedules",
+            Self::BoardOpenPullRequest => "board::OpenPullRequest",
+            Self::BoardCopyPullRequestUrl => "board::CopyPullRequestUrl",
             Self::CardDetailClose => "card_detail::Close",
             Self::CardDetailEditTitle => "card_detail::EditTitle",
             Self::CardDetailEditDescription => "card_detail::EditDescription",
@@ -413,22 +433,31 @@ impl Command {
             Self::BoardPickAssignee => has_card && !state.is_readonly_field("assignee"),
             Self::BoardPickLabels => has_card && !state.is_readonly_field("labels"),
             Self::BoardPickEstimate => has_card && !state.is_readonly_field("estimate"),
-            // Runs exist only on a worktree board: over the Hub's context board the three rows
-            // could only ever answer the daemon's capability refusal (contracts §5.5). The
-            // board pane is the second surface the keys are bound on, and the palette lists a
-            // row exactly where its key would fire.
+            // Runs exist only on a board that runs its cards: over a plain context board the
+            // three rows could only ever answer the daemon's capability refusal (contracts
+            // §5.5). The board pane and the Review board are the other surfaces the keys are
+            // bound on, and the palette lists a row exactly where its key would fire.
             Self::BoardAttachRun | Self::BoardCancelRun | Self::BoardRunNow => {
-                matches!(
-                    state.board.scope,
-                    Some(crate::state::BoardScope::Worktree(_))
-                ) && ((state.board_pane_is_active()
-                    && crate::screens::board::selected_card(state).is_some())
-                    || (card.detail && has_card))
+                state.board_runs_cards()
+                    && (((state.board_pane_is_active() || state.review_board_is_shown())
+                        && crate::screens::board::selected_card(state).is_some())
+                        || (card.detail && has_card))
             }
             // Both edit a field every board has, so they follow the pickers above; `blocked_by`
             // is Fleet's own link and no backend owns it.
             Self::BoardPickBlockedBy | Self::BoardPickAgent => has_card,
             Self::BoardColumns => on_board,
+            // `T` and `R` are bound wherever a board is drawn, the Review board included, and
+            // on a daemon without schedules both could only answer the capability refusal.
+            Self::BoardSchedules | Self::BoardRunSchedules => {
+                (on_board || state.board_pane_is_active() || state.review_board_is_shown())
+                    && state.board().is_some()
+                    && state.board_takes_schedules()
+            }
+            // `B` and `y` are the Review board's and the detail's keys, and a card with no
+            // pull request could only answer "no pull request" (§3.9 lists no row that cannot
+            // run).
+            Self::BoardOpenPullRequest | Self::BoardCopyPullRequestUrl => card.pull_request,
             // A card the backend has not linked, or linked without publishing an address, has
             // no remote issue: the row would open a browser tab at nothing.
             Self::BoardOpenRemote | Self::CardDetailOpenRemote => has_card && card.remote,
@@ -505,6 +534,9 @@ pub(super) struct CardContext {
     mirrored: bool,
     /// The card detail is the dialog the palette was opened over.
     detail: bool,
+    /// The card `B` and `y` would act on records a pull request: the detail's card, or the
+    /// card selected on the Review board, the two surfaces those keys are bound on.
+    pull_request: bool,
 }
 
 /// The places whose commands act on what the surface under the palette is showing, most
@@ -554,7 +586,15 @@ pub(super) fn card_context(
         })
         .flatten()
         .or(selected);
+    let review_card = (!detail && state.review_board_is_shown())
+        .then(|| crate::screens::board::selected_card(state))
+        .flatten();
+    let pull_request = card
+        .filter(|_| detail)
+        .or(review_card)
+        .is_some_and(|card| card.pull_request.is_some());
     CardContext {
+        pull_request,
         present: card.is_some(),
         conflicted: card.is_some_and(|card| card.conflict.is_some()),
         worktree: card.is_some_and(|card| card.worktree_id.is_some()),

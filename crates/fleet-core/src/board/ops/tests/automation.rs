@@ -27,6 +27,7 @@ fn ended(card: &mut Card, outcome: RunOutcome, ended_at: &str) {
         files_changed: 0,
         cost_usd: None,
         tokens: None,
+        worktree_id: None,
     });
 }
 
@@ -138,6 +139,8 @@ fn a_succeeded_run_never_wants_a_human() {
 fn a_pending_run_wants_a_human_only_once_it_has_waited_a_minute() {
     let mut board = board();
     let mut card = create(&mut board, &[], "a");
+    // Parked in its own column: a queued card never raises attention.
+    card.status_id = "in-progress".parse().unwrap();
     card.pending_run = Some(PendingRun {
         status_id: "in-progress".parse().unwrap(),
         since: NOW.into(),

@@ -4,7 +4,7 @@ use crate::{DaemonError, DaemonResult, adapters::files::Files};
 use fleet_core::{
     board::{
         BOARD_DOCUMENT_MIN_VERSION, BOARD_DOCUMENT_VERSION, BoardDocument, document_version,
-        validate_board, validate_card,
+        validate_board, validate_card, validate_pull_requests,
     },
     ids::BoardId,
     paths::FleetHome,
@@ -288,6 +288,7 @@ fn validate_document(doc: &BoardDocument) -> DaemonResult<()> {
             ));
         }
     }
+    validate_pull_requests(&doc.board, &doc.cards)?;
     Ok(())
 }
 
@@ -299,7 +300,7 @@ mod tests {
         testing::fakes::{FakeFiles, FakeFilesCall},
     };
     use fleet_core::{
-        board::{ColumnAutomation, new_board},
+        board::{BoardKind, ColumnAutomation, RunLocation, new_board},
         model::Context,
     };
 
@@ -364,6 +365,36 @@ mod tests {
         assert!(store.load(&doc.board.id).is_err());
         assert_eq!(std::fs::read_dir(home.boards_dir()).unwrap().count(), 2);
         assert!(store.save(&invalid).is_err());
+    }
+    #[test]
+    fn persisted_pull_request_with_a_mismatched_url_is_invalid() {
+        let (_temp, home, store, mut doc) = fixture();
+        let mut card: fleet_core::board::Card = serde_json::from_value(serde_json::json!({
+            "id": "card-1",
+            "boardId": doc.board.id,
+            "number": 1,
+            "title": "Review acme/api#7",
+            "statusId": "todo",
+            "pullRequest": {
+                "repo": "acme/api",
+                "number": 7,
+                "url": "https://github.com/acme/api/pull/8"
+            },
+            "createdAt": "now",
+            "updatedAt": "now"
+        }))
+        .unwrap();
+        card.board_id = doc.board.id.clone();
+        doc.cards.push(card);
+        std::fs::create_dir_all(home.boards_dir()).unwrap();
+        std::fs::write(
+            home.board_path(&doc.board.id),
+            serde_json::to_string(&doc).unwrap(),
+        )
+        .unwrap();
+
+        assert!(store.peek(&doc.board.id).is_err());
+        assert!(store.save(&doc).is_err());
     }
     #[test]
     fn peek_reports_a_damaged_document_without_moving_it() {
@@ -462,8 +493,26 @@ mod tests {
         assert_eq!(written["version"], 2);
         assert_eq!(
             store.load(&doc.board.id).unwrap().map(|doc| doc.version),
-            Some(BOARD_DOCUMENT_VERSION)
+            Some(2)
         );
+    }
+
+    #[test]
+    fn a_reviews_board_saves_and_loads_at_version_3() {
+        let (_temp, home, store, mut doc) = fixture();
+        doc.board.kind = BoardKind::Reviews;
+        doc.board.settings.run_location = RunLocation::CardWorktree;
+
+        store.save(&doc).unwrap();
+
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(home.board_path(&doc.board.id)).unwrap())
+                .unwrap();
+        assert_eq!(written["version"], 3);
+        assert_eq!(written["board"]["kind"], "reviews");
+        let loaded = store.load(&doc.board.id).unwrap().unwrap();
+        assert_eq!(loaded.version, BOARD_DOCUMENT_VERSION);
+        assert_eq!(loaded.board, doc.board);
     }
 
     #[test]
@@ -498,7 +547,7 @@ mod tests {
         assert_eq!(
             store.load(&doc.board.id).unwrap_err().to_string(),
             format!(
-                "unsupported: board {} uses document version 3 (this build reads 1..=2)",
+                "unsupported: board {} uses document version 4 (this build reads 1..=3)",
                 doc.board.id
             )
         );

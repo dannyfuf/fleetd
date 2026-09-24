@@ -16,13 +16,15 @@ const TO_FIRST: isize = -1024;
 /// A click on the rail: the section `⇥` would reach after this many presses.
 pub(super) fn select_section(
     state: &Entity<AppState>,
+    bridge: &Bridge,
     index: usize,
     focus: &FocusHandle,
     window: &mut Window,
     cx: &mut App,
 ) {
     let current = read_host(state, cx, |host, _| {
-        BoardSection::ALL
+        host.board_settings
+            .sections()
             .iter()
             .position(|section| *section == host.board_settings.section)
             .unwrap_or(0)
@@ -31,8 +33,11 @@ pub(super) fn select_section(
     if delta == 0 {
         return;
     }
-    cycle_section(state, delta, cx);
+    if !cycle_section(state, delta, cx) {
+        return;
+    }
     materialize_input(state, Some(window), Some(focus), cx);
+    load_board_schedules(state, bridge, cx);
 }
 
 /// A click on row `row` of the open pane: the cursor moves there, as `j` / `k` would move it.
@@ -56,6 +61,10 @@ pub(super) fn select_row(
         draft.editing = false;
         draft.discard_armed = false;
         if draft.pending_delete.is_none() {
+            draft.notice = None;
+        }
+        // A schedule's armed delete belongs to the row it was asked on (§3.13).
+        if draft.schedules.pending_delete.take().is_some() {
             draft.notice = None;
         }
         true

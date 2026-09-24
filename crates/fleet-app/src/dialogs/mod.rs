@@ -29,9 +29,15 @@ use crate::{bridge::Bridge, state::AppState};
 /// Clamped cursor stepping, named so it does not collide with the per-dialog `move_cursor`
 /// helpers that step a whole draft.
 pub(crate) use crate::state::move_cursor as step;
+#[cfg(test)]
+pub(crate) use board_settings::schedules_form_probe;
 /// `C` opens the board settings on one named section (contracts §5.4); `,` opens the dialog on
 /// the section this app session last used.
-pub(crate) use board_settings::{BoardSection, open_on_section as open_board_section};
+pub(crate) use board_settings::{
+    BoardSection, SCHEDULES_UNSUPPORTED, automation_locked, load_schedules,
+    open_on_section as open_board_section, open_schedules_section, refresh_stale_schedules,
+    skipped_run_notice,
+};
 pub use confirm::ConfirmRequest;
 pub(crate) use confirm::MoveTarget;
 pub use host::{ActiveDialog, request_confirm, request_edit_hooks};
@@ -253,7 +259,10 @@ pub(crate) fn seed(dialog: &Dialogs, state: &Entity<AppState>, bridge: &Bridge, 
     }
     with_host(state, cx, |host| host.open = Some(dialog.clone()));
     match dialog {
-        Dialogs::BoardSettings => board_settings::seed(state, cx),
+        Dialogs::BoardSettings => {
+            board_settings::seed(state, cx);
+            board_settings::load_board_schedules(state, bridge, cx);
+        }
         Dialogs::CardPicker => card_picker::seed(state, cx),
         Dialogs::CardCreate => card_create::seed(state, cx),
         Dialogs::CardDetail => card_detail::seed(state, cx),

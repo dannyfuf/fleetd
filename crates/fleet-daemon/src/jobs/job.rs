@@ -102,6 +102,7 @@ impl JobCtx {
                     if let Err(error) = context.progress(line) {
                         tracing::warn!(%error, job = %context.id, "failed to record child progress");
                     }
+                    Box::pin(async {})
                 }),
             )
             .await

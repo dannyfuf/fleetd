@@ -2,7 +2,9 @@
 
 use std::{
     collections::BTreeMap,
+    future::Future,
     path::{Path, PathBuf},
+    pin::Pin,
     process::Stdio,
     sync::Arc,
     time::Duration,
@@ -20,6 +22,9 @@ use tokio_util::sync::CancellationToken;
 use crate::{DaemonError, DaemonResult};
 
 const STREAM_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+/// Maximum encoded size of one streamed line, including its truncation marker.
+pub(crate) const STREAM_LINE_MAX_BYTES: usize = 64 * 1024;
+pub(crate) const STREAM_LINE_TRUNCATION_MARKER: &str = " [fleet: line truncated]";
 
 /// A fully specified process invocation without shell interpolation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,8 +37,16 @@ pub struct ShellCommand {
     pub cwd: Option<PathBuf>,
     /// Environment additions or replacements.
     pub env: BTreeMap<String, String>,
+    /// Whether the child starts from an empty environment, so `env` is its whole environment
+    /// rather than additions to the daemon's own: what a caller that has already filtered a
+    /// complete environment (a scheduled agent run, BOARD §12.3) needs.
+    pub clear_env: bool,
     /// Optional execution timeout.
     pub timeout: Option<Duration>,
+    /// Whether a streaming child's whole process group is killed as soon as the child itself
+    /// exits: what a scheduled agent run needs, whose descendants (MCP servers, tool shells)
+    /// must not outlive it (BOARD §12.3).
+    pub kill_group_on_exit: bool,
 }
 
 impl ShellCommand {
@@ -45,7 +58,9 @@ impl ShellCommand {
             args: Vec::new(),
             cwd: None,
             env: BTreeMap::new(),
+            clear_env: false,
             timeout: None,
+            kill_group_on_exit: false,
         }
     }
 
@@ -77,10 +92,24 @@ impl ShellCommand {
         self
     }
 
+    /// Starts the child from an empty environment: `env` becomes the whole of it.
+    #[must_use]
+    pub fn clear_env(mut self) -> Self {
+        self.clear_env = true;
+        self
+    }
+
     /// Sets the process deadline.
     #[must_use]
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
+        self
+    }
+
+    /// Kills a streaming child's process group the moment the child exits.
+    #[must_use]
+    pub fn kill_group_on_exit(mut self) -> Self {
+        self.kill_group_on_exit = true;
         self
     }
 }
@@ -124,8 +153,14 @@ pub struct DetachedProcess {
     pub pid: u32,
 }
 
-/// Callback receiving complete stdout and stderr lines from a streaming child.
-pub type LineCallback = Arc<dyn Fn(String) + Send + Sync>;
+/// Future returned by a streaming line callback.
+pub type LineCallbackFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+/// Callback receiving complete, lossily decoded stdout and stderr lines from a streaming child.
+///
+/// The future lets a bounded consumer apply backpressure without blocking a Tokio worker. Stream
+/// drain tasks remain abortable while they wait for the consumer.
+pub type LineCallback = Arc<dyn Fn(String) -> LineCallbackFuture + Send + Sync>;
 
 /// External process boundary used by all command-line adapters.
 #[async_trait]
@@ -140,7 +175,7 @@ pub trait Shell: Send + Sync {
         log_path: &Path,
     ) -> DaemonResult<DetachedProcess>;
 
-    /// Runs a child while streaming lines and honoring explicit cancellation.
+    /// Runs a child while streaming lossily decoded lines and honoring explicit cancellation.
     async fn run_streaming(
         &self,
         command: ShellCommand,
@@ -245,7 +280,10 @@ impl Shell for RealShell {
             .stderr(Stdio::piped());
         let mut child = process
             .spawn()
-            .map_err(|error| DaemonError::Shell(format!("{description}: {error}")))?;
+            .map_err(|error| {
+                tracing::debug!(command = %description, %error, "streaming shell command failed to spawn");
+                DaemonError::Shell(format!("{}: {error}", subcommand(&command)))
+            })?;
         let stdout = child
             .stdout
             .take()
@@ -254,9 +292,13 @@ impl Shell for RealShell {
             .stderr
             .take()
             .ok_or_else(|| DaemonError::Shell("streaming child stderr unavailable".to_owned()))?;
-        let pid = child
-            .id()
-            .ok_or_else(|| DaemonError::Shell(format!("{description}: child has no pid")))?;
+        let pid = child.id().ok_or_else(|| {
+            tracing::debug!(command = %description, "streaming shell child has no pid");
+            DaemonError::Shell(format!("{}: child has no pid", subcommand(&command)))
+        })?;
+        // `kill_on_drop` reaches the leader only; the group guard takes its descendants too when
+        // this future is dropped mid-run, as it is when the daemon shuts down.
+        let mut group = GroupGuard::new(pid);
         let mut drains = JoinSet::new();
         let stdout_callback = Arc::clone(&on_line);
         drains.spawn(async move { ("stdout", stream_lines(stdout, stdout_callback).await) });
@@ -274,12 +316,33 @@ impl Shell for RealShell {
             status = child.wait() => StreamingCompletion::Exited(status),
             () = &mut deadline => StreamingCompletion::TimedOut,
         };
+        // From here the group is either reaped (the leader exited) or killed below, and its id
+        // may be reused by an unrelated process once it is gone.
+        group.disarm();
 
+        // Errors name the program and its subcommands only: the arguments of an agent run carry
+        // the whole prompt, which must not become a run's summary or a log line.
+        let label = subcommand(&command);
         match completion {
             StreamingCompletion::Exited(status) => {
-                let status = status
-                    .map_err(|error| DaemonError::Shell(format!("{description}: {error}")))?;
-                finish_streams(&mut drains, &description).await?;
+                let status =
+                    status.map_err(|error| DaemonError::Shell(format!("{label}: {error}")))?;
+                // The leader is reaped, but a group whose members remain keeps its id, so the
+                // negative id still names only them.
+                if command.kill_group_on_exit {
+                    kill_group(pid);
+                }
+                match finish_streams(&mut drains, &label).await {
+                    Ok(()) => {}
+                    // The child's own output is complete; what holds the pipes open is a
+                    // descendant it left behind, and that must not turn a finished command into
+                    // a failed one, nor stay running.
+                    Err(DaemonError::Timeout(_)) => {
+                        tracing::warn!(command = %label, "a finished command's descendants kept its output open; killing them");
+                        kill_group(pid);
+                    }
+                    Err(error) => return Err(error),
+                }
                 Ok(ShellResult {
                     status: status.code().unwrap_or(-1),
                     stdout: String::new(),
@@ -287,15 +350,70 @@ impl Shell for RealShell {
                 })
             }
             StreamingCompletion::Cancelled => {
-                terminate_process_group(&mut child, pid, &description).await?;
-                let _ignored = finish_streams(&mut drains, &description).await;
+                terminate_process_group(&mut child, pid, &label).await?;
+                let _ignored = finish_streams(&mut drains, &label).await;
                 Err(DaemonError::Cancelled)
             }
             StreamingCompletion::TimedOut => {
-                terminate_process_group(&mut child, pid, &description).await?;
-                let _ignored = finish_streams(&mut drains, &description).await;
-                Err(DaemonError::Timeout(subcommand(&command)))
+                terminate_process_group(&mut child, pid, &label).await?;
+                let _ignored = finish_streams(&mut drains, &label).await;
+                Err(DaemonError::Timeout(label))
             }
+        }
+    }
+}
+
+/// Kills a streaming child's whole process group when the future running it is dropped before
+/// the child finished.
+///
+/// A scheduled agent (`claude -p`) starts MCP servers and tool shells in its group; without this
+/// a daemon shutdown killed the leader through `kill_on_drop` and left the rest orphaned.
+struct GroupGuard {
+    group: Option<i32>,
+}
+
+impl GroupGuard {
+    fn new(pid: u32) -> Self {
+        Self {
+            group: i32::try_from(pid).ok(),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.group = None;
+    }
+}
+
+impl Drop for GroupGuard {
+    fn drop(&mut self) {
+        if let Some(group) = self.group {
+            // SAFETY: the child was placed in a process group whose id equals its pid and has not
+            // been reaped (the guard is disarmed first), so the negative id names that group.
+            let killed = unsafe { libc::kill(-group, libc::SIGKILL) };
+            if killed != 0 {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::ESRCH) {
+                    tracing::warn!(group, %error, "could not kill a dropped child's process group");
+                }
+            }
+        }
+    }
+}
+
+/// Kills what is left of an exited streaming child's process group; a group already empty is
+/// not an error.
+fn kill_group(pid: u32) {
+    let Ok(group) = i32::try_from(pid) else {
+        return;
+    };
+    // SAFETY: the child was placed in a process group whose id equals its pid. Its leader is
+    // reaped, but the id cannot be reused while any member of the group remains, so the negative
+    // id names only those members, or nothing (`ESRCH`).
+    let killed = unsafe { libc::kill(-group, libc::SIGKILL) };
+    if killed != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            tracing::warn!(group, %error, "could not kill an exited child's process group");
         }
     }
 }
@@ -350,15 +468,16 @@ async fn finish_streams(
         Ok(result) => result,
         Err(_) => {
             drains.abort_all();
-            Err(DaemonError::Shell(format!(
-                "{description}: stream drain timed out"
-            )))
+            Err(DaemonError::Timeout(format!("{description}: stream drain")))
         }
     }
 }
 
 fn build_command(command: &ShellCommand) -> Command {
     let mut process = Command::new(&command.program);
+    if command.clear_env {
+        process.env_clear();
+    }
     process.args(&command.args).envs(&command.env);
     if let Some(cwd) = &command.cwd {
         process.current_dir(cwd);
@@ -397,11 +516,56 @@ async fn stream_lines<R>(reader: R, on_line: LineCallback) -> std::io::Result<()
 where
     R: tokio::io::AsyncRead + Unpin,
 {
-    let mut lines = BufReader::new(reader).lines();
-    while let Some(line) = lines.next_line().await? {
-        on_line(line);
+    let mut reader = BufReader::new(reader);
+    let mut line = Vec::with_capacity(STREAM_LINE_MAX_BYTES);
+    let mut truncated = false;
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            if !line.is_empty() || truncated {
+                on_line(finish_stream_line(&mut line, truncated)).await;
+            }
+            break;
+        }
+
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let consumed = newline.map_or(available.len(), |position| position + 1);
+        let content = &available[..newline.unwrap_or(available.len())];
+        if !truncated {
+            let remaining = STREAM_LINE_MAX_BYTES.saturating_sub(line.len());
+            line.extend_from_slice(&content[..content.len().min(remaining)]);
+            truncated = content.len() > remaining;
+        }
+        reader.consume(consumed);
+
+        if newline.is_some() {
+            on_line(finish_stream_line(&mut line, truncated)).await;
+            truncated = false;
+        }
     }
     Ok(())
+}
+
+fn finish_stream_line(buffer: &mut Vec<u8>, truncated: bool) -> String {
+    while buffer.last() == Some(&b'\r') {
+        buffer.pop();
+    }
+    let mut line = String::from_utf8_lossy(buffer).into_owned();
+    buffer.clear();
+    cap_stream_line(&mut line, truncated);
+    line
+}
+
+pub(crate) fn cap_stream_line(line: &mut String, force_marker: bool) {
+    if force_marker || line.len() > STREAM_LINE_MAX_BYTES {
+        let limit = STREAM_LINE_MAX_BYTES - STREAM_LINE_TRUNCATION_MARKER.len();
+        let mut boundary = limit.min(line.len());
+        while !line.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        line.truncate(boundary);
+        line.push_str(STREAM_LINE_TRUNCATION_MARKER);
+    }
 }
 
 fn concise_output<'a>(stderr: &'a str, stdout: &'a str) -> &'a str {
@@ -458,6 +622,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_streaming_spawn_failure_keeps_the_os_error_and_hides_long_arguments() {
+        let secret = "private prompt ".repeat(80);
+        let error = RealShell
+            .run_streaming(
+                ShellCommand::new("fleet-no-such-streaming-program").args([
+                    "-p".to_owned(),
+                    "--".to_owned(),
+                    secret.clone(),
+                ]),
+                CancellationToken::new(),
+                Arc::new(|_| Box::pin(async {})),
+            )
+            .await
+            .expect_err("a program that is not on PATH cannot stream");
+        let message = error.to_string();
+        assert!(message.contains("No such file or directory"), "{message}");
+        assert!(!message.contains(&secret), "{message}");
+    }
+
+    #[tokio::test]
     async fn verbose_child_cannot_deadlock() {
         let lines = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed = Arc::clone(&lines);
@@ -468,6 +652,7 @@ mod tests {
                 CancellationToken::new(),
                 Arc::new(move |_| {
                     observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    Box::pin(async {})
                 }),
             ),
         )
@@ -476,6 +661,61 @@ mod tests {
         .expect("verbose command succeeds");
         assert!(result.success());
         assert_eq!(lines.load(std::sync::atomic::Ordering::Relaxed), 20_000);
+    }
+
+    #[tokio::test]
+    async fn streaming_replaces_invalid_utf8_and_delivers_later_lines() {
+        let lines = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = Arc::clone(&lines);
+        let result = RealShell
+            .run_streaming(
+                ShellCommand::new("sh").args(["-c", "printf 'ok\\n\\377\\nafter\\n'"]),
+                CancellationToken::new(),
+                Arc::new(move |line| {
+                    observed
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(line);
+                    Box::pin(async {})
+                }),
+            )
+            .await
+            .expect("invalid UTF-8 is lossy, not fatal");
+
+        assert!(result.success());
+        assert_eq!(
+            *lines
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            ["ok", "�", "after"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_newline_free_stream_is_capped_without_buffering_the_remainder() {
+        let input = vec![b'x'; STREAM_LINE_MAX_BYTES * 3];
+        let lines = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = Arc::clone(&lines);
+
+        stream_lines(
+            input.as_slice(),
+            Arc::new(move |line| {
+                observed
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(line);
+                Box::pin(async {})
+            }),
+        )
+        .await
+        .expect("the oversized line is drained");
+
+        let lines = lines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].len(), STREAM_LINE_MAX_BYTES);
+        assert!(lines[0].ends_with(STREAM_LINE_TRUNCATION_MARKER));
     }
 
     #[tokio::test]
@@ -492,6 +732,7 @@ mod tests {
                         if let Ok(pid) = line.parse() {
                             let _ignored = pid_sender.send(pid);
                         }
+                        Box::pin(async {})
                     }),
                 )
                 .await
@@ -520,9 +761,90 @@ mod tests {
         );
     }
 
+    /// A daemon shutdown drops the run's future rather than cancelling it; the child's whole
+    /// group must still go, not only its leader.
+    #[tokio::test]
+    async fn dropping_a_streaming_run_kills_its_descendants() {
+        let (pid_sender, mut pid_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(async move {
+            RealShell
+                .run_streaming(
+                    ShellCommand::new("sh").args(["-c", "sleep 30 & echo $!; wait"]),
+                    CancellationToken::new(),
+                    Arc::new(move |line| {
+                        if let Ok(pid) = line.parse() {
+                            let _ignored = pid_sender.send(pid);
+                        }
+                        Box::pin(async {})
+                    }),
+                )
+                .await
+        });
+        let descendant = tokio::time::timeout(Duration::from_secs(2), pid_receiver.recv())
+            .await
+            .expect("descendant pid is reported")
+            .expect("pid channel remains open");
+
+        task.abort();
+        let aborted = task.await.expect_err("the run was dropped mid-flight");
+        assert!(aborted.is_cancelled());
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while crate::adapters::process::pid_is_alive(descendant)
+            && tokio::time::Instant::now() < deadline
+        {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !crate::adapters::process::pid_is_alive(descendant),
+            "descendant survived its dropped run"
+        );
+    }
+
+    /// A descendant still holding the inherited output does not fail a command that finished,
+    /// and does not outlive it.
+    #[tokio::test]
+    async fn a_descendant_holding_the_output_does_not_fail_a_finished_command() {
+        for kill_on_exit in [false, true] {
+            let (pid_sender, mut pid_receiver) = tokio::sync::mpsc::unbounded_channel();
+            let mut command = ShellCommand::new("sh").args(["-c", "sleep 30 & echo $!"]);
+            if kill_on_exit {
+                command = command.kill_group_on_exit();
+            }
+            let result = tokio::time::timeout(
+                Duration::from_secs(5),
+                RealShell.run_streaming(
+                    command,
+                    CancellationToken::new(),
+                    Arc::new(move |line| {
+                        if let Ok(pid) = line.parse::<u32>() {
+                            let _ignored = pid_sender.send(pid);
+                        }
+                        Box::pin(async {})
+                    }),
+                ),
+            )
+            .await
+            .expect("the drain is bounded")
+            .expect("a finished command succeeds");
+            assert!(result.success());
+            let descendant = pid_receiver.try_recv().expect("descendant pid is reported");
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            while crate::adapters::process::pid_is_alive(descendant)
+                && tokio::time::Instant::now() < deadline
+            {
+                tokio::task::yield_now().await;
+            }
+            assert!(
+                !crate::adapters::process::pid_is_alive(descendant),
+                "descendant survived its finished command (kill on exit: {kill_on_exit})"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn stream_read_failure_fails_command() {
-        let error = stream_lines(BrokenReader::default(), Arc::new(|_| {}))
+        let error = stream_lines(BrokenReader::default(), Arc::new(|_| Box::pin(async {})))
             .await
             .expect_err("read failure must propagate");
         assert_eq!(error.kind(), std::io::ErrorKind::Other);
@@ -573,5 +895,21 @@ mod tests {
             marker.exists(),
             "detached child was killed with its runtime"
         );
+    }
+
+    #[tokio::test]
+    async fn a_cleared_environment_is_exactly_the_one_given() {
+        let command = ShellCommand::new("/bin/sh")
+            .args([
+                "-c",
+                "printf '%s|%s' \"${HOME:-unset}\" \"${FLEET_ONLY:-unset}\"",
+            ])
+            .env("FLEET_ONLY", "kept")
+            .clear_env();
+        let result = RealShell
+            .run(command)
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(result.stdout, "unset|kept");
     }
 }

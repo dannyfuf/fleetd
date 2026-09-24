@@ -445,6 +445,14 @@ fn watch(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
         ) {
             card_detail::refresh(&state, cx);
         }
+        // The schedules mirror moves under an open Board settings; its list is re-prepared
+        // here, never in render.
+        if matches!(
+            state.read(cx).overlay,
+            Some(Overlay::Dialog(Dialogs::BoardSettings))
+        ) {
+            board_settings::sync_open_list(&state, cx);
+        }
         if matches!(
             state.read(cx).overlay,
             Some(Overlay::Dialog(Dialogs::ChangesDiff))

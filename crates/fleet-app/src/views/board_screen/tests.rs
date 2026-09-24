@@ -527,3 +527,48 @@ fn the_board_records_no_target_with_the_harness_off(cx: &mut gpui::TestAppContex
         "the paint path must record nothing while recording is off"
     );
 }
+
+#[test]
+fn only_a_card_with_a_pull_request_carries_a_reference() {
+    let mut view = view();
+    view.cards[1].pull_request = Some(fleet_core::board::PullRequestRef {
+        repo: fleet_core::ids::RepoId::try_from("acme/api")
+            .unwrap_or_else(|error| panic!("{error}")),
+        number: 123,
+        url: "https://github.com/acme/api/pull/123".into(),
+    });
+    let model = build(&view, "", None, 0, &BoardMarks::default());
+    let references: Vec<(String, Option<String>)> = model
+        .columns
+        .iter()
+        .flat_map(|column| column.rows.iter())
+        .map(|row| {
+            (
+                row.title.to_string(),
+                row.reference.as_ref().map(ToString::to_string),
+            )
+        })
+        .collect();
+    assert!(references.contains(&("Ship the board".to_owned(), Some("acme/api#123".to_owned()))));
+    assert_eq!(
+        references
+            .iter()
+            .filter(|(_, reference)| reference.is_some())
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn the_model_carries_the_schedules_strip_it_is_handed() {
+    let model = build(&view(), "", None, 0, &BoardMarks::default());
+    assert_eq!(model.schedules, None);
+    let strip = ScheduleStrip {
+        label: "\u{27f3} GitHub reviews".into(),
+        failed: false,
+    };
+    assert_eq!(
+        model.with_schedules(Some(strip.clone())).schedules,
+        Some(strip)
+    );
+}

@@ -667,7 +667,8 @@ pub mod settings {
 /// Actions the Board settings dialog adds to the shared settings vocabulary (contracts §5.4).
 ///
 /// The rail, the cursor and the cyclers are `settings`'s — the two dialogs answer the same keys
-/// on purpose — and only the save and the four Columns-list verbs are this dialog's own.
+/// on purpose — and only the save, the Columns-list verbs and the Schedules list's run-now are
+/// this dialog's own.
 pub mod board_settings {
     use gpui::actions;
 
@@ -686,6 +687,8 @@ pub mod board_settings {
             MoveColumnUp,
             /// `P` — add the workflow preset's missing columns.
             ApplyPreset,
+            /// `r` — run the focused schedule now (Schedules section).
+            RunScheduleNow,
         ]
     );
 }
@@ -834,6 +837,14 @@ pub mod board {
             PickAgent,
             /// `C` — open board settings on its Columns section.
             Columns,
+            /// `B` — open the review card's pull request in the browser.
+            OpenPullRequest,
+            /// `y` — copy the review card's pull request URL.
+            CopyPullRequestUrl,
+            /// `T` — open board settings on its Schedules section.
+            Schedules,
+            /// `R` — run every enabled schedule of the board now.
+            RunSchedules,
         ]
     );
 }

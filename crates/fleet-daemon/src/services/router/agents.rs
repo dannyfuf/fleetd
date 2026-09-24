@@ -449,6 +449,7 @@ pub fn register_thread_events(
         | Event::AgentWindow { .. }
         | Event::DelegationChanged(_)
         | Event::BoardChanged { .. }
+        | Event::SchedulesChanged { .. }
         | Event::WatchStarted(_)
         | Event::WatchOutput { .. }
         | Event::WatchExited(_)

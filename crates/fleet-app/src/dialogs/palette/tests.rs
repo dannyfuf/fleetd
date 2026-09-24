@@ -757,6 +757,58 @@ fn the_run_rows_are_offered_over_a_worktree_board_only() {
     assert!(!Command::BoardRunNow.valid(&state));
 }
 
+/// APP-CONTRACTS: every BOARD §8 command has a palette row. `T` and `R` need a board on a
+/// daemon that serves schedules; `B` and `y` need a card that records a pull request, on the
+/// Review board or behind the detail — the surfaces those keys are bound on.
+#[test]
+fn the_schedule_and_pull_request_rows_follow_where_their_keys_fire() {
+    let mut state = board_with_one_card();
+    assert!(
+        !Command::BoardSchedules.valid(&state),
+        "no `schedules` capability"
+    );
+    assert!(!Command::BoardRunSchedules.valid(&state));
+    state
+        .daemon_capabilities
+        .insert(fleet_proto::response::SCHEDULES_CAPABILITY.to_owned());
+    assert!(Command::BoardSchedules.valid(&state));
+    assert!(Command::BoardRunSchedules.valid(&state));
+    let elsewhere = AppState::new("/tmp/fleet-palette-no-board", Instant::now());
+    assert!(!Command::BoardSchedules.valid(&elsewhere));
+
+    // A card with no pull request: the rows could only say so.
+    let over_detail = card_context(&state, Some(Dialogs::CardDetail), None);
+    assert!(!Command::BoardOpenPullRequest.valid_with(&state, over_detail));
+    let card = state
+        .board
+        .view
+        .as_mut()
+        .and_then(|view| view.cards.first_mut())
+        .unwrap_or_else(|| panic!("a card"));
+    card.pull_request = Some(fleet_core::board::PullRequestRef {
+        repo: "acme/api".parse().unwrap_or_else(|error| panic!("{error}")),
+        number: 7,
+        url: "https://github.com/acme/api/pull/7".into(),
+    });
+    let over_detail = card_context(&state, Some(Dialogs::CardDetail), None);
+    assert!(Command::BoardOpenPullRequest.valid_with(&state, over_detail));
+    assert!(Command::BoardCopyPullRequestUrl.valid_with(&state, over_detail));
+    // The Hub's board tab binds neither key.
+    assert!(!Command::BoardOpenPullRequest.valid(&state));
+
+    state
+        .daemon_capabilities
+        .insert(fleet_proto::response::BOARD_REVIEWS_CAPABILITY.to_owned());
+    state.screen = Screen::Hub { tab: HubTab::Prs };
+    state.pr_tab = fleet_core::github::PrTab::Review;
+    assert!(Command::BoardOpenPullRequest.valid(&state));
+    assert!(Command::BoardCopyPullRequestUrl.valid(&state));
+    assert!(
+        Command::BoardSchedules.valid(&state),
+        "the Review board binds `T`"
+    );
+}
+
 /// The other three rows of §5.5 follow the pickers and the settings row beside them.
 #[test]
 fn the_link_agent_and_columns_rows_follow_the_board_they_edit() {

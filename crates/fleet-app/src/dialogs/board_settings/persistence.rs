@@ -1,5 +1,16 @@
 use super::*;
 
+/// Whether the board's columns may not carry automation (§5.4).
+///
+/// A board runs in its own worktree or in each card's. A context board that runs in its own
+/// has no checkout to run in, and a linked board's columns answer to its backend. Both keep
+/// every other row. The harness projection reads the same predicate, so its `disabled` marks
+/// state what the dialog draws.
+pub(crate) fn automation_locked(board: &Board) -> bool {
+    (board.worktree_id.is_none() && board.settings.run_location.is_board_worktree())
+        || board.backend.kind != BackendRef::LOCAL
+}
+
 /// Loads the open board into the draft, including its backend's own settings rows.
 pub(crate) fn seed(state: &Entity<AppState>, cx: &mut App) {
     let app = state.read(cx);
@@ -23,16 +34,15 @@ pub(crate) fn seed(state: &Entity<AppState>, cx: &mut App) {
                 original_columns: columns.clone(),
                 columns,
                 cards_by_column: std::rc::Rc::new(cards_by_column(view)),
-                // §5.4: a context board has no checkout to run in, and a linked board's columns
-                // answer to its backend. Both keep every other row.
-                automation_locked: view.board.worktree_id.is_none()
-                    || view.board.backend.kind != BackendRef::LOCAL,
+                automation_locked: automation_locked(&view.board),
+                run_location: view.board.settings.run_location,
                 backend_kind: kind.clone(),
                 original_kind: kind.clone(),
                 original_settings: settings,
                 ..BoardSettingsState::default()
             };
             draft.rows = backend_rows(&schema_for(app, &kind), &draft.original_settings);
+            draft.seed_schedules(app);
             draft.prepare();
             draft
         })

@@ -135,19 +135,36 @@ pub fn blocked(board: &Board, cards: &[Card], card: &Card) -> Option<Blocked> {
     })
 }
 
+/// Whether the card waits in a routing column for a run slot of the column it is bound for.
+///
+/// True when `pending_run` is set and names a column other than the card's own. A card parked
+/// in the very column it is owed a run by is waiting too, but it is not *queued*: it has already
+/// arrived, and only the slot is missing.
+#[must_use]
+pub fn queued(card: &Card) -> bool {
+    card.pending_run
+        .as_ref()
+        .is_some_and(|pending| pending.status_id != card.status_id)
+}
+
 /// Whether this card is waiting on a human.
 ///
 /// Two situations qualify, and both are things a person must decide: the last run ended
 /// needing one — and nobody has moved the card by hand since, which is how a human says "seen"
 /// — or a run has been owed for at least [`PENDING_AMBER_AFTER_SECS`] without a slot freeing.
 /// An outcome move is `AutoMoved`, so only a human's or the CLI's `Moved` clears the first.
+///
+/// A [`queued`] card's wait is not counted: standing in a routing column until the board has a
+/// slot is the queue working as designed, and a full board would otherwise turn every card in
+/// line amber at once.
 #[must_use]
 pub fn attention(card: &Card, now: &str) -> bool {
-    if card
-        .pending_run
-        .as_ref()
-        .and_then(|pending| elapsed_secs(&pending.since, now))
-        .is_some_and(|secs| secs >= PENDING_AMBER_AFTER_SECS)
+    if !queued(card)
+        && card
+            .pending_run
+            .as_ref()
+            .and_then(|pending| elapsed_secs(&pending.since, now))
+            .is_some_and(|secs| secs >= PENDING_AMBER_AFTER_SECS)
     {
         return true;
     }
@@ -198,6 +215,7 @@ pub fn summarize(board: &Board, cards: &[Card], live: &[LiveRun], now: &str) -> 
         id: board.id.clone(),
         context_id: board.context_id.clone(),
         worktree_id: board.worktree_id.clone(),
+        kind: board.kind,
         name: board.name.clone(),
         prefix: board.prefix.clone(),
         backend_kind: board.backend.kind.clone(),
@@ -216,15 +234,24 @@ pub fn summarize(board: &Board, cards: &[Card], live: &[LiveRun], now: &str) -> 
             .count(),
         dirty_count: cards.iter().filter(|c| c.dirty).count(),
         conflict_count: cards.iter().filter(|c| c.conflict.is_some()).count(),
-        working_count: count(cards.iter().filter(|card| {
-            card.pending_run.is_some()
-                || latest_run(card).is_some_and(CardRun::is_live)
-                || live.iter().any(|run| run.card_id == card.id)
-        })),
+        working_count: count(cards.iter().filter(|card| working(card, live))),
         attention_count: count(cards.iter().filter(|card| attention(card, now))),
+        idle_started: count(cards.iter().filter(|card| {
+            board.statuses.iter().any(|status| {
+                status.id == card.status_id && status.category == StatusCategory::Started
+            }) && !working(card, live)
+                && !attention(card, now)
+        })),
         last_synced_at: board.sync.last_synced_at.clone(),
         last_error: board.sync.last_error.clone(),
     }
+}
+
+/// Whether the card has a live run, or is owed one: the definition `working_count` counts.
+fn working(card: &Card, live: &[LiveRun]) -> bool {
+    card.pending_run.is_some()
+        || latest_run(card).is_some_and(CardRun::is_live)
+        || live.iter().any(|run| run.card_id == card.id)
 }
 
 /// A count as every summary field spells it, saturating rather than wrapping on a huge board.

@@ -817,6 +817,7 @@ mod workflow {
             files_changed: 0,
             cost_usd: None,
             tokens: None,
+            worktree_id: None,
         }
     }
 
@@ -1096,5 +1097,30 @@ mod workflow {
             columns.rows[1].marks,
             vec!["action".to_owned(), "disabled".to_owned()]
         );
+    }
+
+    #[test]
+    fn a_reviews_board_s_columns_stay_editable_in_the_snapshot() {
+        // FEA-25: a board that runs in each card's worktree has a checkout per run, so its
+        // columns carry automation even with no worktree of its own, as the dialog draws them.
+        let mut context_view = view();
+        context_view.board.worktree_id = None;
+        context_view.board.settings.run_location = fleet_core::board::RunLocation::CardWorktree;
+        let mut state = state_with(view());
+        state.board.view = None;
+        state.board.scope = Some(crate::state::BoardScope::Context(context().id));
+        state.apply_board_view(context_view);
+        state.open_overlay(Overlay::Dialog(crate::dialogs::Dialogs::BoardSettings));
+        let dump = state.harness_projection().snapshot;
+        let columns = &dump.lists["settings.columns"];
+        assert!(
+            columns
+                .rows
+                .iter()
+                .all(|row| !row.marks.iter().any(|mark| mark == "disabled")),
+            "no column of a Reviews board is locked: {:?}",
+            columns.rows
+        );
+        assert_eq!(columns.rows[1].marks, vec!["action".to_owned()]);
     }
 }

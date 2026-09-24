@@ -1,4 +1,6 @@
-use super::{CommandOutput, subagents::read_text, unknown, validation, worktrees::parse_host};
+use super::{
+    CommandOutput, FAILURE, subagents::read_text, unknown, validation, worktrees::parse_host,
+};
 use crate::{
     args::{
         AgentChoice, BoardArgs, BoardCardCommand, BoardCardFields, BoardCommand,
@@ -6,8 +8,9 @@ use crate::{
         BoardWorktreeSelector,
     },
     envelope::{
-        BoardBackendSchemaEnvelope, BoardBackendsEnvelope, BoardCardEnvelope, BoardEnvelope,
-        BoardListEnvelope, BoardSyncEnvelope, BoardWorktreeEnvelope, OkEnvelope, PROTOCOL, to_json,
+        BoardBackendSchemaEnvelope, BoardBackendsEnvelope, BoardCardEnvelope,
+        BoardCardUpsertEnvelope, BoardEnvelope, BoardListEnvelope, BoardSyncEnvelope,
+        BoardWorktreeEnvelope, OkEnvelope, PROTOCOL, to_json,
     },
     human,
 };
@@ -16,8 +19,8 @@ use fleet_core::{
     agents::{AgentKind, AgentThreadSummary, ThreadId},
     board::{
         BackendDescriptor, BackendRef, Board, BoardPatch, BoardView, Card, CardAgentPrefs,
-        CardDraft, CardPatch, ConflictPolicy, ConflictResolution, Label, Priority, latest_run,
-        merge_settings, summarize, valid_date,
+        CardDraft, CardPatch, ConflictPolicy, ConflictResolution, Label, Priority, PullRequestRef,
+        UpsertOutcome, latest_run, merge_settings, parse_requested_at, summarize, valid_date,
     },
     ids::{BoardId, CardId, ContextId, JobId, LabelId, RepoId, SessionId, StatusId, WorktreeId},
     sessions::SessionKind,
@@ -39,11 +42,20 @@ pub(super) async fn board(
         board,
         worktree,
         context,
+        reviews,
         json,
         command,
     } = arguments;
     // Clap checks conflicts within a command level, but global flags can be
     // supplied at different levels of the nested card command.
+    if board.is_some() && reviews {
+        return Err(validation("--board and --reviews cannot be used together"));
+    }
+    if worktree.is_some() && reviews {
+        return Err(validation(
+            "--reviews and --worktree cannot be used together",
+        ));
+    }
     if board.is_some() && context.is_some() {
         return Err(validation("--board and --context cannot be used together"));
     }
@@ -62,15 +74,39 @@ pub(super) async fn board(
                     "board list accepts --board to narrow the table, not --worktree",
                 ));
             }
+            if reviews {
+                return Err(validation(
+                    "board list accepts --board to narrow the table, not --reviews",
+                ));
+            }
             list(client, board, context, json).await
         }
         BoardCommand::Backends => backends(client, json).await,
+        BoardCommand::Create(_) if reviews => Err(validation(
+            "board create does not take --reviews; any `fleet board --reviews` command creates the Reviews board",
+        )),
         BoardCommand::Create(arguments) => {
             create(client, board, worktree, context, arguments, json).await
         }
         // Every remaining command names one board, and each resolves it the same way.
         command => {
-            let view = resolve_board(client, board, worktree, context).await?;
+            let selector = BoardSelector {
+                board,
+                worktree,
+                context,
+                reviews,
+            };
+            // Everything `card new --pr` can get wrong is refused before a board is resolved:
+            // resolving one ensures it, and `--reviews` would create a Reviews board only to
+            // refuse the command that asked for it.
+            if let BoardCommand::Card(arguments) = &command
+                && let BoardCardCommand::New {
+                    pr, requested_at, ..
+                } = &arguments.command
+            {
+                pull_request_upsert(pr.clone(), requested_at.clone())?;
+            }
+            let view = resolve_board(client, selector).await?;
             match command {
                 BoardCommand::Show => show(client, &view, json).await,
                 BoardCommand::Describe => describe(client, &view, json).await,
@@ -309,12 +345,32 @@ async fn resolve_context(
     }
 }
 
-async fn resolve_board(
+/// The four global board selectors one command was given.
+///
+/// At most one of `board`, `worktree` and `reviews` is set; `context` narrows `reviews`, or
+/// names the context board on its own.
+#[derive(Debug, Default)]
+pub(super) struct BoardSelector {
+    pub(super) board: Option<BoardId>,
+    pub(super) worktree: Option<BoardWorktreeSelector>,
+    pub(super) context: Option<ContextId>,
+    pub(super) reviews: bool,
+}
+
+/// The board the selectors name, ensured into existence when a context or worktree names it.
+///
+/// `--reviews` resolves its context exactly as the context fallback does — `--context`, or the
+/// active context — and then asks for that context's Reviews board rather than its main one.
+pub(super) async fn resolve_board(
     client: &Client,
-    board: Option<BoardId>,
-    worktree: Option<BoardWorktreeSelector>,
-    context: Option<ContextId>,
+    selector: BoardSelector,
 ) -> Result<BoardView, ProtoError> {
+    let BoardSelector {
+        board,
+        worktree,
+        context,
+        reviews,
+    } = selector;
     if let Some(board) = board {
         return client.get_board(board).await;
     }
@@ -323,9 +379,11 @@ async fn resolve_board(
             .ensure_worktree_board(resolve_worktree(client, worktree).await?)
             .await;
     }
-    client
-        .ensure_board(resolve_context(client, context).await?)
-        .await
+    let context = resolve_context(client, context).await?;
+    if reviews {
+        return client.ensure_reviews_board(context).await;
+    }
+    client.ensure_board(context).await
 }
 
 async fn resolve_worktree(
@@ -608,16 +666,21 @@ fn cards_output(
     linked: &[Card],
     json: bool,
 ) -> Result<CommandOutput, ProtoError> {
-    if json || linked.is_empty() {
+    if json {
         return card_output(board, cards, card, json);
     }
-    let mut sections = vec![human::board_card(board, cards, card)];
-    sections.extend(
-        linked
-            .iter()
-            .map(|card| human::board_card(board, cards, card)),
-    );
-    Ok(CommandOutput::success(sections.join("\n\n")))
+    Ok(CommandOutput::success(cards_text(
+        board, cards, card, linked,
+    )))
+}
+
+/// The human report of a card and every card its `--blocks` sugar changed.
+fn cards_text(board: &Board, cards: &[Card], card: &Card, linked: &[Card]) -> String {
+    std::iter::once(card)
+        .chain(linked)
+        .map(|card| human::board_card(board, cards, card))
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 fn resolve_card<'a>(view: &'a BoardView, key: &str) -> Result<&'a Card, ProtoError> {
@@ -827,7 +890,18 @@ async fn card_command(
             fields,
             blocked_by,
             blocks,
-        } => card_new(client, view, title, fields, &blocked_by, &blocks, json).await,
+            pr,
+            requested_at,
+        } => {
+            let upsert = pull_request_upsert(pr, requested_at)?;
+            let new = NewCard {
+                title,
+                fields,
+                blocked_by,
+                blocks,
+            };
+            card_new(client, view, new, upsert, json).await
+        }
         BoardCardCommand::Show { key } => {
             card_output(&view.board, &view.cards, resolve_card(view, &key)?, json)
         }
@@ -902,16 +976,65 @@ struct CardLinks {
     remove_blocks: Vec<String>,
 }
 
-/// Creates a card from the `card new` value flags.
+/// What `card new --requested-at` answers when no pull request says what was requested.
+const REQUESTED_AT_NEEDS_PR: &str = "--requested-at needs --pr";
+
+/// The `card new` title, value flags and link flags.
+struct NewCard {
+    title: String,
+    fields: BoardCardFields,
+    blocked_by: Vec<String>,
+    blocks: Vec<String>,
+}
+
+/// The pull request `card new --pr` upserts, with the time its review was last requested.
+struct PullRequestUpsert {
+    pull_request: PullRequestRef,
+    requested_at: Option<String>,
+}
+
+/// The upsert `card new` sends for `--pr` and `--requested-at`, or `None` without `--pr`.
+///
+/// Both refusals are the sentences the daemon would answer with (`invalid pull_request: …`,
+/// `invalid requested_at: …`), so a bad flag reads the same whether it is caught here or there.
+fn pull_request_upsert(
+    pr: Option<String>,
+    requested_at: Option<String>,
+) -> Result<Option<PullRequestUpsert>, ProtoError> {
+    match (pr, requested_at) {
+        (None, Some(_)) => Err(validation(REQUESTED_AT_NEEDS_PR)),
+        (None, None) => Ok(None),
+        (Some(pr), requested_at) => {
+            let pull_request =
+                PullRequestRef::parse(&pr).map_err(|error| validation(error.to_string()))?;
+            if let Some(at) = &requested_at {
+                parse_requested_at(at).map_err(|error| validation(error.to_string()))?;
+            }
+            Ok(Some(PullRequestUpsert {
+                pull_request,
+                requested_at,
+            }))
+        }
+    }
+}
+
+/// Creates a card from the `card new` value flags, or upserts it when `--pr` names one.
+///
+/// With a pull request the daemon may hand back a card that already held it, so the human
+/// output leads with `Created`, `Existing` or `Reopened` and the key before the card itself.
 async fn card_new(
     client: &Client,
     view: &BoardView,
-    title: String,
-    fields: BoardCardFields,
-    blocked_by: &[String],
-    blocks: &[String],
+    new: NewCard,
+    upsert: Option<PullRequestUpsert>,
     json: bool,
 ) -> Result<CommandOutput, ProtoError> {
+    let NewCard {
+        title,
+        fields,
+        blocked_by,
+        blocks,
+    } = new;
     // The contract gives `new` the value flags only: a clear flag would be a silent no-op on
     // a card that has nothing to clear yet.
     if let Some(flag) = fields.clear_flag() {
@@ -922,40 +1045,77 @@ async fn card_new(
     // Both key lists are resolved before the card exists, so a typo costs nothing: a created
     // card whose links were refused afterwards is the shape a chain-building script cannot
     // recover from without reading the board back.
-    let blocked_by = resolve_cards(view, blocked_by)?;
-    let blocks = resolve_cards(view, blocks)?;
+    let blocked_by = resolve_cards(view, &blocked_by)?;
+    let blocks = resolve_cards(view, &blocks)?;
     let patch = card_patch(&view.board, fields)?;
-    let card = client
-        .create_card(
-            view.board.id.clone(),
-            CardDraft {
-                title,
-                description: patch.description.unwrap_or_default(),
-                status_id: patch.status_id,
-                priority: patch.priority.unwrap_or_default(),
-                labels: patch.labels.unwrap_or_default(),
-                assignee: patch.assignee.flatten(),
-                estimate: patch.estimate.flatten(),
-                due_date: patch.due_date.flatten(),
-                repo_id: patch.repo_id.flatten(),
-                agent: patch.agent.flatten(),
-                blocked_by: blocked_by.iter().map(|card| card.id.clone()).collect(),
-                ..CardDraft::default()
-            },
-        )
-        .await?;
+    let mut draft = CardDraft {
+        title,
+        description: patch.description.unwrap_or_default(),
+        status_id: patch.status_id,
+        priority: patch.priority.unwrap_or_default(),
+        labels: patch.labels.unwrap_or_default(),
+        assignee: patch.assignee.flatten(),
+        estimate: patch.estimate.flatten(),
+        due_date: patch.due_date.flatten(),
+        repo_id: patch.repo_id.flatten(),
+        agent: patch.agent.flatten(),
+        blocked_by: blocked_by.iter().map(|card| card.id.clone()).collect(),
+        ..CardDraft::default()
+    };
+    let (card, outcome) = match upsert {
+        None => (
+            client.create_card(view.board.id.clone(), draft).await?,
+            None,
+        ),
+        Some(PullRequestUpsert {
+            pull_request,
+            requested_at,
+        }) => {
+            draft.pull_request = Some(pull_request);
+            let (card, outcome) = client
+                .upsert_pull_request_card(view.board.id.clone(), draft, requested_at)
+                .await?;
+            (card, Some(outcome))
+        }
+    };
     let linked = link_blocks(client, &card.id, blocks, Vec::new()).await?;
     // The view was read before this card existed, and every dependant printed below resolves
     // its `Blocked by` against that list: without the new card in it the blocker prints as a
     // raw id and `blocked()` — which calls a blocker it cannot find canceled or archived —
-    // marks the dependant amber for a card that was created a moment ago.
+    // marks the dependant amber for a card that was created a moment ago. An upsert that found
+    // the card already on the board replaces the stale copy rather than printing it twice.
     let cards: Vec<Card> = view
         .cards
         .iter()
+        .filter(|other| other.id != card.id)
         .cloned()
         .chain(std::iter::once(card.clone()))
         .collect();
-    cards_output(&view.board, &cards, &card, &linked, json)
+    let Some(outcome) = outcome else {
+        return cards_output(&view.board, &cards, &card, &linked, json);
+    };
+    if json {
+        return Ok(CommandOutput::success(to_json(&BoardCardUpsertEnvelope {
+            protocol: PROTOCOL,
+            card: &card,
+            outcome,
+        })?));
+    }
+    Ok(CommandOutput::success(format!(
+        "{}\n{}",
+        upsert_headline(&view.board, &card, outcome),
+        cards_text(&view.board, &cards, &card, &linked)
+    )))
+}
+
+/// The line `card new --pr` leads with: `Created FEA-3`, `Existing FEA-3` or `Reopened FEA-3`.
+fn upsert_headline(board: &Board, card: &Card, outcome: UpsertOutcome) -> String {
+    let verb = match outcome {
+        UpsertOutcome::Created => "Created",
+        UpsertOutcome::Existing => "Existing",
+        UpsertOutcome::Reopened => "Reopened",
+    };
+    format!("{verb} {}", card.display_key(board))
 }
 
 /// Applies the `card edit` field flags, `--archive` and the link flags to one card.
@@ -1119,9 +1279,21 @@ async fn card_run(
     key: &str,
     json: bool,
 ) -> Result<CommandOutput, ProtoError> {
-    let card = client
-        .card_run_start(resolve_card(view, key)?.id.clone())
-        .await?;
+    let before = resolve_card(view, key)?;
+    let newest_before = latest_run(before).map(|run| run.id);
+    let card = client.card_run_start(before.id.clone()).await?;
+    // A start the daemon refused is a run on the card that never began: its sentence is the
+    // answer, and the command fails, rather than `run requested` over a run that cannot happen.
+    // The new run is told apart by its id, not by a longer list: a card at its run cap drops
+    // its oldest run for every one it gains.
+    if let Some(run) = latest_run(&card)
+        && newest_before.as_ref() != Some(&run.id)
+        && let Some(refusal) = human::run_refusal(run)
+    {
+        let headline = format!("run {} failed: {refusal}", run.id);
+        let output = card_output_headed(&view.board, &view.cards, &card, Some(&headline), json)?;
+        return Ok(CommandOutput::with_exit_code(output.text, FAILURE));
+    }
     // A board already at its limit owes the card a run instead of starting one, and says so
     // rather than printing a run line for a delegation that does not exist yet.
     let headline = match latest_run(&card) {

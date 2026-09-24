@@ -71,6 +71,10 @@ pub struct Boards {
     /// Serializes the short choose-id-and-save section across differently based boards.
     /// Per-board gates cannot protect suffixes shared by distinct base ids.
     allocation: Arc<Mutex<()>>,
+    /// Serializes linking a pull-request worktree to a card across boards, so two Reviews
+    /// boards tracking one pull request cannot both claim its worktree. Taken before a board
+    /// gate and by nothing else.
+    pull_request_links: Arc<Mutex<()>>,
     /// The last reported load failure per board. The snapshot refresh rescans every document
     /// roughly every two seconds, and one unreadable file must not fill the log with it.
     unreadable: Arc<std::sync::Mutex<HashMap<BoardId, String>>>,
@@ -106,7 +110,7 @@ mod worktree;
 
 pub use automation::Automation;
 use cards::{awaiting_push_baseline, new_card_id, require_push_baseline, validate_parent};
-use worktree::scrub_repo;
+use worktree::{card_repo_context, scrub_repo};
 
 impl Boards {
     /// Constructs board orchestration around shared daemon services and event bus.
@@ -138,6 +142,7 @@ impl Boards {
             index: Arc::new(RwLock::new(HashMap::new())),
             gates: Arc::new(Mutex::new(HashMap::new())),
             allocation: Arc::new(Mutex::new(())),
+            pull_request_links: Arc::new(Mutex::new(())),
             unreadable: Arc::new(std::sync::Mutex::new(HashMap::new())),
             summaries: Arc::new(RwLock::new(HashMap::new())),
             remote_worktrees: Arc::new(std::sync::OnceLock::new()),

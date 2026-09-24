@@ -505,6 +505,9 @@ key_table! {
     "b", "Hub > Board" => board::PickBlockedBy;
     "m", "Hub > Board" => board::PickAgent;
     "C", "Hub > Board" => board::Columns;
+    // Not `S` and `F`, which the schedules strip would suggest: those are sync and full sync.
+    "T", "Hub > Board" => board::Schedules;
+    "R", "Hub > Board" => board::RunSchedules;
 
     // BOARD §8: the `fleet://board` tab draws the very same board with the very same keys, so
     // every `Hub > Board` row above is repeated here against the same action. The word sits
@@ -541,6 +544,54 @@ key_table! {
     "b", "Workspace > Native > Board" => board::PickBlockedBy;
     "m", "Workspace > Native > Board" => board::PickAgent;
     "C", "Workspace > Native > Board" => board::Columns;
+    "T", "Workspace > Native > Board" => board::Schedules;
+    "R", "Workspace > Native > Board" => board::RunSchedules;
+
+    // The Review tab of the PR screen draws the context's Reviews board (KEYMAP § Hub › Pull
+    // requests › Review board). The word nests under `Hub > Prs`, so `Hub > Board`'s rows match
+    // it too at the same depth; these rows are registered after them and win every tie. The
+    // differences: `tab` / `shift-tab` stay the screen's tab keys, `p` / `q` stay back, the run
+    // keys are bound because a review card runs in its own pull-request worktree, and `B` / `y`
+    // act on the card's pull request.
+    "tab", "Hub > Prs > Board" => prs::NextTab;
+    "shift-tab", "Hub > Prs > Board" => prs::PrevTab;
+    "p", "Hub > Prs > Board" => prs::Back;
+    "q", "Hub > Prs > Board" => prs::Back;
+    "h", "Hub > Prs > Board" => board::PrevColumn;
+    "left", "Hub > Prs > Board" => board::PrevColumn;
+    "l", "Hub > Prs > Board" => board::NextColumn;
+    "right", "Hub > Prs > Board" => board::NextColumn;
+    "j", "Hub > Prs > Board" => board::NextCard;
+    "down", "Hub > Prs > Board" => board::NextCard;
+    "k", "Hub > Prs > Board" => board::PrevCard;
+    "up", "Hub > Prs > Board" => board::PrevCard;
+    "enter", "Hub > Prs > Board" => board::OpenCard;
+    "c", "Hub > Prs > Board" => board::NewCard;
+    "s", "Hub > Prs > Board" => board::PickStatus;
+    "a", "Hub > Prs > Board" => board::PickAssignee;
+    "t", "Hub > Prs > Board" => board::PickLabels;
+    "e", "Hub > Prs > Board" => board::PickEstimate;
+    "[", "Hub > Prs > Board" => board::MovePrevColumn;
+    "]", "Hub > Prs > Board" => board::MoveNextColumn;
+    "w", "Hub > Prs > Board" => board::CreateWorktree;
+    "o", "Hub > Prs > Board" => board::OpenWorktree;
+    "S", "Hub > Prs > Board" => board::Sync;
+    "F", "Hub > Prs > Board" => board::FullSync;
+    "x", "Hub > Prs > Board" => board::OpenRemote;
+    "d", "Hub > Prs > Board" => board::DeleteCard;
+    ",", "Hub > Prs > Board" => board::Settings;
+    "r", "Hub > Prs > Board" => board::Reload;
+    "/", "Hub > Prs > Board" => board::Filter;
+    "A", "Hub > Prs > Board" => board::AttachRun;
+    "X", "Hub > Prs > Board" => board::CancelRun;
+    ">", "Hub > Prs > Board" => board::RunNow;
+    "b", "Hub > Prs > Board" => board::PickBlockedBy;
+    "m", "Hub > Prs > Board" => board::PickAgent;
+    "C", "Hub > Prs > Board" => board::Columns;
+    "B", "Hub > Prs > Board" => board::OpenPullRequest;
+    "y", "Hub > Prs > Board" => board::CopyPullRequestUrl;
+    "T", "Hub > Prs > Board" => board::Schedules;
+    "R", "Hub > Prs > Board" => board::RunSchedules;
     "escape", "Dialog > CardDetail" => card_detail::Close;
     "i", "Dialog > CardDetail" => card_detail::EditTitle;
     "d", "Dialog > CardDetail" => card_detail::EditDescription;
@@ -566,6 +617,9 @@ key_table! {
     "t", "Dialog > CardDetail" => board::PickLabels;
     "e", "Dialog > CardDetail" => board::PickEstimate;
     "o", "Dialog > CardDetail" => board::OpenWorktree;
+    // `B`, not `b`: `b` is *blocked by* on every board surface.
+    "B", "Dialog > CardDetail" => board::OpenPullRequest;
+    "y", "Dialog > CardDetail" => board::CopyPullRequestUrl;
     // The palette replaces the dialog it is opened over and remembers which one it was, so the
     // `Card detail:` rows can save or cancel an edit already typed instead of reseeding one over
     // it. Without a way in from the detail those rows can never be listed and that path is dead.
@@ -594,6 +648,7 @@ key_table! {
     "J", "Dialog > BoardSettings" => board_settings::MoveColumnDown;
     "K", "Dialog > BoardSettings" => board_settings::MoveColumnUp;
     "P", "Dialog > BoardSettings" => board_settings::ApplyPreset;
+    "r", "Dialog > BoardSettings" => board_settings::RunScheduleNow;
     // §5.4 moved the save off `enter`, which the Columns pane needs for drilling in, so it is
     // bound in both contexts: a column row being edited saves without being left first.
     "ctrl-s", "Dialog > BoardSettings" => board_settings::Save;
@@ -1101,6 +1156,7 @@ mod tests {
         "Hub > Worktrees",
         "Hub > Prs",
         "Hub > Board",
+        "Hub > Prs > Board",
         "Dialog > CardDetail",
         "Dialog > CardDetailEditing",
         "Dialog > CardCreate",
@@ -1215,6 +1271,8 @@ mod tests {
         "Hub > Worktrees",
         "Hub > Prs",
         "Hub > Board",
+        // The Review tab's board: its filter publishes `Filter > BoardFilter` like the Hub's.
+        "Hub > Prs > Board",
         // The board pane's own word, for the same reason the Hub's is here: the board's filter
         // input never wraps in it, because `AppState::context_chain` publishes
         // `Filter > BoardFilter` and nothing else while that editor owns the keyboard.
@@ -1274,8 +1332,11 @@ mod tests {
                 .then_some((keys, context, action))
             })
             .collect();
+        // `Hub > Prs > Board` is documented as "the `Hub > Board` table plus these
+        // differences" and is checked against that sentence by its own test below.
         let registered: HashSet<_> = table()
             .into_iter()
+            .filter(|spec| spec.context != REVIEW_BOARD)
             .filter(|spec| {
                 spec.action.starts_with("board::")
                     || spec.action.starts_with("card_detail::")
@@ -1291,6 +1352,47 @@ mod tests {
             .collect();
         assert!(!documented.is_empty());
         assert_eq!(documented, registered);
+    }
+
+    /// The Review tab's board context (KEYMAP § Hub › Pull requests › Review board).
+    const REVIEW_BOARD: &str = "Hub > Prs > Board";
+
+    /// KEYMAP says the Review board binds the whole `Hub > Board` table against the same
+    /// actions, with a short list of differences. This is that sentence as a test.
+    #[test]
+    fn the_review_board_binds_the_hub_board_table_with_its_documented_differences() {
+        let table = table();
+        let rows = |context: &str| -> HashMap<&'static str, &'static str> {
+            table
+                .iter()
+                .filter(|spec| spec.context == context)
+                .map(|spec| (spec.keys, spec.action))
+                .collect()
+        };
+        let mut expected = rows("Hub > Board");
+        for (keys, action) in [
+            ("tab", "prs::NextTab"),
+            ("shift-tab", "prs::PrevTab"),
+            ("p", "prs::Back"),
+            ("q", "prs::Back"),
+            ("A", "board::AttachRun"),
+            ("X", "board::CancelRun"),
+            (">", "board::RunNow"),
+            ("B", "board::OpenPullRequest"),
+            ("y", "board::CopyPullRequestUrl"),
+        ] {
+            expected.insert(keys, action);
+        }
+        assert_eq!(rows(REVIEW_BOARD), expected);
+
+        // Every tie with `Hub > Board` (same depth on the live chain) must go to the review
+        // rows, which gpui settles by registration order.
+        let chain = ["Fleet", "Hub", "Prs", "Board"];
+        for (keys, action) in rows(REVIEW_BOARD) {
+            let resolved = action_for_chain(&chain, &Keystroke::parse(keys).unwrap())
+                .map(|action| action.name());
+            assert_eq!(resolved, Some(action), "`{keys}` on the Review board");
+        }
     }
 
     /// The floor sits within ten rows of the live table, so a silent loss is caught and a

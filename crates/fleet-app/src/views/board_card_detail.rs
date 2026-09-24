@@ -55,6 +55,8 @@ pub(crate) enum PropertyTarget {
     Worktree,
     /// Open the remote issue in the browser, as `x` does.
     Remote,
+    /// Open the card's pull request in the browser, as `B` does.
+    PullRequest,
     /// Nothing: the row states a fact the app does not edit.
     ReadOnly,
 }
@@ -239,6 +241,18 @@ pub fn property_rows(board: &Board, cards: &[Card], card: &Card, now: i64) -> Ve
         )
         .mono(),
     ]);
+    // Only a review card has one, and a card's pull request never changes after creation, so
+    // the row is zero-suppressed rather than a dash on every task card.
+    if let Some(pull_request) = card.pull_request.as_ref() {
+        rows.push(
+            PropertyRow::new(
+                "Pull request",
+                Some(pull_request_value(&pull_request.key())),
+                PropertyTarget::PullRequest,
+            )
+            .mono(),
+        );
+    }
 
     if let Some(remote) = card.remote.as_ref() {
         let mut value = remote.key.clone();
@@ -302,6 +316,11 @@ pub fn property_rows(board: &Board, cards: &[Card], card: &Card, now: i64) -> Ve
         rows.push(row.locked(!schema.editable));
     }
     rows
+}
+
+/// `acme/api#412 · open ↗`: the reference, and the word that says `⏎` leaves Fleet.
+fn pull_request_value(key: &str) -> String {
+    format!("{key} \u{00b7} open \u{2197}")
 }
 
 /// The rows a workflow board adds under Status, each one zero-suppressed (contracts §5.3).
@@ -527,8 +546,13 @@ pub(crate) fn property_row(
     props: PropertyRowProps,
     theme: &Theme,
 ) -> AnyElement {
-    let tone = if row.target == PropertyTarget::Worktree && !row.locked {
-        // The worktree is a link: a click opens its session, as `o` does.
+    let link = matches!(
+        row.target,
+        PropertyTarget::Worktree | PropertyTarget::PullRequest
+    );
+    let tone = if link && !row.locked {
+        // The worktree and the pull request are links: a click opens the session, as `o` does,
+        // or the pull request in the browser, as `B` does.
         Tone::Accent
     } else {
         row.tone

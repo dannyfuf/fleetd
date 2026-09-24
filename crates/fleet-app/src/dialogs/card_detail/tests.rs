@@ -69,6 +69,7 @@ fn reported() -> Card {
         files_changed: 0,
         cost_usd: None,
         tokens: None,
+        worktree_id: None,
     });
     card.comments.push(fleet_core::board::Comment {
         id: "report-1".to_owned(),
@@ -206,4 +207,53 @@ fn the_property_column_is_prepared_once_per_board_revision(cx: &mut gpui::TestAp
         !Rc::ptr_eq(&first, &moved),
         "a new board revision rebuilds the rows"
     );
+}
+
+/// `⏎` on the Pull request row opens the pull request in the browser, as `B` does.
+#[gpui::test]
+fn enter_on_the_pull_request_row_opens_it_in_the_browser(cx: &mut gpui::TestAppContext) {
+    use crate::state::{BoardFocus, Overlay};
+
+    let url = "https://github.com/acme/api/pull/412";
+    let mut card = reported();
+    card.pull_request = Some(fleet_core::board::PullRequestRef {
+        repo: "acme/api".parse().unwrap_or_else(|error| panic!("{error}")),
+        number: 412,
+        url: url.to_owned(),
+    });
+    let context = fleet_core::model::Context {
+        id: fleet_core::ids::ContextId::try_from("work").unwrap_or_else(|error| panic!("{error}")),
+        name: "Fleet".into(),
+        owners: vec![],
+        created_at: "2026-09-06T12:00:00Z".into(),
+    };
+    let board = fleet_core::board::new_board(&context, "2026-09-06T12:00:00Z");
+    let rows = detail::property_rows(&board, std::slice::from_ref(&card), &card, 0);
+    let index = rows
+        .iter()
+        .position(|row| row.target == PropertyTarget::PullRequest)
+        .unwrap_or_else(|| panic!("no Pull request row"));
+    let column = board
+        .statuses
+        .iter()
+        .position(|status| status.id == card.status_id)
+        .unwrap_or_else(|| panic!("the card landed in no column"));
+    let id = card.id.clone();
+    let mut app = AppState::new("/tmp/fleet-card-detail-pr", std::time::Instant::now());
+    app.board.view = Some(fleet_core::board::BoardView {
+        board,
+        cards: vec![card],
+        live_runs: Vec::new(),
+    });
+    app.board.focus = BoardFocus { column, row: 0 };
+    app.open_overlay(Overlay::Dialog(Dialogs::CardDetail));
+    let state = cx.new(|_| app);
+    let bridge = Bridge::closed();
+    cx.update(|cx| {
+        with_host(&state, cx, |host| host.card_detail.card_id = Some(id));
+        open_row(&state, &bridge, &rows, index, cx);
+    });
+    assert_eq!(cx.opened_url().as_deref(), Some(url));
+    let selected = cx.update(|cx| with_host(&state, cx, |host| host.card_detail.property_row));
+    assert_eq!(selected, index);
 }

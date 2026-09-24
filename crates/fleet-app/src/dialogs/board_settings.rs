@@ -19,8 +19,8 @@ use fleet_core::{
     board::{
         Action, ActionKind, BackendRef, Board, BoardPatch, BoardSettings, ColumnAgentPrefs,
         ColumnAutomation, ConflictPolicy, MAX_LIVE_RUNS_PER_BOARD, PropertyKind, PropertyOption,
-        PropertySchema, Status, StatusCategory, apply_workflow_preset, normalise_automation,
-        validate_automation,
+        PropertySchema, RunLocation, Status, StatusCategory, apply_workflow_preset,
+        normalise_automation, validate_automation,
     },
     ids::{BoardId, CardId, RepoId, StatusId},
 };
@@ -67,6 +67,7 @@ mod draft;
 mod keys;
 mod persistence;
 mod pointer;
+mod schedules;
 mod schema;
 #[cfg(test)]
 mod tests;
@@ -78,9 +79,19 @@ use draft::*;
 /// `C` opens this dialog on one named section; `,` opens it on the remembered one.
 pub(crate) use keys::open_on_section;
 use keys::*;
-pub(crate) use persistence::seed;
 use persistence::*;
+pub(crate) use persistence::{automation_locked, seed};
 use pointer::*;
+#[cfg(test)]
+pub(crate) use schedules::requests::schedules_form_probe;
+pub(crate) use schedules::requests::{
+    load_board_schedules, load_schedules, open_schedules_section, refresh_stale_schedules,
+    sync_open_list,
+};
+use schedules::*;
+/// `T` and the Review board's empty state open the Schedules section; the event loop refreshes
+/// the schedules mirror.
+pub(crate) use schedules::{SCHEDULES_UNSUPPORTED, skipped_run_notice};
 pub(crate) use schema::BoardSection;
 use schema::*;
 pub(crate) use view::render;

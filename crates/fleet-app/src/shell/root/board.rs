@@ -184,7 +184,7 @@ impl Shell {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        crate::screens::board::settings(&self.state, &self.bridge, cx);
+        crate::screens::board::settings(&self.state, cx);
     }
 
     pub(super) fn board_reload(
@@ -266,7 +266,7 @@ impl Shell {
         // Through the same guards `,` uses: an unreachable daemon flashes the banner and a
         // board that is not loaded says so, and neither remembers Columns as the section the
         // next `,` should open on.
-        crate::screens::board::settings(&self.state, &self.bridge, cx);
+        crate::screens::board::settings(&self.state, cx);
         if self.state.read(cx).overlay
             == Some(crate::state::Overlay::Dialog(
                 crate::dialogs::Dialogs::BoardSettings,
@@ -278,6 +278,54 @@ impl Shell {
                 cx,
             );
         }
+    }
+
+    /// `T` — board settings, opened on its Schedules section (BOARD §11.8).
+    pub(super) fn board_schedules(
+        &mut self,
+        _: &board::Schedules,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // The same guards `C` goes through; the section switch only lands on an open dialog.
+        crate::screens::board::settings(&self.state, cx);
+        if self.state.read(cx).overlay
+            == Some(crate::state::Overlay::Dialog(
+                crate::dialogs::Dialogs::BoardSettings,
+            ))
+        {
+            crate::dialogs::open_schedules_section(&self.state, false, cx);
+        }
+    }
+
+    /// `R` — run every enabled schedule of the shown board now.
+    pub(super) fn board_run_schedules(
+        &mut self,
+        _: &board::RunSchedules,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        crate::screens::board::run_schedules(&self.state, &self.bridge, cx);
+    }
+
+    /// `B` — open the review card's pull request in the browser.
+    pub(super) fn board_open_pull_request(
+        &mut self,
+        _: &board::OpenPullRequest,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        crate::screens::board::open_pull_request(&self.state, &self.bridge, cx);
+    }
+
+    /// `y` — copy the review card's pull request URL.
+    pub(super) fn board_copy_pull_request_url(
+        &mut self,
+        _: &board::CopyPullRequestUrl,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        crate::screens::board::copy_pull_request_url(&self.state, &self.bridge, cx);
     }
 
     pub(super) fn card_detail_close(

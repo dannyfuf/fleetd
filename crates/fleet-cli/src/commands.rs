@@ -5,6 +5,7 @@ mod board;
 mod clipboard;
 mod hosts;
 mod jobs;
+mod schedules;
 mod sessions;
 mod subagents;
 mod watches;
@@ -269,6 +270,7 @@ fn connect_only_error(home: &Path, error: ConnectError) -> ProtoError {
 async fn execute(client: &Client, command: Command) -> Result<CommandOutput, ProtoError> {
     match command {
         Command::Board(arguments) => board(client, arguments).await,
+        Command::Schedule(arguments) => schedules::schedule(client, arguments).await,
         Command::Host(arguments) => hosts::run(client, arguments).await,
         Command::Clipboard(_) | Command::Exec(_) | Command::WatchChild(_) => Err(validation(
             "local commands must run before daemon autostart",
@@ -342,6 +344,7 @@ pub(crate) fn fleet_home() -> Result<PathBuf, ProtoError> {
 fn command_requests_json(command: &Command) -> bool {
     match command {
         Command::Board(arguments) => arguments.json,
+        Command::Schedule(arguments) => arguments.json,
         Command::Host(arguments) => matches!(
             arguments.command,
             crate::args::HostCommand::List { json: true }

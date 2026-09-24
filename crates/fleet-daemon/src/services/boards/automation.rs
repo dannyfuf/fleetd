@@ -15,6 +15,8 @@
 //! cancelling and waiting all happen between two gates, because a provider that is slow to answer
 //! must not stop every other card on its board from being read or moved.
 
+#[cfg(test)]
+mod card_worktree_tests;
 mod resume;
 
 use std::{
@@ -29,11 +31,11 @@ use fleet_core::{
         Action, ActionKind, ActivityKind, Board, BoardDocument, BoardError, Card, CardRun, Comment,
         LiveIndex, LiveRun, MAX_REPORT_COMMENTS_PER_CARD, MAX_RUNS_PER_CARD, Plan,
         REPORT_EXCERPT_CAP_BYTES, RunOutcome, Status, brief, latest_run, move_card, push_activity,
-        re_evaluate, re_evaluate_settled, render_template, resolve_prefs, validate_env,
+        re_evaluate, re_evaluate_settled, render_card_template, resolve_prefs, validate_env,
     },
-    ids::{BoardId, CardId, StatusId},
+    ids::{BoardId, CardId, StatusId, WorktreeId},
 };
-use fleet_proto::{event::BoardChangeReason, response::ResponseBody};
+use fleet_proto::{error::ProtoError, event::BoardChangeReason, response::ResponseBody};
 use tokio::sync::Mutex;
 
 use super::{Boards, cards::is_working};
@@ -99,9 +101,41 @@ pub struct Automation {
     /// Memory only. After a restart a reservation degrades to the card's `pending_run`, which
     /// [`Boards::resume_automation`] adopts or restarts — a durable reservation would instead
     /// have to be swept, and a swept row is indistinguishable from a live one.
-    in_flight: Mutex<BTreeMap<BoardId, BTreeSet<CardId>>>,
+    in_flight: Mutex<BTreeMap<BoardId, BTreeMap<CardId, StartReservation>>>,
     /// Boards known to hold a `pending_run`, so a freed slot costs nothing on every other board.
     pending_boards: Mutex<BTreeSet<BoardId>>,
+    /// Card-worktree starts a board write decided and handed off rather than awaited
+    /// ([`Boards::apply_starts_after_answer`]), so a test can wait for them to land.
+    background_starts: tokio_util::task::TaskTracker,
+}
+
+/// Where a reserved start is in the only gap card mutations need to distinguish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartPhase {
+    /// The card may still be mutated while its worktree is being created; `prepare_run`
+    /// revalidates every fact afterwards.
+    CreatingWorktree,
+    /// `prepare_run` returned the status and action the delegation is being launched for.
+    Launching,
+}
+
+/// One in-memory start reservation and the cancellation requested before its row exists.
+struct StartReservation {
+    phase: StartPhase,
+    cancel_requested: bool,
+    settled: tokio_util::sync::CancellationToken,
+    cancel_result: Arc<Mutex<Option<Result<(), ProtoError>>>>,
+}
+
+impl StartReservation {
+    fn creating_worktree() -> Self {
+        Self {
+            phase: StartPhase::CreatingWorktree,
+            cancel_requested: false,
+            settled: tokio_util::sync::CancellationToken::new(),
+            cancel_result: Arc::new(Mutex::new(None)),
+        }
+    }
 }
 
 impl Automation {
@@ -114,6 +148,7 @@ impl Automation {
             checkpoints,
             in_flight: Mutex::new(BTreeMap::new()),
             pending_boards: Mutex::new(BTreeSet::new()),
+            background_starts: tokio_util::task::TaskTracker::new(),
         }
     }
 }
@@ -126,6 +161,9 @@ impl Automation {
 struct Prepared {
     /// The identity of the run, whether or not the delegation service accepts it.
     row: RunRow,
+    /// The worktree the run executes in, by [`run_worktree`]'s rule, written on the `CardRun`
+    /// either way; `None` only when that rule refuses, which is then the run's refusal.
+    worktree: Option<WorktreeId>,
     /// The request, or the refusal that stopped it being built.
     request: Result<CardRunRequest, DaemonError>,
 }
@@ -140,16 +178,55 @@ enum Seeds {
     Settled,
 }
 
+/// How one start ended, which decides what its freed reservation owes the board.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartEnd {
+    /// A run is recorded and holds the slot.
+    Live,
+    /// A failed start is recorded; no run holds the slot.
+    Failed,
+    /// Nothing was recorded: the card left its column, lost its action or went away first.
+    Abandoned,
+}
+
+/// What `record_run` did with the provider answer after revalidating the card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecordEnd {
+    /// The card still matched the prepared start, so the row was saved.
+    Recorded,
+    /// A cancel arrived while the provider was starting; a live delegation was stopped.
+    Cancelled,
+    /// The card no longer matched the prepared start; a live delegation was stopped.
+    Abandoned,
+}
+
+/// How long `start_run` waits for a start it handed off before answering the card as it is:
+/// well inside the client's request timeout, and far longer than a start that fetches nothing.
+const START_ANSWER_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+
 /// Drops one card's reservation on its board, and the board's entry once it holds none.
 async fn release(automation: &Automation, board: &BoardId, card: &CardId) {
     let mut reserved = automation.in_flight.lock().await;
     let Some(cards) = reserved.get_mut(board) else {
         return;
     };
-    cards.remove(card);
+    if let Some(reservation) = cards.remove(card) {
+        reservation.settled.cancel();
+    }
     if cards.is_empty() {
         reserved.remove(board);
     }
+}
+
+/// Whether the card is past revalidation and must not change until its run is recorded.
+async fn launching(automation: &Automation, board: &BoardId, card: &CardId) -> bool {
+    automation
+        .in_flight
+        .lock()
+        .await
+        .get(board)
+        .and_then(|cards| cards.get(card))
+        .is_some_and(|reservation| reservation.phase == StartPhase::Launching)
 }
 
 /// The facts about a run that come from the board rather than from the delegation.
@@ -196,7 +273,7 @@ impl Boards {
                     .lock()
                     .await
                     .get(&doc.board.id)
-                    .is_some_and(|reserved| reserved.contains(card))
+                    .is_some_and(|reserved| reserved.contains_key(card))
             {
                 return Err(DaemonError::Conflict(format!(
                     "{key} is working; cancel the run first"
@@ -209,10 +286,19 @@ impl Boards {
             self.save(&doc, BoardChangeReason::CardChanged).await?;
             self.note_pending(&doc.board.id, holds_pending(&doc.cards))
                 .await;
-            (doc.board.id.clone(), plan)
+            (doc.board.clone(), plan)
         };
-        self.apply_starts(&board, plan).await?;
-        self.card_now(&board, card).await
+        // A card-worktree start may fetch its pull request first, which can outlast the
+        // client's request timeout. It runs on its own and is awaited only for a bounded time,
+        // so a quick start or refusal is in the answer and a slow one is answered as it stands.
+        if let Some(started) = self.hand_off_starts(&board, plan).await?
+            && tokio::time::timeout(START_ANSWER_WAIT, started)
+                .await
+                .is_err()
+        {
+            tracing::debug!(board = %board.id, %card, "a card run is still starting; answering the card as it is");
+        }
+        self.card_now(&board.id, card).await
     }
 
     /// Cancels the card's live run, or drops the slot an owed one is waiting for.
@@ -229,39 +315,68 @@ impl Boards {
         let Some(automation) = self.automation() else {
             return Err(DaemonError::Unsupported(NO_DELEGATION_SERVICE.to_owned()));
         };
-        let (board, run) = {
+        let (board, run, starting) = {
             let (_guard, mut doc, index) = self.locked_card_document(card).await?;
             match live_run(&doc.cards[index]) {
-                Some(live) => (doc.board.id.clone(), live),
-                None if doc.cards[index].pending_run.is_some() => {
-                    let now = self.now();
-                    doc.cards[index].pending_run = None;
-                    doc.cards[index].updated_at.clone_from(&now);
-                    push_activity(
-                        &mut doc.cards[index],
-                        ActivityKind::Updated,
-                        None,
-                        PENDING_RUN_DROPPED.to_owned(),
-                        &now,
-                    );
-                    doc.board.updated_at.clone_from(&now);
-                    self.save(&doc, BoardChangeReason::CardChanged).await?;
-                    self.note_pending(&doc.board.id, holds_pending(&doc.cards))
-                        .await;
-                    return self.card_view(&doc.board, &doc.cards[index]).await;
-                }
+                Some(live) => (doc.board.id.clone(), Some(live), None),
                 None => {
-                    return Err(DaemonError::NotFound(format!(
-                        "{} has no live run",
-                        doc.cards[index].display_key(&doc.board)
-                    )));
+                    let mut reservations = automation.in_flight.lock().await;
+                    let launching = reservations
+                        .get_mut(&doc.board.id)
+                        .and_then(|cards| cards.get_mut(card))
+                        .filter(|reservation| reservation.phase == StartPhase::Launching);
+                    if let Some(reservation) = launching {
+                        reservation.cancel_requested = true;
+                        (
+                            doc.board.id.clone(),
+                            None,
+                            Some((
+                                reservation.settled.clone(),
+                                Arc::clone(&reservation.cancel_result),
+                            )),
+                        )
+                    } else if doc.cards[index].pending_run.is_some() {
+                        drop(reservations);
+                        let now = self.now();
+                        doc.cards[index].pending_run = None;
+                        doc.cards[index].updated_at.clone_from(&now);
+                        push_activity(
+                            &mut doc.cards[index],
+                            ActivityKind::Updated,
+                            None,
+                            PENDING_RUN_DROPPED.to_owned(),
+                            &now,
+                        );
+                        doc.board.updated_at.clone_from(&now);
+                        self.save(&doc, BoardChangeReason::CardChanged).await?;
+                        self.note_pending(&doc.board.id, holds_pending(&doc.cards))
+                            .await;
+                        return self.card_view(&doc.board, &doc.cards[index]).await;
+                    } else {
+                        return Err(DaemonError::NotFound(format!(
+                            "{} has no live run",
+                            doc.cards[index].display_key(&doc.board)
+                        )));
+                    }
                 }
             }
         };
+        if let Some((settled, result)) = starting {
+            settled.cancelled().await;
+            if let Some(Err(error)) = result.lock().await.clone() {
+                return Err(from_proto_error(error));
+            }
+            return self.card_now(&board, card).await;
+        }
         // Outside the gate on purpose: cancelling stops a child process, and the board it belongs
         // to stays readable while that happens. Nothing is written here — the child's own
         // `Cancelled` transition reaches `on_run_delivered`, which is the one writer of an
         // outcome, so a cancel that raced a success cannot overwrite the success.
+        let Some(run) = run else {
+            return Err(DaemonError::Conflict(format!(
+                "{card} lost its live run while cancellation was starting"
+            )));
+        };
         automation
             .delegations
             .cancel(run)
@@ -320,6 +435,130 @@ impl Boards {
         let Some(automation) = self.automation() else {
             return Ok(());
         };
+        let ended = self.try_start_for_card(automation, board, card).await;
+        match &ended {
+            Ok(StartEnd::Live) => {}
+            // No run holds the slot this start reserved, so it is handed on at once: the card
+            // waiting in line would otherwise wait for an unrelated delegation to end.
+            Ok(StartEnd::Failed) => self.hand_on_slot(board, None),
+            // The card left its column meanwhile, and the entry's own evaluation was refused
+            // because this start still held the card: it is evaluated again now.
+            Ok(StartEnd::Abandoned) => self.hand_on_slot(board, Some(card.clone())),
+            Err(_) => {
+                release(automation, board, card).await;
+                self.hand_on_slot(board, None);
+            }
+        }
+        ended.map(drop)
+    }
+
+    /// Hands a slot a start freed without a run to the next card, and re-evaluates a card whose
+    /// start was abandoned, on a tracked task of their own.
+    ///
+    /// Its own task rather than an await: [`Self::release_slot`] can start the next card, whose
+    /// start can end here again, and a request or event loop must not wait on that chain.
+    fn hand_on_slot(&self, board: &BoardId, reentered: Option<CardId>) {
+        let Some(automation) = self.automation() else {
+            return;
+        };
+        let service = self.clone();
+        let board = board.clone();
+        automation.background_starts.spawn(async move {
+            // The card that waited longest goes first; the one re-evaluated queues behind it.
+            if let Err(error) = service.release_slot(&board).await {
+                tracing::warn!(%board, %error, "a slot freed by a start that ran nothing could not be handed on");
+            }
+            if let Some(card) = reentered
+                && let Err(error) = service.reseed(&board, &card).await
+            {
+                tracing::warn!(%board, %card, %error, "a card whose start was abandoned could not be evaluated again");
+            }
+        });
+    }
+
+    /// Evaluates one card again as having entered the column it stands in.
+    ///
+    /// For a card that entered a routing column while a start still held it: rule 0 refused it
+    /// then, and nothing else would ever look at it again.
+    async fn reseed(&self, board: &BoardId, card: &CardId) -> DaemonResult<()> {
+        let (board, plan) = {
+            let _guard = self.gate(board).await;
+            let now = self.now();
+            let mut doc = self.load(board)?;
+            if !doc
+                .cards
+                .iter()
+                .any(|other| other.id == *card && !other.archived)
+            {
+                return Ok(());
+            }
+            let plan = self
+                .evaluate_with_reservation(&mut doc, std::slice::from_ref(card), &now)
+                .await?;
+            if resume::decided(&plan, &doc.cards, &now) {
+                doc.board.updated_at = now;
+                self.save(&doc, BoardChangeReason::CardChanged).await?;
+            }
+            self.note_pending(board, holds_pending(&doc.cards)).await;
+            (doc.board, plan)
+        };
+        self.apply_starts_after_answer(&board, plan).await
+    }
+
+    /// Whether an earlier evaluation has promised this card a run that is not recorded yet.
+    pub(super) async fn start_in_flight(&self, board: &BoardId, card: &CardId) -> bool {
+        let Some(automation) = self.automation() else {
+            return false;
+        };
+        automation
+            .in_flight
+            .lock()
+            .await
+            .get(board)
+            .is_some_and(|reserved| reserved.contains_key(card))
+    }
+
+    /// Whether the card's reserved start has passed its final revalidation and is launching.
+    pub(super) async fn start_is_launching(&self, board: &BoardId, card: &CardId) -> bool {
+        let Some(automation) = self.automation() else {
+            return false;
+        };
+        launching(automation, board, card).await
+    }
+
+    /// The start itself, answering how it ended; [`Self::start_for_card`] owns what follows.
+    async fn try_start_for_card(
+        &self,
+        automation: &Automation,
+        board: &BoardId,
+        card: &CardId,
+    ) -> DaemonResult<StartEnd> {
+        // Outside every gate, and with the reservation still held: a card-worktree run may first
+        // have to fetch its pull request into a new worktree, and that clone counts against the
+        // board's live-run ceiling like the run it is for.
+        if let Err(error) = self.ensure_pull_request_worktree(board, card).await {
+            let Some(prepared) = self.prepare_run(board, card).await? else {
+                // The card left, or its column stopped running, while the worktree was made. The
+                // refusal names the worktree it leaves behind, and nothing on the card can.
+                tracing::warn!(%board, %card, %error, "a card run's worktree could not be linked");
+                release(automation, board, card).await;
+                return Ok(StartEnd::Abandoned);
+            };
+            let recorded = self
+                .record_run(
+                    board,
+                    card,
+                    in_worktree(
+                        failed(&prepared.row, &error, &self.now()),
+                        prepared.worktree,
+                    ),
+                )
+                .await?;
+            return Ok(match recorded {
+                RecordEnd::Recorded | RecordEnd::Cancelled => StartEnd::Failed,
+                RecordEnd::Abandoned => StartEnd::Abandoned,
+            });
+        }
         let prepared = match self.prepare_run(board, card).await? {
             Some(prepared) => prepared,
             // The card left the column, lost its action or was deleted between the evaluation
@@ -327,29 +566,57 @@ impl Boards {
             // reservation must still go, or this card is one nothing ever starts again.
             None => {
                 release(automation, board, card).await;
-                return Ok(());
+                return Ok(StartEnd::Abandoned);
             }
         };
-        let request = match prepared.request {
+        let Prepared {
+            row,
+            worktree,
+            request,
+        } = prepared;
+        let request = match request {
             Ok(request) => request,
             Err(error) => {
-                return self
-                    .record_run(board, card, failed(&prepared.row, &error, &self.now()))
-                    .await;
+                let recorded = self
+                    .record_run(
+                        board,
+                        card,
+                        in_worktree(failed(&row, &error, &self.now()), worktree),
+                    )
+                    .await?;
+                return Ok(match recorded {
+                    RecordEnd::Recorded | RecordEnd::Cancelled => StartEnd::Failed,
+                    RecordEnd::Abandoned => StartEnd::Abandoned,
+                });
             }
         };
         match automation.delegations.run_for_card(request).await {
             Ok((delegation, _warning)) => {
-                self.record_run(
-                    board,
-                    card,
-                    started(&prepared.row, &delegation, &self.now()),
-                )
-                .await
+                let recorded = self
+                    .record_run(
+                        board,
+                        card,
+                        in_worktree(started(&row, &delegation, &self.now()), worktree),
+                    )
+                    .await?;
+                Ok(match recorded {
+                    RecordEnd::Recorded => StartEnd::Live,
+                    RecordEnd::Cancelled => StartEnd::Failed,
+                    RecordEnd::Abandoned => StartEnd::Abandoned,
+                })
             }
             Err(error) => {
-                self.record_run(board, card, failed(&prepared.row, &error, &self.now()))
-                    .await
+                let recorded = self
+                    .record_run(
+                        board,
+                        card,
+                        in_worktree(failed(&row, &error, &self.now()), worktree),
+                    )
+                    .await?;
+                Ok(match recorded {
+                    RecordEnd::Recorded | RecordEnd::Cancelled => StartEnd::Failed,
+                    RecordEnd::Abandoned => StartEnd::Abandoned,
+                })
             }
         }
     }
@@ -368,84 +635,225 @@ impl Boards {
         Ok(())
     }
 
+    /// Starts what a card write decided without making the write wait for it, on a board that
+    /// runs each card in the card's own worktree; awaits it anywhere else.
+    ///
+    /// A card-worktree start may first fetch its pull request and create the worktree — minutes
+    /// of work — and the request that moved or created the card (`card new --pr` from a
+    /// scheduled agent, a move in the app) must answer once its save has landed, not time out
+    /// on a card the daemon did write. The reservation the plan holds keeps the slot counted
+    /// meanwhile, and every refusal is recorded on the card's run, so the only thing the caller
+    /// no longer hears is a failed board write, which is logged instead.
+    ///
+    /// # Errors
+    ///
+    /// On a board-worktree board, what [`Self::apply_starts`] returns.
+    pub(crate) async fn apply_starts_after_answer(
+        &self,
+        board: &Board,
+        plan: Plan,
+    ) -> DaemonResult<()> {
+        self.hand_off_starts(board, plan).await.map(drop)
+    }
+
+    /// [`Self::apply_starts_after_answer`], answering the handle of the task it handed the
+    /// starts to, if it handed them off, so a caller can wait for them a bounded while.
+    async fn hand_off_starts(
+        &self,
+        board: &Board,
+        plan: Plan,
+    ) -> DaemonResult<Option<tokio::task::JoinHandle<()>>> {
+        if plan.starts.is_empty() || board.settings.run_location.is_board_worktree() {
+            return self.apply_starts(&board.id, plan).await.map(|()| None);
+        }
+        let Some(automation) = self.automation() else {
+            return Ok(None);
+        };
+        let service = self.clone();
+        let board = board.id.clone();
+        Ok(Some(automation.background_starts.spawn(async move {
+            if let Err(error) = service.apply_starts(&board, plan).await {
+                tracing::warn!(%board, %error, "a card run started after its request answered could not be recorded");
+            }
+        })))
+    }
+
+    /// Waits until every start [`Self::apply_starts_after_answer`] handed off has landed.
+    #[cfg(test)]
+    pub(crate) async fn background_starts_settled(&self) {
+        let Some(automation) = self.automation() else {
+            return;
+        };
+        let tracker = &automation.background_starts;
+        tracker.close();
+        tracker.wait().await;
+        tracker.reopen();
+    }
+
     /// Reads what one start needs, without holding anything.
     ///
     /// `Ok(None)` means there is nothing left to start: the card is gone, archived, or its column
     /// no longer runs an action. The inner `Err` is a refusal that must be *recorded* on the card
     /// rather than returned, which is why it travels inside [`Prepared`] rather than out of here.
     async fn prepare_run(&self, board: &BoardId, card: &CardId) -> DaemonResult<Option<Prepared>> {
+        let Some(automation) = self.automation() else {
+            return Ok(None);
+        };
+        // This gate joins the final revalidation to the phase transition. A mutation either
+        // lands before this read (and is observed below), or takes the gate afterwards and sees
+        // `Launching`; there is no unguarded interval between the two.
+        let _guard = self.gate(board).await;
         let doc = self.load(board)?;
         let Some(index) = doc.cards.iter().position(|other| other.id == *card) else {
             return Ok(None);
         };
-        let card = &doc.cards[index];
-        if card.archived {
+        let target = &doc.cards[index];
+        if target.archived {
             return Ok(None);
         }
-        let Some(action) = on_enter(&doc.board, &card.status_id) else {
+        let Some(action) = on_enter(&doc.board, &target.status_id) else {
             return Ok(None);
         };
-        let prefs = resolve_prefs(card, action);
+        let prefs = resolve_prefs(target, action);
         let row = RunRow {
-            status_id: card.status_id.clone(),
+            status_id: target.status_id.clone(),
             action: action.kind.clone(),
             provider: prefs.provider.unwrap_or(DEFAULT_PROVIDER),
             model: prefs.model.clone(),
             effort: prefs.effort.clone(),
         };
-        let key = card.display_key(&doc.board);
+        let key = target.display_key(&doc.board);
+        let worktree = run_worktree(&doc.board, target, &key).ok();
         // Contracts §1.7: the three board rules run again here, not only when automation is
         // configured — a worktree can be adopted by another host long after its column was
         // written, and the run that would touch it is the thing that must refuse.
         let request = match self.require_automatable(&doc.board).await {
-            Ok(()) => card_request(&doc.board, card, action, &key, &row, prefs.mode),
+            Ok(()) => card_request(&doc.board, target, action, &key, &row, prefs.mode),
             Err(refusal) => Err(refusal),
         };
-        Ok(Some(Prepared { row, request }))
+        let prepared = Prepared {
+            row,
+            worktree,
+            request,
+        };
+        let mut reserved = automation.in_flight.lock().await;
+        let reservation = reserved
+            .get_mut(board)
+            .and_then(|cards| cards.get_mut(card))
+            .ok_or_else(|| {
+                DaemonError::Conflict(format!(
+                    "card {card} lost its start reservation before launch"
+                ))
+            })?;
+        reservation.phase = StartPhase::Launching;
+        Ok(Some(prepared))
     }
 
     /// Writes one run onto the card, clears its reservation, and saves once.
     ///
     /// The reservation is released *inside* the gate and after the row is written, so the next
     /// evaluation sees exactly one of the two: the promise, or the run that kept it.
-    async fn record_run(&self, board: &BoardId, card: &CardId, run: CardRun) -> DaemonResult<()> {
+    async fn record_run(
+        &self,
+        board: &BoardId,
+        card: &CardId,
+        run: CardRun,
+    ) -> DaemonResult<RecordEnd> {
         let Some(automation) = self.automation() else {
-            return Ok(());
+            return Ok(RecordEnd::Abandoned);
         };
-        let _guard = self.gate(board).await;
+        let guard = self.gate(board).await;
         let now = self.now();
         let mut doc = self.load(board)?;
-        let saved = match doc.cards.iter().position(|other| other.id == *card) {
-            Some(index) => {
-                let failed_to_start = run.failed_to_start();
-                let ended = run.ended_at.clone();
-                let outcome = run.outcome;
-                push_run(&mut doc.cards[index], run, &now);
-                doc.cards[index].pending_run = None;
-                // A start that never happened still ends: the card carries a `RunStarted` the
-                // evaluation wrote, and an entry nothing closes reads as a run still working.
-                if failed_to_start && let Some(outcome) = outcome {
-                    let message = run_ended(outcome, ended.is_some().then_some(0), None);
-                    push_activity(
-                        &mut doc.cards[index],
-                        ActivityKind::RunEnded,
-                        None,
-                        message,
-                        &now,
-                    );
-                }
-                doc.board.updated_at = now;
-                let saved = self.save(&doc, BoardChangeReason::CardChanged).await;
-                self.note_pending(board, holds_pending(&doc.cards)).await;
-                saved
+        let index = doc.cards.iter().position(|other| other.id == *card);
+        let still_prepared = index.is_some_and(|index| {
+            let target = &doc.cards[index];
+            !target.archived
+                && target.status_id == run.status_id
+                && on_enter(&doc.board, &target.status_id)
+                    .is_some_and(|action| action.kind == run.action)
+        });
+        let cancel_requested = automation
+            .in_flight
+            .lock()
+            .await
+            .get(board)
+            .and_then(|cards| cards.get(card))
+            .is_some_and(|reservation| reservation.cancel_requested);
+        if !cancel_requested && let Some(index) = index.filter(|_| still_prepared) {
+            let failed_to_start = run.failed_to_start();
+            let ended = run.ended_at.clone();
+            let outcome = run.outcome;
+            push_run(&mut doc.cards[index], run, &now);
+            doc.cards[index].pending_run = None;
+            // A start that never happened still ends: the card carries a `RunStarted` the
+            // evaluation wrote, and an entry nothing closes reads as a run still working.
+            if failed_to_start && let Some(outcome) = outcome {
+                let message = run_ended(outcome, ended.is_some().then_some(0), None);
+                push_activity(
+                    &mut doc.cards[index],
+                    ActivityKind::RunEnded,
+                    None,
+                    message,
+                    &now,
+                );
             }
-            // The card was deleted while its child was starting. The delegation is the deleting
-            // path's problem — it refuses a card with a live run — and there is nothing here to
-            // write it on.
-            None => Ok(()),
+            doc.board.updated_at = now;
+            let saved = self.save(&doc, BoardChangeReason::CardChanged).await;
+            self.note_pending(board, holds_pending(&doc.cards)).await;
+            drop(guard);
+            release(automation, board, card).await;
+            saved?;
+            return Ok(RecordEnd::Recorded);
+        }
+        if !cancel_requested {
+            tracing::warn!(
+                %board,
+                %card,
+                status = %run.status_id,
+                action = ?run.action,
+                "stopping a card delegation because its prepared start is no longer current"
+            );
+        }
+        let saved = if cancel_requested
+            && let Some(index) = index
+            && doc.cards[index].pending_run.take().is_some()
+        {
+            doc.cards[index].updated_at.clone_from(&now);
+            doc.board.updated_at.clone_from(&now);
+            let saved = self.save(&doc, BoardChangeReason::CardChanged).await;
+            self.note_pending(board, holds_pending(&doc.cards)).await;
+            saved
+        } else {
+            Ok(())
         };
+        let live = run.is_live();
+        let delegation = run.id;
+        drop(guard);
+        let cancelled = if live {
+            automation.delegations.cancel(delegation).await.map(drop)
+        } else {
+            Ok(())
+        };
+        if cancel_requested
+            && let Some(result) = automation
+                .in_flight
+                .lock()
+                .await
+                .get(board)
+                .and_then(|cards| cards.get(card))
+                .map(|reservation| Arc::clone(&reservation.cancel_result))
+        {
+            *result.lock().await = Some(cancelled.clone());
+        }
         release(automation, board, card).await;
-        saved
+        saved?;
+        cancelled.map_err(from_proto_error)?;
+        Ok(if cancel_requested {
+            RecordEnd::Cancelled
+        } else {
+            RecordEnd::Abandoned
+        })
     }
 
     /// Walks the automation engine over a document the caller changed, holding the board's own
@@ -510,17 +918,36 @@ impl Boards {
         // its delivery lands, so a document loaded under the gate already knows.
         let live = LiveIndex::from_runs(&doc.cards);
         let mut reserved = automation.in_flight.lock().await;
-        let in_flight = reserved.entry(doc.board.id.clone()).or_default();
+        let reservations = reserved.entry(doc.board.id.clone()).or_default();
+        let mut in_flight = reservations.keys().cloned().collect::<BTreeSet<_>>();
         let plan = match kind {
-            Seeds::Entered => re_evaluate(&doc.board, &mut doc.cards, seeds, &live, in_flight, now),
-            Seeds::Settled => {
-                re_evaluate_settled(&doc.board, &mut doc.cards, seeds, &live, in_flight, now)
-            }
+            Seeds::Entered => re_evaluate(
+                &doc.board,
+                &mut doc.cards,
+                seeds,
+                &live,
+                &mut in_flight,
+                now,
+            ),
+            Seeds::Settled => re_evaluate_settled(
+                &doc.board,
+                &mut doc.cards,
+                seeds,
+                &live,
+                &mut in_flight,
+                now,
+            ),
         };
+        reservations.retain(|card, _| in_flight.contains(card));
+        for card in in_flight {
+            reservations
+                .entry(card)
+                .or_insert_with(StartReservation::creating_worktree);
+        }
         // A board nobody is starting anything on keeps no entry: the map is memory the daemon
         // holds for the life of the process, and an empty set per board ever touched is a leak
         // nothing would ever collect.
-        if reserved.get(&doc.board.id).is_some_and(BTreeSet::is_empty) {
+        if reserved.get(&doc.board.id).is_some_and(BTreeMap::is_empty) {
             reserved.remove(&doc.board.id);
         }
         Ok(plan?)
@@ -588,7 +1015,7 @@ impl RunDeliveryHook for Boards {
         let changed = self.changed_files(automation, board, delegation).await;
         self.record_result_files(automation, delegation.id, &changed)
             .await;
-        let (board_id, plan) = {
+        let (next_board, plan) = {
             let _guard = self.gate(board).await;
             let now = self.now();
             let mut doc = self.load(board)?;
@@ -609,6 +1036,7 @@ impl RunDeliveryHook for Boards {
             if doc.cards[index].runs[run].outcome.is_some() {
                 return Ok(());
             }
+            let run_status = doc.cards[index].runs[run].status_id.clone();
             let ended_at = delegation
                 .finished
                 .map_or_else(|| now.clone(), |finished| finished.to_rfc3339());
@@ -633,7 +1061,7 @@ impl RunDeliveryHook for Boards {
                 let comment = uuid::Uuid::new_v4().to_string();
                 // The section is appended *after* the cap, so a long report is what gets elided
                 // and the file list is never the part that goes missing.
-                let files = files_section(&changed, doc.board.settings.max_live_runs() > 1);
+                let files = files_section(&changed, shares_worktree(&doc.board));
                 doc.cards[index].comments.push(Comment {
                     id: comment.clone(),
                     author: None,
@@ -663,21 +1091,23 @@ impl RunDeliveryHook for Boards {
             // would start the same column again the moment this run ended, and again when that
             // one did, for as long as nobody moved the card.
             let entered = outcome == RunOutcome::Succeeded
-                && self.move_on_success(&mut doc.board, &mut doc.cards, index, &now);
+                && self.move_on_success(&mut doc.board, &mut doc.cards, index, &run_status, &now);
             let plan = self
                 .evaluate_after_run(&mut doc, card, entered, &now)
                 .await?;
             doc.board.updated_at = now;
             self.save(&doc, BoardChangeReason::CardChanged).await?;
             self.note_pending(board, holds_pending(&doc.cards)).await;
-            (doc.board.id.clone(), plan)
+            (doc.board, plan)
         };
-        self.apply_starts(&board_id, plan).await
+        // Handed off on a card-worktree board: the next card's pull-request fetch must not hold
+        // the delegation outbox drain, which every other delivery waits behind.
+        self.apply_starts_after_answer(&next_board, plan).await
     }
 }
 
 impl Boards {
-    /// What the run left in the board's worktree, as its delivery can describe it.
+    /// What the run left in the worktree it ran in, as its delivery can describe it.
     ///
     /// Every way of not knowing answers an empty list and logs: a board that is not a worktree
     /// board, a worktree this daemon no longer holds, a checkout that is not a Git working tree,
@@ -690,13 +1120,13 @@ impl Boards {
         delegation: &Delegation,
     ) -> Vec<ChangedFile> {
         let worktree = match self.load(board) {
-            Ok(doc) => doc.board.worktree_id,
+            Ok(doc) => diff_worktree(&doc, delegation.id),
             Err(error) => {
                 tracing::warn!(%board, %error, "a card run's board could not be read for its diff");
                 return Vec::new();
             }
         };
-        // Automation refuses a board with no worktree at `card_request`, so this is a board that
+        // Automation refuses a run with no worktree at `card_request`, so this is a board that
         // lost its worktree while a run was working rather than one that never had one.
         let Some(worktree) = worktree else {
             return Vec::new();
@@ -783,7 +1213,7 @@ impl Boards {
         }
     }
 
-    /// Moves a card whose run succeeded to the column its current column routes to, and reports
+    /// Moves a card whose run succeeded to the column its run column routes to, and reports
     /// whether it moved.
     ///
     /// The answer is what tells the delivery's evaluation which card *entered* a column: only a
@@ -797,9 +1227,10 @@ impl Boards {
         board: &mut Board,
         cards: &mut [Card],
         index: usize,
+        run_status: &StatusId,
         now: &str,
     ) -> bool {
-        let Some(target) = column(board, &cards[index].status_id)
+        let Some(target) = column(board, run_status)
             .and_then(|status| status.automation.as_ref())
             .and_then(|automation| automation.on_success.clone())
         else {
@@ -825,6 +1256,55 @@ impl Boards {
     }
 }
 
+/// The worktree one card's run executes in, by the board's `run_location`.
+///
+/// A board-worktree board runs every card in its own worktree; a card-worktree board runs each
+/// card in the card's, which [`Boards::ensure_pull_request_worktree`] linked just before. Both
+/// refusals are unreachable behind that step and `require_automatable`, which every start passes
+/// first; they are kept because the worktree is what the request is built from, and they are
+/// spelt in the contracts' own words.
+fn run_worktree(board: &Board, card: &Card, key: &str) -> Result<WorktreeId, DaemonError> {
+    let (worktree, reason) = if board.settings.run_location.is_board_worktree() {
+        (
+            board.worktree_id.clone(),
+            "automation is available on worktree boards only".to_owned(),
+        )
+    } else {
+        (
+            card.worktree_id.clone(),
+            format!(
+                "{key} has no worktree to run in; link a pull request or create its worktree first"
+            ),
+        )
+    };
+    worktree.ok_or_else(|| {
+        BoardError::Invalid {
+            field: "automation".into(),
+            reason,
+        }
+        .into()
+    })
+}
+
+/// The worktree a delivered run's changed files are read from: the one it ran in, or the
+/// board's for a run recorded before runs carried their worktree.
+fn diff_worktree(doc: &BoardDocument, delegation: DelegationId) -> Option<WorktreeId> {
+    doc.cards
+        .iter()
+        .flat_map(|card| &card.runs)
+        .find(|run| run.id == delegation)
+        .and_then(|run| run.worktree_id.clone())
+        .or_else(|| doc.board.worktree_id.clone())
+}
+
+/// Whether another run may be working in the same checkout as this one.
+///
+/// Only a board that runs every card in its own worktree shares one; each card of a
+/// card-worktree board has a checkout of its own.
+fn shares_worktree(board: &Board) -> bool {
+    board.settings.run_location.is_board_worktree() && board.settings.max_live_runs() > 1
+}
+
 /// Assembles what the delegation service needs to start one card's run.
 ///
 /// Every refusal it can raise is a *card* fact: the board is not a worktree board, or a column
@@ -838,15 +1318,7 @@ fn card_request(
     row: &RunRow,
     mode: fleet_core::agents::PermissionMode,
 ) -> Result<CardRunRequest, DaemonError> {
-    let Some(worktree) = board.worktree_id.clone() else {
-        // Unreachable behind `require_automatable`, which every start passes first; kept because
-        // the worktree is what the request is built from, and spelt in §1.7's own words.
-        return Err(BoardError::Invalid {
-            field: "automation".into(),
-            reason: "automation is available on worktree boards only".into(),
-        }
-        .into());
-    };
+    let worktree = run_worktree(board, card, key)?;
     validate_env(&action.env)?;
     // `validate_env` has already refused every entry without an `=`, so the filter drops nothing
     // a board can actually hold.
@@ -854,7 +1326,7 @@ fn card_request(
         .env
         .iter()
         .filter_map(|entry| entry.split_once('='))
-        .map(|(name, value)| (name.to_owned(), render_template(value, key, &card.title)))
+        .map(|(name, value)| (name.to_owned(), render_card_template(value, key, card)))
         .collect();
     let reports: Vec<&Comment> = card
         .comments
@@ -894,6 +1366,7 @@ fn started(row: &RunRow, delegation: &Delegation, now: &str) -> CardRun {
         files_changed: 0,
         cost_usd: None,
         tokens: None,
+        worktree_id: None,
     }
 }
 
@@ -918,6 +1391,18 @@ fn failed(row: &RunRow, error: &DaemonError, now: &str) -> CardRun {
         files_changed: 0,
         cost_usd: None,
         tokens: None,
+        worktree_id: None,
+    }
+}
+
+/// A run row, stamped with the worktree it ran in — or would have, for a refused start.
+///
+/// Kept apart from [`started`] and [`failed`] because boot recovery builds the row of a run it
+/// adopts from [`started`] too, with no prepared start to read the worktree from.
+fn in_worktree(run: CardRun, worktree: Option<WorktreeId>) -> CardRun {
+    CardRun {
+        worktree_id: worktree,
+        ..run
     }
 }
 
@@ -1643,5 +2128,119 @@ mod tests {
                 .expect("a static worktree id is valid"),
         );
         board
+    }
+
+    /// A run with this delegation id, recorded in `worktree`.
+    fn run_in(id: DelegationId, worktree: Option<&str>) -> CardRun {
+        CardRun {
+            worktree_id: worktree.map(|id| id.parse().expect("a static worktree id is valid")),
+            ..started(&row(), &delegation_with(id), NOW)
+        }
+    }
+
+    fn delegation_with(id: DelegationId) -> Delegation {
+        Delegation {
+            id,
+            ..delegation(DelegationStatus::Succeeded, None)
+        }
+    }
+
+    fn document(board: Board, runs: Vec<CardRun>) -> BoardDocument {
+        let mut card = card();
+        card.runs = runs;
+        BoardDocument {
+            version: fleet_core::board::document_version(&board, std::slice::from_ref(&card)),
+            board,
+            cards: vec![card],
+        }
+    }
+
+    #[test]
+    fn a_card_worktree_run_diffs_its_own_worktree() {
+        let delivered = DelegationId::new();
+        let mut board = board();
+        board.settings.run_location = fleet_core::board::RunLocation::CardWorktree;
+        let doc = document(
+            board,
+            vec![
+                run_in(DelegationId::new(), Some("acme/api#review-8")),
+                run_in(delivered, Some("acme/api#review-7")),
+            ],
+        );
+        assert_eq!(
+            diff_worktree(&doc, delivered).map(|id| id.to_string()),
+            Some("acme/api#review-7".to_owned()),
+            "the delivered run's own worktree, not the board's or another run's"
+        );
+    }
+
+    #[test]
+    fn a_run_recorded_before_worktree_ids_diffs_the_board_worktree() {
+        let delivered = DelegationId::new();
+        let doc = document(board(), vec![run_in(delivered, None)]);
+        assert_eq!(
+            diff_worktree(&doc, delivered).map(|id| id.to_string()),
+            Some("acme/api#feature".to_owned())
+        );
+    }
+
+    #[test]
+    fn card_worktree_runs_never_print_the_shared_sentence() {
+        let changed = [changed("src/lib.rs", ChangeKind::Modified)];
+        let mut board = board();
+        board.settings.max_live_runs = Some(3);
+        assert!(
+            shares_worktree(&board),
+            "a board worktree run by three is shared"
+        );
+        assert!(files_section(&changed, shares_worktree(&board)).contains(FILES_SHARED_WORKTREE));
+
+        board.settings.run_location = fleet_core::board::RunLocation::CardWorktree;
+        assert!(!shares_worktree(&board));
+        let section = files_section(&changed, shares_worktree(&board));
+        assert!(section.contains("M src/lib.rs"));
+        assert!(!section.contains(FILES_SHARED_WORKTREE), "{section}");
+    }
+
+    #[test]
+    fn a_card_worktree_board_runs_each_card_in_the_card_worktree() {
+        let mut board = board();
+        board.settings.run_location = fleet_core::board::RunLocation::CardWorktree;
+        let mut card = card();
+        let key = card.display_key(&board);
+        let refused = card_request(
+            &board,
+            &card,
+            &action(),
+            &key,
+            &row(),
+            fleet_core::agents::PermissionMode::default(),
+        )
+        .map(|request| request.worktree);
+        match refused {
+            Err(error) => assert_eq!(
+                error.to_string(),
+                format!(
+                    "validation failed: invalid automation: {key} has no worktree to run in; link a pull request or create its worktree first"
+                )
+            ),
+            Ok(worktree) => panic!("a card with no worktree ran in {worktree}"),
+        }
+
+        card.worktree_id = Some(
+            "acme/api#review-7"
+                .parse()
+                .expect("a static worktree id is valid"),
+        );
+        let request = card_request(
+            &board,
+            &card,
+            &action(),
+            &key,
+            &row(),
+            fleet_core::agents::PermissionMode::default(),
+        )
+        .expect("a linked card builds its request");
+        assert_eq!(request.worktree.to_string(), "acme/api#review-7");
     }
 }

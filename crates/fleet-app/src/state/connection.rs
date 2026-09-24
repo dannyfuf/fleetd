@@ -170,6 +170,9 @@ impl AppState {
                 self.daemon_since = now;
                 self.link_generation = self.link_generation.wrapping_add(1);
                 self.clear_board();
+                // Another daemon, or the same one after a gap, may hold other schedules, and a
+                // `SchedulesChanged` missed while disconnected would leave an entry stale forever.
+                self.schedules.clear();
                 self.watches.reconnect();
                 self.seed_agent_activity(&snapshot, now);
                 self.agents.forget_unconfirmed();
@@ -216,6 +219,9 @@ impl AppState {
             }
             BridgeEvent::Disconnected { attempt } => {
                 self.clear_board();
+                // Another daemon, or the same one after a gap, may hold other schedules, and a
+                // `SchedulesChanged` missed while disconnected would leave an entry stale forever.
+                self.schedules.clear();
                 self.daemon_capabilities.clear();
                 let (dismissed, reason) = match self.daemon {
                     DaemonLink::Lost {
@@ -253,6 +259,9 @@ impl AppState {
                 // fleetd itself restarted.
                 self.link_generation = self.link_generation.wrapping_add(1);
                 self.clear_board();
+                // Another daemon, or the same one after a gap, may hold other schedules, and a
+                // `SchedulesChanged` missed while disconnected would leave an entry stale forever.
+                self.schedules.clear();
                 self.watches.reconnect();
                 self.seed_agent_activity(&snapshot, now);
                 self.agents.forget_unconfirmed();
@@ -337,6 +346,12 @@ impl AppState {
             // The local daemon refilled a mirrored thread's stored window, so the client
             // re-reads the window it has open rather than trusting what it cached.
             Event::AgentWindow { thread } => self.agents.mark_resync(thread),
+            // A board's schedules changed (created, edited, run, finished): the mirror entry is
+            // marked stale and the event loop re-asks for it once per batch. A board this app
+            // never asked about has no entry and costs nothing.
+            Event::SchedulesChanged { board_id } => {
+                self.schedules.mark_stale(&board_id);
+            }
             // An event family this build does not understand is ignored, never re-broadcast.
             Event::Unknown => {}
             Event::TerminalFrame(frame) => {

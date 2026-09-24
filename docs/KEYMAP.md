@@ -168,6 +168,33 @@ depending on row state — same key, same pane, same mode, different blast radiu
 | `r` | force refresh both tabs |
 | `p`, `q` | back to worktrees |
 
+On a daemon that advertises `board.reviews` the rows above serve the **Mine** tab; the Review tab
+is the context's Reviews board and publishes `Hub > Prs > Board` (below). On an older daemon the
+Review tab keeps its flat list and these rows serve both tabs.
+
+## Hub › Pull requests › Review board
+
+`Hub > Prs > Board` nests under `Hub > Prs`, so anything it does not bind falls through to the PR
+screen's rows. It binds the whole `Hub > Board` table (*Board and card detail*, below) against the
+same actions, with these differences:
+
+| Key | Action |
+| --- | --- |
+| `tab` / `shift-tab` | `prs::NextTab` / `prs::PrevTab` — Mine ⇄ Review, as on the rest of the screen |
+| `h` / `l`, `left` / `right` | `board::PrevColumn` / `board::NextColumn` — columns, overriding the screen's tab keys in this context only |
+| `p`, `q` | `prs::Back` — back to worktrees; the priority picker is in the card menu and the card detail here |
+| `A` | `board::AttachRun` — attach the focused card's run as an agent tab |
+| `X` | `board::CancelRun` — cancel the focused card's live run |
+| `>` | `board::RunNow` — run the column's action on the focused card now |
+| `B` | `board::OpenPullRequest` — open the focused review card's pull request in the browser |
+| `y` | `board::CopyPullRequestUrl` — copy the focused review card's pull request URL |
+| `T` | `board::Schedules` — Board settings, on its Schedules section |
+| `R` | `board::RunSchedules` — run every enabled schedule of the board now |
+
+Every other `Hub > Board` key — `j`/`k`, `enter`, `c`, `s`, `a`, `t`, `e`, `[`/`]`, `w`, `o`, `S`,
+`F`, `x`, `d`, `,`, `r`, `/`, `b`, `m`, `C` — is bound here to the same action it has on the Hub's
+board. `A`, `X` and `>` are bound because a review card runs in its own pull-request worktree.
+
 ## Workspace (Terminal mode)
 
 All keys go to the PTY except these direct terminal affordances:
@@ -792,6 +819,8 @@ that cannot contain a space, and `space` toggles the highlighted card.
 | `b` | `Hub > Board` | `board::PickBlockedBy` — Pick the cards this one is blocked by (shadows the Hub's `b` while the board owns the keys) |
 | `m` | `Hub > Board` | `board::PickAgent` — Pick the agent that runs this card |
 | `C` | `Hub > Board` | `board::Columns` — Board settings, on its Columns section |
+| `T` | `Hub > Board` | `board::Schedules` — Board settings, on its Schedules section |
+| `R` | `Hub > Board` | `board::RunSchedules` — Run every enabled schedule of the board now |
 | `h` | `Workspace > Native > Board` | `board::PrevColumn` — Previous column |
 | `left` | `Workspace > Native > Board` | `board::PrevColumn` — Previous column |
 | `l` | `Workspace > Native > Board` | `board::NextColumn` — Next column |
@@ -824,6 +853,8 @@ that cannot contain a space, and `space` toggles the highlighted card.
 | `b` | `Workspace > Native > Board` | `board::PickBlockedBy` — Pick the cards this one is blocked by |
 | `m` | `Workspace > Native > Board` | `board::PickAgent` — Pick the agent that runs this card |
 | `C` | `Workspace > Native > Board` | `board::Columns` — Board settings, on its Columns section |
+| `T` | `Workspace > Native > Board` | `board::Schedules` — Board settings, on its Schedules section |
+| `R` | `Workspace > Native > Board` | `board::RunSchedules` — Run every enabled schedule of the board now |
 | `escape` | `Dialog > CardDetail` | `card_detail::Close` — Close |
 | `i` | `Dialog > CardDetail` | `card_detail::EditTitle` — Edit title |
 | `d` | `Dialog > CardDetail` | `card_detail::EditDescription` — Edit description |
@@ -847,6 +878,8 @@ that cannot contain a space, and `space` toggles the highlighted card.
 | `t` | `Dialog > CardDetail` | `board::PickLabels` — Labels picker for the card on show |
 | `e` | `Dialog > CardDetail` | `board::PickEstimate` — Estimate picker for the card on show |
 | `o` | `Dialog > CardDetail` | `board::OpenWorktree` — Open the card's linked worktree session |
+| `B` | `Dialog > CardDetail` | `board::OpenPullRequest` — Open the review card's pull request in the browser |
+| `y` | `Dialog > CardDetail` | `board::CopyPullRequestUrl` — Copy the review card's pull request URL |
 | `:` | `Dialog > CardDetail` | `OpenPalette` — Command palette over the open card detail (⌘K / `ctrl-k` too) |
 | `escape` | `Dialog > CardDetailEditing` | `card_detail::Close` — Cancel text edit |
 | `enter` | `Dialog > CardDetailEditing` | `card_detail::EditProperty` — Submit title or insert a legacy multiline newline |
@@ -866,6 +899,7 @@ that cannot contain a space, and `space` toggles the highlighted card.
 | `J` | `Dialog > BoardSettings` | `board_settings::MoveColumnDown` — Move the column one place later |
 | `K` | `Dialog > BoardSettings` | `board_settings::MoveColumnUp` — Move the column one place earlier |
 | `P` | `Dialog > BoardSettings` | `board_settings::ApplyPreset` — Add the workflow preset's missing columns |
+| `r` | `Dialog > BoardSettings` | `board_settings::RunScheduleNow` — Run the focused schedule now (Schedules section) |
 | `ctrl-s` | `Dialog > BoardSettings` | `board_settings::Save` — Save the board's settings |
 | `ctrl-s` | `Dialog > BoardSettingsEditing` | `board_settings::Save` — Save the board's settings |
 | `enter` | `Dialog > BoardSettingsEditing` | `dialog::Confirm` — Open a column, commit an edit, or save |
@@ -876,6 +910,22 @@ board has no worktree to run in, and a key that could only refuse is worse than 
 are bound on all three surfaces, and on `Hub > Board` `b` **shadows** the Hub's own `b` (open in
 browser) for as long as the board owns the keys, which is what a board screen inside the Hub means
 (`APP-CONTRACTS.md` §3). `C` opens Board settings on its Columns section on both boards.
+
+`T` opens Board settings on its **Schedules** section and `R` runs every enabled schedule of the
+board now, on every board surface. They are not `S` and `F`, which the schedules strip would
+otherwise suggest, because those are the board's sync and full sync. `B` and `y` act on a review
+card's pull request — open it in the browser, copy its URL — on the Review board and in the card
+detail; they are not `b`, which is *blocked by* on every board surface.
+
+**Board settings › Schedules.** The section reuses the dialog's keys, each meaning its schedule
+twin while the Schedules list is showing: `n` adds a schedule (on a Reviews board, pre-filled with
+the GitHub starter), `⏎` opens the focused schedule's form, `space` enables or disables it (sent at
+once), `r` runs it now, `d` arms a delete and a second `d` confirms it (`esc`, `j`/`k`, a click, `space` or `r` disarm
+it; the Confirm dialog is not used, as dialogs do not stack), `j`/`k` move, and `ctrl-s` saves the
+form. On a form with unsaved edits the first `tab`, `shift-tab` or rail click asks, as `esc` does,
+and stays on the section; the next one leaves and discards the form.
+Inside the form `h`/`l` cycle a closed choice (provider, mode, cadence), `space` toggles Enabled,
+and `⏎` opens a field's editor. `J`, `K` and `P` do nothing on this section.
 
 Board filtering keeps horizontal navigation on keys the input does not own. `left` / `right` and
 `ctrl-b` / `ctrl-f` now move the caret through `FleetTextInput`; column navigation therefore uses

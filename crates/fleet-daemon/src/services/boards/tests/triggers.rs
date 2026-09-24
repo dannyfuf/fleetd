@@ -373,14 +373,20 @@ async fn deleting_a_blocker_drops_its_links_in_the_same_write() {
     let view = services.boards.get(&board.id).await.unwrap();
     assert_eq!(view.cards.len(), 1);
     assert!(view.cards[0].blocked_by.is_empty());
-    assert_eq!(
-        view.cards[0]
-            .activity
-            .last()
-            .map(|entry| entry.message.clone()),
-        Some(format!("Unblocked: {key} was deleted")),
-        "{:?}",
-        view.cards[0].activity
+    let activity = &view.cards[0].activity;
+    assert!(
+        activity
+            .iter()
+            .any(|entry| entry.message == format!("Unblocked: {key} was deleted")),
+        "{activity:?}"
+    );
+    // Freed in a routing column, the card advances at once (§11.7 rule 0).
+    assert!(
+        activity
+            .iter()
+            .any(|entry| entry.kind == ActivityKind::AutoMoved
+                && entry.message == "Moved to Todo: nothing blocks it"),
+        "{activity:?}"
     );
 }
 
@@ -594,6 +600,30 @@ async fn a_routed_success_moves_the_card_and_the_next_column_starts_it() {
         "{:?}",
         card.activity
     );
+}
+
+#[tokio::test]
+async fn a_success_routes_from_the_runs_column_not_the_cards_current_column() {
+    let (_temp, services, _receiver) = fixture().await;
+    let board = automated_board(&services, None).await;
+    write_document(
+        &services,
+        &board,
+        vec![seeded_card(&board, 1, "in-progress", live_run("todo"))],
+    );
+
+    services
+        .boards
+        .on_run_delivered(
+            &board.id,
+            &card_id(1),
+            &delivered(&board, DelegationStatus::Succeeded),
+        )
+        .await
+        .unwrap();
+
+    let view = services.boards.get(&board.id).await.unwrap();
+    assert_eq!(view.cards[0].status_id, status_id("done"));
 }
 
 /// One board's reservation is not spent against another board's ceiling.

@@ -1,7 +1,8 @@
-# `fleet board` command reference
+# `fleet board` and `fleet schedule` command reference
 
 Source of truth: `crates/fleet-cli/src/args.rs` (`BoardArgs`, `BoardCommand`, `BoardSetArgs`,
-`BoardCardCommand`, `BoardCardFields`) and `docs/BOARD.md` §6. When this file and the code
+`BoardCardCommand`, `BoardCardFields`, `ScheduleArgs`, `ScheduleCommand`) and `docs/BOARD.md`
+§6 and §12. When this file and the code
 disagree, the code is right and this file needs the fix.
 
 ## Global flags (any position, mutually exclusive selectors)
@@ -12,6 +13,7 @@ disagree, the code is right and this file needs the fix.
 | `--worktree` | The worktree owning `FLEET_SESSION` — the worktree session in a terminal, or the native agent thread with that id. Creates the board on first use. |
 | `--worktree=<owner/name#slug>` | A named worktree. The `=` is mandatory so a subcommand is never eaten as the value. Creates on first use. |
 | `--context <id>` | A named context. Creates on first use. |
+| `--reviews` | The Reviews board of `--context <id>`, or of the active context. Creates on first use. Conflicts with `--board` and `--worktree`. |
 | *(none)* | The daemon's active context. Creates on first use. Errors with `no active context` if there is none. |
 | `--json` | Protocol-1 JSON envelope on stdout; errors as a JSON envelope too. |
 
@@ -21,10 +23,10 @@ disagree, the code is right and this file needs the fix.
 
 | Command | What it does | Prints |
 | --- | --- | --- |
-| `fleet board show` | Columns and their cards. | Header, then `<Column> (n)` sections with `KEY  priority  title  [labels]  @assignee` rows, then `No column (n)` for orphaned cards. |
-| `fleet board list [--board ID] [--context ID]` | Every board the daemon knows, or one. | Table: id, context, worktree, name, backend, cards, open, dirty, conflicts, and a trailing last-error cell when one exists. |
+| `fleet board show` | Columns and their cards. | Header (`backend: …`, then `N/M working` over the board's live-run limit, or `N working · K waiting` while cards are owed a slot, then `N needs you`), then `<Column> (n)` sections with `KEY  priority  title  [labels]  @assignee` rows, then `No column (n)` for orphaned cards. |
+| `fleet board list [--board ID] [--context ID]` | Every board the daemon knows, or one. | Table: id, context, scope (`context`, `reviews` for a context's Reviews board, or the worktree id), name, backend, cards, open, dirty, conflicts, working, needs you, and a trailing last-error cell when one exists. |
 | `fleet board backends` | Registered backend kinds, their capabilities, their setting keys. | Table. Resolves no board. |
-| `fleet board describe` | What the selected board's backend reports: statuses, labels, properties, read-only fields. | Table. On a Jira board this is where the real column names come from. |
+| `fleet board describe` | What the selected board's backend reports: statuses, labels, properties, read-only fields. A local board (every Reviews board) reports its own columns, labels, properties and prefix. | Table. On a Jira board this is where the real column names come from; on a Reviews board it lists the labels a scheduled run puts on a card. |
 | `fleet board create [--name N] [--prefix P] [--backend K] [--setting k=v]...` | Create a context or worktree board explicitly. Name defaults to the context name or worktree slug. `--setting` requires `--backend`. | The new board as `show` prints it. |
 | `fleet board set …` | Update board properties (below). Refuses an empty patch. | The board as `show` prints it. |
 | `fleet board sync [--wait] [--full]` | Start a sync job. `--wait` blocks until it ends. `--full` ignores the incremental cursor. | `Sync started <job>`; with `--wait`: `Synced <board> (<job>)`, progress, counts, and `Last error:` when the backend skipped cards. |
@@ -88,12 +90,13 @@ card with no remote link; matching is case-insensitive; an ambiguous match is re
 | Command | Notes |
 | --- | --- |
 | `card new <title> [fields] [--blocked-by KEY]... [--blocks KEY]...` | No `--status` means the first unstarted column. `--clear-*` flags are refused here. Both link lists are resolved before the card is created, so a typo costs nothing. |
-| `card show <key>` | Identity line, one `Field: value` line each (Status, Priority, Labels, Assignee, Estimate, Due, Parent, Repo, Worktree, Archived, Dirty, Created, Updated, Local key when unlinked, Remote/URL/Synced when linked, Conflict when present, backend properties), then `Description` and `Comments` blocks. |
+| `card new <title> --pr <ref> [--requested-at <rfc3339>] [fields]` | Records a pull request, idempotently. `<ref>` is `https://github.com/<owner>/<name>/pull/<n>` (a trailing `/files`, `/commits`, `#…` or `?…` is fine) or `<owner>/<name>#<n>`. Prints `Created <KEY>`, `Existing <KEY>` or `Reopened <KEY>` first, then the card. The same pull request spelt in another case (`Acme/API#7`) is the same card. A completed or archived card reopens only when `--requested-at` is later than its last completion, and never while its run is still live. `--requested-at` without `--pr` is refused: `--requested-at needs --pr`; a bad `--pr` or `--requested-at` is refused (`invalid pull_request: …`, `invalid requested_at: …`) before any board is resolved or created. On a Reviews board the review run starts after the command answers. A card's pull request never changes after creation. |
+| `card show <key>` | Identity line, one `Field: value` line each (Status, Priority, Labels, Assignee, Estimate, Due, Parent, Repo, Worktree, Pull request (`<owner/name#n>  <url>`, review cards only), Archived, Dirty, Created, Updated, Local key when unlinked, Remote/URL/Synced when linked, Conflict when present, backend properties), then `Description` and `Comments` blocks. |
 | `card edit <key> [--title T] [fields] [--clear-*] [--archive [true\|false]] [link flags]` | Omitted fields are unchanged. Refuses an empty patch. `--archive false` restores. Link flags: `--add-blocked-by KEY`, `--remove-blocked-by KEY`, `--clear-blocked-by`, `--add-blocks KEY`, `--remove-blocks KEY` (all repeatable except the clear). `--add-blocks` edits the *named* card, so it is never an empty patch. |
 | `card move <key> <status> [--index N] [--cancel-run]` | Status by id or name (case-insensitive). `--index` positions inside the column; default is the end. A card with a live run is refused unless `--cancel-run` says to stop it. |
-| `card run <key>` | Starts a run for a card standing in a column with an action. Prints `run <id> started, thread <thread>` then the card, or `run pending; it starts when a run slot frees` when the board is at its ceiling. |
+| `card run <key>` | Starts a run for a card standing in a column with an action. Prints `run <id> started, thread <thread>` then the card, or `run pending; it starts when a run slot frees` when the board is at its ceiling. A start the daemon refused prints `run <id> failed: <sentence>` (the C5 refusal, for example `owner/name is not a Fleet repository; clone it into this context first`) and exits 1. On a board that runs each card in its own worktree, a start still fetching its pull request after about 20 seconds is answered as `run requested` and keeps going. |
 | `card cancel <key>` | Cancels the card's live run, or drops the slot a card is waiting for when it has only been *owed* one. Refuses a card with neither: `{KEY} has no live run`. Prints the card. |
-| `card runs <key>` | One tab-separated line per run, newest last: run id, column, outcome, provider, model, effort, duration, files changed, cost, thread. `—` for what is not known yet. |
+| `card runs <key>` | One tab-separated line per run, newest last: run id, column, outcome, provider, model, effort, duration, tokens, cost, thread, and the refusal sentence of a start that never began. `—` for what is not known yet. |
 | `card attach <key>` | Prints the thread id alone — the live run's, else the newest run's — so `fleet agent tail` can follow it. |
 | `card wait <key> [--timeout 540]` | Waits for the card's *newest* run. Exits 0 when it is terminal, 2 when it is still live, when no run started, or when the card is still owed one behind the board's live-run ceiling. It does not wait for a run that has not begun, so it is not a barrier for a whole chain. |
 | `card comment <key> <body>` | Appends a comment. Author is empty for local comments. A run's report arrives as a comment carrying its `runId`. |
@@ -126,8 +129,9 @@ All carry `"protocol": 1`. Fields are camelCase.
 | Command | Shape |
 | --- | --- |
 | `show`, `create`, `set`, every `columns` verb | `{ protocol, board: {…}, cards: [{…}], liveRuns?: [{…}] }` — whole cards, including `description`, `comments`, `activity`, `blockedBy`, `pendingRun` and `runs`. `liveRuns` joins the delegation behind each live run and is omitted when nothing is live; it is never persisted. |
-| `list` | `{ protocol, boards: [{ id, contextId, worktreeId?, name, backendKind, cardCount, openCount, dirtyCount, conflictCount, lastError? }] }` |
-| `card new/show/edit/move/comment/resolve` | `{ protocol, card: {…} }` |
+| `list` | `{ protocol, boards: [{ id, contextId, worktreeId?, kind?, name, backendKind, cardCount, openCount, dirtyCount, conflictCount, lastError? }] }` |
+| `card new/show/edit/move/comment/resolve` | `{ protocol, card: {…} }` — a card with a pull request carries `pullRequest: { repo, number, url }`, and each run its `worktreeId`. |
+| `card new --pr` | `{ protocol, card: {…}, outcome }`, `outcome` one of `created`, `existing`, `reopened`. |
 | `card delete` | `{ protocol, ok: true }` |
 | `card worktree` | `{ protocol, created, card, worktree }` |
 | `sync` | `{ protocol, jobId, job?, summary? }` — `job` and `summary` only with `--wait`. |
@@ -145,12 +149,55 @@ fleet board show --json | jq -r '.cards[] | select(.statusId!="done") | "\(.titl
 fleet board show --json | jq -r '.liveRuns[]? | "\(.cardId)\t\(.status)"'
 ```
 
+## `fleet schedule`
+
+A schedule is a prompt that belongs to one board, run headless by the daemon every N minutes or
+once. The global selectors are the same as `fleet board`'s (`--board`, `--worktree[=W]`,
+`--context`, `--reviews`, plus `--json`), and they name the board the schedule belongs to.
+
+| Command | Notes |
+| --- | --- |
+| `schedule list` | A header row, then one row per schedule on the board: `id  name  cadence  next  last outcome  last summary`. Cadence reads `every 15m` or `once 2026-09-23 09:00`; `—` where there is nothing. |
+| `schedule show <id>` | Fact lines (id, name, board, enabled, cadence, next, agent, timeout), the prompt, and the last five runs. |
+| `schedule new --name N (--prompt T \| --prompt-file F \| --starter github-reviews) (--every MIN \| --once RFC3339) [flags]` | Prints `Created <id>` and the schedule. |
+| `schedule edit <id> [any new flag] [--enable \| --disable]` | Omitted fields are unchanged. An empty patch is refused: `nothing to change`. Prints `Updated <id>`. |
+| `schedule rm <id>` | Deletes the schedule and its run logs, cancelling a live run. Prints `Deleted <id>`. |
+| `schedule run <id> [--wait]` | Fires it now, whatever its cadence. Prints `Started <job>`, or `Skipped <id>: <reason>` when a run is still live. `--wait` polls once a second until the run ends, then prints its outcome and summary; it exits 1 when the run failed or timed out. |
+| `schedule runs <id>` | A header row, then every recorded run, newest last as `card runs` lists a card's (the last 20 finished runs are kept, and a live run is never dropped): start, outcome, job, cost, log path, summary. |
+
+### `schedule new` and `edit` flags
+
+| Flag | Value |
+| --- | --- |
+| `--name` | At most 80 characters. |
+| `--prompt T`, `--prompt-file F`, `--starter github-reviews` | Exactly one on `new`. At most 16 KiB. `{board}`, `{now}` and `{last_run_at}` (`never` before the first run) are filled at fire time. `github-reviews` lists your open review requests with `gh`. |
+| `--every MIN`, `--once RFC3339` | Exactly one on `new`. `--every` is 5 to 1440. |
+| `--provider claude\|codex`, `--model M`, `--effort E` | What the run launches. Claude when omitted. |
+| `--mode` | Permission mode; `full-access` when omitted, since a headless run has nobody to ask. |
+| `--timeout MIN` | 1 to 120; default 20. A run past it ends `timed_out`. |
+| `--disabled` (`new`), `--enable` / `--disable` (`edit`) | A disabled schedule never fires by itself; `run` still fires it. |
+
+The daemon appends a fixed footer to every prompt: record each pull request with
+`fleet board --board <id> card new "<title>" --pr <url> --requested-at <time> --label <source>`,
+change nothing else, and end with `SUMMARY: <n> created, <n> existing, <n> reopened, <note>`. That
+line becomes the run's summary. Run outcomes are `succeeded`, `failed`, `timed_out` and `skipped`.
+
+JSON: `{ protocol, schedule: {…} }` for `show`, `new`, `edit`, `run` and `runs`; `{ protocol, schedules: [...] }`
+for `list`; `{ protocol, ok: true }` for `rm`. A schedule carries `id`, `boardId`, `name`, `prompt`, `cadence` (`{ kind: "every",
+minutes }` or `{ kind: "once", at }`), `agent`, `enabled`, `timeoutMinutes`, `runs` and
+`nextRunAt`; a run carries `jobId`, `startedAt`, `endedAt`, `outcome`, `summary`, `costUsd` and
+`logPath`.
+
+```sh
+fleet schedule --reviews --json show sch-1a2b3c4d | jq -r '.schedule.runs[-1] | "\(.outcome)\t\(.summary)"'
+```
+
 ## Exit codes
 
 | Code | Meaning |
 | --- | --- |
 | 0 | Success. For `card wait`: the card's newest run is terminal. |
-| 1 | Any error: bad flags, unknown key, ambiguous key, daemon refusal, failed `sync --wait`. |
+| 1 | Any error: bad flags, unknown key, ambiguous key, daemon refusal, failed `sync --wait`, a `schedule run --wait` whose run failed or timed out. |
 | 2 | `card wait` only: the newest run is still live, no run started before the timeout, or the card is owed one it has not been given yet. Nothing is wrong; wait again. |
 
 ## Finding ids

@@ -191,18 +191,15 @@ fn validate_job_id(value: &str) -> Result<(), IdError> {
     Ok(())
 }
 
-fn validate_slug(value: &str) -> Result<(), IdError> {
+/// A lowercase slug, refused in the name of the identifier family `kind` it was parsed as.
+fn validate_slug(kind: &'static str, value: &str) -> Result<(), IdError> {
     let mut chars = value.chars();
     if !matches!(chars.next(), Some('a'..='z' | '0'..='9'))
         || !chars.all(|character| {
             character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
         })
     {
-        return Err(IdError::new(
-            "context id",
-            value,
-            "expected /^[a-z0-9][a-z0-9-]*$/",
-        ));
+        return Err(IdError::new(kind, value, "expected /^[a-z0-9][a-z0-9-]*$/"));
     }
     Ok(())
 }
@@ -218,10 +215,24 @@ fn validate_opaque_id(value: &str) -> Result<(), IdError> {
     Ok(())
 }
 
-string_id!(BoardId, "board", validate_slug);
+string_id!(BoardId, "board", |value| validate_slug("board id", value));
 string_id!(CardId, "card", validate_opaque_id);
-string_id!(StatusId, "status", validate_slug);
-string_id!(LabelId, "label", validate_slug);
+string_id!(StatusId, "status", |value| validate_slug(
+    "status id",
+    value
+));
+string_id!(LabelId, "label", |value| validate_slug("label id", value));
+string_id!(ScheduleId, "schedule", |value| validate_slug(
+    "schedule id",
+    value
+));
+
+/// Mints a schedule id: `sch-` followed by eight lowercase hex characters of a fresh UUID.
+#[must_use]
+pub fn new_schedule_id() -> ScheduleId {
+    let hex = uuid::Uuid::new_v4().simple().to_string();
+    ScheduleId(format!("sch-{}", &hex[..8]))
+}
 
 impl From<ContextId> for BoardId {
     fn from(id: ContextId) -> Self {
@@ -317,6 +328,28 @@ impl TryFrom<&str> for TerminalId {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every slug id is refused in its own name, never another family's.
+    #[test]
+    fn a_bad_slug_names_the_id_it_was_parsed_as() {
+        let message = |error: IdError| error.to_string();
+        assert_eq!(
+            message(ScheduleId::try_from("BAD_ID").expect_err("uppercase is refused")),
+            "invalid schedule id `BAD_ID`: expected /^[a-z0-9][a-z0-9-]*$/"
+        );
+        assert!(
+            message(BoardId::try_from("Bad").expect_err("uppercase is refused"))
+                .starts_with("invalid board id ")
+        );
+        assert!(
+            message(StatusId::try_from("Bad").expect_err("uppercase is refused"))
+                .starts_with("invalid status id ")
+        );
+        assert!(
+            message(LabelId::try_from("Bad").expect_err("uppercase is refused"))
+                .starts_with("invalid label id ")
+        );
+    }
 
     #[test]
     fn validates_context_ids() {

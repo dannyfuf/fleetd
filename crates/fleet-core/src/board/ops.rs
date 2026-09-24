@@ -4,8 +4,8 @@ use super::{
     model::{
         ActionKind, Activity, ActivityKind, BackendRef, Board, BoardSettings, BoardSummary, Card,
         CardAgentPrefs, CardRun, ColumnAutomation, Comment, Label, LiveRun,
-        MAX_LIVE_RUNS_PER_BOARD, PENDING_AMBER_AFTER_SECS, Priority, RunOutcome, Status,
-        StatusCategory,
+        MAX_LIVE_RUNS_PER_BOARD, PENDING_AMBER_AFTER_SECS, Priority, PullRequestRef, RunOutcome,
+        Status, StatusCategory,
     },
     property::{PropertySchema, PropertyValue},
 };
@@ -23,15 +23,18 @@ mod query;
 mod tests;
 mod validation;
 
-pub use cards::{add_comment, create_card, move_card, push_activity};
+pub use cards::{
+    add_comment, create_card, move_card, parse_requested_at, push_activity,
+    upsert_pull_request_card,
+};
 pub use patches::{apply_board_patch, apply_card_patch, merge_settings, normalise_automation};
 pub use query::{
     Blocked, BlockedTone, attention, blocked, blocks, column_cards, first_status_in, is_satisfied,
-    latest_run, summarize, worktree_slug,
+    latest_run, queued, summarize, worktree_slug,
 };
 pub use validation::{
     check_draft_writable, valid_date, validate_automation, validate_board, validate_card,
-    validate_env, validate_links,
+    validate_env, validate_links, validate_pull_requests,
 };
 
 use cards::dedupe_labels;
@@ -79,6 +82,24 @@ pub struct CardDraft {
     /// Cards that must be completed before this one may start.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocked_by: Vec<CardId>,
+    /// The pull request the new card reviews.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request: Option<PullRequestRef>,
+}
+
+/// What `upsert_pull_request_card` did with the pull request it was given.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum UpsertOutcome {
+    /// The board held no card for it, so one was created.
+    #[default]
+    Created,
+    /// A card already held it and was left unchanged.
+    Existing,
+    /// A completed or archived card held it and was reopened for a newer request.
+    Reopened,
 }
 
 /// `None` = leave unchanged; `Some(None)` = clear. All fields optional.

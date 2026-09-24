@@ -533,6 +533,7 @@ fn board() -> Board {
         sync: fleet_core::board::SyncState::default(),
         created_at: String::new(),
         updated_at: String::new(),
+        kind: Default::default(),
     }
 }
 
@@ -1234,7 +1235,16 @@ fn a_click_on_an_option_lands_where_the_arrows_would(cx: &mut gpui::TestAppConte
         });
     });
 
-    visual.update(|window, cx| select_section(&state, 2, &focus, window, cx));
+    visual.update(|window, cx| {
+        select_section(
+            &state,
+            &crate::bridge::Bridge::closed(),
+            2,
+            &focus,
+            window,
+            cx,
+        )
+    });
     visual.update(|_, cx| {
         read_host(&state, cx, |host, _| {
             assert_eq!(host.board_settings.section, BoardSection::Columns);
@@ -1274,4 +1284,99 @@ fn a_column_opens_on_double_click_and_its_choices_take_a_click(cx: &mut gpui::Te
             );
         });
     });
+}
+
+/// Seeds the dialog over a board shaped by `shape`, with one column that runs a prompt.
+fn seeded_over(
+    cx: &mut gpui::TestAppContext,
+    shape: impl FnOnce(&mut Board),
+) -> BoardSettingsState {
+    let mut shaped = board();
+    let mut status = column("review", "Review").status;
+    status.automation = Some(ColumnAutomation {
+        on_enter: Some(Action {
+            kind: ActionKind::Prompt,
+            instructions: String::new(),
+            expect: String::new(),
+            env: Vec::new(),
+            agent: ColumnAgentPrefs::default(),
+        }),
+        ..ColumnAutomation::default()
+    });
+    shaped.statuses = vec![status];
+    shape(&mut shaped);
+    let mut app = AppState::new(
+        "/tmp/board-settings-run-location",
+        std::time::Instant::now(),
+    );
+    app.board.view = Some(fleet_core::board::BoardView {
+        board: shaped,
+        cards: Vec::new(),
+        live_runs: Vec::new(),
+    });
+    cx.update(|cx| cx.set_global(fleet_ui_kit::Theme::dark()));
+    let state = cx.new(|_| app);
+    cx.update(|cx| {
+        open_on_section(&state, BoardSection::General, cx);
+        seed(&state, cx);
+        with_host(&state, cx, |host| {
+            let draft = &mut host.board_settings;
+            draft.section = BoardSection::Columns;
+            draft.opened_column = Some(0);
+            draft.prepare();
+        });
+        read_host(&state, cx, |host, _| host.board_settings.clone())
+    })
+}
+
+/// Whether every automation row of the open column is drawn disabled.
+fn automation_disabled(draft: &BoardSettingsState) -> bool {
+    draft
+        .prepared
+        .iter()
+        .filter(|row| matches!(row.row, SettingRow::ColumnField(field) if field.is_automation()))
+        .all(|row| row.disabled)
+}
+
+/// BOARD §11.10: a Reviews board has no worktree of its own, but each of its runs executes in
+/// its card's worktree, so its columns carry automation.
+#[gpui::test]
+fn the_columns_pane_is_editable_on_a_reviews_board(cx: &mut gpui::TestAppContext) {
+    let draft = seeded_over(cx, |board| {
+        board.kind = fleet_core::board::BoardKind::Reviews;
+        board.settings.run_location = RunLocation::CardWorktree;
+    });
+    assert!(!draft.automation_locked);
+    assert!(!automation_disabled(&draft));
+    assert!(
+        draft.prepared.len() > 3,
+        "a column that runs a prompt draws its action rows"
+    );
+}
+
+/// A context board that runs in its own worktree has none to run in.
+#[gpui::test]
+fn the_columns_pane_is_locked_on_a_plain_context_board(cx: &mut gpui::TestAppContext) {
+    let draft = seeded_over(cx, |_| {});
+    assert!(draft.automation_locked);
+    assert!(automation_disabled(&draft));
+}
+
+/// General states where runs execute, read-only, from `settings.run_location`.
+#[gpui::test]
+fn the_general_pane_says_where_runs_execute(cx: &mut gpui::TestAppContext) {
+    let reviews = seeded_over(cx, |board| {
+        board.settings.run_location = RunLocation::CardWorktree;
+    });
+    assert_eq!(RUNS_IN_LABEL, "Runs in");
+    assert_eq!(
+        run_location_label(reviews.run_location),
+        "each card's worktree"
+    );
+    let plain = seeded_over(cx, |_| {});
+    assert_eq!(run_location_label(plain.run_location), "this worktree");
+    assert!(
+        !GENERAL_ROWS.contains(&SettingRow::NoRow),
+        "the fact is not a cursor row: nothing on it can change"
+    );
 }

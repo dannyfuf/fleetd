@@ -1,0 +1,54 @@
+# plans/pr-review-boards-2026-09-22-phase-4-plan.md P4-T07 (FEA-26) · UX-SPEC.md §3.8.6 Board
+# settings ("Schedules") · KEYMAP.md §Dialog > BoardSettings · TESTING-HARNESS.md §11 (the
+# `section` and row-editor fields) — on a Reviews board, `n` in the Schedules section starts
+# from the GitHub review starter.
+#
+# The `reviews` preset (§4) seeds the context's Reviews board, and the daemon advertises
+# `schedules`, so the rail reads General, Backend, Columns, Schedules: three `tab` from the
+# General the dialog opens on in a fresh session. `n` there is the new-schedule form, and on a
+# Reviews board it is pre-filled with the starter — the name `GitHub reviews` and
+# `fleet_core::schedule::STARTER_PROMPT_GITHUB_REVIEWS`.
+#
+# The form's values are read through the one row-scoped editor a row mounts on `⏎`, which is the
+# only place a Board settings text row can be read back (§11): `dialog.fields[1]` is named after
+# the row. The rows run Name, Provider, Model, Effort, Mode, Cadence, Every, Timeout, Prompt,
+# Enabled — Once at is hidden while the cadence is `every` — so Prompt is eight `j` below Name.
+#
+# Nothing is saved: `^s` would create a schedule, and that is FEA-26's gpui tests' business. The
+# fields are read with `assert`, never `await`: typing and editors do not notify `AppState` (§11).
+#
+# Headless: virtual-lane only, because of its `shot`. Every other line runs headless (§7).
+fixture: reviews
+await idle 30000
+key g p
+await hub_tab == Prs 15000
+key tab
+await key_contexts[2] == "Board" 20000
+await lists.board.rows[0].label == "Pending review" 20000
+
+# `,` opens Board settings on this board; the rail's fourth section is Schedules.
+key ,
+await dialog.name == BoardSettings 15000
+assert dialog.fields[0].name == "section" && dialog.fields[0].value == "General"
+key tab tab tab
+assert dialog.fields[0].value == "Schedules"
+assert key_contexts[0] == "Dialog" && key_contexts[1] == "BoardSettings"
+
+# `n` is the starter form. Its Name row carries the starter's name.
+key n
+key enter
+assert key_contexts[1] == "BoardSettingsEditing"
+assert dialog.fields[1].name == "name" && dialog.fields[1].value == "GitHub reviews"
+key escape
+assert key_contexts[1] == "BoardSettings" && dialog.fields[0].value == "Schedules"
+
+# And its Prompt row carries the starter's prompt.
+key j j j j j j j j
+key enter
+assert dialog.fields[1].name == "prompt"
+assert dialog.fields[1].value ~= "^List every open pull request where my review is requested, directly or through one of my teams, with gh search prs --review-requested=@me"
+assert dialog.fields[1].value ~= "use its updatedAt as the requested time and github as the source label\\.$"
+key escape
+assert key_contexts[1] == "BoardSettings"
+shot schedules-starter
+quit

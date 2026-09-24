@@ -372,13 +372,11 @@ async fn settle(
 /// A four-card diamond runs every card exactly once, one at a time, and lands them all in Done.
 ///
 /// `A` blocks `B` and `C`; `B` and `C` both block `D`. Every card is created in the waiting
-/// column, which releases a card into the action column as soon as nothing blocks it, and only
-/// `A` is moved by hand. That move is not a shortcut: the engine's cascade reaches a card only
-/// through a *blocker* it has just visited, so a card nothing blocks — `A` — is released by
-/// nothing and a person, or `start_run`, has to name it (`docs/BOARD.md` §11.7). From there the
-/// board drives itself: a success moves the card to Done, Done satisfies its dependants, and the
-/// one-run ceiling parks whichever of `B` and `C` the cascade reached second until the slot the
-/// other one holds is released.
+/// column, which releases a card into the action column as soon as nothing blocks it — `A` the
+/// moment it is created (`docs/BOARD.md` §11.7 rule 0). From there the board drives itself: a
+/// success moves the card to Done, Done satisfies its dependants, and the one-run ceiling parks
+/// whichever of `B` and `C` the cascade reached second until the slot the other one holds is
+/// released.
 #[tokio::test]
 async fn a_four_card_diamond_never_runs_two_delegations_at_once() {
     let world = World::boot("diamond")
@@ -400,19 +398,6 @@ async fn diamond(world: &World) -> anyhow::Result<()> {
     let c = waiting_card(&client, &view, "C", std::slice::from_ref(&a)).await?;
     let d = waiting_card(&client, &view, "D", &[b.clone(), c.clone()]).await?;
     let cards = [a.clone(), b.clone(), c.clone(), d.clone()];
-
-    // Nothing has started: a card merely standing in the waiting column is owed nothing.
-    let before = client.get_board(view.board.id.clone()).await?;
-    anyhow::ensure!(
-        before.cards.iter().all(|card| card.runs.is_empty()),
-        "creating the diamond started a run:\n  {}",
-        face(&before)
-    );
-
-    client
-        .move_card(a.clone(), status_id(RUNNING), None, false)
-        .await
-        .map_err(|error| anyhow::anyhow!("move A into the action column: {error}"))?;
 
     let settled = settle(&client, &view, SETTLE_BUDGET, 1, |view| {
         view.cards
@@ -514,11 +499,8 @@ async fn a_restart_mid_run_adopts_the_live_delegation() {
 async fn restart_adopts(world: &mut World) -> anyhow::Result<()> {
     let client = world.client().await?;
     let view = automated_board(&client, 1).await?;
+    // Nothing blocks the card, so it advances and starts the moment it is created (§11.7 rule 0).
     let only = waiting_card(&client, &view, "Adopted", &[]).await?;
-    client
-        .move_card(only.clone(), status_id(RUNNING), None, false)
-        .await
-        .map_err(|error| anyhow::anyhow!("move the card into the action column: {error}"))?;
 
     let working = settle(&client, &view, RUN_BUDGET, 1, |view| {
         view.cards

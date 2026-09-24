@@ -223,6 +223,7 @@ mod tests {
             blocked: None,
             blocked_label: None,
             link: None,
+            reference: None,
             menu: super::super::CardMenu::default(),
         };
         CardDrag {

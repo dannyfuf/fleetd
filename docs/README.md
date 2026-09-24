@@ -7,7 +7,7 @@
 | [UX-SPEC.md](UX-SPEC.md) | What every screen shows and why |
 | [KEYMAP.md](KEYMAP.md) | Which key does what, in which context |
 | [DESIGN-SYSTEM.md](DESIGN-SYSTEM.md) | The `fleet-ui-kit` tokens and component contracts |
-| [BOARD.md](BOARD.md) | The card model, the reconciliation engine, the column-automation engine that runs a card as a native subagent, and the board surface |
+| [BOARD.md](BOARD.md) | The card model, the reconciliation engine, the column-automation engine that runs a card as a native subagent, review boards, board-owned schedules, and the board surface |
 | [BOARD-JIRA.md](BOARD-JIRA.md) | The Jira backend, and what `acli` can and cannot do |
 | [NATIVE-AGENTS.md](NATIVE-AGENTS.md) | Native Claude Code / Codex sessions: adapters, event model, thread state, the transcript, the decision surfaces, the agent tab |
 | [REMOTE-MACHINES.md](REMOTE-MACHINES.md) | Authoritative remote-machine config, protocol, provider, routing, mirror, and recovery contract |
@@ -52,3 +52,5 @@ what was rejected and why, and cites the research it was distilled from.
 | [0021](decisions/0021-hosted-worktree-boards-route-to-owner.md) | A hosted worktree's board routes to the daemon that owns the worktree (supersedes 0019's addendum) |
 | [0022](decisions/0022-board-workflows.md) | The worktree board is a control plane: a column runs a card as a native subagent, and the document version bumps lazily |
 | [0023](decisions/0023-pointer-parity.md) | Pointer parity: every action has a key and a visible control, controls are not focusable, and the mode word is retired |
+| [0024](decisions/0024-review-boards.md) | Review boards: a second board per context, shown in the Review tab, whose cards each run in their own pull-request worktree |
+| [0025](decisions/0025-scheduled-agent-tasks.md) | Scheduled agent tasks run headless as daemon jobs, owned by a board, on an interval or once |

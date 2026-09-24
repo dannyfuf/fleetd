@@ -17,6 +17,8 @@ struct ProjectionKey {
     tab: PrTab,
     screen: Screen,
     query: String,
+    /// Whether the Review tab is the Reviews board, which builds no flat list (§3.5).
+    review_board: bool,
 }
 
 /// The Hub model for this frame, rebuilt only when one of its inputs changed.
@@ -31,6 +33,7 @@ pub(super) fn prepare(state: &AppState, hub: &HubState, now: i64) -> Rc<HubModel
         tab: state.pr_tab,
         screen: state.screen.clone(),
         query: state.filter.query.clone(),
+        review_board: state.review_board_is_shown(),
     };
     if cache.key.as_ref() != Some(&key) {
         cache.model = Rc::new(model(state, hub, now));
@@ -232,7 +235,11 @@ fn model(state: &AppState, hub: &HubState, now: i64) -> HubModel {
     };
     let cache_key = cache::PrCacheKey::from_state(state);
     let slice = hub.prs.slice_for(state.pr_tab, &cache_key);
-    let (prs, pr_total) = if matches!(state.screen, Screen::Hub { tab: HubTab::Prs }) {
+    // The Review tab on a daemon with `board.reviews` is the Reviews board: there is no `gh`
+    // list to build, and a stale one would answer `lists.prs` and the PR keys underneath it.
+    let (prs, pr_total) = if matches!(state.screen, Screen::Hub { tab: HubTab::Prs })
+        && !state.review_board_is_shown()
+    {
         let rows = prs_screen::build_rows(
             &PrInputs {
                 slice,
@@ -260,7 +267,11 @@ fn model(state: &AppState, hub: &HubState, now: i64) -> HubModel {
         worktree_total,
         worktree_summary,
         pr_total,
-        pr_hidden: prs_screen::hidden_rows(slice),
+        pr_hidden: if state.review_board_is_shown() {
+            0
+        } else {
+            prs_screen::hidden_rows(slice)
+        },
         prepared_at: now,
     }
 }

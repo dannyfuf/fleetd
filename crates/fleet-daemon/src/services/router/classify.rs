@@ -116,6 +116,7 @@ pub fn classify(body: &RequestBody, resolver: &dyn Resolver) -> Target {
         | DeleteBoard { board_id }
         | CreateCard { board_id, .. }
         | SyncBoard { board_id, .. }
+        | UpsertPullRequestCard { board_id, .. }
         | DescribeBoardBackend { board_id } => host_or_local(resolver.host_of_board(board_id)),
         UpdateCard { card_id, .. }
         | MoveCard { card_id, .. }
@@ -137,6 +138,14 @@ pub fn classify(body: &RequestBody, resolver: &dyn Resolver) -> Target {
         | EnsureBoard { .. }
         | CreateBoard { .. }
         | ListBoardBackends {}
+        // The Reviews board is context-scoped like `EnsureBoard`, and schedules live on the
+        // daemon that runs them.
+        | EnsureReviewsBoard { .. }
+        | ListSchedules { .. }
+        | CreateSchedule { .. }
+        | UpdateSchedule { .. }
+        | DeleteSchedule { .. }
+        | RunScheduleNow { .. }
         | AppendWatchOutput { .. }
         | FinishWatch { .. }
         | TailWatch { .. }
@@ -360,6 +369,13 @@ pub(crate) fn local_fanout_part(
         | RequestBody::ResolveCardConflict { .. }
         | RequestBody::DescribeBoardBackend { .. }
         | RequestBody::ListBoardBackends {}
+        | RequestBody::EnsureReviewsBoard { .. }
+        | RequestBody::UpsertPullRequestCard { .. }
+        | RequestBody::ListSchedules { .. }
+        | RequestBody::CreateSchedule { .. }
+        | RequestBody::UpdateSchedule { .. }
+        | RequestBody::DeleteSchedule { .. }
+        | RequestBody::RunScheduleNow { .. }
         | RequestBody::StartWatch { .. }
         | RequestBody::AppendWatchOutput { .. }
         | RequestBody::FinishWatch { .. }

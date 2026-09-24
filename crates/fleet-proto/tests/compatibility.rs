@@ -261,6 +261,7 @@ fn response_wire_goldens() {
                 id: "work".parse().unwrap(),
                 context_id: "work".parse().unwrap(),
                 worktree_id: None,
+                kind: Default::default(),
                 name: "Fleet".to_owned(),
                 prefix: "FLT".to_owned(),
                 backend_kind: "jira".to_owned(),
@@ -270,6 +271,7 @@ fn response_wire_goldens() {
                 conflict_count: 0,
                 working_count: 0,
                 attention_count: 0,
+                idle_started: 0,
                 last_synced_at: None,
                 last_error: None,
             }])),
@@ -750,4 +752,255 @@ fn the_board_automation_capability_name_is_fixed_before_any_daemon_serves_it() {
         fleet_proto::response::BOARD_AUTOMATION_CAPABILITY,
         "board.automation"
     );
+}
+
+fn review_pull_request() -> fleet_core::board::PullRequestRef {
+    fleet_core::board::PullRequestRef {
+        repo: "o/n".parse().unwrap(),
+        number: 12,
+        url: "https://github.com/o/n/pull/12".to_owned(),
+    }
+}
+
+fn review_schedule() -> fleet_core::schedule::Schedule {
+    fleet_core::schedule::Schedule {
+        id: "sch-0a1b2c3d".parse().unwrap(),
+        board_id: "reviews-work".parse().unwrap(),
+        name: "GitHub reviews".to_owned(),
+        prompt: "List my review requests".to_owned(),
+        cadence: fleet_core::schedule::Cadence::Every { minutes: 15 },
+        agent: fleet_core::schedule::ScheduleAgent::default(),
+        enabled: true,
+        timeout_minutes: 20,
+        created_at: "2026-09-22T09:00:00Z".to_owned(),
+        updated_at: "2026-09-22T09:00:00Z".to_owned(),
+        runs: vec![fleet_core::schedule::ScheduleRun {
+            job_id: Some("job-7".parse().unwrap()),
+            started_at: "2026-09-22T09:00:00Z".to_owned(),
+            ended_at: Some("2026-09-22T09:02:00Z".to_owned()),
+            outcome: Some(fleet_core::schedule::ScheduleOutcome::Succeeded),
+            summary: Some("2 created, 1 existing, 0 reopened".to_owned()),
+            cost_usd: Some(0.25),
+            log_path: Some("/fleet/schedules/sch-0a1b2c3d/logs/20260922T090000Z.log".to_owned()),
+        }],
+        next_run_at: Some("2026-09-22T09:15:00Z".to_owned()),
+    }
+}
+
+#[test]
+fn review_board_wire_goldens() {
+    assert_frame(
+        Request {
+            id: 81,
+            body: RequestBody::EnsureReviewsBoard {
+                context_id: "work".parse().unwrap(),
+            },
+        },
+        r#"{"id":81,"body":{"type":"ensure_reviews_board","context_id":"work"}}"#,
+    );
+    assert_frame(
+        Request {
+            id: 82,
+            body: RequestBody::UpsertPullRequestCard {
+                board_id: "reviews-work".parse().unwrap(),
+                draft: CardDraft {
+                    title: "Fix login".to_owned(),
+                    pull_request: Some(review_pull_request()),
+                    ..CardDraft::default()
+                },
+                requested_at: Some("2026-09-22T10:00:00Z".to_owned()),
+            },
+        },
+        r#"{"id":82,"body":{"type":"upsert_pull_request_card","board_id":"reviews-work","draft":{"title":"Fix login","description":"","statusId":null,"priority":"none","labels":[],"assignee":null,"estimate":null,"dueDate":null,"parentId":null,"repoId":null,"properties":{},"pullRequest":{"repo":"o/n","number":12,"url":"https://github.com/o/n/pull/12"}},"requested_at":"2026-09-22T10:00:00Z"}}"#,
+    );
+    // Without a requested time the field is absent, not null, so an older builder's frame and
+    // this one are byte-identical.
+    assert_frame(
+        Request {
+            id: 83,
+            body: RequestBody::UpsertPullRequestCard {
+                board_id: "reviews-work".parse().unwrap(),
+                draft: CardDraft {
+                    title: "Fix login".to_owned(),
+                    pull_request: Some(review_pull_request()),
+                    ..CardDraft::default()
+                },
+                requested_at: None,
+            },
+        },
+        r#"{"id":83,"body":{"type":"upsert_pull_request_card","board_id":"reviews-work","draft":{"title":"Fix login","description":"","statusId":null,"priority":"none","labels":[],"assignee":null,"estimate":null,"dueDate":null,"parentId":null,"repoId":null,"properties":{},"pullRequest":{"repo":"o/n","number":12,"url":"https://github.com/o/n/pull/12"}}}}"#,
+    );
+    let mut card = board_view().cards.pop().expect("fixture card");
+    card.pull_request = Some(review_pull_request());
+    assert_frame(
+        Response {
+            id: 84,
+            result: Ok(ResponseBody::CardUpsert {
+                card,
+                outcome: fleet_core::board::UpsertOutcome::Reopened,
+            }),
+        },
+        r#"{"id":84,"result":{"Ok":{"type":"card_upsert","data":{"card":{"id":"card-12","boardId":"work","number":12,"title":"Fix login","description":"","statusId":"todo","priority":"none","labels":[],"assignee":null,"estimate":null,"dueDate":null,"parentId":null,"repoId":null,"worktreeId":null,"pullRequest":{"repo":"o/n","number":12,"url":"https://github.com/o/n/pull/12"},"properties":{},"comments":[],"activity":[],"remote":null,"conflict":null,"dirty":false,"archived":false,"position":0,"createdAt":"2026-09-06T12:00:00Z","updatedAt":"2026-09-06T12:00:00Z"},"outcome":"reopened"}}}}"#,
+    );
+}
+
+/// The idle-in-a-started-column count rides on a Reviews board's summary beside the two run
+/// counts, and is absent at zero, so every summary an older daemon wrote decodes unchanged.
+#[test]
+fn a_reviews_board_summary_carries_its_idle_started_count() {
+    assert_frame(
+        Response {
+            id: 85,
+            result: Ok(ResponseBody::Boards(vec![BoardSummary {
+                id: "reviews-work".parse().unwrap(),
+                context_id: "work".parse().unwrap(),
+                worktree_id: None,
+                kind: fleet_core::board::BoardKind::Reviews,
+                name: "Reviews".to_owned(),
+                prefix: "REV".to_owned(),
+                backend_kind: "local".to_owned(),
+                card_count: 4,
+                open_count: 4,
+                dirty_count: 0,
+                conflict_count: 0,
+                working_count: 1,
+                attention_count: 1,
+                idle_started: 2,
+                last_synced_at: None,
+                last_error: None,
+            }])),
+        },
+        r#"{"id":85,"result":{"Ok":{"type":"boards","data":[{"id":"reviews-work","contextId":"work","kind":"reviews","name":"Reviews","prefix":"REV","backendKind":"local","cardCount":4,"openCount":4,"dirtyCount":0,"conflictCount":0,"workingCount":1,"attentionCount":1,"idleStarted":2,"lastSyncedAt":null,"lastError":null}]}}}"#,
+    );
+}
+
+#[test]
+fn schedule_wire_goldens() {
+    assert_frame(
+        Request {
+            id: 91,
+            body: RequestBody::ListSchedules {
+                board_id: Some("reviews-work".parse().unwrap()),
+            },
+        },
+        r#"{"id":91,"body":{"type":"list_schedules","board_id":"reviews-work"}}"#,
+    );
+    assert_frame(
+        Request {
+            id: 92,
+            body: RequestBody::ListSchedules { board_id: None },
+        },
+        r#"{"id":92,"body":{"type":"list_schedules"}}"#,
+    );
+    assert_frame(
+        Request {
+            id: 93,
+            body: RequestBody::CreateSchedule {
+                draft: fleet_core::schedule::ScheduleDraft {
+                    board_id: "reviews-work".parse().unwrap(),
+                    name: "GitHub reviews".to_owned(),
+                    prompt: "List my review requests".to_owned(),
+                    cadence: fleet_core::schedule::Cadence::Every { minutes: 15 },
+                    agent: Some(fleet_core::schedule::ScheduleAgent {
+                        provider: fleet_core::agents::AgentKind::Codex,
+                        model: Some("gpt-5".to_owned()),
+                        effort: Some("high".to_owned()),
+                        mode: fleet_core::agents::PermissionMode::AcceptEdits,
+                    }),
+                    enabled: Some(false),
+                    timeout_minutes: Some(30),
+                },
+            },
+        },
+        r#"{"id":93,"body":{"type":"create_schedule","draft":{"boardId":"reviews-work","name":"GitHub reviews","prompt":"List my review requests","cadence":{"kind":"every","minutes":15},"agent":{"provider":"codex","model":"gpt-5","effort":"high","mode":"accept_edits"},"enabled":false,"timeoutMinutes":30}}}"#,
+    );
+    assert_frame(
+        Request {
+            id: 94,
+            body: RequestBody::CreateSchedule {
+                draft: fleet_core::schedule::ScheduleDraft {
+                    board_id: "reviews-work".parse().unwrap(),
+                    name: "Standup".to_owned(),
+                    prompt: "Summarise".to_owned(),
+                    cadence: fleet_core::schedule::Cadence::Once {
+                        at: "2026-09-23T09:00:00Z".to_owned(),
+                    },
+                    agent: None,
+                    enabled: None,
+                    timeout_minutes: None,
+                },
+            },
+        },
+        r#"{"id":94,"body":{"type":"create_schedule","draft":{"boardId":"reviews-work","name":"Standup","prompt":"Summarise","cadence":{"kind":"once","at":"2026-09-23T09:00:00Z"}}}}"#,
+    );
+    assert_frame(
+        Request {
+            id: 95,
+            body: RequestBody::UpdateSchedule {
+                id: "sch-0a1b2c3d".parse().unwrap(),
+                patch: fleet_core::schedule::SchedulePatch {
+                    enabled: Some(false),
+                    cadence: Some(fleet_core::schedule::Cadence::Every { minutes: 60 }),
+                    ..fleet_core::schedule::SchedulePatch::default()
+                },
+            },
+        },
+        r#"{"id":95,"body":{"type":"update_schedule","id":"sch-0a1b2c3d","patch":{"cadence":{"kind":"every","minutes":60},"enabled":false}}}"#,
+    );
+    assert_frame(
+        Request {
+            id: 96,
+            body: RequestBody::DeleteSchedule {
+                id: "sch-0a1b2c3d".parse().unwrap(),
+            },
+        },
+        r#"{"id":96,"body":{"type":"delete_schedule","id":"sch-0a1b2c3d"}}"#,
+    );
+    assert_frame(
+        Request {
+            id: 97,
+            body: RequestBody::RunScheduleNow {
+                id: "sch-0a1b2c3d".parse().unwrap(),
+            },
+        },
+        r#"{"id":97,"body":{"type":"run_schedule_now","id":"sch-0a1b2c3d"}}"#,
+    );
+    const SCHEDULE: &str = r#"{"id":"sch-0a1b2c3d","boardId":"reviews-work","name":"GitHub reviews","prompt":"List my review requests","cadence":{"kind":"every","minutes":15},"agent":{"provider":"claude","mode":"full_access"},"enabled":true,"timeoutMinutes":20,"createdAt":"2026-09-22T09:00:00Z","updatedAt":"2026-09-22T09:00:00Z","runs":[{"jobId":"job-7","startedAt":"2026-09-22T09:00:00Z","endedAt":"2026-09-22T09:02:00Z","outcome":"succeeded","summary":"2 created, 1 existing, 0 reopened","costUsd":0.25,"logPath":"/fleet/schedules/sch-0a1b2c3d/logs/20260922T090000Z.log"}],"nextRunAt":"2026-09-22T09:15:00Z"}"#;
+    assert_frame(
+        Response {
+            id: 98,
+            result: Ok(ResponseBody::Schedules(vec![review_schedule()])),
+        },
+        &format!(r#"{{"id":98,"result":{{"Ok":{{"type":"schedules","data":[{SCHEDULE}]}}}}}}"#),
+    );
+    assert_frame(
+        Response {
+            id: 99,
+            result: Ok(ResponseBody::Schedule(review_schedule())),
+        },
+        &format!(r#"{{"id":99,"result":{{"Ok":{{"type":"schedule","data":{SCHEDULE}}}}}}}"#),
+    );
+    assert_frame(
+        Event::SchedulesChanged {
+            board_id: "reviews-work".parse().unwrap(),
+        },
+        r#"{"type":"schedules_changed","data":{"board_id":"reviews-work"}}"#,
+    );
+    assert_eq!(
+        serde_json::to_string(&fleet_proto::job::JobKind::ScheduledTask).unwrap(),
+        r#"{"custom":"scheduled_task"}"#
+    );
+    assert_eq!(
+        serde_json::to_string(&fleet_proto::event::EventKind::SchedulesChanged).unwrap(),
+        r#""schedules_changed""#
+    );
+}
+
+#[test]
+fn the_review_and_schedule_capability_names_are_fixed() {
+    assert_eq!(
+        fleet_proto::response::BOARD_REVIEWS_CAPABILITY,
+        "board.reviews"
+    );
+    assert_eq!(fleet_proto::response::SCHEDULES_CAPABILITY, "schedules");
 }

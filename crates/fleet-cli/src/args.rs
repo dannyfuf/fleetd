@@ -43,6 +43,8 @@ pub enum Command {
     Host(HostArgs),
     /// Manage context and worktree boards and their cards.
     Board(BoardArgs),
+    /// Manage a board's scheduled agent tasks.
+    Schedule(ScheduleArgs),
     /// Run a command, optionally teeing piped output to a read-only watch.
     Exec(ExecArgs),
     /// Inspect subagent watches and their retained output.
@@ -1095,6 +1097,9 @@ pub struct BoardArgs {
     /// Context ID; defaults to the daemon's active context.
     #[arg(long, global = true, conflicts_with_all = ["board", "worktree"])]
     pub context: Option<fleet_core::ids::ContextId>,
+    /// The Reviews board of --context, or of the active context; created when missing.
+    #[arg(long, global = true, conflicts_with_all = ["board", "worktree"])]
+    pub reviews: bool,
     /// Emit a protocol-one JSON envelope.
     #[arg(long, global = true)]
     pub json: bool,
@@ -1435,6 +1440,15 @@ pub enum BoardCardCommand {
         /// Card this one blocks; repeat for more. Sugar for editing that card's `blocked-by`.
         #[arg(long = "blocks", value_name = "KEY")]
         blocks: Vec<String>,
+        /// Pull request the card reviews: a GitHub pull request URL or `owner/name#number`.
+        ///
+        /// A pull request already on the board is never duplicated: the command prints
+        /// `Created`, `Existing` or `Reopened` and the key first.
+        #[arg(long, value_name = "REF")]
+        pr: Option<String>,
+        /// RFC 3339 time the review was requested; needs --pr.
+        #[arg(long, value_name = "RFC3339")]
+        requested_at: Option<String>,
     },
     /// Show card properties, description, and comments.
     Show {
@@ -1630,5 +1644,284 @@ impl BoardCardFields {
             () if self.clear_agent => Some("--clear-agent"),
             () => None,
         }
+    }
+}
+
+/// Schedule selection and operations; the board selectors are the same as `fleet board`'s.
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct ScheduleArgs {
+    /// Explicit board ID; mutually exclusive with --context, --worktree and --reviews.
+    #[arg(long, global = true, conflicts_with_all = ["context", "worktree"])]
+    pub board: Option<fleet_core::ids::BoardId>,
+    /// Worktree ID, or the current terminal's worktree when no ID is given.
+    #[arg(
+        long,
+        global = true,
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "@session",
+        conflicts_with_all = ["board", "context"]
+    )]
+    pub worktree: Option<BoardWorktreeSelector>,
+    /// Context ID; defaults to the daemon's active context.
+    #[arg(long, global = true, conflicts_with_all = ["board", "worktree"])]
+    pub context: Option<fleet_core::ids::ContextId>,
+    /// The Reviews board of --context, or of the active context; created when missing.
+    #[arg(long, global = true, conflicts_with_all = ["board", "worktree"])]
+    pub reviews: bool,
+    /// Emit a protocol-one JSON envelope.
+    #[arg(long, global = true)]
+    pub json: bool,
+    /// Schedule operation.
+    #[command(subcommand)]
+    pub command: ScheduleCommand,
+}
+
+/// Schedule operations.
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum ScheduleCommand {
+    /// List the board's schedules.
+    List,
+    /// Show one schedule and its recent runs.
+    Show {
+        /// Schedule ID.
+        id: fleet_core::ids::ScheduleId,
+    },
+    /// Create a schedule on the board.
+    New(ScheduleNewArgs),
+    /// Change selected fields of a schedule.
+    Edit(ScheduleEditArgs),
+    /// Delete a schedule and its run logs.
+    Rm {
+        /// Schedule ID.
+        id: fleet_core::ids::ScheduleId,
+    },
+    /// Fire a schedule now, whatever its cadence.
+    Run {
+        /// Schedule ID.
+        id: fleet_core::ids::ScheduleId,
+        /// Wait for the run to end before returning.
+        #[arg(long)]
+        wait: bool,
+    },
+    /// List every recorded run of a schedule with its log path.
+    Runs {
+        /// Schedule ID.
+        id: fleet_core::ids::ScheduleId,
+    },
+}
+
+/// Built-in prompts a schedule can start from.
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub enum ScheduleStarter {
+    /// Record every open GitHub pull request awaiting your review.
+    GithubReviews,
+}
+
+/// Arguments accepted by `fleet schedule new`.
+#[derive(Debug, Args, PartialEq, Eq)]
+#[command(
+    group(clap::ArgGroup::new("prompt_source").required(true).args(["prompt", "prompt_file", "starter"])),
+    group(clap::ArgGroup::new("cadence").required(true).args(["every", "once"]))
+)]
+pub struct ScheduleNewArgs {
+    /// Schedule name.
+    #[arg(long)]
+    pub name: String,
+    /// The prompt the agent runs.
+    #[arg(long)]
+    pub prompt: Option<String>,
+    /// Read the prompt from this file.
+    #[arg(long, value_name = "PATH")]
+    pub prompt_file: Option<std::path::PathBuf>,
+    /// Start from a built-in prompt.
+    #[arg(long, value_enum)]
+    pub starter: Option<ScheduleStarter>,
+    /// Fire every this many minutes.
+    #[arg(long, value_name = "MINUTES")]
+    pub every: Option<u32>,
+    /// Fire once, at this RFC 3339 time.
+    #[arg(long, value_name = "RFC3339")]
+    pub once: Option<String>,
+    /// Provider that runs the prompt; Claude when omitted.
+    #[arg(long, value_enum)]
+    pub provider: Option<AgentChoice>,
+    /// Provider-native model.
+    #[arg(long)]
+    pub model: Option<String>,
+    /// Provider-native reasoning effort.
+    #[arg(long)]
+    pub effort: Option<String>,
+    /// Permission mode; full access when omitted, since a headless run has nobody to ask.
+    #[arg(long, value_enum)]
+    pub mode: Option<AgentModeChoice>,
+    /// Minutes one run may take before it is stopped.
+    #[arg(long, value_name = "MINUTES")]
+    pub timeout: Option<u32>,
+    /// Create the schedule disabled.
+    #[arg(long)]
+    pub disabled: bool,
+}
+
+/// Arguments accepted by `fleet schedule edit`; omitted fields stay unchanged.
+#[derive(Debug, Args, PartialEq, Eq)]
+#[command(
+    group(clap::ArgGroup::new("prompt_source").args(["prompt", "prompt_file", "starter"])),
+    group(clap::ArgGroup::new("cadence").args(["every", "once"]))
+)]
+pub struct ScheduleEditArgs {
+    /// Schedule ID.
+    pub id: fleet_core::ids::ScheduleId,
+    /// New name.
+    #[arg(long)]
+    pub name: Option<String>,
+    /// New prompt.
+    #[arg(long)]
+    pub prompt: Option<String>,
+    /// Read the new prompt from this file.
+    #[arg(long, value_name = "PATH")]
+    pub prompt_file: Option<std::path::PathBuf>,
+    /// Replace the prompt with a built-in one.
+    #[arg(long, value_enum)]
+    pub starter: Option<ScheduleStarter>,
+    /// Fire every this many minutes.
+    #[arg(long, value_name = "MINUTES")]
+    pub every: Option<u32>,
+    /// Fire once, at this RFC 3339 time.
+    #[arg(long, value_name = "RFC3339")]
+    pub once: Option<String>,
+    /// Provider that runs the prompt.
+    #[arg(long, value_enum)]
+    pub provider: Option<AgentChoice>,
+    /// Provider-native model.
+    #[arg(long)]
+    pub model: Option<String>,
+    /// Provider-native reasoning effort.
+    #[arg(long)]
+    pub effort: Option<String>,
+    /// Permission mode.
+    #[arg(long, value_enum)]
+    pub mode: Option<AgentModeChoice>,
+    /// Minutes one run may take before it is stopped.
+    #[arg(long, value_name = "MINUTES")]
+    pub timeout: Option<u32>,
+    /// Enable the schedule.
+    #[arg(long, conflicts_with = "disable")]
+    pub enable: bool,
+    /// Disable the schedule.
+    #[arg(long)]
+    pub disable: bool,
+}
+
+#[cfg(test)]
+mod schedule_args_tests {
+    use super::*;
+
+    fn parse(arguments: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::try_parse_from(std::iter::once("fleet").chain(arguments.iter().copied()))
+    }
+
+    #[test]
+    fn the_reviews_selector_conflicts_with_board_and_worktree() {
+        assert!(parse(&["board", "--reviews", "show"]).is_ok());
+        assert!(parse(&["board", "--reviews", "--context", "work", "show"]).is_ok());
+        assert!(parse(&["board", "--reviews", "--board", "work", "show"]).is_err());
+        assert!(parse(&["board", "--reviews", "--worktree", "show"]).is_err());
+        assert!(parse(&["schedule", "--reviews", "--board", "work", "list"]).is_err());
+    }
+
+    #[test]
+    fn card_new_takes_a_pull_request_and_a_requested_time() {
+        let Ok(Cli {
+            command: Some(Command::Board(arguments)),
+            ..
+        }) = parse(&[
+            "board",
+            "--reviews",
+            "card",
+            "new",
+            "Fix login",
+            "--pr",
+            "o/n#12",
+            "--requested-at",
+            "2026-09-22T10:00:00Z",
+        ])
+        else {
+            panic!("card new --pr parses");
+        };
+        assert!(arguments.reviews);
+        let BoardCommand::Card(BoardCardArgs {
+            command: BoardCardCommand::New {
+                pr, requested_at, ..
+            },
+        }) = arguments.command
+        else {
+            panic!("a card new command");
+        };
+        assert_eq!(pr.as_deref(), Some("o/n#12"));
+        assert_eq!(requested_at.as_deref(), Some("2026-09-22T10:00:00Z"));
+    }
+
+    #[test]
+    fn schedule_new_needs_one_prompt_source_and_one_cadence() {
+        let Ok(Cli {
+            command: Some(Command::Schedule(arguments)),
+            ..
+        }) = parse(&[
+            "schedule",
+            "--reviews",
+            "new",
+            "--name",
+            "GitHub reviews",
+            "--starter",
+            "github-reviews",
+            "--every",
+            "15",
+        ])
+        else {
+            panic!("schedule new parses");
+        };
+        let ScheduleCommand::New(new) = arguments.command else {
+            panic!("a new command");
+        };
+        assert_eq!(new.starter, Some(ScheduleStarter::GithubReviews));
+        assert_eq!(new.every, Some(15));
+        assert!(!new.disabled);
+        for refused in [
+            &["schedule", "new", "--name", "n", "--every", "15"][..],
+            &["schedule", "new", "--name", "n", "--prompt", "p"][..],
+            &[
+                "schedule",
+                "new",
+                "--name",
+                "n",
+                "--prompt",
+                "p",
+                "--starter",
+                "github-reviews",
+                "--every",
+                "15",
+            ][..],
+            &[
+                "schedule",
+                "new",
+                "--name",
+                "n",
+                "--prompt",
+                "p",
+                "--every",
+                "15",
+                "--once",
+                "2026-09-23T09:00:00Z",
+            ][..],
+            &["schedule", "edit", "sch-0a1b2c3d", "--enable", "--disable"][..],
+        ] {
+            assert!(parse(refused).is_err(), "{refused:?}");
+        }
+        assert!(parse(&["schedule", "edit", "sch-0a1b2c3d", "--disable"]).is_ok());
+        assert!(parse(&["schedule", "run", "sch-0a1b2c3d", "--wait", "--json"]).is_ok());
+        assert!(parse(&["schedule", "runs", "sch-0a1b2c3d"]).is_ok());
+        assert!(parse(&["schedule", "rm", "sch-0a1b2c3d"]).is_ok());
+        assert!(parse(&["schedule", "show", "sch-0a1b2c3d"]).is_ok());
     }
 }
