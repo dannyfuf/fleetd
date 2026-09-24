@@ -21,7 +21,7 @@ use gpui::{AnyElement, App, SharedString, Window, div, prelude::*};
 
 use super::transcript_list::{RowAction, RowActionKbd, RowActions};
 use crate::{
-    components::{ButtonSize, Chip, ContextMenu, IconButton, KeyHint, MenuItem, Spinner},
+    components::{ButtonSize, Chip, ContextMenu, IconButton, MenuItem, Spinner},
     focus::FocusRing,
     harness::HarnessTargetExt as _,
     icons::{Icon, IconSize},
@@ -587,12 +587,6 @@ const fn verb_id(action: RowAction) -> &'static str {
         RowAction::Open => "tool-open",
         RowAction::Revert => "tool-revert",
     }
-}
-
-/// The `[⏎] show` hint a collapsed row with a body draws.
-#[must_use]
-pub fn expand_hint(expanded: bool) -> KeyHint {
-    KeyHint::labeled("⏎", if expanded { "hide" } else { "show" })
 }
 
 #[cfg(test)]

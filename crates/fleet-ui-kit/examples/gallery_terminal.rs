@@ -337,11 +337,6 @@ fn overlays_section(cx: &mut App) -> AnyElement {
             stage(&t, px(64.0), ScrollPill::new(412, 2000)),
         ),
         LAYOUT.labeled(
-            "scroll pill \u{b7} selecting",
-            &t,
-            stage(&t, px(78.0), ScrollPill::new(412, 2000).selecting(true)),
-        ),
-        LAYOUT.labeled(
             "scroll pill \u{b7} alt-screen (suppressed)",
             &t,
             stage(&t, px(48.0), ScrollPill::new(412, 2000).alt_screen(true)),

@@ -71,16 +71,14 @@ pub fn title_bar(id: &'static str, sample: TitleSample, status: TitleStatus) -> 
                 .items_center()
                 .gap(gpui::px(8.0))
                 .child({
-                    let back = Button::new((id, 2usize), "Worktrees")
-                        .icon(Icon::ChevronLeft)
-                        .style(ButtonStyle::Ghost)
-                        .size(ButtonSize::Compact);
+                    let back =
+                        IconButton::new((id, 2usize), Icon::ChevronLeft, "Back to Worktrees")
+                            .size(ButtonSize::Compact);
                     match kbd("ctrl-s s") {
                         Some(kbd) => back.kbd(kbd),
                         None => back,
                     }
                 })
-                .child(Text::ui("/").faint())
                 .child(Text::ui("acme/api").muted())
                 .child(Text::ui("/").faint())
                 .child(Text::ui_strong("agent")),
@@ -90,7 +88,7 @@ pub fn title_bar(id: &'static str, sample: TitleSample, status: TitleStatus) -> 
     if let Some(kbd) = kbd("cmd-k") {
         command = command.kbd(kbd);
     }
-    let mut bar = bar.center(command);
+    let mut bar = bar.command(command);
     if status.needs_you > 0 {
         bar = bar.trailing(
             StatusButton::new((id, 4usize), format!("{} needs you", status.needs_you))

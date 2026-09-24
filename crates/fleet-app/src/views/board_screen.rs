@@ -738,7 +738,13 @@ fn tile_with_menu(
         .on_drag_move::<CardDrag>(move |event, window, cx| {
             let (bounds, y) = (event.bounds, event.event.position.y);
             if bounds.contains(&event.event.position) {
-                let slot = drag::slot_over(row, bounds.top(), bounds.bottom(), y);
+                let current = aiming
+                    .borrow()
+                    .target
+                    .as_ref()
+                    .filter(|target| target.column == column)
+                    .map(|target| target.slot);
+                let slot = drag::slot_over(row, bounds.top(), bounds.bottom(), y, current);
                 drag::aim(&aiming, event.drag(cx), &over, slot, window);
             }
         })

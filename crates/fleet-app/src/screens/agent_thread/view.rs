@@ -11,13 +11,13 @@
 use fleet_core::agents::PermissionMode;
 use fleet_ui_kit::{
     AGENT_CONTENT_W, ActiveTheme, Button, ButtonSize, ButtonStyle, ComposerChip, ContextMeter,
-    Decision, DecisionAction, DecisionDock, HarnessTargetExt, Icon, IconSize, Kbd, Menu, MenuItem,
-    MetadataRow, PopoverMenu, Segment, SegmentedControl, Text, Tone,
+    Decision, DecisionAction, DecisionDock, DecisionKind, HarnessTargetExt, Icon, IconSize, Kbd,
+    Menu, MenuItem, MetadataRow, PopoverMenu, Segment, SegmentedControl, Text, Tone,
 };
 use gpui::{Action, Context, Entity, SharedString, Window, div, prelude::*};
 
 use super::{AgentThreadView, composer::InteractionMode, presentation, presentation::mode_label};
-use crate::actions::native_agent;
+use crate::{actions::native_agent, keymap};
 
 impl Render for AgentThreadView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -164,15 +164,20 @@ impl AgentThreadView {
         let head = Decision::head(&self.decisions)?.clone();
         let diff = self.decision_diff(&head);
         let entity = cx.entity();
+        // The context the decision's keys are bound in, or none while a draft owns the keyboard
+        // and the bare letters type into it instead (`AppState::agent_context_chain`).
+        let context = (!self.is_composing(cx)).then(|| decision_key_context(&head.kind));
         let mut dock = DecisionDock::new(head)
             .on_action(move |action, _window, cx| {
                 entity.update(cx, |view, cx| view.act_on_decision(&action, cx));
             })
             // Each control shows the key its action is bound to in the decision's own context,
-            // so a chip can never name a key that would not do what the button does.
-            .kbd_for(|action, window, cx| {
+            // so a chip can never name a key that would not do what the button does. It is read
+            // from the key table rather than from the focused element: the palette or a dialog
+            // taking the focus must not strip the chips and reflow the drawer under it.
+            .kbd_for(move |action, _window, _cx| {
                 let action = decision_action(action)?;
-                Kbd::for_action(action.as_ref(), window, cx)
+                keymap::keystrokes_in(context?, action.as_ref()).map(|strokes| Kbd::new(&strokes))
             });
         if let Some((header, diff)) = diff {
             dock = dock.diff(diff).diff_header(header);
@@ -488,13 +493,19 @@ impl AgentThreadView {
                         .items_center()
                         .gap(theme.space.sm)
                         .px(theme.space.sm)
-                        .child(Text::hint(picker.kind.title()).muted())
-                        .child(
-                            fleet_ui_kit::KeyHint::labeled("\u{23ce}", "accept").tone(Tone::Muted),
-                        ),
+                        .child(Text::hint(picker.kind.title()).muted()),
                 )
                 .children(rows),
         )
+    }
+}
+
+/// The key context a decision's keys are bound in (`keymap.rs`, `Agent > AgentDecision > *`).
+fn decision_key_context(kind: &DecisionKind) -> &'static str {
+    match kind {
+        DecisionKind::Approval(_) => "Agent > AgentDecision > AgentPermission",
+        DecisionKind::Question(_) => "Agent > AgentDecision > AgentQuestion",
+        DecisionKind::PlanReady { .. } => "Agent > AgentDecision > AgentPlan",
     }
 }
 

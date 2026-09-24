@@ -6,7 +6,7 @@ use fleet_ui_kit::{Icon, prelude::*};
 use gpui::{AnyElement, App, Entity, FocusHandle, Window, div};
 
 use crate::{
-    actions::{fleet as fleet_actions, quit_daemon_dialog, quit_dialog},
+    actions::{quit_daemon_dialog, quit_dialog},
     dialogs::{Dialogs, footer, root},
     presentation::is_user_visible_job,
     state::{AppState, running_jobs},
@@ -170,7 +170,7 @@ pub(crate) fn render_quit(
 pub(crate) fn render_quit_daemon(
     state: &Entity<AppState>,
     focus: &FocusHandle,
-    window: &mut Window,
+    _window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
     let gap = cx.theme().space.sm;
@@ -231,15 +231,7 @@ pub(crate) fn render_quit_daemon(
     }
     let body = body
         .child(Text::ui("Worktrees, repos and state on disk are untouched.").muted())
-        .child(
-            // The way out is a key the live keymap owns, so its chip comes from there.
-            div()
-                .flex()
-                .items_center()
-                .gap(cx.theme().space.xs)
-                .children(Kbd::for_action(&fleet_actions::Quit, window, cx))
-                .child(Text::ui("quits Fleet and leaves all of this running.").muted()),
-        );
+        .child(Text::ui("Quitting Fleet alone leaves all of this running.").muted());
 
     root(focus)
         .child(

@@ -307,7 +307,7 @@ The names Fleet paints today, by surface:
 | Detail panel | `detail.open`, `detail.sleep`, `detail.menu`, `detail.copy_path`, `detail.inspect` |
 | Title bar | `titlebar.context`, `titlebar.command`, `titlebar.needs_you`, `titlebar.jobs`, `titlebar.update`, `titlebar.daemon`, `titlebar.help`, `titlebar.settings`, `titlebar.back`, `workspace.back`, `workspace.switcher`, `workspace.pr` |
 | Status bar | `statusbar.shortcuts`, `statusbar.commands` |
-| Board | `board.column[C]`, `board.column[C].card[R]`, `board.filter`; the pointer controls `board.new` (New card), `board.sync` (the sync button; absent on a local board), `board.settings` (Board settings), `board.column[C].add` (a column's `+`) and `board.column[C].card[R].menu` (a card's `⋯`, painted while the card is hovered or selected). `board.filter` is the header's filter field, painted always. The card menu's entries are `menu.item[N]`. |
+| Board | `board.column[C]`, `board.column[C].card[R]`, `board.filter`; the pointer controls `board.new` (New card), `board.sync` (the sync button; absent on a local board), `board.settings` (Board settings), `board.column[C].add` (a column's `+`) and `board.column[C].card[R].menu` (a card's `⋯`, painted while the card is hovered or selected). `board.filter` is the header's filter field, painted always. The card menu's entries are `menu.item[N]`. The drag insertion marker has no target: it is non-interactive paint whose consequence sentence is an accessibility label. During a drag the existing card target rectangles and the column's scroll offset stay unchanged; scenarios continue to aim with the card and column targets. |
 | Filter and palette | `filter.input`, `filter.clear` (the query's clear ✕, only while it holds text), `filter.empty.clear` (the `Clear filter` button of a Hub list the filter left empty), `palette.input`, `palette.row[N]` (one flat numbering down the ranked list, across its sections; `palette.row[0]` is the top match) |
 | Dialogs | `dialog.field[N]`, `dialog.row[N]`, `dialog.close`, `dialog.button[N]`, `dialog.checkbox`, `dialog.segment[N]` |
 | Help | `help.search` (also `dialog.field[0]`), `help.tab[N]` (0 Guides, 1 All shortcuts), `help.here[N]` (the *Here in …* rows), `help.guide[N]` (by the guide's position in the full list, searched or not), `help.step[N].action[M]` (the shown guide's step `N`, button `M`, both from 0), `help.shortcut[N]` (the table's rows, or the actions a Guides-tab search lists), `help.place[N]` (0 All places, then the catalogue places in order), `help.run`, `help.related` |
@@ -315,7 +315,7 @@ The names Fleet paints today, by surface:
 | Sheets | `sheet.close` |
 | Card detail | `card_detail.close` (the sheet's ✕, also `sheet.close`), `card_detail.title` (a click edits the title, as `i`), `card_detail.menu` (the header's ⋯), `card_detail.property[N]` (the property column's rows, `0` Status, numbered as `card.properties`), `card_detail.comment` (the composer's *Add a comment…*, as `c`), `card_detail.edit.save` and `card_detail.edit.cancel` (an open title, description or comment edit's *Save* / *Comment* and *Cancel*, as `ctrl-enter` and `esc`, painted only while that edit is open), and on the run card `card_detail.run.attach`, `card_detail.run.rerun` and `card_detail.run.cancel`, each painted only while its action can work on the card |
 | Jobs panel | `jobs.row[N].retry`, `jobs.row[N].cancel`, `jobs.row[N].log`, `jobs.filter[N]`, `jobs.clear`, `jobs.more`, `jobs.log.back`, `jobs.log.follow`, `jobs.log.end` |
-| Tabs | `tabs.tab[N]` for a process tab, `agents.tabs.tab[N]` for a conversation, sharing one numbering; `tabs.tab[N].close` / `agents.tabs.tab[N].close` (the tab's `✕`), `tabs.new` (the `+`), `tabs.fallback`, `tabs.watch`, `tabs.zoom`, `tabs.changes` |
+| Tabs | `tabs.tab[N]` for a process tab, `agents.tabs.tab[N]` for a conversation, sharing one numbering; `tabs.tab[N].close` / `agents.tabs.tab[N].close` (the tab's `✕`), `tabs.new` (the `+`), `tabs.fallback`, `tabs.watch`, `tabs.changes` |
 | Toasts and errors | `toasts.toast[N]` (0 is the oldest, matching the `toasts` array), `toasts.toast[N].action`, `toasts.toast[N].close`, `sticky_error.retry`, `sticky_error.close` |
 | Daemon banner | `banner.button[N]` (`0` Reconnect now, `1` Open log), `banner.close` |
 | First run | `first_run.step[N]` (`0` Create a context, `1` Clone a repository, `2` Start a worktree and an agent), `first_run.import`, `first_run.help`, `first_run.settings` |
@@ -354,8 +354,8 @@ laid out, until the tab is hovered or active, so a scenario clicks it on the act
 *Terminal*, *Claude thread*, *Codex thread*, *Board*, then *Lazygit* on a worktree session and
 *Terminal fallback* on an agent tab. A right-click on a tab selects it and opens its menu:
 *Rename* and, on an exited PTY, *Restart command* for a terminal, then *Close* and, with more than
-one tab, *Close others*. `tabs.zoom` is always painted; `tabs.watch` only while the session has a
-subagent watch; `tabs.fallback` only on an agent tab; `tabs.changes` on a worktree session.
+one tab, *Close others*. `tabs.watch` is painted only while the session has a subagent watch;
+`tabs.fallback` only on an agent tab; `tabs.changes` on a worktree session.
 
 The Changes panel (UX-SPEC §3.6) paints `changes.panel` (the whole column), `changes.file[N]` (the
 file row at model position `N`, a virtualized row) and `changes.lazygit` (*Open in Lazygit*) while

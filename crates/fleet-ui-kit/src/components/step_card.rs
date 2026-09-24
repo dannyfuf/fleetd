@@ -1,14 +1,14 @@
 //! `StepCard` — one clickable step of a short, ordered getting-started list.
 //!
 //! ```text
-//! [ (1)  Create a context                                        N ]
+//! [ (1)  Create a context                                          ]
 //!        Group repositories by GitHub org or client, e.g. "Acme".
 //! ```
 //!
-//! A card is a verb, so the whole card is the control: clicking it runs its action, and the chip
-//! at its end is that action's key from the live keymap (ADR 0023). The number says the order;
+//! A card is a verb, so the whole card is the control: clicking it runs its action, and its
+//! tooltip names that action's key from the live keymap (ADR 0023). The number says the order;
 //! the step to do now is [`StepCard::current`] (an accent badge and a tinted hairline), and a
-//! step that cannot run yet is [`StepCard::unavailable`], dimmed with a note in place of its key
+//! step that cannot run yet is [`StepCard::unavailable`], dimmed with a note at its end
 //! ("after step 2") and no click. A [`StepMark::Icon`] card drawn [`StepCard::dashed`] is an
 //! optional side path next to the numbered ones (an import).
 //!
@@ -17,7 +17,10 @@
 
 use gpui::{Action, App, ElementId, SharedString, Window, div, prelude::*};
 
-use super::{Kbd, KbdSize};
+use super::{
+    Kbd,
+    tooltip::{Tooltip, WithTooltip},
+};
 use crate::{
     icons::{Icon, IconSize},
     text::Text,
@@ -36,7 +39,7 @@ pub enum StepMark {
 
 type ClickFn = Box<dyn Fn(&mut Window, &mut App) + 'static>;
 
-/// One step: a mark, a title, one line of description, and its key.
+/// One step: a mark, a title, one line of description, and its key in the tooltip.
 #[derive(IntoElement)]
 pub struct StepCard {
     id: ElementId,
@@ -76,14 +79,14 @@ impl StepCard {
         self
     }
 
-    /// Run `action` on click, dispatched to the focused element as its key would be, and show
-    /// that key's chip from the live keymap.
+    /// Run `action` on click, dispatched to the focused element as its key would be, and name
+    /// that key from the live keymap in the tooltip.
     pub fn action(mut self, action: Box<dyn Action>) -> Self {
         self.action = Some(action);
         self
     }
 
-    /// The chip to show instead of the one [`StepCard::action`] resolves.
+    /// The key to name instead of the one [`StepCard::action`] resolves.
     pub fn kbd(mut self, kbd: Kbd) -> Self {
         self.kbd = Some(kbd);
         self
@@ -206,7 +209,6 @@ impl RenderOnce for StepCard {
                             .map(|description| Text::caption(description).tone(Tone::Muted)),
                     ),
             )
-            .children(kbd.map(|kbd| div().flex_none().child(kbd.size(KbdSize::Default))))
             .children(self.note.map(|note| {
                 div()
                     .flex_none()
@@ -216,6 +218,10 @@ impl RenderOnce for StepCard {
         if self.unavailable {
             return card.into_any_element();
         }
+        let card = match kbd {
+            Some(kbd) => card.with_tooltip(Tooltip::new(self.title.clone()).kbd(kbd), cx),
+            None => card,
+        };
         let (action, on_click) = (self.action, self.on_click);
         if action.is_none() && on_click.is_none() {
             return card.into_any_element();

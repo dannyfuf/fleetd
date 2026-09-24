@@ -430,8 +430,10 @@ fn guide_view(
                 .size(ButtonSize::Compact)
                 .when(destructive, |control| control.style(ButtonStyle::Danger))
                 .disabled(runnable.is_none());
+            // A guide teaches keys, so its buttons are among the few that keep the chip on the
+            // face (DESIGN-SYSTEM §4); `here` is read from the key table, so it holds still.
             if let Some(kbd) = kbd {
-                control = control.kbd(kbd);
+                control = control.kbd(kbd).show_kbd();
             }
             match runnable {
                 Some(action) => control.on_click(move |_, _, cx| run(&run_state, action, cx)),

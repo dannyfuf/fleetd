@@ -1,21 +1,24 @@
 //! `TitleBar` and `CommandField` — the one 44 px row at the top of every Fleet window.
 //!
 //! The title bar is the unified macOS titlebar, so it starts after the traffic lights
-//! (`metrics.traffic_light_inset`) and paints the `chrome` ground. It has three named regions:
+//! (`metrics.traffic_light_inset`) and paints the `chrome` ground. It has three named regions,
+//! weighted to the left:
 //!
 //! ```text
-//! [inset][ leading …            ][   command field   ][            … trailing ]
+//! [inset][ leading …                          ][ command field ][ trailing ]
 //! ```
 //!
 //! - **leading**: where you are. In the Hub, the context switcher and the section nav; in the
-//!   Workspace, the breadcrumb `← Worktrees / repo / worktree ⌄`.
-//! - **center**: the [`CommandField`], centred in the *window* rather than in the space the other
-//!   regions leave, so it stays put when a count appears on the right.
+//!   Workspace, the breadcrumb `‹ / repo / worktree ⌄` and what git knows about it. It takes all
+//!   the width the other two leave, and clips rather than wraps.
+//! - **command**: the [`CommandField`], right-aligned against the trailing region at its fixed
+//!   `command_field_w`, so it never moves while the leading region changes.
 //! - **trailing**: what needs you and what is running (each a [`super::StatusButton`] shown only
-//!   while its count is non-zero), then Help and Settings as [`super::IconButton`]s.
+//!   while its count is non-zero), then Help and Settings as [`super::IconButton`]s. Never
+//!   shrinks.
 //!
-//! The two side regions share the width left of and right of the field equally and clip rather
-//! than wrap, so a narrow window loses the ends of its labels, never the field.
+//! Where you are is what a narrow window must keep longest, so only the leading region yields
+//! width: a narrow window loses the end of the breadcrumb, never the field or a count.
 //!
 //! Use it once, as [`super::AppFrame::title_bar`]; the frame owns the height. A floating window of
 //! its own (the agent popup) draws a header of its own, not a second title bar.
@@ -37,7 +40,7 @@ use crate::{
 pub struct TitleBar {
     leading_inset: Option<Pixels>,
     leading: Vec<AnyElement>,
-    center: Option<AnyElement>,
+    command: Option<AnyElement>,
     trailing: Vec<AnyElement>,
 }
 
@@ -48,7 +51,7 @@ impl TitleBar {
         Self {
             leading_inset: None,
             leading: Vec::new(),
-            center: None,
+            command: None,
             trailing: Vec::new(),
         }
     }
@@ -66,9 +69,10 @@ impl TitleBar {
         self
     }
 
-    /// The centred element: normally a [`CommandField`].
-    pub fn center(mut self, element: impl IntoElement) -> Self {
-        self.center = Some(element.into_any_element());
+    /// The element right of the leading region, against the trailing one: normally a
+    /// [`CommandField`]. It keeps its own width.
+    pub fn command(mut self, element: impl IntoElement) -> Self {
+        self.command = Some(element.into_any_element());
         self
     }
 
@@ -88,14 +92,6 @@ impl Default for TitleBar {
 impl RenderOnce for TitleBar {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
-        let side = || {
-            div()
-                .flex()
-                .flex_1()
-                .min_w_0()
-                .items_center()
-                .overflow_hidden()
-        };
         div()
             .flex()
             .items_center()
@@ -105,14 +101,26 @@ impl RenderOnce for TitleBar {
             .bg(theme.colors.chrome)
             .border_b(theme.metrics.hairline)
             .border_color(theme.colors.border)
-            .child(side().gap(theme.space.md).children(self.leading))
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_w_0()
+                    .items_center()
+                    .gap(theme.space.md)
+                    .overflow_hidden()
+                    .children(self.leading),
+            )
             .children(
-                self.center
-                    .map(|center| div().flex_none().px(theme.space.md).child(center)),
+                self.command
+                    .map(|command| div().flex_none().pl(theme.space.lg).child(command)),
             )
             .child(
-                side()
-                    .justify_end()
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .pl(theme.space.sm)
                     .gap(theme.space.xs)
                     .children(self.trailing),
             )
@@ -125,6 +133,12 @@ impl RenderOnce for TitleBar {
 /// palette takes the keyboard, and the typing happens there. Drawing it as a field is what tells
 /// a person there is somewhere to type; making it a real input would put a second, weaker palette
 /// on screen. Like every [`super::Button`] it is not focusable (ADR 0023).
+///
+/// Its chip is one of the few a face keeps (DESIGN-SYSTEM §4): the palette reaches everything,
+/// so its key is the one worth teaching. Pass it with [`Self::kbd`], read from the key table
+/// rather than from focus: the palette, a popover or a dialog takes the focus away from where
+/// the key is bound, and the chip must not vanish under it. The field is `command_field_w` wide
+/// whatever its chip, so nothing beside it moves either way.
 #[derive(IntoElement)]
 pub struct CommandField {
     id: ElementId,
@@ -144,14 +158,16 @@ impl CommandField {
         }
     }
 
-    /// Dispatch `action` to the focused element on click, and show its live key binding.
+    /// Dispatch `action` to the focused element on click. Without [`Self::kbd`] the chip is its
+    /// live key binding in the focused context.
     pub fn action(mut self, action: Box<dyn Action>) -> Self {
         self.action = Some(action);
         self
     }
 
-    /// Show this key instead of the one [`Self::action`] resolves. Never a hand-typed string for
-    /// a key the keymap owns.
+    /// Show this key instead of the one [`Self::action`] resolves: the caller's key-table
+    /// spelling, which does not depend on focus. Never a hand-typed string for a key the keymap
+    /// owns.
     pub fn kbd(mut self, kbd: Kbd) -> Self {
         self.kbd = Some(kbd);
         self

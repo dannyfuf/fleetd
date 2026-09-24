@@ -119,7 +119,6 @@ impl WorkspaceScreen {
             .child(grid)
             .children((model.mode == TerminalMode::Scroll).then(|| {
                 ScrollPill::new(model.scroll_offset, model.scrollback_len)
-                    .selecting(selection.is_some())
                     .alt_screen(model.alt_screen)
             }));
         self.with_mouse_selection(area, state, focus, model.terminal)

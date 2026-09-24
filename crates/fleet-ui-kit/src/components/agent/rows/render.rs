@@ -11,7 +11,6 @@ use gpui::{AnyElement, App, Pixels, SharedString, Stateful, Window, div, prelude
 
 use super::{TranscriptRhythm, TranscriptRow, TranscriptRowId, TranscriptRowKind};
 use crate::{
-    components::KeyHint,
     harness::HarnessTargetExt as _,
     icons::{Icon, IconSize},
     text::Text,
@@ -192,12 +191,16 @@ pub(super) fn chevron(expanded: bool, expandable: bool) -> impl IntoElement {
         )
 }
 
-/// The `[⏎] <label>` hint, `invisible` when the row cannot expand.
-pub(super) fn show_hint(expanded: bool, expandable: bool, label: &'static str) -> impl IntoElement {
+/// The disclosure word — `<label>` folded, `hide` open — `invisible` when the row cannot expand.
+pub(super) fn disclosure(
+    expanded: bool,
+    expandable: bool,
+    label: &'static str,
+) -> impl IntoElement {
     div()
         .flex_none()
         .when(!expandable, |el| el.invisible())
-        .child(KeyHint::labeled("⏎", if expanded { "hide" } else { label }))
+        .child(Text::hint(if expanded { "hide" } else { label }).faint())
 }
 
 /// A body region: indented, capped, and scrolling inside its own row.

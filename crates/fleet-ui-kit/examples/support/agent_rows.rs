@@ -260,7 +260,6 @@ pub fn sample_thread(thread: Thread) -> Vec<TranscriptRow> {
     push(
         TranscriptRowKind::Error(ErrorRow {
             message: "API error 529 — overloaded".into(),
-            retryable: true,
         }),
         None,
     );

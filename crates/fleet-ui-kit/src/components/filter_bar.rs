@@ -22,7 +22,7 @@
 use gpui::{App, Entity, Window, div, prelude::*};
 
 use crate::{
-    components::{ButtonSize, IconButton, KeyHint, TextInput},
+    components::{ButtonSize, IconButton, TextInput},
     harness::HarnessTargetExt,
     icons::{Icon, IconSize},
     text::{Text, TextRole, styled_with},
@@ -96,10 +96,7 @@ impl RenderOnce for FilterBar {
                     .flex_none()
                     .items_center()
                     .gap(theme.space.md)
-                    .child(Text::label(format!("{shown}/{total}")).tone(count_tone))
-                    // Stage one of the two-stage `Esc`: leave the input, keep the filter. The
-                    // bar exists only in that stage, so the hint is not a state of its own.
-                    .child(KeyHint::labeled("esc", "leave")),
+                    .child(Text::label(format!("{shown}/{total}")).tone(count_tone)),
             )
     }
 }

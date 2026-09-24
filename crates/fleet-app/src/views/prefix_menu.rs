@@ -325,7 +325,9 @@ impl PrefixMenuState {
                 Button::new("prefix-menu-close", "Close")
                     .style(ButtonStyle::Ghost)
                     .size(ButtonSize::Compact)
+                    // The ⌃S menu is a table of keys, so even its close keeps `esc` on its face.
                     .kbd(Kbd::new(std::slice::from_ref(key)))
+                    .show_kbd()
                     .on_click(move |_, window, cx| {
                         run(surface, action.boxed_clone(), &state, window, cx);
                     })
