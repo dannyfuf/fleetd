@@ -86,6 +86,7 @@ pub fn event_damage(event: &Event) -> EventDamage {
                 ..EventDamage::default()
             }
         }
+        Event::TerminalClipboard { .. } => EventDamage::default(),
         Event::TerminalReattach { terminal } => EventDamage {
             terminal: Some(*terminal),
             sessions: true,

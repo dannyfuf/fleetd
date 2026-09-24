@@ -6,6 +6,12 @@ pub const PROTOCOL_VERSION: u32 = 8;
 /// Capability advertised by daemons that support machine federation.
 pub const REMOTE_MACHINES_CAPABILITY: &str = "remote-machines";
 
+/// Capability advertised by peers that support terminal-originated clipboard writes.
+pub const TERMINAL_CLIPBOARD_CAPABILITY: &str = "terminal.clipboard";
+
+/// Maximum decoded UTF-8 byte length of a terminal-originated clipboard write.
+pub const TERMINAL_CLIPBOARD_MAX_BYTES: usize = 1024 * 1024;
+
 /// Capability advertised by daemons that serve bounded transcript windows and paginate history.
 ///
 /// A client must never send a window field — `turn_limit`, `after_seq`, `before_cursor`,

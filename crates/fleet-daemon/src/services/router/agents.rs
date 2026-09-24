@@ -459,6 +459,7 @@ pub fn register_thread_events(
         | Event::TerminalFrame(_)
         | Event::TerminalExited { .. }
         | Event::TerminalTitle { .. }
+        | Event::TerminalClipboard { .. }
         | Event::HostLinkChanged { .. }
         | Event::TerminalReattach { .. }
         | Event::Toast { .. }

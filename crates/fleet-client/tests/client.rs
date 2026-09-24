@@ -390,6 +390,24 @@ async fn worktree_board_api_requires_capability_before_sending_requests() {
     .expect("worktree board capability check");
 }
 
+#[tokio::test]
+async fn terminal_clipboard_subscription_follows_daemon_capability() {
+    for capabilities in [
+        Vec::new(),
+        vec![fleet_proto::TERMINAL_CLIPBOARD_CAPABILITY.to_owned()],
+    ] {
+        let home = TempDir::new().expect("temporary Fleet home");
+        let listener = bind(home.path()).await;
+        let server = async {
+            let (socket, _) = listener.accept().await.expect("accept client");
+            let mut transport = Framed::new(socket, FleetCodec::new());
+            authenticate_with_capabilities(&mut transport, None, capabilities).await;
+        };
+        let (client, ()) = tokio::join!(Client::connect(home.path()), server);
+        drop(client.expect("connect client"));
+    }
+}
+
 async fn board_api_round_trips() {
     let home = TempDir::new().unwrap();
     let listener = bind(home.path()).await;
@@ -750,6 +768,9 @@ async fn authenticate_with_capabilities(
     also_subscribed: Option<Vec<EventKind>>,
     capabilities: Vec<String>,
 ) {
+    let expects_clipboard = capabilities
+        .iter()
+        .any(|capability| capability == fleet_proto::TERMINAL_CLIPBOARD_CAPABILITY);
     let hello = transport.next().await.unwrap().unwrap();
     assert!(matches!(
         hello.body,
@@ -785,7 +806,12 @@ async fn authenticate_with_capabilities(
     // `Subscribe` is additive on the daemon, so the set the client replays on a reconnect is
     // the union the daemon holds; a connection never receives fewer kinds after a reconnect
     // than before one.
-    assert_eq!(events.len(), 18);
+    assert_eq!(events.len(), if expects_clipboard { 19 } else { 18 });
+    assert_eq!(
+        events.contains(&EventKind::TerminalClipboard),
+        expects_clipboard,
+        "the additive event kind must never be sent to a legacy daemon"
+    );
     for kind in [
         EventKind::Agent,
         EventKind::AgentSummary,

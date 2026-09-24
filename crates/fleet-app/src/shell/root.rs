@@ -16,6 +16,7 @@ mod actions;
 mod agent;
 mod board;
 mod bootstrap;
+mod clipboard;
 mod daemon_lifecycle;
 mod events;
 mod focus;

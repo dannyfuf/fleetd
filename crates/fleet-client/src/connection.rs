@@ -15,7 +15,7 @@ use std::{
 
 use fleet_core::{ids::TerminalId, paths::FleetHome};
 use fleet_proto::{
-    PROTOCOL_VERSION,
+    PROTOCOL_VERSION, TERMINAL_CLIPBOARD_CAPABILITY,
     codec::FleetCodec,
     error::{ErrorKind, ProtoError},
     event::{Event, EventKind, ToastLevel},
@@ -862,13 +862,15 @@ async fn establish(
 
     reconcile_daemon_identity(state, read_daemon_identity(home));
 
+    let subscriptions = subscriptions_for_peer(&state.subscriptions, &state.capabilities);
+
     exchange(
         &mut transport,
         &mut buffered_events,
         Request {
             id: 1,
             body: RequestBody::Subscribe {
-                events: state.subscriptions.clone(),
+                events: subscriptions,
             },
         },
         expect_ack,
@@ -920,6 +922,7 @@ fn hello_client(client_id: &str) -> fleet_proto::request::HelloClient {
             .iter()
             .map(|capability| (*capability).to_owned())
             .chain(std::iter::once(BOARD_AUTOMATION_CAPABILITY.to_owned()))
+            .chain(std::iter::once(TERMINAL_CLIPBOARD_CAPABILITY.to_owned()))
             .collect(),
         ..fleet_proto::request::HelloClient::default()
     }
@@ -1144,11 +1147,26 @@ fn all_event_kinds() -> Vec<EventKind> {
         EventKind::TerminalFrame,
         EventKind::TerminalExited,
         EventKind::TerminalTitle,
+        EventKind::TerminalClipboard,
         EventKind::HostLinkChanged,
         EventKind::TerminalReattach,
         EventKind::Toast,
         EventKind::DaemonShuttingDown,
     ]
+}
+
+fn subscriptions_for_peer(
+    requested: &[EventKind],
+    capabilities: &HashSet<String>,
+) -> Vec<EventKind> {
+    requested
+        .iter()
+        .copied()
+        .filter(|kind| {
+            *kind != EventKind::TerminalClipboard
+                || capabilities.contains(TERMINAL_CLIPBOARD_CAPABILITY)
+        })
+        .collect()
 }
 
 fn command_is_expired(command: &Command) -> bool {
@@ -1342,6 +1360,30 @@ mod tests {
                 "the agent capabilities are still all named: {capability}"
             );
         }
+        assert!(
+            hello
+                .capabilities
+                .iter()
+                .any(|capability| capability == TERMINAL_CLIPBOARD_CAPABILITY),
+            "the daemon must know this client can decode clipboard events"
+        );
+    }
+
+    #[test]
+    fn terminal_clipboard_is_subscribed_only_after_capability_negotiation() {
+        let requested = all_event_kinds();
+        assert!(requested.contains(&EventKind::TerminalClipboard));
+        assert!(
+            !subscriptions_for_peer(&requested, &HashSet::new())
+                .contains(&EventKind::TerminalClipboard)
+        );
+        assert!(
+            subscriptions_for_peer(
+                &requested,
+                &HashSet::from([TERMINAL_CLIPBOARD_CAPABILITY.to_owned()])
+            )
+            .contains(&EventKind::TerminalClipboard)
+        );
     }
 
     #[test]

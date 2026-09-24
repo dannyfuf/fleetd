@@ -295,15 +295,11 @@ impl VtEngine for GhosttyEngine {
         }))?;
         let clipboard_events = Arc::clone(&events);
         backend(terminal.on_clipboard_write(move |_, write| {
-            if let Some(content) = write
+            if let Some(text) = write
                 .contents()
-                .find(|content| content.mime == "text/plain")
-                .or_else(|| write.contents().next())
+                .find_map(|content| clipboard_text(content.mime, content.data.as_bytes()))
             {
-                lock_events(&clipboard_events).push(EngineEvent::ClipboardWrite {
-                    mime: content.mime.to_owned(),
-                    data: content.data.to_owned(),
-                });
+                lock_events(&clipboard_events).push(EngineEvent::ClipboardWrite(text));
             }
             Ok(())
         }))?;
@@ -660,6 +656,13 @@ impl VtEngine for GhosttyEngine {
     fn take_events(&mut self) -> Vec<EngineEvent> {
         std::mem::take(&mut *lock_events(&self.events))
     }
+}
+
+fn clipboard_text(mime: &str, data: &[u8]) -> Option<String> {
+    if mime != "text/plain" || data.len() > fleet_proto::TERMINAL_CLIPBOARD_MAX_BYTES {
+        return None;
+    }
+    std::str::from_utf8(data).ok().map(str::to_owned)
 }
 
 fn backend<T>(result: Result<T, libghostty_vt::Error>) -> Result<T, EngineError> {

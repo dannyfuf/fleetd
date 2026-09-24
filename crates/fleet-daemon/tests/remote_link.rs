@@ -538,6 +538,7 @@ async fn complete_scripted_handshake(peer: DuplexStream) -> (ScriptedRemote, Sna
             client
         } if client.kind == ClientKind::Proxy
             && client.host_id.as_ref().is_some_and(|id| id.as_str() == "local-daemon")
+            && client.supports(fleet_proto::TERMINAL_CLIPBOARD_CAPABILITY)
     ));
     send_value(
         &mut remote,
@@ -564,6 +565,7 @@ async fn complete_scripted_handshake(peer: DuplexStream) -> (ScriptedRemote, Sna
         RequestBody::Subscribe { events }
             if events.contains(&EventKind::SnapshotChanged)
                 && events.contains(&EventKind::TerminalExited)
+                && !events.contains(&EventKind::TerminalClipboard)
                 && !events.contains(&EventKind::HostLinkChanged)
                 && !events.contains(&EventKind::TerminalReattach)
     ));

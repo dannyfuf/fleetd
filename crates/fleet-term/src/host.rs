@@ -135,12 +135,7 @@ pub enum HostEvent {
     /// The terminal reported its working directory.
     Cwd(String),
     /// The terminal requested a clipboard write.
-    ClipboardWrite {
-        /// MIME type of the preferred representation.
-        mime: String,
-        /// Decoded clipboard data.
-        data: String,
-    },
+    ClipboardWrite(String),
 }
 
 /// Monotonic input/output activity observed by a terminal host.
@@ -487,7 +482,7 @@ pub(super) fn host_event_bytes(event: &HostEvent) -> usize {
             )
         }),
         HostEvent::Title(title) | HostEvent::Cwd(title) => title.len(),
-        HostEvent::ClipboardWrite { mime, data } => mime.len().saturating_add(data.len()),
+        HostEvent::ClipboardWrite(text) => text.len(),
         HostEvent::Exited(_) | HostEvent::Bell => 0,
     };
     payload.saturating_add(std::mem::size_of::<HostEvent>())
