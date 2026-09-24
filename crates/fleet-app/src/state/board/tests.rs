@@ -740,6 +740,10 @@ fn a_child_that_goes_blocked_turns_its_card_amber_without_a_board_reload() {
         state.board.marks.working, 1,
         "a blocked child is still holding the checkout"
     );
+    assert_eq!(
+        state.board.marks.needs_you, 1,
+        "the header counts the card its tile says needs you, though its run has not ended"
+    );
 }
 
 #[test]
@@ -781,6 +785,10 @@ fn a_card_called_child_that_starts_blocked_paints_needs_you_before_the_board_rec
         first_marks(&state).run,
         Some(RunMark::NeedsYou),
         "a child parked on its gate is the one thing the tile must say without a reload"
+    );
+    assert_eq!(
+        state.board.marks.needs_you, 1,
+        "and the header says it with the tile"
     );
 }
 

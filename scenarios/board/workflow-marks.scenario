@@ -113,13 +113,14 @@ key ]
 await lists.board.selected.label == "In Progress" 20000
 assert lists["board.cards"].rows[0].badges[0] == "AGE-1"
 await lists["board.cards"].rows[0].marks[0] == "needs you" 30000
-await lists["board.summary"].rows[0].label == "1/1 working" 20000
+await lists["board.summary"].rows[0].label == "1/1 working · 1 needs you" 20000
 
 # The child asks its question and parks on it — the tile already says `needs you` because the face
 # is painted from the delegation mirror (BOARD.md §11.8); the delegation itself is read too. The
-# header counts the slot that child is holding either way, which is the reading that matters here.
+# header counts the slot that child is holding either way, and its amber count says what the
+# tile says: one card waits on a person.
 await agents.delegations[0].status == blocked 30000
-await lists["board.summary"].rows[0].label == "1/1 working" 20000
+await lists["board.summary"].rows[0].label == "1/1 working · 1 needs you" 20000
 
 # Back to Todo, which is three cards now and still says what blocks the last two of them.
 key h
@@ -150,7 +151,7 @@ await lists.board.selected.label == "In Progress" 20000
 assert lists["board.cards"].rows[1].badges[0] == "AGE-2"
 await lists["board.cards"].rows[1].marks[0] == "pending" 40000
 await agents.delegations[0].status == blocked 30000
-await lists["board.summary"].rows[0].label == "2/1 working" 20000
+await lists["board.summary"].rows[0].label == "2/1 working · 1 needs you" 20000
 assert lists["board.summary"].rows[0].marks[0] == "waiting:1"
 assert lists.board.rows[3].badges[0] == "2" && lists.board.rows[3].marks[0] == "action"
 shot workflow-marks

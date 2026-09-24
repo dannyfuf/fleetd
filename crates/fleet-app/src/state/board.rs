@@ -363,7 +363,11 @@ impl AppState {
             if !live && card.pending_run.is_some() {
                 marks.waiting = marks.waiting.saturating_add(1);
             }
-            if attention(card, &stamp) {
+            // `attention` reads the card alone, so it cannot see a child that is still out and
+            // parked on a person's answer: only the delegation mirror knows, and the tile already
+            // says `needs you` from it (BOARD.md §11.8). The header counts what the tiles say.
+            let parked = live && run == Some(RunMark::NeedsYou);
+            if parked || attention(card, &stamp) {
                 marks.needs_you = marks.needs_you.saturating_add(1);
             }
             if run.is_some() || blocked.is_some() {
