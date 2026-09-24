@@ -1,9 +1,8 @@
-//! The Hub sidebar (UX-SPEC §3.2): the repositories the worktree list is scoped to, the agents
-//! one click away, a collapse control at its foot and an edge the pointer can drag.
+//! The Hub sidebar (UX-SPEC §3.2): the repositories the worktree list is scoped to, a collapse
+//! control at its foot and an edge the pointer can drag.
 //!
 //! Rows answer the pointer the way their keys do: a click on a repository selects it like `⏎`,
-//! its `⋯` and its right-click menu list `n` `e` `m` `d` (and `x` on a failed clone), and a
-//! click on an agent goes to it like the palette's `go`.
+//! and its `⋯` and its right-click menu list `n` `e` `m` `d` (and `x` on a failed clone).
 
 use std::{collections::HashMap, rc::Rc};
 
@@ -28,18 +27,10 @@ use crate::{
     views::{first_run::EmptySurface, harness, worktrees_list::label},
 };
 
-mod agents;
-
-pub use agents::{AgentRow, AgentTarget, agent_rows};
-
 /// The repositories section's title.
 const REPOS_TITLE: &str = "Repositories";
-/// The agents section's title.
-const AGENTS_TITLE: &str = "Agents";
 /// What the pinned scope row reads.
 const ALL_LABEL: &str = "All repositories";
-/// The chip an agent that needs you carries.
-const NEEDS_YOU: &str = "needs you";
 /// The accessible name of a row's `⋯` trigger.
 const MORE_ACTIONS: &str = "More actions";
 /// How many rows tall the Repositories section is while it has no repository to list.
@@ -319,14 +310,12 @@ pub fn matches(row: &RailRow, query: &str) -> bool {
 pub type ResizeHandler = Rc<dyn Fn(Pixels, &mut Window, &mut App)>;
 
 /// What the sidebar's rows and edge do when the pointer uses them. Built by the Hub, which owns
-/// the cursor, the scope and the bridge.
+/// the cursor, the scope and the stored width.
 #[derive(Clone)]
 pub struct SidebarHandlers {
     /// A repository row: a click selects (like `⏎`), a double-click opens, a right-click selects
     /// before its menu opens.
     pub repos: ListPointer,
-    /// An agent row: a click goes to it.
-    pub agents: ListPointer,
     /// A drag of the edge, with the new width.
     pub resize: ResizeHandler,
 }
@@ -337,8 +326,6 @@ pub struct RailProps<Rows = Rc<[RailRow]>> {
     pub header_override: Option<AnyElement>,
     /// The repository rows, already filtered.
     pub rows: Rows,
-    /// The Agents section's rows; the section is hidden when there are none.
-    pub agents: Rc<[AgentRow]>,
     /// The cursor index into `rows`.
     pub cursor: usize,
     /// Whether the sidebar owns the keyboard (the cursor bar and the focus ring).
@@ -355,8 +342,7 @@ pub struct RailProps<Rows = Rc<[RailRow]>> {
     pub handlers: SidebarHandlers,
 }
 
-/// Renders the sidebar: the repositories, the agents, the collapse control and the §3.13 empty
-/// states.
+/// Renders the sidebar: the repositories, the collapse control and the §3.13 empty states.
 #[must_use]
 pub fn render(
     props: RailProps<impl AsRef<[RailRow]> + 'static>,
@@ -366,7 +352,6 @@ pub fn render(
     let RailProps {
         header_override,
         rows,
-        agents,
         cursor,
         focused,
         collapsed,
@@ -421,8 +406,8 @@ pub fn render(
     let mut repos_section = SidebarSection::new(REPOS_TITLE)
         .action(repos_actions(filter))
         .body(list);
-    // A virtualized list cannot measure itself: the section is its rows' height, and scrolls
-    // when the sidebar is shorter, so the Agents section sits right under the last repository.
+    // A virtualized list cannot measure itself: the section is its rows' height and scrolls when
+    // the sidebar is shorter.
     if row_count > 0 {
         repos_section = repos_section.body_height(row_h * row_count as f32);
     } else if !collapsed {
@@ -433,14 +418,11 @@ pub fn render(
     if let Some(header) = header_override {
         repos_section = repos_section.header(header);
     }
-    let mut sidebar = Sidebar::new("hub-sidebar")
+    let sidebar = Sidebar::new("hub-sidebar")
         .width(width)
         .collapsed(collapsed)
         .focused(focused)
         .section(repos_section);
-    if !agents.is_empty() {
-        sidebar = sidebar.section(agents_section(&agents, collapsed, &handlers.agents));
-    }
     let resize = handlers.resize;
     // The sidebar's own rect stays the collapse oracle (TESTING-HARNESS §3): `sidebar_w` or the
     // dragged width expanded, `sidebar_collapsed_w` collapsed.
@@ -607,28 +589,6 @@ pub(crate) fn repo_menu(menu: Menu, kind: RailKind) -> Menu {
             .item(item(Box::new(repos::Clone))),
         RailKind::All | RailKind::Cloning => menu.item(item(Box::new(repos::Clone))),
     }
-}
-
-/// The Agents section: one item per thread or window, a dot and, when it waits, a chip.
-fn agents_section(rows: &[AgentRow], collapsed: bool, pointer: &ListPointer) -> SidebarSection {
-    SidebarSection::new(AGENTS_TITLE).body(div().flex().flex_col().children(
-        rows.iter().enumerate().map(|(ix, row)| {
-            NavItem::new(("agent-item", ix), row.label.clone())
-                .leading(StatusDot::small(row.dot))
-                .when(row.needs_you, |item| {
-                    item.trailing(
-                        Chip::new()
-                            .text(NEEDS_YOU)
-                            .tone(Tone::Warning)
-                            .filled(true)
-                            .id(("agent-needs-you", ix)),
-                    )
-                })
-                .collapsed(collapsed)
-                .pointer(pointer, ix)
-                .harness_target_indexed("agents.sidebar.row", ix)
-        }),
-    ))
 }
 
 fn rail_row_id(row: &RailRow) -> SharedString {

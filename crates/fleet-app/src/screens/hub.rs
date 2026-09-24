@@ -167,8 +167,6 @@ pub struct HubState {
     restoring_trash: Option<String>,
     /// `$HOME`, so the prepared worktree paths are tilde-collapsed once.
     home: Option<std::path::PathBuf>,
-    /// The sidebar's Agents rows, rebuilt when the Hub synchronizes and replaced only on change.
-    agents: Rc<[repos_rail::AgentRow]>,
 }
 
 impl HubState {

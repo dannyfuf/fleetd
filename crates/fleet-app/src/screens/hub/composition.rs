@@ -29,7 +29,7 @@ impl HubScreen {
             let width = f32::from(viewport.width);
             let model = self.hub.read(cx).prepared.clone();
             let handlers = ctx.row_handlers();
-            let sidebar = ctx.sidebar_handlers(bridge);
+            let sidebar = ctx.sidebar_handlers();
             self.body(
                 state.read(cx),
                 self.hub.read(cx),
@@ -175,7 +175,6 @@ impl HubScreen {
                             .into_any_element()
                     }),
                 rows: model.rail.clone(),
-                agents: hub.agents.clone(),
                 cursor: state.cursors.repos,
                 focused: state.hub_pane == HubPane::Repos,
                 collapsed: state.rail_collapsed,

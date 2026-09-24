@@ -521,7 +521,6 @@ impl HubCtx {
             hub.prepared = model.clone();
             changed
         });
-        let changed = self.refresh_agents(cx) || changed;
         publish_breadcrumb(&self.state, &model, cx);
         self.tick_pull_requests(cx);
         let selected = self.inspection_target(cx);

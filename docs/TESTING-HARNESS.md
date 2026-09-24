@@ -300,7 +300,7 @@ The names Fleet paints today, by surface:
 
 | Surface | Names |
 | --- | --- |
-| Sidebar | `repos.rail` (the whole sidebar), `repos.row[N]`, `repos.row[N].menu` (a repository's `⋯`, painted while the row is hovered), `repos.clone` (the `+` beside `Repositories`), `repos.collapse` (the foot button, the pointer's `H`), `repos.resize` (the draggable edge), `agents.sidebar.row[N]` (the Agents section's rows, absent while there are none). `repos.rail`'s `w` is the collapse and drag oracle — 232 expanded by default, 44 collapsed, the dragged width (200–320) after `drag repos.resize <x> <y>`. |
+| Sidebar | `repos.rail` (the whole sidebar), `repos.row[N]`, `repos.row[N].menu` (a repository's `⋯`, painted while the row is hovered), `repos.clone` (the `+` beside `Repositories`), `repos.collapse` (the foot button, the pointer's `H`), `repos.resize` (the draggable edge). `repos.rail`'s `w` is the collapse and drag oracle — 232 expanded by default, 44 collapsed, the dragged width (200–320) after `drag repos.resize <x> <y>`. |
 | Hub lists | `worktrees.row[N]`, `prs.row[N]`, `jobs.row[N]`, `hub.tab[N]`, `prs.tab[N]` |
 | Worktrees page | `worktrees.new` (absent while the context has no repository), `worktrees.clone` (the primary then), `worktrees.empty.clone` (the empty page's `Clone repo` when there is no repository), `worktrees.filter`, `worktrees.row[N].open`, `worktrees.row[N].menu`, `worktrees.row[N].log` |
 | Pull requests | `prs.filter`, `prs.refresh`, `prs.retry`, `prs.more`, `prs.row[N].open`, `prs.row[N].menu` |

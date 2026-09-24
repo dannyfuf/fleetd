@@ -384,10 +384,9 @@ Hub keys) and Help / Settings stay; Help and Jobs show their `⌃S` chords.
 
 ---
 
-### 3.2 Hub — Sidebar: repositories and agents
+### 3.2 Hub — Sidebar: repositories
 
-**Purpose:** *Scope the worktree list; is any repo unhealthy or still cloning; which agent needs
-me?*
+**Purpose:** *Scope the worktree list; is any repo unhealthy or still cloning?*
 
 ```
 ┌────────────────────────────┐
@@ -397,11 +396,6 @@ me?*
 │  • acme/web              1 │
 │  ⟳ nixos       cloning 40% │     clone in flight, thin bar along its foot
 │  ✕ old-api          failed │     clone failed, stays until dismissed
-│                            │
-│ Agents                     │     hidden while there are none
-│  • codex · REA… [needs you]│
-│  • claude · spike          │
-│  • claude · agent window   │
 │                            │
 │ ◧                          │     collapse (H)
 └────────────────────────────┘
@@ -422,7 +416,6 @@ the sidebar owns the keyboard, and the sidebar draws the pane focus ring then.
 | Worktree count | integer, right, muted | right | sizes the jump you are about to make | §5 "worktree count" |
 | Clone row | spinning `loader-circle` + name + `cloning 40%` (`cloning…` until a percent is parseable) + a thin progress bar along the item's foot | sort position | a repo being born must be visible where it will live | §1 `CloneJob`, §6 |
 | Clone failed row | `circle-x` red + name + faint `failed` | same | failure must not disappear silently; `Enter` opens the Jobs panel focused on that job, `x` dismisses (KEYMAP arbitrates `d` = delete repo, `x` = dismiss a failed clone) | `CloneJob.status`, `.error` |
-| Agents section | every top-level native agent thread whose worktree is in the active context, in the daemon's order, then every agent window (`a` / `A`) the daemon holds: a dot (amber needs you, green working, red failed, grey otherwise), `provider · title` (`provider · worktree` before the thread has a title, `provider · agent window` for a window) and an amber `needs you` chip | under the repositories | a running agent one click from anywhere in the Hub | the palette's `AGENTS` data, `Attention` |
 | Collapse | an icon button at the foot, the same as `H`; collapsed, the sidebar is 44 px of icons whose labels are tooltips | foot | the pointer's way to the room `H` makes | KEYMAP A22 |
 | Edge | drag the right edge between 200 and 320 px; the width is kept while Fleet runs and comes back when the sidebar is expanded again | right border | a long repo name can be given room | — |
 
@@ -433,29 +426,24 @@ to scope to: a click only puts the cursor on it, and a double-click opens its jo
 right-click menu are the same list, each item with its key from the live keymap: Clone repo `n`,
 Edit setup commands `e`, Move to another context `m` — Delete the repository `d` (red, confirms);
 a failed clone lists Dismiss the failed clone `x` and Clone repo `n`, a clone in flight Clone repo
-`n`. A click on an agent goes to it: a thread opens the way the palette's `go` does (its tab, its
-worktree's session first when needed), and an agent window is shown the way `a` / `A` shows it,
-never hidden by the click. Agent rows carry no menu: going to one is their only action.
+`n`.
 
 **Intentionally omitted:** `url`, `path`, `defaultBranch`, `clonedAt`, hook lists, prepared-pool
 state, private lock icon, owner avatar, a separate "live" count badge — all in the detail panel;
-none of them changes which repo you select. Delegated child threads — their caller's transcript
-reaches them, and the caller's dot already carries a child that needs you. The stale stamp, which
-the Worktrees page header carries.
+none of them changes which repo you select. The stale stamp, which the Worktrees page header
+carries.
 
 **States:** *empty* → `No repos in <context>.` over a `Clone repo  n` button (§3.13).
 *filter-empty* → `Nothing matches "<filter>".` *loading* → the rail renders from `state.json`
-instantly, no skeleton; the reconcile shows only as the jobs chip. *no agents* → the Agents
-section is not drawn. *collapsed* → icons and dots only; no empty sentence.
+instantly, no skeleton; the reconcile shows only as the jobs chip. *collapsed* → icons and dots
+only; no empty sentence.
 
 **Icons:** `layout-grid`, `plus`, `ellipsis`, `loader-circle`, `circle-x`, `panel-left-close`,
 `panel-left-open`, `folder-git-2` (detail header only), `zap` (prepared copies, detail only).
 
 **Keyboard:** `j`/`k`, `gg`/`G`, `ctrl-d`/`ctrl-u` · `Enter`/`o`/`l` → focus worktrees · `n` clone
 · `d` delete (confirm, cascades) · `x` dismiss a failed clone · `e` edit hooks (KEYMAP A16) · `m` move
-to context · `i` detail · `ga` jump to `All` (KEYMAP A7) · `H` collapse/expand the sidebar. The
-Agents section has no keys of its own: the palette's `AGENTS` rows and `^s <n>` reach the same
-threads.
+to context · `i` detail · `ga` jump to `All` (KEYMAP A7) · `H` collapse/expand the sidebar.
 
 ---
 
