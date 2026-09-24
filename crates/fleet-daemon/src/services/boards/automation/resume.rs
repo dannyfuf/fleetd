@@ -145,7 +145,7 @@ impl Boards {
                     .lock()
                     .await
                     .get(board)
-                    .cloned()
+                    .map(|reservations| reservations.keys().cloned().collect())
                     .unwrap_or_default(),
                 None => BTreeSet::new(),
             };

@@ -118,6 +118,14 @@ impl Boards {
     pub async fn update_card(&self, card: &CardId, patch: CardPatch) -> DaemonResult<Card> {
         let (guard, mut doc, index) = self.card_document(card).await?;
         let now = self.now();
+        if (patch.archived == Some(true) || patch.status_id.is_some())
+            && self.start_is_launching(&doc.board.id, card).await
+        {
+            return Err(DaemonError::Conflict(format!(
+                "{} is starting; cancel the run first",
+                doc.cards[index].display_key(&doc.board)
+            )));
+        }
         // A working card cannot be archived out from under its run: the run would carry on with
         // no column left to report into, and the board would show neither. Cancel it first.
         if patch.archived == Some(true) && is_working(&doc.cards[index]) {
@@ -216,6 +224,12 @@ impl Boards {
         cancel_run: bool,
     ) -> DaemonResult<Card> {
         let (mut guard, mut doc, mut card_index) = self.card_document(card).await?;
+        if self.start_is_launching(&doc.board.id, card).await {
+            return Err(DaemonError::Conflict(format!(
+                "{} is starting; cancel the run first",
+                doc.cards[card_index].display_key(&doc.board)
+            )));
+        }
         // A live run is settled before the move, and never under this gate: `cancel_run` takes
         // the same board gate itself, and the gates are not reentrant.
         if is_working(&doc.cards[card_index]) {
@@ -265,6 +279,12 @@ impl Boards {
     /// Deletes a card and clears references to it from its children.
     pub async fn delete_card(&self, card: &CardId) -> DaemonResult<()> {
         let (guard, mut doc, index) = self.locked_card_document(card).await?;
+        if self.start_is_launching(&doc.board.id, card).await {
+            return Err(DaemonError::Conflict(format!(
+                "{} is starting; cancel the run first",
+                doc.cards[index].display_key(&doc.board)
+            )));
+        }
         // The same refusal archiving makes, for the same reason: a run reporting into a card
         // this document no longer holds has nowhere to land its outcome.
         if is_working(&doc.cards[index]) {

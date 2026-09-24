@@ -602,6 +602,30 @@ async fn a_routed_success_moves_the_card_and_the_next_column_starts_it() {
     );
 }
 
+#[tokio::test]
+async fn a_success_routes_from_the_runs_column_not_the_cards_current_column() {
+    let (_temp, services, _receiver) = fixture().await;
+    let board = automated_board(&services, None).await;
+    write_document(
+        &services,
+        &board,
+        vec![seeded_card(&board, 1, "in-progress", live_run("todo"))],
+    );
+
+    services
+        .boards
+        .on_run_delivered(
+            &board.id,
+            &card_id(1),
+            &delivered(&board, DelegationStatus::Succeeded),
+        )
+        .await
+        .unwrap();
+
+    let view = services.boards.get(&board.id).await.unwrap();
+    assert_eq!(view.cards[0].status_id, status_id("done"));
+}
+
 /// One board's reservation is not spent against another board's ceiling.
 ///
 /// The set is held for the whole round trip to the provider, which is seconds; counted daemon

@@ -1207,7 +1207,7 @@ async fn an_abandoned_start_evaluates_its_card_again() {
         .await
         .entry(board.id.clone())
         .or_default()
-        .insert(card_id(1));
+        .insert(card_id(1), super::StartReservation::creating_worktree());
 
     world
         .services
@@ -1258,7 +1258,7 @@ async fn a_second_freed_slot_passes_over_a_card_already_handed_one() {
         .await
         .entry(board.id.clone())
         .or_default()
-        .insert(card_id(1));
+        .insert(card_id(1), super::StartReservation::creating_worktree());
 
     world
         .services

@@ -2050,16 +2050,23 @@ allowance re-running one card, and a cancel would be followed by a replacement r
 cascade *moves* has entered its new column and gets both rules, settled seed or not, which is how
 a routed success carries a card down a chain.
 
-**The reservation.** `in_flight` is one `BTreeSet<CardId>` **per board**, held by `Automation` in
-a `BTreeMap` keyed by board id and lent to every walk through the single
+**The reservation.** `in_flight` is one `BTreeMap<CardId, StartReservation>` **per board**, held
+by `Automation` in an outer `BTreeMap` keyed by board id and lent to every walk through the single
 `Boards::evaluate_with_reservation`. Per board because the ceiling it is counted against is:
 `settings.max_live_runs` belongs to one board, and one daemon-wide set would let a card reserved
 on one board park a card on another — a park only some *other* board's freed slot would ever
-release. A `StartRun` inserts its
-card before it is returned, and `start_for_card` removes it on both paths — the started run and the
-refused one. Without it two evaluations racing on one board would each see a free slot and start
-two runs for one ceiling; it is also what makes `start_run`'s "is working" refusal true for a run
-that has been promised to a provider but has no row yet.
+release. Each entry carries a phase. A `StartRun` inserts its card as **creating the worktree**;
+in that phase move, archive and delete remain allowed, because `prepare_run` re-reads the card
+after worktree creation and abandons a start whose card changed or disappeared. Once that final
+read succeeds, the entry becomes **launching** before the board gate is released. Move, archive
+and delete then refuse with `card is starting`, because the provider is being created for the
+recorded status and action. A cancel in this phase marks the reservation; when the provider
+answers, `record_run` stops the new delegation through the normal cancellation path and records no
+live row. `record_run` also revalidates the card, status and action under the board gate, stopping
+the delegation and logging when any no longer matches. It removes the entry only after recording
+the run, stopping it, or recording the refusal. Without the reservation two evaluations racing on
+one board would each see a free slot and start two runs for one ceiling; it is also what makes
+`start_run`'s "is working" refusal true before a run row exists.
 
 **The throttle, in order.** The ceiling is `live.len() + in_flight.len() >= settings.max_live_runs()`
 — the runs the document remembers plus the runs this daemon has promised. A card that meets it is
