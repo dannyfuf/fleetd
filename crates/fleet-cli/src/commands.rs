@@ -2,6 +2,7 @@
 
 mod agents;
 mod board;
+mod clipboard;
 mod hosts;
 mod jobs;
 mod sessions;
@@ -113,6 +114,12 @@ fn run_from(arguments: Vec<OsString>, stdout: &mut impl Write, stderr: &mut impl
         );
     };
     let command = match command {
+        Command::Clipboard(args) => {
+            return match clipboard::run(args) {
+                Ok(()) => 0,
+                Err(error) => error_result(writeln!(stderr, "fleet: {error:#}"), false),
+            };
+        }
         Command::Exec(args) => return crate::exec::run(args),
         Command::WatchChild(args) => return crate::exec::child(args),
         other => other,
@@ -263,9 +270,9 @@ async fn execute(client: &Client, command: Command) -> Result<CommandOutput, Pro
     match command {
         Command::Board(arguments) => board(client, arguments).await,
         Command::Host(arguments) => hosts::run(client, arguments).await,
-        Command::Exec(_) | Command::WatchChild(_) => {
-            Err(validation("exec must run before daemon autostart"))
-        }
+        Command::Clipboard(_) | Command::Exec(_) | Command::WatchChild(_) => Err(validation(
+            "local commands must run before daemon autostart",
+        )),
         Command::Watch(arguments) => match arguments.command {
             WatchCommand::List(arguments) => watch_list(client, arguments).await,
             WatchCommand::Tail(arguments) => watch_tail(client, arguments).await,
@@ -361,6 +368,7 @@ fn command_requests_json(command: &Command) -> bool {
         },
         Command::Doctor(arguments) => arguments.json,
         Command::Exec(_)
+        | Command::Clipboard(_)
         | Command::WatchChild(_)
         | Command::Open(_)
         | Command::Agent(_)

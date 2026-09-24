@@ -1703,7 +1703,10 @@ editors, and opening another worktree sleeps the one left unless it is opened ke
 **Terminal clipboard**, as the *Terminals* guide states it: drag selects, double-click selects a
 word, triple-click a line, and the text is copied **when the button is released**; the copy key
 copies a selection and, with none, goes to the program; the paste key pastes, bracketed when the
-program asks. `ctrl-c` and `ctrl-v` stay the program's.
+program asks. A program in the active terminal may also write the Mac clipboard through OSC 52,
+whether that terminal is local or owned by a remote daemon. Clipboard queries receive no reply;
+Mac clipboard content enters the program through Fleet's paste action. `ctrl-c` and `ctrl-v` stay
+the program's.
 
 **All shortcuts tab.**
 
