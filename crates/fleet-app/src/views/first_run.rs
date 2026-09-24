@@ -8,7 +8,7 @@ use fleet_ui_kit::{
 };
 use gpui::{AnyElement, App, SharedString, div};
 
-use crate::actions::{first_run as first_run_actions, fleet, hub, repos};
+use crate::actions::{filter, first_run as first_run_actions, fleet, hub, repos};
 
 /// What Fleet is for, in one sentence (§3.13).
 const HEADLINE: &str =
@@ -62,7 +62,7 @@ impl EmptySurface {
             Self::Repos => ("No repos in {}.", "n  clone one"),
             Self::Worktrees => ("No worktrees yet", "n  create one"),
             Self::WorktreesRepo => ("No worktrees for {} yet", "n  create one"),
-            Self::Filter => ("Nothing matches \"{}\".", "esc  clear"),
+            Self::Filter => ("Nothing matches \"{}\".", "Clear filter"),
             Self::PrsMine => ("No open PRs authored by you in {}.", "r  refresh"),
             Self::PrsReview => ("No PRs waiting for your review in {}.", "r  refresh"),
         };
@@ -95,8 +95,21 @@ impl EmptySurface {
                     .action(Box::new(repos::Clone)),
                 )
                 .into_any_element(),
-            // A filter miss keeps its key line: the field it describes carries the clear ✕.
-            _ => EmptyState::new(fact).action(action).into_any_element(),
+            // A filter miss offers the way out as a button: one click clears the query from
+            // either stage of the two-stage `Esc`, and the chip is the `esc` that clears it once
+            // the input has been left — none while typing, where `esc` only leaves the input.
+            Self::Filter => EmptyState::new(fact)
+                .button(
+                    Button::new("filter-empty-clear", action)
+                        .icon(Icon::X)
+                        .action(Box::new(filter::Clear))
+                        .key_of(Box::new(fleet::Cancel))
+                        .harness_target("filter.empty.clear"),
+                )
+                .into_any_element(),
+            Self::PrsMine | Self::PrsReview => {
+                EmptyState::new(fact).action(action).into_any_element()
+            }
         }
     }
 }
@@ -282,7 +295,7 @@ mod tests {
         );
         assert_eq!(
             EmptySurface::Filter.copy(Some("rut")),
-            ("Nothing matches \"rut\".".into(), "esc  clear")
+            ("Nothing matches \"rut\".".into(), "Clear filter")
         );
         assert_eq!(
             EmptySurface::Worktrees.copy(None),

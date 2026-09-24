@@ -151,6 +151,27 @@ impl Shell {
         }
     }
 
+    pub(super) fn filter_clear(
+        &mut self,
+        _: &filter::Clear,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let was_editing = self.state.read(cx).filter.editing;
+        let changed = self.state.update(cx, |state, cx| {
+            let changed = state.clear_filter();
+            if changed {
+                cx.notify();
+            }
+            changed
+        });
+        if changed && was_editing {
+            // The same hand-back as the first `Esc`: the editor sits inside the body, so focus
+            // reconciliation cannot see that it no longer owns the keyboard.
+            window.focus(&self.body_focus, cx);
+        }
+    }
+
     pub(super) fn close_palette(
         &mut self,
         _: &palette::Close,
@@ -347,6 +368,7 @@ impl Shell {
         .on_action(cx.listener(Self::cancel_dialog))
         .on_action(cx.listener(Self::reject_confirm))
         .on_action(cx.listener(Self::filter_escape))
+        .on_action(cx.listener(Self::filter_clear))
         // Daemon
         .on_action(cx.listener(Self::daemon_retry))
         .on_action(cx.listener(Self::daemon_reconnect))

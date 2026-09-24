@@ -1,0 +1,32 @@
+# UX-SPEC §3.10 — a filter that leaves the list empty offers the way out as a button. One click
+# clears the query from either stage of the two-stage `Esc`; its chip is the `esc` that clears
+# once the input has been left, and there is none while typing, where `esc` only leaves it.
+fixture: busy
+await idle 30000
+assert screen == Hub && hub_pane == List && lists.worktrees.rows[3] exists
+
+# Still typing: the miss shows the button, and a click clears the query and closes the input.
+key /
+await overlay == Filter
+type zzqx
+await lists.worktrees.filter == zzqx 10000
+await lists.worktrees.rows[0] absent 10000
+shot empty-while-typing
+click filter.empty.clear
+await lists.worktrees.filter == "" 10000
+assert overlay absent && mode == Normal && screen == Hub && lists.worktrees.rows[3] exists
+
+# After the input was left, the kept filter goes the same way.
+key /
+await overlay == Filter
+type zzqx
+await lists.worktrees.filter == zzqx 10000
+key escape
+await overlay absent
+assert lists.worktrees.filter == zzqx
+shot empty-filter-kept
+click filter.empty.clear
+await lists.worktrees.filter == "" 10000
+assert overlay absent && screen == Hub && lists.worktrees.rows[3] exists
+dump cleared
+quit

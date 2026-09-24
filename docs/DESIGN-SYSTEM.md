@@ -2069,7 +2069,7 @@ longer uses it); `fleet_app::presentation::pretty_keys` re-exports it.
 `button_h_compact`) tall, `radii.control`, a hairline. Label in `UiStrong`; icon 14 px (12
 compact); the chip `kbd_h` (`kbd_h_small` compact) and toned for the fill.
 **API.** `Button::new(id, label)` then `.style(ButtonStyle::{Primary, Secondary, Ghost, Danger, GhostDanger})
-.size(ButtonSize::{Default, Compact}) .icon(Icon) .dot(Hsla) .kbd(Kbd) .action(Box<dyn Action>) .prefer_key(keys)
+.size(ButtonSize::{Default, Compact}) .icon(Icon) .dot(Hsla) .kbd(Kbd) .action(Box<dyn Action>) .prefer_key(keys) .key_of(Box<dyn Action>)
 .on_click(Fn(&ClickEvent, &mut Window, &mut App)) .disabled(bool) .selected(bool) .full_width()
 .tooltip(text)`. `.dot(color)` leads the label with a `dot_size_small` dot of a token colour —
 a value that has a colour of its own, such as the card detail's status button.
@@ -2086,7 +2086,11 @@ toggled — only for a toggle, and only on `Secondary` / `Ghost`) · disabled (4
 click). Never focused.
 **Usage rule.** Wire it with `.action(..)`: the click dispatches that action to the focused element
 with `window.dispatch_action`, and the chip is `Kbd::for_action` of the same action unless `.kbd`
-overrides it — so the button and its key cannot disagree. `.on_click` is for a control that is not
+overrides it — so the button and its key cannot disagree. `.key_of(other)` shows `other`'s live
+key instead, for a button that does in one click what that key does from where the keyboard is:
+the empty filter's `Clear filter` runs `filter::Clear` and shows the `esc` (`fleet::Cancel`) that
+clears once the input has been left, and no chip while the input still owns the keyboard, where
+`esc` only leaves it. `.on_click` is for a control that is not
 an action, and runs before the action when both are set. An action invalid on the surface is
 **not rendered**; `.disabled(true)` is only for an action that will become valid on this surface
 (§4). The accessible name is the label; a single-stroke chip is also announced as the shortcut

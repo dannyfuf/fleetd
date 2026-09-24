@@ -500,6 +500,10 @@ pub mod filter {
             Accept,
             /// `Esc` — first press keeps the filter, second clears it. Never quits.
             Escape,
+            /// No key of its own: the empty filter state's `Clear filter` button, which clears
+            /// the query in one click wherever the keyboard is. Its chip is `Esc` (`Cancel`),
+            /// which does the same once the input has been left.
+            Clear,
             /// `ctrl-n` / `↓` — move the list cursor down while still typing.
             CursorDown,
             /// `ctrl-p` / `↑` — move the list cursor up while still typing.

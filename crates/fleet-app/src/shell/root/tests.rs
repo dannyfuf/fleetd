@@ -568,6 +568,17 @@ fn dispatch_root_key(fixture: &mut RootInputFixture, key: &str) {
     finish_test_render(&fixture.focus_owner_keys);
 }
 
+/// A control's click: the action goes to the focused element, then the frame is painted.
+fn dispatch_root_action(fixture: &mut RootInputFixture, action: impl Action) {
+    fixture.visual.dispatch_action(action);
+    fixture.visual.run_until_parked();
+    fixture
+        .visual
+        .update(|window, cx| window.draw(cx).clear(cx));
+    fixture.visual.run_until_parked();
+    finish_test_render(&fixture.focus_owner_keys);
+}
+
 fn assert_dialog_input_focused(fixture: &mut RootInputFixture) {
     fixture.visual.update(|window, cx| {
         let input = crate::dialogs::focused_input(&fixture.state, cx).expect("dialog input");
@@ -824,6 +835,32 @@ fn real_shell_hub_filter_escape_keeps_then_clears_the_query(cx: &mut gpui::TestA
 
     // Stage two clears it, and the editor follows the state it mirrors.
     dispatch_root_key(&mut fixture, "escape");
+    assert_eq!(hub_filter_query(&mut fixture), "");
+}
+
+#[gpui::test]
+fn real_shell_clear_filter_button_clears_from_either_stage(cx: &mut gpui::TestAppContext) {
+    let mut fixture = root_hub_fixture(cx, "hub-filter-clear");
+
+    // Still typing: one click clears what two `Esc` presses would, and hands the keyboard back.
+    dispatch_root_key(&mut fixture, "/");
+    fixture.visual.simulate_input("feat");
+    dispatch_root_action(&mut fixture, crate::actions::filter::Clear);
+    assert_eq!(hub_filter_query(&mut fixture), "");
+    fixture.visual.update(|window, _| {
+        assert!(fixture.body_focus.is_focused(window));
+    });
+    fixture.state.read_with(&fixture.visual, |app, _| {
+        assert!(!app.filter.editing);
+        assert!(app.overlay.is_none());
+    });
+
+    // After the input was left: the retained query goes too.
+    dispatch_root_key(&mut fixture, "/");
+    fixture.visual.simulate_input("fix");
+    dispatch_root_key(&mut fixture, "escape");
+    assert_eq!(hub_filter_query(&mut fixture), "fix");
+    dispatch_root_action(&mut fixture, crate::actions::filter::Clear);
     assert_eq!(hub_filter_query(&mut fixture), "");
 }
 

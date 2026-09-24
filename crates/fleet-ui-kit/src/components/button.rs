@@ -74,6 +74,7 @@ struct ButtonBase {
     size: ButtonSize,
     kbd: Option<Kbd>,
     preferred_key: Option<&'static str>,
+    key_action: Option<Box<dyn Action>>,
     action: Option<Box<dyn Action>>,
     on_click: Option<ClickHandler>,
     disabled: bool,
@@ -98,6 +99,7 @@ impl ButtonBase {
             size: ButtonSize::Default,
             kbd: None,
             preferred_key: None,
+            key_action: None,
             action: None,
             on_click: None,
             disabled: false,
@@ -164,7 +166,7 @@ impl ButtonBase {
     /// The chip: the one the caller gave, else the live binding of the action, else none.
     fn resolve_kbd(&mut self, window: &Window, cx: &App) -> Option<Kbd> {
         self.kbd.take().or_else(|| {
-            let action = self.action.as_deref()?;
+            let action = self.key_action.as_deref().or(self.action.as_deref())?;
             match self.preferred_key {
                 Some(keys) => Kbd::for_action_preferring(action, keys, window, cx),
                 None => Kbd::for_action(action, window, cx),
@@ -255,6 +257,15 @@ macro_rules! button_builders {
         /// [`Kbd::for_action_preferring`].
         pub fn prefer_key(mut self, keys: &'static str) -> Self {
             self.base.preferred_key = Some(keys);
+            self
+        }
+
+        /// Show the live key of `action` instead of [`Self::action`]'s, without dispatching it:
+        /// for a control that does in one click what that key does from where the keyboard is
+        /// (`Clear filter` shows the `esc` that clears once the filter input is left). Resolved
+        /// like [`Self::action`]'s, so the chip disappears wherever that key does nothing.
+        pub fn key_of(mut self, action: Box<dyn Action>) -> Self {
+            self.base.key_action = Some(action);
             self
         }
 
@@ -726,5 +737,39 @@ mod tests {
             .chip_labels();
         assert_eq!(bound, Some(expected));
         assert_eq!(unbound, None, "an unbound action shows no chip");
+    }
+
+    #[gpui::test]
+    fn key_of_shows_another_actions_key_and_hides_it_where_that_key_is_unbound(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (_window, mut cx) = host(cx);
+        let (borrowed, dead) = cx.update(|window, cx| {
+            let mut borrowed = Button::new("clear", "Clear")
+                .action(Box::new(Unbound))
+                .key_of(Box::new(Fire));
+            let mut dead = Button::new("fire", "Fire")
+                .action(Box::new(Fire))
+                .key_of(Box::new(Unbound));
+            (
+                borrowed
+                    .base
+                    .resolve_kbd(window, cx)
+                    .map(|kbd| kbd.chip_labels()),
+                dead.base.resolve_kbd(window, cx),
+            )
+        });
+        let expected = Kbd::parse("ctrl-s a")
+            .unwrap_or_else(|error| panic!("{error}"))
+            .chip_labels();
+        assert_eq!(
+            borrowed,
+            Some(expected),
+            "the chip is the borrowed action's key"
+        );
+        assert_eq!(
+            dead, None,
+            "a borrowed key that does nothing here shows no chip, whatever the click runs"
+        );
     }
 }

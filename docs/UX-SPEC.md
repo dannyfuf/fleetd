@@ -524,7 +524,7 @@ it changes a decision.
 | State | Rendering |
 | --- | --- |
 | Empty | `No worktrees yet` / `No worktrees for <repo> yet` over a primary `New worktree  n` button |
-| Filter-empty | `Nothing matches "<filter>".` + faint `esc clear` |
+| Filter-empty | `Nothing matches "<filter>".` over a `Clear filter  esc` button (§3.10) |
 | Loading (cold) | `Loading…` until the first snapshot; rows then render from `state.json` immediately — **never blank** |
 | Job running on a row | name icon → spinning `loader-circle` (amber), session + age → phase text; the row stays selectable and `Enter` opens it as soon as the session exists |
 | Deleting | row dims to 40 %, `deleting`, non-selectable, disappears on state commit |
@@ -1913,8 +1913,10 @@ The filter **replaces the pane header in place** — 30 px, same row, no overlay
 **[D-15]** `Esc` in the Hub **never quits the app** — swarm's "clear filter, else quit" is
 retired (KEYMAP A13).
 
-**States:** no match → the list area shows `Nothing matches "<filter>".` + faint `esc clear` and
-`Enter` is inert; the header keeps `0/12`. A filter survives a refresh; it does **not** survive a
+**States:** no match → the list area shows `Nothing matches "<filter>".` over a `Clear filter`
+button that clears the query in one click from either stage (the input closes too); its chip is
+the `esc` that clears once the input has been left, and it shows none while the input still owns
+the keyboard, where `esc` only leaves it. `Enter` is inert; the header keeps `0/12`. A filter survives a refresh; it does **not** survive a
 repo change or a screen change.
 
 ---
@@ -2008,7 +2010,7 @@ no control to put it in (the terminal exit strip).
 | No repos | `No repos in <context>.` | `Clone repo  n` button |
 | No worktrees | `No worktrees yet` | primary `New worktree  n` button |
 | No worktrees for a repo | `No worktrees for <repo> yet` | primary `New worktree  n` button |
-| Filter miss | `Nothing matches "<filter>".` | `esc  clear` |
+| Filter miss | `Nothing matches "<filter>".` | `Clear filter  esc` button |
 | PR mine | `No open PRs authored by you in <scope>.` | `Refresh  r` button |
 | PR review | `No PRs waiting for your review in <scope>.` | `Refresh  r` button |
 | Jobs | `Nothing running.` | `Jobs and sessions live in fleetd, so they survive closing this window.` |

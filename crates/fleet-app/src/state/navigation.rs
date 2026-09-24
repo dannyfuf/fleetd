@@ -770,6 +770,18 @@ impl AppState {
         self.close_overlay()
     }
 
+    /// Clears the Hub filter in one step, whichever stage of the two-stage `Esc` it is in: the
+    /// query goes, the input is left and its overlay closes. Returns whether anything changed.
+    pub fn clear_filter(&mut self) -> bool {
+        let changed = self.filter.is_active() || self.filter.editing;
+        self.filter.query.clear();
+        self.filter.editing = false;
+        if matches!(self.overlay, Some(Overlay::Filter)) {
+            self.overlay = None;
+        }
+        changed
+    }
+
     /// Moves the session MRU as a session is opened.
     pub fn touch_session(&mut self, session: SessionId) {
         self.session_mru.touch(session);
