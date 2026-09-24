@@ -1,15 +1,42 @@
 use super::*;
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Where a toast that points somewhere goes when it is clicked, or its `View` pressed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToastTarget {
+    /// The Jobs panel, as `J` opens it: a background job finished off-screen.
+    Jobs,
+    /// A native agent thread that wants the user.
+    AgentThread(fleet_core::agents::ThreadId),
+}
+
+impl ToastTarget {
+    /// The label of the toast's button.
+    const LABEL: &'static str = "View";
+}
+
 /// A toast plus the instants that govern its life.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveToast {
+    /// Stable for the toast's life, so a click resolves to the toast it was painted for even if
+    /// an older one expired in between.
+    pub id: u64,
     /// The kit toast being rendered.
     pub toast: Toast,
+    /// Where it points, when it points anywhere.
+    pub target: Option<ToastTarget>,
     /// When it first appeared. Coalescing compares against this.
     pub shown_at: Instant,
     /// When it must be removed.
     pub expires_at: Instant,
+    /// The dwell left when the pointer came to rest on it. While set the toast does not decay;
+    /// the pointer leaving restarts the clock with this much left.
+    pub held: Option<Duration>,
 }
+
+/// Toast ids only need to be unique for the app's life.
+static NEXT_TOAST_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Pushes a toast, applying the §2.7 law: identical text within one second coalesces into
 /// `×n`, and the stack never exceeds [`MAX_TOASTS`].
@@ -17,7 +44,21 @@ pub struct LiveToast {
 /// Errors are never toasts (§1.8); a `Danger` tone is downgraded to `Warning` so a caller
 /// cannot smuggle one in.
 pub fn push_toast(toasts: &mut Vec<LiveToast>, toast: Toast, now: Instant, dwell: Duration) {
-    let mut toast = toast;
+    push_toast_to(toasts, toast, None, now, dwell);
+}
+
+/// [`push_toast`] for a toast that points somewhere: it gains a `View` button that goes there.
+pub fn push_toast_to(
+    toasts: &mut Vec<LiveToast>,
+    toast: Toast,
+    target: Option<ToastTarget>,
+    now: Instant,
+    dwell: Duration,
+) {
+    let mut toast = match target {
+        Some(_) => toast.action(ToastTarget::LABEL),
+        None => toast,
+    };
     if toast.tone == Tone::Danger {
         toast.tone = Tone::Warning;
     }
@@ -27,12 +68,18 @@ pub fn push_toast(toasts: &mut Vec<LiveToast>, toast: Toast, now: Instant, dwell
     {
         existing.toast.count += 1;
         existing.expires_at = now + dwell;
+        if existing.held.is_some() {
+            existing.held = Some(dwell);
+        }
         return;
     }
     toasts.push(LiveToast {
+        id: NEXT_TOAST_ID.fetch_add(1, Ordering::Relaxed),
         toast,
+        target,
         shown_at: now,
         expires_at: now + dwell,
+        held: None,
     });
     while toasts.len() > MAX_TOASTS {
         toasts.remove(0);
@@ -42,8 +89,30 @@ pub fn push_toast(toasts: &mut Vec<LiveToast>, toast: Toast, now: Instant, dwell
 /// Removes expired toasts, returning whether anything was removed.
 pub fn expire_toasts(toasts: &mut Vec<LiveToast>, now: Instant) -> bool {
     let before = toasts.len();
-    toasts.retain(|live| live.expires_at > now);
+    toasts.retain(|live| live.held.is_some() || live.expires_at > now);
     toasts.len() != before
+}
+
+/// Holds a toast's dwell while the pointer rests on it (`hovered`), and restarts it with the
+/// time it had left once the pointer leaves. Returns whether the toast exists.
+pub fn hold_toast(toasts: &mut [LiveToast], id: u64, hovered: bool, now: Instant) -> bool {
+    let Some(live) = toasts.iter_mut().find(|live| live.id == id) else {
+        return false;
+    };
+    if hovered {
+        if live.held.is_none() {
+            live.held = Some(live.expires_at.saturating_duration_since(now));
+        }
+    } else if let Some(left) = live.held.take() {
+        live.expires_at = now + left;
+    }
+    true
+}
+
+/// Removes one toast, returning it when it was still up.
+pub fn remove_toast(toasts: &mut Vec<LiveToast>, id: u64) -> Option<LiveToast> {
+    let index = toasts.iter().position(|live| live.id == id)?;
+    Some(toasts.remove(index))
 }
 
 /// Moves one stored instant `by` further into the past.
@@ -261,6 +330,58 @@ impl AppState {
         push_toast(&mut self.toasts, toast, now, dwell);
     }
 
+    /// Records a toast that points at `target`: it gains a `View` button, and a click on it goes
+    /// there (§3.11).
+    pub fn toast_to(&mut self, toast: Toast, target: ToastTarget, now: Instant, dwell: Duration) {
+        push_toast_to(&mut self.toasts, toast, Some(target), now, dwell);
+    }
+
+    /// A 1.6 s acknowledgement that points at `target`, with its `View` button.
+    pub fn toast_short_to(
+        &mut self,
+        text: impl Into<gpui::SharedString>,
+        icon: Icon,
+        target: ToastTarget,
+        now: Instant,
+    ) {
+        self.toast_to(
+            Toast::new(text).icon(icon).short(),
+            target,
+            now,
+            dwell_for(ToastDuration::Short),
+        );
+    }
+
+    /// The pointer came to rest on a toast, or left it (§3.11: hovering holds the dwell).
+    pub fn hold_toast(&mut self, id: u64, hovered: bool, now: Instant) -> bool {
+        hold_toast(&mut self.toasts, id, hovered, now)
+    }
+
+    /// The toast's ✕, or its `View` once followed: the toast goes now. Returns it when it was
+    /// still up.
+    pub fn dismiss_toast(&mut self, id: u64) -> Option<LiveToast> {
+        remove_toast(&mut self.toasts, id)
+    }
+
+    /// The sticky error's ✕ (§1.8): the error leaves the status bar, and every failure the Jobs
+    /// panel lists now counts as seen, so an older one does not take its place. The failed jobs
+    /// stay in the panel and the title bar keeps counting them until they are dismissed there.
+    pub fn dismiss_sticky_error(&mut self) -> bool {
+        if self.sticky_error.take().is_none() {
+            return false;
+        }
+        if let Some(snapshot) = self.snapshot.as_ref() {
+            self.seen_failed.extend(
+                snapshot
+                    .jobs
+                    .iter()
+                    .filter(|job| matches!(job.status, JobStatus::Failed { .. }))
+                    .map(|job| job.id.clone()),
+            );
+        }
+        true
+    }
+
     /// Records a short clipboard-style acknowledgement.
     pub fn toast_short(&mut self, text: impl Into<gpui::SharedString>, icon: Icon, now: Instant) {
         self.toast(
@@ -330,6 +451,7 @@ impl AppState {
         &mut self,
         label: &str,
         attention: fleet_core::agents::Attention,
+        target: Option<ToastTarget>,
         now: Instant,
     ) {
         use fleet_core::agents::{Attention, AttentionKind};
@@ -365,8 +487,10 @@ impl AppState {
             }
         };
         if self.notifications.toast {
-            self.toast(
+            push_toast_to(
+                &mut self.toasts,
                 Toast::new(text).icon(icon).tone(tone),
+                target,
                 now,
                 dwell_for(ToastDuration::Normal),
             );
@@ -398,6 +522,7 @@ impl AppState {
             self.notify_agent_thread(
                 session.as_str(),
                 fleet_core::agents::Attention::NeedsYou(attention),
+                None,
                 now,
             );
         }
@@ -434,6 +559,7 @@ impl AppState {
             self.notify_agent_thread(
                 session.as_str(),
                 fleet_core::agents::Attention::NeedsYou(attention),
+                None,
                 now,
             );
         }
@@ -459,8 +585,9 @@ impl AppState {
         refresh_job_sticky_error(&mut self.sticky_error, &snapshot.jobs, &self.seen_failed);
         self.bump_snapshot_revision();
         if let Some(text) = outcome {
-            self.toast(
+            self.toast_to(
                 Toast::new(text).icon(Icon::CircleCheck),
+                ToastTarget::Jobs,
                 now,
                 dwell_for(ToastDuration::Normal),
             );

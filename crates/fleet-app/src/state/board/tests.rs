@@ -709,9 +709,13 @@ fn a_live_run_marks_its_card_as_working() {
         "applying the view is what derives the mark; nothing re-derives it in render"
     );
     assert_eq!(
-        (state.board.marks.working, state.board.marks.needs_you),
-        (1, 0),
-        "a live run holds a slot and asks nobody for anything"
+        (
+            state.board.marks.working,
+            state.board.marks.waiting,
+            state.board.marks.needs_you
+        ),
+        (1, 0, 0),
+        "a live run holds a slot, waits for none, and asks nobody for anything"
     );
 }
 
@@ -735,6 +739,10 @@ fn a_child_that_goes_blocked_turns_its_card_amber_without_a_board_reload() {
     assert_eq!(
         state.board.marks.working, 1,
         "a blocked child is still holding the checkout"
+    );
+    assert_eq!(
+        state.board.marks.needs_you, 1,
+        "the header counts the card its tile says needs you, though its run has not ended"
     );
 }
 
@@ -777,6 +785,10 @@ fn a_card_called_child_that_starts_blocked_paints_needs_you_before_the_board_rec
         first_marks(&state).run,
         Some(RunMark::NeedsYou),
         "a child parked on its gate is the one thing the tile must say without a reload"
+    );
+    assert_eq!(
+        state.board.marks.needs_you, 1,
+        "and the header says it with the tile"
     );
 }
 
@@ -833,8 +845,9 @@ fn an_owed_run_turns_amber_once_the_wait_is_the_story() {
     state.refresh_card_marks(at("2026-09-20T11:59:59Z"));
     assert_eq!(first_marks(&state).run, Some(RunMark::Pending));
     assert_eq!(
-        state.board.marks.working, 1,
-        "an owed run counts against the live limit that is holding it up"
+        (state.board.marks.working, state.board.marks.waiting),
+        (1, 1),
+        "an owed run counts against the live limit that is holding it up, and as waiting"
     );
 
     state.refresh_card_marks(at(NOW));

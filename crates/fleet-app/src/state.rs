@@ -23,7 +23,7 @@ use fleet_proto::{
         Cell, CellWidth, CursorShape, CursorState, FrameUpdate, TerminalModes, ViewportInfo,
     },
 };
-use fleet_ui_kit::{Icon, Mode as ModeWord, PrBadgeState, Toast, ToastDuration, Tone};
+use fleet_ui_kit::{Icon, PrBadgeState, Toast, ToastDuration, Tone};
 
 use crate::{
     bridge::BridgeEvent,
@@ -33,6 +33,7 @@ use crate::{
 
 mod agents;
 mod board;
+mod changes;
 mod connection;
 mod harness;
 mod jobs_filter;
@@ -45,6 +46,10 @@ mod test_support;
 
 pub use agents::{AgentCounts, AgentThreads};
 pub use board::{BoardFocus, BoardScope, BoardState, GroupBy, WORKTREE_BOARDS_UNSUPPORTED};
+pub use changes::{
+    ChangesDiff, ChangesModel, ChangesPanel, ChangesReading, CommitRow, DiffBody, FileRow,
+    ReadingBody,
+};
 pub use connection::{DaemonLink, DaemonLossReason, daemon_log_path, reconnect_backoff};
 use harness::HarnessCache;
 pub use harness::{
@@ -61,7 +66,7 @@ pub use navigation::{
     WORKSPACE_TAB_LIMIT_NOTICE, filter_escape, half_page, move_cursor,
 };
 pub use notifications::{
-    LiveToast, StickyError, dwell_for, expire_toasts, latest_failed_job, running_jobs,
+    LiveToast, StickyError, ToastTarget, dwell_for, expire_toasts, latest_failed_job, running_jobs,
 };
 pub use snapshot::{ChipCounts, breadcrumb};
 pub use terminal::MirrorGrid;
@@ -92,6 +97,21 @@ pub struct JobsPanelMirror {
     pub cursor: usize,
     /// Filter currently applied by the panel.
     pub filter: JobFilter,
+}
+
+/// What one inspection of the Workspace's worktree says about its git state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceGit {
+    /// The worktree inspected; the facts are dropped when the Workspace shows another.
+    pub worktree: WorktreeId,
+    /// Commits ahead of the upstream, when divergence could be computed.
+    pub ahead: Option<u64>,
+    /// Commits behind the upstream, when divergence could be computed.
+    pub behind: Option<u64>,
+    /// Whether tracked or untracked changes exist.
+    pub dirty: bool,
+    /// How many porcelain entries are dirty, when status collection succeeded.
+    pub dirty_files: Option<u64>,
 }
 
 /// The whole client-side state of the app.
@@ -156,6 +176,13 @@ pub struct AppState {
     pub displayed_hub: crate::presentation::DisplayedHub,
     /// The Workspace sub-mode.
     pub terminal_mode: TerminalMode,
+    /// Whether a native agent tab's `^s` is held, waiting for its second key.
+    ///
+    /// The chord publishes no key context (the tab's chain is derived from daemon state and
+    /// has no room for a one-shot context), so the harness snapshot does not project it; it is state
+    /// only so the ⌃S command menu can appear over the thread while it is held. The shell's
+    /// keystroke interceptor sets it on `^s` and clears it on the very next key.
+    pub agent_chord_armed: bool,
     /// The floating agent popup, independent of the base Hub or Workspace screen.
     pub agent_popup: Option<AgentPopupState>,
     /// The native structured agent threads: daemon summaries, opened projections, seen cursors.
@@ -174,10 +201,15 @@ pub struct AppState {
     dialog_key_context: Option<(Dialogs, &'static str)>,
     /// The filter of the focused list.
     pub filter: FilterState,
-    /// Whether the detail panel is open (`i`). Never focusable.
-    pub detail_open: bool,
-    /// Whether the repos rail is collapsed to its 44 px icon rail (`H`).
+    /// Whether the user opened (`Some(true)`) or closed (`Some(false)`) the detail panel with `i`;
+    /// `None` until they do, which means the width decides ([`AppState::detail_visible`]).
+    /// Never focusable.
+    pub detail_open: Option<bool>,
+    /// Whether the Hub sidebar is collapsed to its icon column (`H`).
     pub rail_collapsed: bool,
+    /// The width the Hub sidebar's edge was dragged to; `None` is `metrics.sidebar_w`. Kept while
+    /// Fleet runs, not across restarts.
+    pub sidebar_w: Option<gpui::Pixels>,
     /// Whether the Workspace hides its header and tab strip (`ctrl-s z`).
     pub zoomed: bool,
     /// Session MRU: `ctrl-s w` jumps to [`Mru::alternate`].
@@ -198,12 +230,34 @@ pub struct AppState {
     pub seen_failed: HashSet<JobId>,
     /// Failed job the next Jobs opening should focus, even after acknowledging its sticky slot.
     pub jobs_focus: Option<JobId>,
+    /// Whether the Jobs panel, when it next opens, expands the log of `jobs_focus` as `⏎`
+    /// would: `View log` asks for the log, not just the row. One-shot; the panel clears it.
+    pub jobs_open_log: bool,
     /// Initial palette query consumed when the palette next opens.
     pub palette_seed: Option<String>,
+    /// The pull requests the PR screen had loaded when the palette was last opened from the
+    /// shell, consumed with [`Self::palette_seed`].
+    pub palette_prs: Option<std::rc::Rc<[crate::dialogs::PalettePr]>>,
+    /// A pull request the palette sent the PR screen to: the Hub anchors its cursor on it the
+    /// next time it reconciles that list, then clears this.
+    pub pending_pr_focus: Option<(RepoId, u64)>,
+    /// The worktree a workspace was showing when the user went back to the Hub: the Worktrees
+    /// list anchors its cursor on it the next time it reconciles, then clears this. Back lands
+    /// on the row just left even when the workspace was opened from the board or the palette.
+    pub pending_worktree_focus: Option<WorktreeId>,
+    /// An action a surface that just closed asked to run on the surface behind it, by name:
+    /// Help's rows and step buttons. The shell dispatches it once the frame that gave the
+    /// keyboard back has painted, so it reaches the same listener its key would.
+    pub pending_action: Option<&'static str>,
     /// Last worktree trash entry returned by fleetd, for `u`.
     pub last_trash_entry: Option<String>,
     /// Pull-request badges shared by Hub and Workspace, keyed by repository and head branch.
     pub pr_badges: HashMap<(RepoId, String), (u64, PrBadgeState)>,
+    /// The git facts of the worktree the Workspace shows, from its last inspection: the title
+    /// bar's `↑2 ↓0` and `3 files changed` chips (UX-SPEC §3.6).
+    pub workspace_git: Option<WorkspaceGit>,
+    /// The Workspace's Changes panel: where it is open and what it last read (UX-SPEC §3.6).
+    pub changes: ChangesPanel,
     /// `config.jobs.warnBeforeQuit`, mirrored so `ctrl-q` can decide without a round trip.
     pub warn_before_quit: bool,
     /// How many PRs the `review` tab holds. The PR screen owns the fetch, the context bar
@@ -268,6 +322,7 @@ impl AppState {
             jobs_panel: JobsPanelMirror::default(),
             displayed_hub: crate::presentation::DisplayedHub::default(),
             terminal_mode: TerminalMode::Terminal,
+            agent_chord_armed: false,
             agent_popup: None,
             agents: AgentThreads::default(),
             terminal_config: fleet_core::config::TerminalConfig::default(),
@@ -275,8 +330,9 @@ impl AppState {
             overlay: None,
             dialog_key_context: None,
             filter: FilterState::default(),
-            detail_open: false,
+            detail_open: None,
             rail_collapsed: false,
+            sidebar_w: None,
             zoomed: false,
             session_mru: Mru::default(),
             terminal_mru: HashMap::new(),
@@ -287,9 +343,16 @@ impl AppState {
             sticky_error: None,
             seen_failed: HashSet::new(),
             jobs_focus: None,
+            jobs_open_log: false,
             palette_seed: None,
+            palette_prs: None,
+            pending_pr_focus: None,
+            pending_worktree_focus: None,
+            pending_action: None,
             last_trash_entry: None,
             pr_badges: HashMap::new(),
+            workspace_git: None,
+            changes: ChangesPanel::default(),
             warn_before_quit: true,
             review_pr_count: 0,
             update_version: None,
@@ -301,6 +364,13 @@ impl AppState {
             harness: HarnessState::default(),
             harness_cache: RefCell::new(None),
         }
+    }
+
+    /// Whether the detail panel is drawn: what the user chose with `i`, else `wide` — the
+    /// panel is on by default where it fits beside the list (UX-SPEC §3.4).
+    #[must_use]
+    pub fn detail_visible(&self, wide: bool) -> bool {
+        self.detail_open.unwrap_or(wide)
     }
 
     /// Mirrors the Jobs panel's own cursor and filter. Returns true if anything changed.

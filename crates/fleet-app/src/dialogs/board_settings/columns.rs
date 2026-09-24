@@ -234,9 +234,20 @@ impl ColumnDraft {
             ColumnField::Category => choice(
                 category_word(self.status.category).to_owned(),
                 position_of(&CATEGORIES, self.status.category),
-                CATEGORIES.len(),
+                CATEGORIES
+                    .iter()
+                    .map(|category| category_word(*category).to_owned()),
             ),
-            ColumnField::OnEnter => ColumnValue::text(self.on_enter.clone(), true),
+            ColumnField::OnEnter => {
+                let skill = self
+                    .kept_skill()
+                    .unwrap_or_else(|| ON_ENTER_SKILL.to_owned());
+                ColumnValue::Action {
+                    value: self.on_enter.clone(),
+                    at: on_enter_position(&self.on_enter),
+                    options: vec![ON_ENTER_NONE.to_owned(), ON_ENTER_PROMPT.to_owned(), skill],
+                }
+            }
             ColumnField::Provider => {
                 let provider = agent.and_then(|agent| agent.provider);
                 choice(
@@ -245,7 +256,8 @@ impl ColumnDraft {
                         |kind| provider_word(kind).to_owned(),
                     ),
                     provider.map_or(0, |kind| position_of(&PROVIDERS, kind) + 1),
-                    PROVIDERS.len() + 1,
+                    std::iter::once(INHERITED.to_owned())
+                        .chain(PROVIDERS.iter().map(|kind| provider_word(*kind).to_owned())),
                 )
             }
             ColumnField::Model => ColumnValue::text(
@@ -265,7 +277,8 @@ impl ColumnDraft {
                 choice(
                     mode.map_or_else(|| INHERITED.to_owned(), |mode| mode_word(mode).to_owned()),
                     mode.map_or(0, |mode| position_of(&MODES, mode) + 1),
-                    MODES.len() + 1,
+                    std::iter::once(INHERITED.to_owned())
+                        .chain(MODES.iter().map(|mode| mode_word(*mode).to_owned())),
                 )
             }
             // The row states the first line only: an instruction block is paragraphs long and
@@ -282,6 +295,19 @@ impl ColumnDraft {
             ColumnField::OnSuccess | ColumnField::WhenUnblocked => {
                 route_value(self.route(field), columns)
             }
+        }
+    }
+
+    /// The skill spelling `on enter` returns to when cycled onto its third value: the one typed
+    /// into the row, else the one the stored action carries.
+    #[must_use]
+    fn kept_skill(&self) -> Option<String> {
+        if self.on_enter.trim().starts_with(ON_ENTER_SKILL) {
+            return Some(self.on_enter.trim().to_owned());
+        }
+        match action_of(&self.status).map(|action| &action.kind) {
+            Some(kind @ ActionKind::Skill { .. }) => Some(spelling(kind)),
+            _ => None,
         }
     }
 
@@ -321,14 +347,28 @@ pub(super) enum ColumnValue {
         /// Whether the `⚡` mark is drawn after it.
         has_action: bool,
     },
-    /// A closed list: `h` / `l` cycle it.
+    /// A closed list: `h` / `l` cycle it, and a click picks one of its options.
     Choice {
         /// The value shown.
         value: String,
+        /// Every value the row can take, in cycle order, as the row reads them.
+        options: Vec<String>,
+        /// Where the value sits among the options.
+        at: usize,
         /// Whether a previous value exists.
         has_prev: bool,
         /// Whether a next value exists.
         has_next: bool,
+    },
+    /// `on enter`: a closed choice the pointer picks from a dropdown, whose third option carries
+    /// a skill name typed after `⏎` opens its editor.
+    Action {
+        /// The row's spelling, as typed.
+        value: String,
+        /// `none`, `prompt`, and the skill spelling the row would return to.
+        options: Vec<String>,
+        /// Where the value sits among the options.
+        at: usize,
     },
     /// Free text: `⏎` opens an editor over it.
     Text {
@@ -575,16 +615,37 @@ fn route_value(target: Option<&StatusId>, columns: &[ColumnDraft]) -> ColumnValu
         },
         |at| format!("\u{2192} {}", columns[at].status.name),
     );
-    choice(value, at.map_or(0, |at| at + 1), columns.len() + 1)
+    choice(
+        value,
+        at.map_or(0, |at| at + 1),
+        std::iter::once(ROUTE_OFF.to_owned()).chain(
+            columns
+                .iter()
+                .map(|column| format!("\u{2192} {}", column.status.name)),
+        ),
+    )
 }
 
-/// A cycler value with the arrows its position earns.
+/// A cycler value with its options and the arrows its position earns.
 #[must_use]
-fn choice(value: String, at: usize, len: usize) -> ColumnValue {
+fn choice(value: String, at: usize, options: impl IntoIterator<Item = String>) -> ColumnValue {
+    let options: Vec<String> = options.into_iter().collect();
     ColumnValue::Choice {
         value,
         has_prev: at > 0,
-        has_next: at + 1 < len,
+        has_next: at + 1 < options.len(),
+        options,
+        at,
+    }
+}
+
+/// Where an `on enter` spelling sits in its cycle: `none`, `prompt`, then any skill.
+#[must_use]
+fn on_enter_position(text: &str) -> usize {
+    match text.trim() {
+        "" | ON_ENTER_NONE => 0,
+        ON_ENTER_PROMPT => 1,
+        _ => 2,
     }
 }
 
@@ -659,22 +720,11 @@ pub(super) fn cycle_field(
         // like every other cycler in this dialog — and keep whatever name was last typed, so
         // cycling an action off and back on does not lose it.
         ColumnField::OnEnter => {
-            let at = match column.on_enter.trim() {
-                "" | ON_ENTER_NONE => 0,
-                ON_ENTER_PROMPT => 1,
-                _ => 2,
-            };
+            let at = on_enter_position(&column.on_enter);
             // The name is remembered even once the row reads `none`, because the column's
             // stored action is still holding it: `ColumnDraft::status` is what drops an
             // action, and it only runs on a save.
-            let kept = if column.on_enter.trim().starts_with(ON_ENTER_SKILL) {
-                Some(column.on_enter.trim().to_owned())
-            } else {
-                match action_of(&column.status).map(|action| &action.kind) {
-                    Some(kind @ ActionKind::Skill { .. }) => Some(spelling(kind)),
-                    _ => None,
-                }
-            };
+            let kept = column.kept_skill();
             column.on_enter = match step(at, delta, 3) {
                 0 => ON_ENTER_NONE.to_owned(),
                 1 => ON_ENTER_PROMPT.to_owned(),

@@ -2,6 +2,8 @@ use fleet_core::config::{NATIVE_BOARD, NATIVE_LAZYGIT, WindowConfig, default_con
 use gpui::AppContext;
 use std::{cell::RefCell, rc::Rc};
 
+use fleet_core::agents::PermissionMode;
+
 use super::*;
 
 struct FakeSettingsRequests {
@@ -58,11 +60,11 @@ fn toggling_a_switch_makes_the_draft_dirty() {
 fn cycling_never_wraps_past_either_end() {
     let mut state = draft();
     let config = state.config.as_mut().unwrap_or_else(|| panic!("no config"));
-    cycle(config, &RowId::Agent, -1);
+    cycle(config, &RowId::Agent, -1, &Efforts::default());
     assert_eq!(config.agent, Agent::Claude);
-    cycle(config, &RowId::Agent, 1);
+    cycle(config, &RowId::Agent, 1, &Efforts::default());
     assert_eq!(config.agent, Agent::Codex);
-    cycle(config, &RowId::Agent, 1);
+    cycle(config, &RowId::Agent, 1, &Efforts::default());
     assert_eq!(config.agent, Agent::Codex);
 }
 
@@ -71,9 +73,9 @@ fn native_agent_default_rows_follow_each_harnesss_mode_vocabulary() {
     let mut state = draft();
     let config = state.config.as_mut().unwrap_or_else(|| panic!("no config"));
     assert_eq!(config.native_agents.claude.mode, PermissionMode::FullAccess);
-    cycle(config, &RowId::ClaudeDefaultMode, -1);
+    cycle(config, &RowId::ClaudeDefaultMode, -1, &Efforts::default());
     assert_eq!(config.native_agents.claude.mode, PermissionMode::DontAsk);
-    cycle(config, &RowId::CodexDefaultMode, -1);
+    cycle(config, &RowId::CodexDefaultMode, -1, &Efforts::default());
     assert_eq!(config.native_agents.codex.mode, PermissionMode::Plan);
 
     assert!(commit_value(
@@ -85,9 +87,14 @@ fn native_agent_default_rows_follow_each_harnesss_mode_vocabulary() {
         config.native_agents.claude.model.as_deref(),
         Some("fable[1m]")
     );
-    assert!(commit_value(config, &RowId::ClaudeDefaultEffort, "  "));
+    // Effort is a closed choice now: `Default` (none configured) first, then the vocabulary.
+    let efforts = Efforts::default();
+    select(config, &RowId::ClaudeDefaultEffort, 3, &efforts);
+    assert_eq!(config.native_agents.claude.effort.as_deref(), Some("high"));
+    select(config, &RowId::ClaudeDefaultEffort, 0, &efforts);
     assert!(config.native_agents.claude.effort.is_none());
 
+    state.section = Section::Agents.index();
     let ids = schema::rows(
         &state,
         &AppState::new("/tmp/fleet", std::time::Instant::now()),
@@ -280,8 +287,9 @@ fn every_section_has_a_title_and_only_data_sections_are_editable() {
     for section in Section::ALL {
         assert!(!section.title().is_empty());
     }
-    assert!(Section::General.editable());
-    assert!(!Section::Windows.editable());
+    assert!(Section::Agents.editable());
+    assert!(!Section::General.editable());
+    assert!(!Section::Hosts.editable());
     assert!(!Section::About.editable());
 }
 
@@ -309,7 +317,7 @@ fn every_reserved_window_command_reads_as_built_in() {
     let mut probe = draft();
     probe.section = Section::ALL
         .iter()
-        .position(|section| *section == Section::Windows)
+        .position(|section| *section == Section::General)
         .unwrap_or(0);
     let config = probe.config.as_mut().unwrap_or_else(|| panic!("no config"));
     config.windows = vec![
@@ -419,6 +427,7 @@ fn dispatched_edits_update_the_selected_setting_and_keep_navigation_available(
     cx.update(|cx| {
         with_host(&state, cx, |host| {
             host.settings = draft();
+            host.settings.section = Section::Agents.index();
             host.settings.row = 1;
         })
     });
@@ -476,7 +485,7 @@ fn a_number_row_refuses_every_non_digit(cx: &mut gpui::TestAppContext) {
         with_host(&state, cx, |host| {
             host.settings = draft();
             // Sleep › Grace, the first number row of §3.8.6.
-            host.settings.section = 1;
+            host.settings.section = Section::Sleep.index();
             host.settings.row = 1;
         });
         refresh_rows(&state, cx);
@@ -514,7 +523,7 @@ fn editing_a_cached_number_preserves_units_and_other_rows(cx: &mut gpui::TestApp
     cx.update(|cx| {
         with_host(&state, cx, |host| {
             host.settings = draft();
-            host.settings.section = 1;
+            host.settings.section = Section::Sleep.index();
             host.settings.row = 1;
         });
         refresh_rows(&state, cx);
@@ -673,4 +682,110 @@ fn an_unreachable_host_reports_the_probe_error_and_a_command_host_its_label() {
         "command \u{00b7} loopback \u{2014} no status yet",
         "a configured host the daemon has not probed says so rather than claiming failure"
     );
+}
+
+#[test]
+fn a_click_on_an_option_writes_the_same_value_its_key_would() {
+    let efforts = Efforts::default();
+    let mut keyed = draft();
+    let mut clicked = draft();
+    let keyed_config = keyed.config.as_mut().unwrap_or_else(|| panic!("no config"));
+    cycle(keyed_config, &RowId::KeepFinishedFor, 1, &efforts);
+    let choice = choice_of(keyed_config, &RowId::KeepFinishedFor, &efforts)
+        .unwrap_or_else(|| panic!("a duration is a choice"));
+    let clicked_config = clicked
+        .config
+        .as_mut()
+        .unwrap_or_else(|| panic!("no config"));
+    select(
+        clicked_config,
+        &RowId::KeepFinishedFor,
+        choice.index.unwrap_or_else(|| panic!("on the grid")),
+        &efforts,
+    );
+    assert_eq!(keyed.config, clicked.config);
+    // An index past the end is ignored rather than clamped onto some other value.
+    let before = clicked.config.clone();
+    select(
+        clicked
+            .config
+            .as_mut()
+            .unwrap_or_else(|| panic!("no config")),
+        &RowId::HotPoolSize,
+        99,
+        &efforts,
+    );
+    assert_eq!(clicked.config, before);
+}
+
+#[test]
+fn a_switch_click_asks_for_a_value_and_space_flips_it() {
+    let mut state = draft();
+    let config = state.config.as_mut().unwrap_or_else(|| panic!("no config"));
+    let on = switch_of(config, &RowId::SleepOnSwitch).unwrap_or_else(|| panic!("a switch"));
+    set_switch(config, &RowId::SleepOnSwitch, on);
+    assert_eq!(switch_of(config, &RowId::SleepOnSwitch), Some(on));
+    toggle(config, &RowId::SleepOnSwitch);
+    assert_eq!(switch_of(config, &RowId::SleepOnSwitch), Some(!on));
+    assert!(state.dirty());
+}
+
+#[test]
+fn effort_offers_the_default_then_the_base_vocabulary_and_keeps_an_unknown_value() {
+    let mut state = draft();
+    let efforts = Efforts::default();
+    let config = state.config.as_mut().unwrap_or_else(|| panic!("no config"));
+    let choice = choice_of(config, &RowId::CodexDefaultEffort, &efforts)
+        .unwrap_or_else(|| panic!("effort is a choice"));
+    assert_eq!(choice.labels, ["Default", "Low", "Medium", "High"]);
+    assert_eq!(choice.index, Some(0));
+    config.native_agents.codex.effort = Some("xhigh".to_owned());
+    let off = choice_of(config, &RowId::CodexDefaultEffort, &efforts)
+        .unwrap_or_else(|| panic!("effort is a choice"));
+    assert_eq!((off.index, off.current.as_str()), (None, "xhigh"));
+}
+
+#[test]
+fn search_finds_rows_across_sections_by_every_word() {
+    let state = draft();
+    let app = AppState::new("/tmp/fleet", std::time::Instant::now());
+    // The model row by its label, and Effort by its helper sentence ("Used with the default
+    // model."), both in Claude's card, in pane order.
+    let hits = schema::search_hits("claude model", &state, &app);
+    assert_eq!(hits.len(), 2);
+    assert_eq!(hits[1].label, "Claude \u{203a} Effort");
+    let hit = &hits[0];
+    assert_eq!(
+        (hit.section, hit.row, hit.label.as_str()),
+        (Section::Agents, 4, "Claude \u{203a} Default model")
+    );
+    assert!(schema::search_hits("   ", &state, &app).is_empty());
+    let retention = schema::search_hits("RETENTION", &state, &app);
+    assert_eq!(retention.len(), 1);
+    assert_eq!(retention[0].section, Section::Jobs);
+}
+
+#[test]
+fn a_card_of_rows_is_one_pane_child_for_scrolling() {
+    let mut state = draft();
+    state.section = Section::Agents.index();
+    let app = AppState::new("/tmp/fleet", std::time::Instant::now());
+    let list = rows(&state, &app);
+    // The default agent, then the Claude card (rows 1–5), then the Codex card (6–10).
+    assert_eq!(block_of(&list, 0), 0);
+    assert_eq!(block_of(&list, 1), 1);
+    assert_eq!(block_of(&list, 5), 1);
+    assert_eq!(block_of(&list, 6), 2);
+    assert_eq!(block_of(&list, 10), 2);
+}
+
+#[test]
+fn the_cursor_row_reads_as_its_label_and_value() {
+    let mut state = draft();
+    state.section = Section::Agents.index();
+    let app = AppState::new("/tmp/fleet", std::time::Instant::now());
+    state.prepared = rows(&state, &app).into();
+    assert_eq!(state.cursor_summary(), "Default agent = Claude");
+    state.row = 4;
+    assert_eq!(state.cursor_summary(), "Default model = ");
 }

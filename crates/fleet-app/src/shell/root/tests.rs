@@ -469,8 +469,7 @@ fn root_input_fixture(cx: &mut gpui::TestAppContext, name: &str) -> RootInputFix
     let mut focus_owner_keys = None;
     let home = format!("/tmp/fleet-shell-input-focus-{name}");
     let window = cx.add_window(|window, cx| {
-        let mut shell = Shell::new(home.into(), cx);
-        shell.bridge.shutdown();
+        let mut shell = Shell::with_bridge(home.into(), crate::bridge::Bridge::closed(), cx);
         shell.state.update(cx, |app, _| {
             app.apply_snapshot(snapshot, Instant::now());
             app.apply_board_view(view);
@@ -561,6 +560,17 @@ fn dispatch_root_key(fixture: &mut RootInputFixture, key: &str) {
     fixture.visual.update(|window, cx| {
         window.dispatch_keystroke(keystroke, cx);
     });
+    fixture.visual.run_until_parked();
+    fixture
+        .visual
+        .update(|window, cx| window.draw(cx).clear(cx));
+    fixture.visual.run_until_parked();
+    finish_test_render(&fixture.focus_owner_keys);
+}
+
+/// A control's click: the action goes to the focused element, then the frame is painted.
+fn dispatch_root_action(fixture: &mut RootInputFixture, action: impl Action) {
+    fixture.visual.dispatch_action(action);
     fixture.visual.run_until_parked();
     fixture
         .visual
@@ -829,6 +839,32 @@ fn real_shell_hub_filter_escape_keeps_then_clears_the_query(cx: &mut gpui::TestA
 }
 
 #[gpui::test]
+fn real_shell_clear_filter_button_clears_from_either_stage(cx: &mut gpui::TestAppContext) {
+    let mut fixture = root_hub_fixture(cx, "hub-filter-clear");
+
+    // Still typing: one click clears what two `Esc` presses would, and hands the keyboard back.
+    dispatch_root_key(&mut fixture, "/");
+    fixture.visual.simulate_input("feat");
+    dispatch_root_action(&mut fixture, crate::actions::filter::Clear);
+    assert_eq!(hub_filter_query(&mut fixture), "");
+    fixture.visual.update(|window, _| {
+        assert!(fixture.body_focus.is_focused(window));
+    });
+    fixture.state.read_with(&fixture.visual, |app, _| {
+        assert!(!app.filter.editing);
+        assert!(app.overlay.is_none());
+    });
+
+    // After the input was left: the retained query goes too.
+    dispatch_root_key(&mut fixture, "/");
+    fixture.visual.simulate_input("fix");
+    dispatch_root_key(&mut fixture, "escape");
+    assert_eq!(hub_filter_query(&mut fixture), "fix");
+    dispatch_root_action(&mut fixture, crate::actions::filter::Clear);
+    assert_eq!(hub_filter_query(&mut fixture), "");
+}
+
+#[gpui::test]
 fn real_shell_palette_query_accepts_platform_text(cx: &mut gpui::TestAppContext) {
     let mut fixture = root_hub_fixture(cx, "palette-query");
 
@@ -993,8 +1029,8 @@ fn real_shell_repository_hooks_grow_a_row_as_they_are_filled(cx: &mut gpui::Test
     assert_eq!(dialog_input_text(&mut fixture), "");
 }
 
-/// The settings dialog with a configuration already loaded: the fixture's bridge is shut down,
-/// so the daemon's `GetConfig` never answers and the rows are planted directly.
+/// The settings dialog with a configuration already loaded: the fixture's bridge is closed, so
+/// the daemon's `GetConfig` is refused and the rows are planted directly.
 fn open_loaded_settings(fixture: &mut RootInputFixture) {
     dispatch_root_key(fixture, ",");
     let state = fixture.state.clone();
@@ -1016,7 +1052,9 @@ fn real_shell_settings_text_row_opens_on_enter_and_then_types(cx: &mut gpui::Tes
     open_loaded_settings(&mut fixture);
     assert_eq!(live_contexts(&mut fixture), vec!["Dialog", "Settings"]);
 
-    // Browsing: `j` moves to `Claude command`, the first free-text row of §3.8.6.
+    // Browsing: `Tab` opens Agents and `j` moves to Claude's terminal command, the first
+    // free-text row of §3.8.6.
+    dispatch_root_key(&mut fixture, "tab");
     dispatch_root_key(&mut fixture, "j");
     assert_eq!(
         fixture.visual.update(
@@ -1063,7 +1101,7 @@ fn real_shell_settings_number_row_drops_every_letter(cx: &mut gpui::TestAppConte
     let state = fixture.state.clone();
     fixture.visual.update(|_, cx| {
         crate::dialogs::with_host(&state, cx, |host| {
-            host.settings.section = 1;
+            host.settings.section = 2;
             host.settings.row = 1;
         });
         crate::dialogs::settings_refresh_rows(&state, cx);
@@ -1220,9 +1258,9 @@ fn real_shell_board_palette_row_reaches_the_same_handler(cx: &mut gpui::TestAppC
     dispatch_root_key(&mut fixture, "W");
     assert_dialog_input_focused(&mut fixture);
     dispatch_root_key(&mut fixture, "ctrl-u");
-    fixture.visual.simulate_input("Open board tab");
+    fixture.visual.simulate_input("Open the worktree's board");
     settle(&mut fixture);
-    assert_eq!(dialog_input_text(&mut fixture), "Open board tab");
+    assert_eq!(dialog_input_text(&mut fixture), "Open the worktree's board");
     dispatch_root_key(&mut fixture, "enter");
 
     assert_eq!(
@@ -1402,7 +1440,7 @@ fn real_shell_board_pane_binds_the_board_keys_and_keeps_the_prefix(cx: &mut gpui
     assert_eq!(chain(&mut fixture), vec!["Workspace", "Native", "Board"]);
 
     // `]` asks the daemon to move the card and never writes the move itself. The fixture's
-    // bridge is shut down, so the refusal in the sticky slot is what proves the key reached
+    // bridge is closed, so the refusal in the sticky slot is what proves the key reached
     // `board::MoveNextColumn` rather than falling through to the Workspace behind it.
     dispatch_root_key(&mut fixture, "]");
     fixture.visual.run_until_parked();

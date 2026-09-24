@@ -94,6 +94,11 @@ impl PickerCandidate {
         };
         Self { value, label }
     }
+
+    /// What accepting the row hands back: a model id, an effort id, a mode label.
+    pub(crate) fn value(&self) -> &str {
+        &self.value
+    }
 }
 
 /// One open completion surface.

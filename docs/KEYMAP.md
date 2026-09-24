@@ -12,6 +12,39 @@ also binds direct `ctrl-q` to hide itself; its other commands use `ctrl-s`.
 This file is the single source of truth for keys. `docs/UX-SPEC.md` describes screens and cites
 this file; where the two disagree, this file wins.
 
+Every action here also has a visible control, and every control shows its key as a chip resolved
+from this table at runtime, never typed (ADR 0023). Controls are not focusable, so no binding
+below gains or loses a meaning because a button exists: the key stays the keyboard path.
+
+## Action catalogue — where labels live
+
+This file says which key runs which action; `crates/fleet-app/src/action_catalogue.rs` says what
+a person calls that action. Every action bound in `keymap::table()` has one hand-written entry
+there (`action_catalogue/entries.rs`):
+
+- **label** — a sentence-case verb phrase a newcomer understands: "Go to tab 1–9", "Allow the
+  agent's request once", "Delete the worktree safely". Never generated from the action's type
+  name; `humanize` survives only as a debugging aid, and a test fails if anything else calls it.
+- **short label** — the same, where space is tight (the `^s` command menu, a compact button).
+- **description** — one line saying what happens, including safety ("Asks first", "keeps running
+  in fleetd").
+- **place** — where the entry is filed: `Everywhere`, `Hub`, `Worktrees`, `Pull requests`,
+  `Board`, `Card`, `Terminal`, `Agent thread`, `Agent window`, `Scrolling`, `Jobs`, `Dialogs`,
+  `Editing text` or `fleetd`. Every key context above maps to one place.
+- **group** — the heading Help and the `^s` menu list it under (Tabs, Session, Terminal, Agents,
+  Panels, Navigation, Worktree, Card, …).
+- **destructive** and **palette** — whether it always goes through a confirm, and whether the
+  command palette offers it.
+- **rank** — for the few entries that answer "what is this surface for", where they rank in
+  Help's *Here in …* list, lower first. Help shows the six lowest ranks whose keys reach the
+  surface it was opened over, so one number serves every surface an entry works on.
+
+A numbered range (`SelectTab1`–`9`, `SelectContext1`–`9`, `Choose1`–`5`) is one entry whose keys
+are shown as `1`–`9`. Help, the palette, the `^s` menu, buttons and tooltips read their words from
+the catalogue — `action_catalogue::info(action)` for one action, `for_place(place)` for what works
+somewhere — so a binding added below without an entry fails the tests rather than shipping
+unlabelled. Change a row here and its entry there in the same commit.
+
 ## Modes and key contexts
 
 | Mode | gpui key context | Entered by | Left by |
@@ -26,9 +59,10 @@ this file; where the two disagree, this file wins.
 | Agent prefix | `Agent > Prefix` (one-shot) | `ctrl-s` inside the popup | any key (consumed) or `Esc` |
 | Agent scroll | `Agent > Scroll` | `ctrl-s [` inside the popup | `Esc`, `q`, `i` |
 | Filter | `Filter` | `/` in a list | `Esc` (first keeps filter, second clears), `Enter` |
-| Palette | `Palette` | `:` | `Esc`, `Enter` |
+| Palette | `Palette` | `:`, ⌘K / `ctrl-k`, `ctrl-s k` in the Workspace, the title bar's command field | `Esc`, `Enter`, a click on a row or outside the card |
 | Dialog | `Dialog > <name>` while browsing; `Dialog > <name>Editing` where the focused field owns typing | action | `Esc`, `Enter` |
 | Text input | `FleetTextInput` (`mode = single_line` \| `multiline`) | focusing a live `TextInput` | its container moves focus or closes |
+| Menu | `FleetMenu`, under the context that opened it | clicking a menu trigger, a dropdown, or right-clicking a row | `Esc`, `Enter`, clicking an item or anywhere outside |
 | Jobs | `Jobs` / `Jobs > Log` (overlay) | `J` anywhere in Normal, `ctrl-s J` in a terminal | `Esc`, `J`, `q` |
 | Daemon | `Daemon > Down` / `Daemon > Banner` / `Daemon > Doctor` | fleetd will not start (§3.12 B), fleetd died while attached (§3.12 C), doctor runs | daemon comes back, `Esc` (banner/doctor), `ctrl-q` |
 | FirstRun | `FirstRun` | no contexts and no repos exist | any key that creates or imports something |
@@ -64,13 +98,14 @@ behind it (`shell/root/focus.rs`, `focus_owner`).
 | `1`–`9`, `gt` / `gT` | switch to nth / next / previous context |
 | `p` | toggle Worktrees ⇄ Pull requests screen |
 | `/` | filter current list |
-| `:` | command palette |
+| `:`, ⌘K / `ctrl-k` | command palette |
 | `,` | settings |
 | `?` | help |
 | `J` | jobs panel |
 | `!` | focus the sticky error slot: the last failed job, offering `R retry` [A18] |
+| `X` | dismiss the sticky error slot (its ✕); the failed jobs stay in the Jobs panel. Hub only — Help lists it under Hub, and the Jobs panel's and the card detail's own `X` (cancel all, cancel the run) shadow it there |
 | `i` | toggle the detail panel (never focusable; it mirrors the cursor row) |
-| `H` | collapse / expand the repos rail (240 ↔ 44 px icon rail) [A22] |
+| `H` | collapse / expand the Hub sidebar (232 ↔ 44 px icon column; also its foot button) [A22] |
 | `a` / `A` | open the floating Claude / Codex agent popup [A21] |
 | `r` | refresh (status, PRs, discovery) — runs as a job, never blocks |
 | `U` | update Fleet (job) |
@@ -172,9 +207,10 @@ alone preserves them.
 | `h` / `l`, `p` / `n` | previous / next terminal tab |
 | `Tab` | last terminal tab (MRU within this session) [A2] |
 | `w` | last session (MRU alternate, vim `ctrl-^`) [A3] |
-| `W` | session switcher: the palette pre-filtered to `GO`/sessions [A4] |
+| `W` | session switcher: the palette pre-filtered to running sessions, most recent first [A4] |
 | `u` | select the caller of the current child thread, attaching it first if needed; on a card run, the worktree's board tab with that card selected |
-| `d` | agent picker: the palette pre-filtered to `AGENTS` |
+| `d` | agent picker: the palette seeded with `!`, its agent threads |
+| `k` | command palette (the Workspace's palette key: `ctrl-k` belongs to the shell) |
 | `c` | new terminal tab (shell in worktree path) |
 | `b` | this worktree's board tab: created the first time, selected every time; an agent session is told `boards belong to worktrees` |
 | `x` | close current terminal (confirm if a keep-alive process is running) |
@@ -185,15 +221,28 @@ alone preserves them.
 | `]` | paste clipboard (bracketed when the app requests it) |
 | `a` / `A` | new native Claude / Codex agent thread in this worktree |
 | `F` | the terminal fallback: the floating agent PTY popup (§10) |
-| `z` | zoom: hide the session header and terminal tab strip; watch pane stays visible (toggle) |
+| `z` | zoom: hide the terminal tab strip; watch pane stays visible (toggle) |
 | `v` | hide/show the cooperative/discovered subagent watch pane; no watches → `no subagent watches` |
 | `V` | dismiss the selected exited watch; if running, hide pane and show `watch still running; pane hidden` |
 | `N` | next watch in the visible session's start order, wrapping; show the pane if hidden |
 | `P` | previous watch in the visible session's start order, wrapping; show the pane if hidden |
+| `g` | show/hide the Changes panel: what this worktree changed against its base (toggle, kept per worktree); an agent session is told `Changes are shown for worktree sessions` |
 | `!` | focus the sticky error slot [A18] |
 | `J` | jobs panel |
 | `?` | help overlay listing this table |
 | `Esc` | cancel prefix |
+
+**The ⌃S command menu.** Holding the prefix for `motion.prefix_hint_delay` (400 ms) without a
+second key shows *Fleet commands*: every row of this table the live chain reaches, grouped by
+the catalogue's headings (Tabs, Session, Terminal, Agents, Panels) and labelled with each entry's
+short label. A row shows only its second key, because the prefix is already held; `ctrl-s` itself
+and `Esc` are the header (the note that pressing the prefix again sends it, and a Close button).
+Clicking a row leaves Prefix and runs the row's action, exactly as the key would; clicking Close
+is `Esc`. The menu takes no focus and changes nothing about the keys: a second key typed before
+the delay skips it, every row above keeps working, and an unbound key still leaves Prefix and
+does nothing. The agent popup (`Agent > Prefix`) and a native agent tab (`ctrl-s <key>` chords)
+show the same menu with their own rows; a row whose key already works without the prefix
+(`cmd-c`, `ctrl-q`) is left off.
 
 Watch navigation uses uppercase `N`/`P` because lowercase `n`/`p` already move between
 terminal tabs; uppercase acts on the watch pane, mirroring `v`/`V`. With no watches,
@@ -217,6 +266,8 @@ unlisted key goes to the agent PTY. Mouse selection, wheel routing, and Scroll m
 Workspace terminal; direct viewport keystrokes remain PTY input unless Scroll mode is entered.
 While the daemon is still ensuring the popup session, the same tracked card shows `attaching…`:
 `ctrl-s`, `ctrl-q`, `ctrl-s q`, and the `ctrl-s a` / `ctrl-s A` switch-or-hide actions remain live.
+The header's Claude/Codex switch, Restart and Hide buttons dispatch these same actions and show
+their keys as chips, and a press on the scrim outside the card is `ctrl-q` (UX-SPEC §3.6.1).
 
 | Key | Action |
 | --- | --- |
@@ -245,8 +296,8 @@ exit keys as Workspace Scroll mode.
 
 ## Native agent thread
 
-A native agent tab is drawn by Fleet, so keys reach its composer rather than a PTY, and the
-status bar reads `AGENT`. The context is chosen by what the thread is doing: an open decision
+A native agent tab is drawn by Fleet, so keys reach its composer rather than a PTY (the harness
+snapshot's `mode` is `Agent`). The context is chosen by what the thread is doing: an open decision
 card shadows everything else, and the focused transcript row is last.
 
 Creating a thread or selecting an existing agent tab with `ctrl-s 1`–`9` focuses its composer
@@ -268,10 +319,11 @@ scroll mode or owned by a decision card preserves that mode's keyboard owner ins
 | every agent-thread sub-mode | `ctrl-s 1`–`9` · `ctrl-s Tab` · `ctrl-s w` | select a Workspace tab · return to the tab MRU · return to the session MRU |
 | every agent-thread sub-mode | `ctrl-s s` · `ctrl-s S` | go to Hub (thread keeps running) · sleep this session and return to the Hub |
 | every agent-thread sub-mode | `ctrl-s h`/`p` · `ctrl-s l`/`n` | previous / next tab, across the mixed terminal-and-thread strip |
-| every agent-thread sub-mode | `ctrl-s W` · `ctrl-s u` · `ctrl-s d` | session switcher · select the caller (attaching it first) · agent picker pre-filtered to `AGENTS` |
+| every agent-thread sub-mode | `ctrl-s W` · `ctrl-s u` · `ctrl-s d` | session switcher · select the caller (attaching it first) · agent picker seeded with `!` |
 | every agent-thread sub-mode | `ctrl-s c` · `ctrl-s b` · `ctrl-s y` · `ctrl-s z` | new terminal tab · this worktree's board tab · copy the worktree path · zoom |
 | every agent-thread sub-mode | `ctrl-s v` · `ctrl-s V` · `ctrl-s N` · `ctrl-s P` | the subagent watch pane: show/hide · dismiss · next · previous |
-| every agent-thread sub-mode | `ctrl-s !` · `ctrl-s J` · `ctrl-s ?` · `ctrl-s Esc` | sticky error · jobs panel · help · cancel the prefix |
+| every agent-thread sub-mode | `ctrl-s g` | the Changes panel: show/hide |
+| every agent-thread sub-mode | `ctrl-s !` · `ctrl-s J` · `ctrl-s ?` · `ctrl-s k` · `ctrl-s Esc` | sticky error · jobs panel · help · command palette (⌘K too on macOS) · cancel the prefix |
 | both | `Esc` | close a picker, else abandon a gate draft, else leave scroll mode, else interrupt — and nothing at all on an idle thread |
 | `Agent > AgentDecision > AgentPermission` | `y` · `a` · `n` · `e` · `Esc` | allow once · allow for this session · deny · edit the command · deny and stop |
 | `Agent > AgentDecision > AgentQuestion` | `1`-`5` · `Space` · `Enter` · `p` | choose · toggle (multi-select) · answer / next · previous question |
@@ -285,8 +337,8 @@ Precedence: `AgentNativeScroll` (a frozen tail beats everything, including an op
 `AgentDecision > AgentPermission | AgentQuestion | AgentPlan` > `AgentWorking` > `AgentIdle`.
 
 `ctrl-s [` freezes the transcript's tail, enters `Agent > AgentNativeScroll` and focuses the row
-nearest the bottom of the viewport; the status bar's mode word reads `SCROLL` for as long as it is
-on. `G` jumps to the newest row without leaving the mode — the tail stays frozen until `q`, `i` or
+nearest the bottom of the viewport; the focused row is how the mode shows, and the snapshot's
+`mode` reads `Scroll` for as long as it is on. `G` jumps to the newest row without leaving the mode — the tail stays frozen until `q`, `i` or
 `Esc` leaves it, which is what re-arms the follow.
 
 **Row focus lives inside scroll mode.** `Agent > AgentNativeScroll > AgentRow` is on the chain
@@ -431,10 +483,17 @@ Scroll mode is suppressed while an alt-screen app is running: `ctrl-s [` then sh
 | `R` | retry a failed job with identical parameters [A19] |
 | `y` | copy the log path of the selected job [A19] |
 | `D` | dismiss finished and failed jobs [A19] |
-| `f` | cycle the filter all → running → failed; inside an expanded log, toggle follow [A19] |
+| `f` | cycle the filter all → running → failed → done; inside an expanded log, toggle follow [A19] |
 
 Inside an **expanded log**: `f` toggles follow, `j` / `k` scroll, `G` re-enables follow, `Esc`
 collapses the sheet back to 440 px (a second `Esc` closes the panel).
+
+Every key has a pointer twin that dispatches the same action (ADR 0023): a press on a row moves
+the cursor, a double-click is `Enter`, a right click opens the row's menu (Show log, Retry, Cancel,
+Copy log path — each only when it can work). A failed row carries Retry `R`, Show log `⏎` and Copy
+log path `y`; a cancellable running row shows Cancel `c` while it is hovered or selected. The
+header's segments pick the filter `f` cycles, Clear finished is `D`, the ⋯ holds Cancel all `X`,
+and the ✕ is `Esc`. In an expanded log: Back `Esc`, Following `f`, Jump to end `G`.
 
 ## Dialogs and text inputs
 
@@ -532,7 +591,8 @@ belong to the `FleetTextInput` table above wherever an editor owns the keyboard.
 bare-letter or caret-collision commands publishes its existing word while browsing and a distinct
 `*Editing` word while a field owns typing. The browsing words are `CardDetail`, `BoardSettings`,
 `Settings`, and `Create`; their editing partners are `CardDetailEditing`, `BoardSettingsEditing`,
-`SettingsEditing`, and `CreateEditing`. Editing words contain only container commands, so the
+`SettingsEditing`, and `CreateEditing`; Settings' header search publishes `SettingsSearch`, a third
+word of the same kind. Editing words contain only container commands, so the
 deeper `FleetTextInput` rows own editing and no dialog action can steal an accepted character.
 Lists under an input use `ctrl-n` / `ctrl-p` or `down` / `up`; `Tab` / `S-Tab` move fields, `Enter`
 confirms where the single-line container says so, and `Esc` cancels. `CardPicker` is the documented
@@ -541,19 +601,34 @@ exception: its query is a filter that never contains a space, so it always publi
 
 | Dialog | Keys beyond the shared frame |
 | --- | --- |
-| Create worktree | under browsing `Dialog > Create`, `←` / `→` cycle the host; the branch editor publishes `Dialog > CreateEditing`, where the same arrows move its caret · `Tab` / `S-Tab` move between branch, base and host · `Enter` create & open · `⌥Enter` create **without** opening [A8] |
+| Create worktree | under browsing `Dialog > Create`, `←` / `→` cycle the host; the branch editor publishes `Dialog > CreateEditing`, where the same arrows move its caret · `Tab` / `S-Tab` move between branch, base and host · `Enter` create & open (create only, while the dialog's "Open after creating" box is unchecked) · `⌥Enter` create **without** opening [A8] |
 | Clone repo | type to search · `ctrl-n` / `ctrl-p` or `↓` / `↑` · `Enter` clone · `Esc` cancels only the search request, never a started clone |
 | Confirm (delete / prune / kill / close terminal) | `y` / `Enter` confirm · `Y` **required instead of `y`** when any decisive safety fact is unknown or the inspection errored, and for repo / context delete [A12] · `n` / `Esc` / `q` cancel · `I` re-check (delete) · `s` toggle the KEEP list (prune). Nothing else is bound. |
 | New / Edit context | `Tab` / `S-Tab` move between name and owners · `ctrl-shift-d` delete this context (routes to the expanded `Y` confirm); plain `ctrl-d` belongs to the focused editor |
 | Repository hooks (`e`) | one editor per command row, `Tab` / `S-Tab` between them; a filled trailing row grows the next blank one · `Enter` saves |
 | Assign repo to context (`m`) | this dialog has **no** text field, so `j` / `k` move the selection as well as `↓` / `↑` and `ctrl-n` / `ctrl-p` |
-| Settings (`,`) | browsing is `Dialog > Settings`: `Space` toggles · `h` / `l` or `←` / `→` cycle a choice · `j` / `k` move · `E` opens `config.json` · `D` runs doctor · `Enter` on a text or number row opens it for editing, and saves on every other row. That row's editor publishes `Dialog > SettingsEditing`, where every printable key types and `Enter` saves; `ctrl-n` / `ctrl-p` or `↓` / `↑` move to the next row and close it, and `Esc` discards in either word. |
-| Help (`?`) | `Esc` / `?` close |
+| Settings (`,`) | browsing is `Dialog > Settings`: `Tab` / `S-Tab` move between sections · `Space` toggles · `h` / `l` or `←` / `→` cycle a choice · `j` / `k` move · `E` opens `config.json` · `D` runs doctor · `/` searches every section · `Enter` on a text or number row opens it for editing, and saves on every other row. That row's editor publishes `Dialog > SettingsEditing`, where every printable key types and `Enter` saves; `ctrl-n` / `ctrl-p` or `↓` / `↑` move to the next row and close it, and `Esc` discards in either word. The search field publishes `Dialog > SettingsSearch`, where every printable key types, `ctrl-n` / `ctrl-p` or `↓` / `↑` move over the matching settings, `Enter` opens the selected one's section with the cursor on it, and `Esc` clears the search and gives the keys back to the rows (a second `Esc` discards). Every key has a pointer twin: the rail, a row, a switch, a segment or dropdown option, a text or number box (`Enter`), Open config.json (`E`), Run doctor (`D`), Cancel (`Esc`) and Save (`Enter`). |
+| Help (`?`) | `Esc` / `?` close · typing goes to its search field · `↓` / `↑` or `ctrl-n` / `ctrl-p` move in its list · `Enter` runs the row (or opens a guide a search found) on the surface Help was opened over · `ctrl-tab` / `ctrl-shift-tab` switch Guides ⇄ All shortcuts |
 | Quit (`ctrl-q`) | `y` quit · `n` / `Esc` cancel · `J` open the jobs panel · `W` never warn again (writes `jobs.warnBeforeQuit=false`) and quit [A23] |
 | Quit and stop daemon (`ctrl-shift-q`) | `Y` stop and quit · `n` / `Esc` cancel |
 
 **`E` is context-scoped.** In `Hub` it edits the active context [A15]; in `Dialog > Settings` it
 opens `config.json` in a new terminal tab. The two never coexist in one key context.
+
+## Open menus (`FleetMenu`)
+
+A kit `Menu` — a row's ⋯ or right-click menu, the `+` new-tab menu, a dropdown's options — takes
+the focus while it is open and publishes `FleetMenu` beneath the context of the element that
+opened it. It is navigated like a list under a text field (ADR 0023), so `j` / `k` are not menu
+keys. Each item shows its own key as a chip; that key still works from the surface once the menu
+is closed. On close the focus goes back to where it was.
+
+| Key | Action |
+| --- | --- |
+| `↓` / `ctrl-n` | highlight the next item (stops at the last) |
+| `↑` / `ctrl-p` | highlight the previous item (stops at the first) |
+| `Enter` | close the menu and run the highlighted item, dispatched to the element that opened it |
+| `Esc` | close the menu without running anything |
 
 ## Filter mode (`/`)
 
@@ -566,11 +641,22 @@ opens `config.json` in a new terminal tab. The two never coexist in one key cont
 
 ## Palette mode (`:`)
 
+⌘K on macOS and `ctrl-k` on other platforms open the palette alongside `:`, in every context
+where `:` does (`Hub` and `Dialog > CardDetail`), and so does clicking the title bar's command
+field. `:` stays bound. Where `ctrl-k` already has an owner it keeps it: a terminal grid, where
+it belongs to the shell, and a focused `FleetTextInput`, where it deletes to the line end
+(ADR 0020). ⌘K also opens the palette from the Workspace — its terminal and native tabs and the
+agent thread — on macOS; on every platform the Workspace has `ctrl-s k`, the only Workspace key
+on Linux. The title bar's chip shows whichever key the focused context binds.
+
+The query's first character narrows the list: `>` commands, `@` worktrees and sessions, `#`
+cards, `!` agent threads (UX-SPEC §3.9).
+
 | Key | Action |
 | --- | --- |
 | printable, `Backspace`, `ctrl-w`, `ctrl-u`, motion, selection, undo | edit the query through the full `FleetTextInput` table above |
-| `ctrl-n` / `↓`, `ctrl-p` / `↑` | move between `GO` / `DO` / `CONTEXT` rows |
-| `Enter` | run the highlighted row (destructive commands still route through their confirm) |
+| `ctrl-n` / `↓`, `ctrl-p` / `↑` | move through the ranked rows, across sections; the list scrolls to keep the row in view |
+| `Enter` | run the highlighted row (destructive commands still route through their confirm); a click on a row does the same |
 | `Esc` | close (`q` remains a printable query character) |
 
 ## Daemon-down surfaces (§3.12)
@@ -581,7 +667,7 @@ opens `config.json` in a new terminal tab. The two never coexist in one key cont
 | | `L` | open `~/.fleet/logs/fleetd.log` |
 | | `D` | run doctor |
 | | `ctrl-q` | quit |
-| **C. fleetd died while attached** (28 px banner) | `r` | reconnect now |
+| **C. fleetd died while attached** (40 px banner) | `r` | reconnect now |
 | | `l` | open the log |
 | | `Esc` | dismiss the banner (the daemon dot stays red) |
 | **Doctor report** (`Daemon > Doctor`, full window) | `r` | dismiss the report, then retry or reconnect if the daemon is down |
@@ -597,6 +683,10 @@ Case C's banner is a container, and `r` and `l` are bare letters, so it obeys th
 rule above: `Daemon > Banner` leaves the chain entirely — `Esc` with it — while a live input owns
 the keyboard, and comes straight back when the keyboard returns to a surface that is not typing.
 
+Every key in this table is also a button showing that key (ADR 0023): case B's `Retry`, `Open
+log`, `Run doctor` and `Quit`; case C's `Reconnect now`, `Open log` and ✕; the report's `Run
+again`, `Open log` and `Close`. Each dispatches the same action its key does.
+
 Case A (cold start) binds nothing: fleetd is auto-spawned. While disconnected, read-only keys
 (`j` / `k`, `y`, `b`, `/`, `i`, `:`) keep working; mutating keys flash the banner. Keys typed
 into a veiled terminal grid are dropped, not buffered.
@@ -610,6 +700,10 @@ into a veiled terminal grid are dropped, not buffered.
 | `n` | clone a repository |
 | `?` / `,` | help / settings |
 | `ctrl-q` | quit |
+
+The page's step cards and footer buttons dispatch these same actions and show these keys: step 1
+is `N`, step 2 `n`, the import card `i`, and the footer's `Keyboard shortcuts` and `Settings` are
+`?` and `,`.
 
 **Arbitration.** `i` means *import* only in the `FirstRun` context; in `Hub` it stays *toggle
 detail panel*. The first-run card is a full-window surface with its own key context, so the two
@@ -633,8 +727,8 @@ and "cancel job" in the Jobs panel. `b` is "open in browser" in the Hub and on t
 "this worktree's board tab" after `ctrl-s`.
 `f` cycles the Jobs filter in the list and toggles follow
 inside an expanded log. `y` copies a path, a URL or a log path depending on the pane. All are
-mode- or pane-disjoint; the Help dialog groups by mode precisely so they can be read side by
-side.
+mode- or pane-disjoint; Help's All shortcuts table files every key under the place it works, so
+they are read side by side with their place.
 
 ## Board and card detail (BOARD §8)
 
@@ -747,10 +841,17 @@ that cannot contain a space, and `space` toggles the highlighted card.
 | `>` | `Dialog > CardDetail` | `board::RunNow` — Run the column's action on this card now |
 | `b` | `Dialog > CardDetail` | `board::PickBlockedBy` — Pick the cards this one is blocked by |
 | `m` | `Dialog > CardDetail` | `board::PickAgent` — Pick the agent that runs this card |
-| `:` | `Dialog > CardDetail` | `OpenPalette` — Command palette over the open card detail |
+| `s` | `Dialog > CardDetail` | `board::PickStatus` — Status picker for the card on show (the Status row) |
+| `p` | `Dialog > CardDetail` | `board::PickPriority` — Priority picker for the card on show |
+| `a` | `Dialog > CardDetail` | `board::PickAssignee` — Assignee picker for the card on show |
+| `t` | `Dialog > CardDetail` | `board::PickLabels` — Labels picker for the card on show |
+| `e` | `Dialog > CardDetail` | `board::PickEstimate` — Estimate picker for the card on show |
+| `o` | `Dialog > CardDetail` | `board::OpenWorktree` — Open the card's linked worktree session |
+| `:` | `Dialog > CardDetail` | `OpenPalette` — Command palette over the open card detail (⌘K / `ctrl-k` too) |
 | `escape` | `Dialog > CardDetailEditing` | `card_detail::Close` — Cancel text edit |
 | `enter` | `Dialog > CardDetailEditing` | `card_detail::EditProperty` — Submit title or insert a legacy multiline newline |
 | `ctrl-s` | `Dialog > CardDetailEditing` | `card_detail::Save` — Save text edit |
+| `ctrl-enter` | `Dialog > CardDetailEditing` | `card_detail::Save` — Save text edit (post the comment) |
 | `ctrl-enter` | `Dialog > CardCreate` | `board::CreateAndOpen` — Create and open |
 | `space` | `Dialog > CardPicker` | `settings::Toggle` — Toggle the highlighted label |
 | `j` | `Dialog > BoardSettings` | `settings::MoveDown` — Next row |

@@ -205,61 +205,76 @@ impl ColumnLadder {
     }
 
     /// The worktrees list ladder of §2.9, keyed
-    /// `glyph`, `branch`, `repo`, `keepalive`, `pr`, `age`.
+    /// `branch`, `repo`, `session`, `pr`, `age`, `actions`.
     pub fn worktrees() -> Self {
         Self::worktrees_in_scope(false)
     }
 
     /// The worktrees ladder, with the `repo` column forced on in `All` scope.
     ///
-    /// §2.9 column 3: `owner/name` is shown when the scope is `All` **or** the pane is at least
+    /// §2.9 column 2: `owner/name` is shown when the scope is `All` **or** the pane is at least
     /// 110 ch, because in `All` scope the repo is the only thing that disambiguates two
-    /// identically named branches.
+    /// identically named branches. The session column says the session in words and steps
+    /// 18 / 14 / 0 ch; `actions` is the hover-only `Open ⏎  ⋯` slot, headed by nothing, and
+    /// always reserved so revealing it never reflows a row.
     pub fn worktrees_in_scope(all_scope: bool) -> Self {
         Self::new([
-            ColumnSpec::fixed("glyph", 2.0).align(ColumnAlign::Center),
             ColumnSpec::flex("branch", 24.0),
-            ColumnSpec::fixed("repo", 14.0)
+            ColumnSpec::fixed("repo", 12.0)
                 .shown_from(110.0)
                 .forced(all_scope),
-            ColumnSpec::ladder("keepalive", KEEP_ALIVE_STEPS),
+            ColumnSpec::ladder("session", SESSION_STEPS),
             ColumnSpec::fixed("pr", 15.0).shown_from(60.0),
-            ColumnSpec::fixed("age", 7.0)
+            ColumnSpec::fixed("age", 5.0)
                 .align(ColumnAlign::Right)
                 .shown_from(52.0),
+            ColumnSpec::fixed("actions", 13.0).align(ColumnAlign::Right),
         ])
     }
 
     /// The PR list ladder of §2.9, keyed
-    /// `presence`, `number`, `title`, `author`, `head`, `repo`, `state`, `age`, for one tab and
-    /// one scope.
+    /// `number`, `title`, `author`, `head`, `repo`, `state`, `checks`, `age`, `actions`, for one
+    /// tab and one scope.
     ///
     /// The two-step author breakpoint (12 ch at 70 ch, 16 ch at 130 ch) is [D-5] and is the one
     /// ladder the pixel-only port lost. §2.9: the `author` column is meaningful only in the
-    /// `REVIEW` tab, and the `repo` column needs both a wide pane **and** a multi-repo scope.
+    /// review tab, and the `repo` column needs both a wide pane **and** a multi-repo scope (the
+    /// detail panel names the repository whenever the column has had to go).
+    /// `state` is wide enough for its longest chip (`Needs changes`); `actions` is the
+    /// hover-only `Open ⏎` / `⋯` slot, reserved so revealing it never moves a column.
     pub fn pull_requests_for(review_tab: bool, multi_repo: bool) -> Self {
         const AUTHOR: &[(f32, f32)] = &[(130.0, 16.0), (70.0, 12.0), (0.0, 0.0)];
         let mut specs = vec![
-            ColumnSpec::fixed("presence", 2.0).align(ColumnAlign::Center),
-            ColumnSpec::fixed("number", 6.0).align(ColumnAlign::Right),
-            ColumnSpec::flex("title", 32.0),
+            ColumnSpec::fixed("number", 6.0),
+            ColumnSpec::flex("title", 24.0),
         ];
         if review_tab {
             specs.push(ColumnSpec::ladder("author", AUTHOR));
         }
-        specs.push(ColumnSpec::fixed("head", 12.0).shown_from(90.0));
+        // The review tab spends 12 ch on the author, so the branch gives way sooner there.
+        let head_from = if review_tab { 120.0 } else { 100.0 };
+        specs.push(ColumnSpec::fixed("head", 12.0).shown_from(head_from));
         if multi_repo {
-            specs.push(ColumnSpec::fixed("repo", 10.0).shown_from(110.0));
+            specs.push(ColumnSpec::fixed("repo", 12.0).shown_from(125.0));
         }
-        specs.push(ColumnSpec::fixed("state", 8.0));
+        specs.push(ColumnSpec::fixed("state", 16.0));
+        specs.push(ColumnSpec::fixed("checks", 10.0).shown_from(70.0));
         specs.push(
-            ColumnSpec::fixed("age", 7.0)
+            ColumnSpec::fixed("age", 5.0)
                 .align(ColumnAlign::Right)
                 .shown_from(52.0),
+        );
+        specs.push(
+            ColumnSpec::fixed("actions", 14.0)
+                .align(ColumnAlign::Right)
+                .shown_from(60.0),
         );
         Self::new(specs)
     }
 }
+
+/// The worktrees list's session column: words such as `claude working · 2 tabs`.
+const SESSION_STEPS: &[(f32, f32)] = &[(100.0, 18.0), (72.0, 14.0), (0.0, 0.0)];
 
 pub(super) const KEEP_ALIVE_STEPS: &[(f32, f32)] =
     &[(104.0, 18.0), (88.0, 14.0), (72.0, 10.0), (0.0, 0.0)];
@@ -281,30 +296,31 @@ mod tests {
         let ladder = ColumnLadder::worktrees();
         assert!(ladder.shows("repo", 138.0));
         assert!(!ladder.shows("repo", 93.0));
-        assert!(ladder.shows("keepalive", 104.0));
-        assert!(!ladder.shows("keepalive", 71.0));
+        assert!(ladder.shows("session", 104.0));
+        assert!(!ladder.shows("session", 71.0));
         assert!(!ladder.shows("age", 40.0));
         assert!(ladder.shows("branch", 40.0));
+        assert!(ladder.shows("actions", 40.0));
     }
 
     #[test]
-    fn keep_alive_steps_18_14_10_0() {
+    fn session_steps_18_14_0() {
         let ladder = ColumnLadder::worktrees();
-        assert_eq!(ladder.width_ch("keepalive", 138.0), Some(18.0));
-        assert_eq!(ladder.width_ch("keepalive", 90.0), Some(14.0));
-        assert_eq!(ladder.width_ch("keepalive", 72.0), Some(10.0));
-        assert_eq!(ladder.width_ch("keepalive", 60.0), None);
+        assert_eq!(ladder.width_ch("session", 138.0), Some(18.0));
+        assert_eq!(ladder.width_ch("session", 90.0), Some(14.0));
+        assert_eq!(ladder.width_ch("session", 72.0), Some(14.0));
+        assert_eq!(ladder.width_ch("session", 60.0), None);
     }
 
     #[test]
-    fn narrow_pane_keeps_glyph_branch_pr_and_age() {
-        // §2.9: "below 72 ch only columns 1, 2, 5, 6 survive".
+    fn narrow_pane_keeps_name_pr_age_and_actions() {
+        // §2.9: "below 72 ch only the name, the pull request, the age and the actions survive".
         let keys: Vec<String> = ColumnLadder::worktrees()
             .resolve(70.0)
             .into_iter()
             .map(|c| c.key.to_string())
             .collect();
-        assert_eq!(keys, ["glyph", "branch", "pr", "age"]);
+        assert_eq!(keys, ["branch", "pr", "age", "actions"]);
     }
 
     #[test]
@@ -333,6 +349,18 @@ mod tests {
     }
 
     #[test]
+    fn pull_requests_keep_number_title_and_state_when_narrow() {
+        let ladder = ColumnLadder::pull_requests_for(false, true);
+        let keys: Vec<_> = ladder
+            .resolve(50.0)
+            .into_iter()
+            .map(|column| column.key.to_string())
+            .collect();
+        assert_eq!(keys, ["number", "title", "state"]);
+        assert!(ladder.shows("checks", 100.0) && ladder.shows("actions", 100.0));
+    }
+
+    #[test]
     fn flex_columns_carry_their_minimum() {
         let title = ColumnLadder::pull_requests_for(true, true)
             .resolve(140.0)
@@ -340,6 +368,6 @@ mod tests {
             .find(|c| c.key.as_ref() == "title")
             .expect("the title column is always shown");
         assert_eq!(title.width, None);
-        assert_eq!(title.min_width, Some(ch(32.0)));
+        assert_eq!(title.min_width, Some(ch(24.0)));
     }
 }

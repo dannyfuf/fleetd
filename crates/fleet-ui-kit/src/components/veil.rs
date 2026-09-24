@@ -1,7 +1,7 @@
 //! `Veil` — a 55 % scrim over **terminal grids only**, while the daemon is gone.
 //!
-//! §3.12 case C draws a sharp line: lists stay at 100 % opacity and stay navigable — they are
-//! *true*, just frozen — while a terminal grid is a live surface whose contents stopped being
+//! §3.12 case C draws a sharp line: lists stay navigable and are only dimmed to the stale
+//! opacity — they are *true*, just frozen — while a terminal grid is a live surface whose contents stopped being
 //! true the moment the daemon died. Only the live surface is veiled.
 //!
 //! Keys typed into a veiled grid are **dropped, not buffered**. Replaying a buffer into a

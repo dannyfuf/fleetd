@@ -1,6 +1,6 @@
 use super::*;
 use super::{
-    chrome::header_status_tone,
+    chrome::{header_keys, header_status_tone, status_line},
     terminal::{copy_reaches_pty, end_mouse_drag, popup_mouse_cell_at},
 };
 use crate::terminal::{AbsoluteCellPoint, AbsoluteCellSelection, SelectionGranularity};
@@ -126,8 +126,11 @@ fn scroll_mode_cmd_c_never_reaches_pty() {
 fn model_with(state: AgentTerminalState, activity: AgentActivity) -> Model {
     Model {
         agent: Agent::Claude,
-        session: fleet_core::sessions::agent_session_id(Agent::Claude)
-            .unwrap_or_else(|error| panic!("valid agent session: {error}")),
+        session_label: fleet_core::sessions::agent_session_id(Agent::Claude)
+            .unwrap_or_else(|error| panic!("valid agent session: {error}"))
+            .to_string()
+            .into(),
+        status_line: status_line(state, activity, true),
         mode: AgentPopupMode::Terminal,
         terminal: None,
         base_terminal: None,
@@ -192,6 +195,49 @@ fn header_tones_cover_all_agent_states() {
     assert_eq!(header_status_tone(&unreachable), Tone::Danger);
 }
 
+#[test]
+fn header_chips_spell_the_popups_own_keys() {
+    let keys = header_keys();
+    let spelled = |kbd: &Option<fleet_ui_kit::Kbd>| {
+        kbd.as_ref().map(|kbd| {
+            kbd.strokes()
+                .iter()
+                .map(|stroke| stroke.unparse())
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+    };
+    assert_eq!(spelled(&keys.hide).as_deref(), Some("ctrl-q"));
+    assert_eq!(spelled(&keys.restart).as_deref(), Some("ctrl-s r"));
+    assert_eq!(spelled(&keys.claude).as_deref(), Some("ctrl-s a"));
+    assert_eq!(spelled(&keys.codex).as_deref(), Some("ctrl-s shift-a"));
+}
+
+#[test]
+fn the_status_line_says_what_the_agent_does_and_that_hiding_is_safe() {
+    let line = |state, activity, reachable| status_line(state, activity, reachable).to_string();
+    assert_eq!(
+        line(AgentTerminalState::Running, AgentActivity::Idle, true),
+        "· idle · runs in fleetd, hiding keeps it alive"
+    );
+    assert_eq!(
+        line(AgentTerminalState::Running, AgentActivity::Working, true),
+        "· working · runs in fleetd, hiding keeps it alive"
+    );
+    assert_eq!(
+        line(AgentTerminalState::Starting, AgentActivity::Unknown, true),
+        "· starting · runs in fleetd, hiding keeps it alive"
+    );
+    assert_eq!(
+        line(AgentTerminalState::Exited, AgentActivity::Idle, true),
+        "· exited · runs in fleetd, hiding keeps it alive"
+    );
+    assert_eq!(
+        line(AgentTerminalState::Running, AgentActivity::Idle, false),
+        "· fleetd unreachable · runs in fleetd, hiding keeps it alive"
+    );
+}
+
 struct AttachingPopupFixture {
     popup: AgentPopup,
     state: Entity<AppState>,
@@ -209,7 +255,11 @@ impl Render for AttachingPopupFixture {
             self.popup
                 .render_attaching(&self.state, &self.focus, width, height, top, cx);
         for context in self.state.read(cx).context_chain().into_iter().rev() {
-            popup = div().key_context(context).child(popup).into_any_element();
+            popup = div()
+                .size_full()
+                .key_context(context)
+                .child(popup)
+                .into_any_element();
         }
         popup
     }
@@ -267,4 +317,56 @@ fn attaching_popups_for_both_providers_can_be_hidden_with_ctrl_s_q(cx: &mut gpui
         visual.simulate_keystrokes("q");
         visual.update(|_, cx| assert!(state.read(cx).agent_popup.is_none()));
     }
+}
+
+#[gpui::test]
+fn a_press_on_the_scrim_hides_the_popup_and_a_press_on_the_card_does_not(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.update(|cx| {
+        cx.set_global(fleet_ui_kit::Theme::dark());
+        crate::keymap::init(cx);
+    });
+    let state = cx.new(|_| {
+        let mut app = AppState::new("/tmp/fleet-agent-popup-scrim", Instant::now());
+        app.daemon = crate::state::DaemonLink::Connected;
+        app.toggle_agent_popup(Agent::Claude, None);
+        app
+    });
+    let fixture_state = state.clone();
+    let (_fixture, visual) = cx.add_window_view(move |window, cx| {
+        let focus = cx.focus_handle();
+        focus.focus(window, cx);
+        let subscription = cx.observe(&fixture_state, |_: &mut AttachingPopupFixture, _, cx| {
+            cx.notify();
+        });
+        AttachingPopupFixture {
+            popup: AgentPopup::new(cx),
+            state: fixture_state,
+            focus,
+            _subscription: subscription,
+        }
+    });
+    visual.run_until_parked();
+
+    let viewport = visual.update(|window, _| window.viewport_size());
+    let centre = gpui::point(viewport.width / 2.0, viewport.height / 2.0);
+    visual.simulate_click(centre, gpui::Modifiers::none());
+    visual.run_until_parked();
+    visual.update(|_, cx| {
+        assert!(
+            state.read(cx).agent_popup.is_some(),
+            "a press inside the card is the agent's, not a dismissal"
+        );
+    });
+
+    // The card spans the middle 90 % × 85 %, so the top-left corner is scrim.
+    visual.simulate_click(gpui::point(px(2.0), px(2.0)), gpui::Modifiers::none());
+    visual.run_until_parked();
+    visual.update(|_, cx| {
+        assert!(
+            state.read(cx).agent_popup.is_none(),
+            "a press on the scrim hides the popup, as ctrl-q does"
+        );
+    });
 }

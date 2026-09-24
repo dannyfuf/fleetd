@@ -190,10 +190,10 @@ pub fn format_exit(code: i32) -> SharedString {
     SharedString::from(format!("exit {code}"))
 }
 
-/// The head-of-queue counter a decision drawer draws when several requests are pending: `2/3`.
+/// The head-of-queue counter a decision drawer draws when several requests are pending: `2 of 3`.
 #[must_use]
 pub fn format_counter(index: usize, total: usize) -> SharedString {
-    SharedString::from(format!("{}/{total}", index + 1))
+    SharedString::from(format!("{} of {total}", index + 1))
 }
 
 /// The retry line of an error card: `rate limited · retrying in 12s`.
@@ -268,8 +268,8 @@ mod tests {
     fn structured_results_are_rendered_as_fields_never_as_prose() {
         assert_eq!(format_exit(0), "exit 0");
         assert_eq!(format_exit(101), "exit 101");
-        assert_eq!(format_counter(0, 3), "1/3");
-        assert_eq!(format_counter(2, 3), "3/3");
+        assert_eq!(format_counter(0, 3), "1 of 3");
+        assert_eq!(format_counter(2, 3), "3 of 3");
     }
 
     #[test]

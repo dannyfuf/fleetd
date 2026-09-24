@@ -4,10 +4,10 @@
 //!
 //! | Region | Height | Token |
 //! | --- | --- | --- |
-//! | context bar | 36 px | `metrics.context_bar_h` |
-//! | banner (§3.12 case C, optional) | 28 px | `metrics.banner_h` |
+//! | title bar | 44 px | `metrics.title_bar_h` |
+//! | banner (§3.12 case C, optional) | 40 px | `metrics.frame_banner_h` |
 //! | body | flexible | — |
-//! | status bar | 26 px | `metrics.status_bar_h` |
+//! | status bar | 28 px | `metrics.status_bar_h` |
 //!
 //! The Workspace replaces the body region entirely but keeps the two bars at the same pixel
 //! positions, so the saccade never changes between screens — that is why the heights live on
@@ -23,7 +23,7 @@
 //!   including both bars, and a palette [`super::Overlay`] is anchored at y = 120 from the
 //!   window's top.
 //! - [`AppFrame::body_overlay`] spans only the band between the bars: the Jobs
-//!   [`super::Sheet`] is "full height between the context bar and the status bar" (§3.7), and
+//!   [`super::Sheet`] is "full height between the title bar and the status bar" (§3.7), and
 //!   the [`super::ToastStack`] sits "bottom-right, **above the status bar**" (§2.2).
 //!
 //! Both layers paint in [`super::OverlayLayer`] order, so a toast is legible over a dialog and
@@ -36,7 +36,7 @@ use crate::theme::ActiveTheme;
 /// The whole-window frame.
 #[derive(IntoElement)]
 pub struct AppFrame {
-    context_bar: Option<AnyElement>,
+    title_bar: Option<AnyElement>,
     banner: Option<AnyElement>,
     body: Option<AnyElement>,
     status_bar: Option<AnyElement>,
@@ -48,7 +48,7 @@ impl AppFrame {
     /// An empty frame.
     pub fn new() -> Self {
         Self {
-            context_bar: None,
+            title_bar: None,
             banner: None,
             body: None,
             status_bar: None,
@@ -57,13 +57,13 @@ impl AppFrame {
         }
     }
 
-    /// The 36 px top bar.
-    pub fn context_bar(mut self, bar: impl IntoElement) -> Self {
-        self.context_bar = Some(bar.into_any_element());
+    /// The 44 px top bar, normally a [`super::TitleBar`].
+    pub fn title_bar(mut self, bar: impl IntoElement) -> Self {
+        self.title_bar = Some(bar.into_any_element());
         self
     }
 
-    /// A 28 px banner directly under the context bar (§3.12 case C).
+    /// A 40 px banner directly under the title bar (§3.12 case C).
     ///
     /// The banner pushes the body down rather than floating over it: it is a *state* of the
     /// window, not a layer, and a terminal that keeps its rows under a floating strip would
@@ -79,7 +79,7 @@ impl AppFrame {
         self
     }
 
-    /// The 26 px bottom bar.
+    /// The 28 px bottom bar.
     pub fn status_bar(mut self, bar: impl IntoElement) -> Self {
         self.status_bar = Some(bar.into_any_element());
         self
@@ -124,11 +124,11 @@ impl RenderOnce for AppFrame {
             .font_family(theme.font_ui.clone())
             .text_size(theme.text.ui.size)
             .line_height(theme.text.ui.line_height)
-            .children(self.context_bar.map(|bar| {
+            .children(self.title_bar.map(|bar| {
                 div()
                     .flex()
                     .flex_none()
-                    .h(theme.metrics.context_bar_h)
+                    .h(theme.metrics.title_bar_h)
                     .w_full()
                     .overflow_hidden()
                     .child(bar)
@@ -137,7 +137,7 @@ impl RenderOnce for AppFrame {
                 div()
                     .flex()
                     .flex_none()
-                    .h(theme.metrics.banner_h)
+                    .h(theme.metrics.frame_banner_h)
                     .w_full()
                     .overflow_hidden()
                     .child(banner)

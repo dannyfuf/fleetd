@@ -1,0 +1,52 @@
+# UX-SPEC.md §5.1 · §Board ("The pane") · ADR 0023 — every board key has a control, and the
+# board is worked by pointer end to end: a column's `+` opens New card with that column chosen,
+# a click selects a card, its ⋯ holds every picker, and the header's `New card` is the `c` key.
+#
+# The `+` is the one control here that no key reproduces exactly: `c` files a card in the board's
+# default column, and `+` files it in the column it sits on. The oracle is the column's badge and
+# `board.cards`, which the card lands in with the cursor on it.
+#
+# Virtual-lane only: it clicks and takes shots.
+fixture: board
+await idle 20000
+key g b
+await hub_tab == Board 10000
+assert lists.board.rows[1].label == "Todo" && lists.board.rows[1].badges[0] == "2"
+assert targets["board.new"] exists && targets["board.filter"] exists
+assert targets["board.column[1].add"] exists
+shot board
+
+# Todo's `+` opens New card on Todo, with the title already taking the keyboard.
+click board.column[1].add
+await overlay == Dialog 10000
+await idle 10000
+assert dialog.name == CardCreate && dialog.fields[0].focused == true
+assert lists.board.selected.label == "Todo"
+type Seed the board preset
+key enter
+await overlay absent 10000
+await lists.board.rows[1].badges[0] == "3" 10000
+assert lists.board.selected.label == "Todo"
+await lists["board.cards"].selected.label == "Seed the board preset" 10000
+
+# A click selects a card, and the selected card shows its ⋯, which holds the pickers.
+click board.column[0].card[1]
+await focused == "board.column[0].card[1]" 5000
+await targets["board.column[0].card[1].menu"] exists 5000
+click board.column[0].card[1].menu
+await targets["menu.item[0]"] exists 5000
+shot card-menu
+click menu.item[0]
+await overlay == Dialog 10000
+assert dialog.name == CardPicker
+key escape
+await overlay absent 10000
+
+# The header's primary button is `c`: New card in the board's default column.
+click board.new
+await overlay == Dialog 10000
+assert dialog.name == CardCreate
+key escape
+await overlay absent 10000
+dump pointer
+quit

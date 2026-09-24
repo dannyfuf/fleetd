@@ -1,0 +1,37 @@
+# UX-SPEC §3.8.7 · ADR 0023 — Help is a guide a new user follows by pointer: the title bar's Help,
+# the guide *Start work on a task*, its first step's *New worktree* button, which closes Help and
+# opens New worktree on the Hub behind it. The branch is typed; Create (with *Open after
+# creating* checked, the default) lands in the new workspace. There the status bar's Shortcuts
+# opens Help on *Here in …* for the workspace, and its ✕ closes it.
+#
+# Virtual-lane only: it takes shots.
+fixture: one-repo
+await idle 30000
+assert screen == Hub && overlay absent
+
+click titlebar.help
+await dialog.name == Help 10000
+await targets["help.guide[0]"] exists 10000
+click help.guide[0]
+await targets["help.step[0].action[1]"] exists 5000
+shot guide
+click help.step[0].action[1]
+await dialog.name == Create 10000
+type feat/guided
+await targets["dialog.row[0]"] exists 20000
+await idle 20000
+shot create
+click dialog.button[1]
+await screen == Workspace 30000
+await lists.tabs.rows[0] exists 20000
+assert lists.tabs.rows[0].label ~= "/acme/api/feat-guided$"
+
+click statusbar.shortcuts
+await dialog.name == Help 10000
+await targets["help.here[0]"] exists 10000
+assert screen == Workspace
+click dialog.close
+await overlay absent 5000
+assert screen == Workspace && dialog absent
+dump closed
+quit

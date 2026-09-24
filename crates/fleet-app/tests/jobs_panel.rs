@@ -2,8 +2,6 @@
 
 mod common;
 
-use std::collections::HashSet;
-
 use fleet_proto::{
     event::Event,
     job::{JobKind, JobStatus},
@@ -48,7 +46,7 @@ async fn a_fresh_daemon_answers_with_a_snapshot_the_panel_can_render() {
         "a fresh snapshot unexpectedly retained jobs: {:?}",
         snapshot.jobs
     );
-    assert!(jobs_panel::visible_jobs(&snapshot.jobs, JobFilter::All, &HashSet::new()).is_empty());
+    assert_eq!(JobFilter::All.visible(&snapshot.jobs).count(), 0);
 
     // §2.2: an idle daemon leaves the shared status-bar slot empty rather than filling it.
     assert_eq!(
@@ -60,7 +58,6 @@ async fn a_fresh_daemon_answers_with_a_snapshot_the_panel_can_render() {
     assert!(snapshot.contexts.is_empty());
     assert!(snapshot.repos.is_empty());
     assert!(!first_run::has_swarm_state(Some(daemon.home())));
-    assert_eq!(first_run::keys(false).len(), 4);
 
     // Every timestamp the daemon writes must be readable by the elapsed column of §3.7.
     assert!(

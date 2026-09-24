@@ -218,6 +218,16 @@ impl Theme {
     pub fn sheet_shadow(&self) -> Vec<BoxShadow> {
         self.shadow(self.elevation.sheet)
     }
+
+    /// The menu / popover / tooltip shadow.
+    pub fn popover_shadow(&self) -> Vec<BoxShadow> {
+        self.shadow(self.elevation.popover)
+    }
+
+    /// The hover lift of a card tile the pointer can pick up.
+    pub fn lift_shadow(&self) -> Vec<BoxShadow> {
+        self.shadow(self.elevation.lift)
+    }
 }
 
 impl Default for Theme {

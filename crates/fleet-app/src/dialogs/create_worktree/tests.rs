@@ -1,7 +1,7 @@
 use std::{cell::RefCell, collections::VecDeque};
 
 use super::*;
-use crate::dialogs::create_worktree::view::host_section;
+use crate::dialogs::create_worktree::view::unavailable_hosts;
 
 enum RecordedRequest {
     Sent(RequestBody),
@@ -92,7 +92,7 @@ fn large_base_ref_lists_keep_default_previous_and_matching_cap() {
     draft.base_refs = (0..10_000).map(|i| format!("origin/feature-{i}")).collect();
     draft.branch = "feature-99".to_owned();
     let rows = draft.base_candidates();
-    assert_eq!(rows.len(), BASE_ROWS);
+    assert_eq!(rows.len(), BASE_LIMIT);
     assert_eq!(&rows[..2], &["origin/main", "pull/412/head"]);
     assert_eq!(rows[2], "origin/feature-99");
     draft.branch = "no-match-at-all".to_owned();
@@ -105,7 +105,7 @@ fn default_base_is_first_and_previous_base_second() {
     assert_eq!(rows[0], "origin/main");
     assert_eq!(rows[1], "pull/412/head");
     assert!(rows.contains(&"origin/release-2026".to_owned()));
-    assert!(rows.len() <= BASE_ROWS);
+    assert!(rows.len() <= BASE_LIMIT);
 }
 
 #[test]
@@ -588,39 +588,111 @@ fn an_unreachable_default_host_leaves_the_picker_on_local(cx: &mut gpui::TestApp
     });
 }
 
+#[test]
+fn a_blocked_host_states_its_reason_and_keeps_the_cycler_live() {
+    let mut draft = draft();
+    draft.branch = "feat/ok".to_owned();
+    draft.hosts = hosts(&[
+        host_status("devbox", "tailscale", LinkState::Down, false),
+        host_status("archdev", "tailscale", LinkState::Ready, true),
+    ]);
+
+    draft.host_index = 1;
+    assert!(draft.host_blocked().is_some());
+    assert!(!draft.can_submit(), "`Enter` is refused on a blocked host");
+    assert_eq!(
+        unavailable_hosts(&draft),
+        ["devbox unavailable \u{2014} ssh: connect timed out after 5s"],
+        "the blocked host still states why"
+    );
+
+    draft.host_index = 0;
+    assert!(draft.can_submit());
+    assert_eq!(
+        unavailable_hosts(&draft).len(),
+        1,
+        "the reason stays while local is chosen"
+    );
+
+    draft.hosts.clear();
+    assert!(
+        draft.selected_choice().is_none(),
+        "the whole row is zero-suppressed when no host is configured"
+    );
+}
+
 #[gpui::test]
-fn a_blocked_host_renders_its_reason_and_keeps_the_cycler_live(cx: &mut gpui::TestAppContext) {
+fn a_click_chooses_a_reachable_host_and_ignores_a_blocked_one(cx: &mut gpui::TestAppContext) {
     cx.update(|cx| {
         cx.set_global(fleet_ui_kit::Theme::dark());
-        let tight = cx.theme().space.xs;
-        let mut draft = draft();
-        draft.branch = "feat/ok".to_owned();
-        draft.hosts = hosts(&[host_status("devbox", "tailscale", LinkState::Down, false)]);
-
-        draft.host_index = 1;
-        assert!(draft.host_blocked().is_some());
-        assert!(!draft.can_submit(), "`Enter` is refused on a blocked host");
-        assert!(
-            host_section(&draft, tight, cx).is_some(),
-            "the blocked host still draws its cycler and its reason"
-        );
-
-        draft.host_index = 0;
-        assert!(draft.can_submit());
-        assert!(host_section(&draft, tight, cx).is_some());
-
-        draft.hosts.clear();
-        assert!(
-            host_section(&draft, tight, cx).is_none(),
-            "the whole row is zero-suppressed when no host is configured"
-        );
+        let state = cx.new(|_| AppState::new("/tmp/fleet", Instant::now()));
+        with_host(&state, cx, |host| {
+            host.create = draft();
+            host.create.hosts = hosts(&[
+                host_status("devbox", "tailscale", LinkState::Ready, true),
+                host_status("archdev", "tailscale", LinkState::Down, false),
+            ]);
+        });
+        select_host(&state, 2, cx);
+        with_host(&state, cx, |host| {
+            assert_eq!(host.create.host_index, 0, "a blocked host is not clickable");
+            assert!(!host.create.host_touched);
+        });
+        select_host(&state, 1, cx);
+        with_host(&state, cx, |host| {
+            assert_eq!(host.create.host_index, 1);
+            assert!(
+                host.create.host_touched,
+                "a click freezes the default-host seeding"
+            );
+        });
     });
+}
+
+#[gpui::test]
+fn the_open_after_box_decides_what_enter_does(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| {
+        let state = cx.new(|_| AppState::new("/tmp/fleet", Instant::now()));
+        with_host(&state, cx, |host| host.create = draft());
+        with_host(&state, cx, |host| {
+            assert!(!host.create.stay_in_hub, "the box starts checked");
+        });
+        set_open_after(&state, false, cx);
+        with_host(&state, cx, |host| assert!(host.create.stay_in_hub));
+        set_open_after(&state, true, cx);
+        with_host(&state, cx, |host| assert!(!host.create.stay_in_hub));
+    });
+}
+
+/// Two displayed worktree rows, `first` above `second`, as the Hub list draws them.
+fn displayed_rows(ids: &[&str]) -> Vec<crate::presentation::DisplayedWorktree> {
+    ids.iter()
+        .map(|id| crate::presentation::DisplayedWorktree {
+            id: WorktreeId::try_from(*id).unwrap_or_else(|error| panic!("{error}")),
+            repo: RepoId::try_from("buk/payroll").unwrap_or_else(|error| panic!("{error}")),
+        })
+        .collect()
 }
 
 #[test]
 fn late_creation_does_not_override_navigation() {
     let mut state = AppState::new("/tmp/fleet", Instant::now());
+    state.displayed_hub.worktrees = displayed_rows(&["buk/payroll#feature", "buk/payroll#other"]);
     let intent = NavigationIntent::capture(&state);
-    state.cursors.worktrees = 4;
+    state.cursors.worktrees = 1;
     assert!(!intent.matches(&state));
+}
+
+#[test]
+fn the_new_row_shifting_the_cursor_is_not_navigation() {
+    let mut state = AppState::new("/tmp/fleet", Instant::now());
+    state.displayed_hub.worktrees = displayed_rows(&["buk/payroll#feature"]);
+    let intent = NavigationIntent::capture(&state);
+    // The snapshot that lists the created worktree inserts it above and keeps `feature` selected.
+    state.displayed_hub.worktrees = displayed_rows(&["buk/payroll#created", "buk/payroll#feature"]);
+    state.cursors.worktrees = 1;
+    assert!(
+        intent.matches(&state),
+        "the same row is selected, so Create must still open the worktree"
+    );
 }

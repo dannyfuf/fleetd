@@ -1,0 +1,38 @@
+# UX-SPEC §3.8.6 · ADR 0023 — a setting is changed and saved by pointer alone: the title bar's
+# Settings, a click on the rail's Sleep section, a click on its switch, the footer's Save.
+#
+# The draft is read across as `dialog.fields` (TESTING-HARNESS §11): `section`, then `row`, the
+# row under the cursor as `<label> = <value>`. Sleep's first row is *Sleep on switch*, on by
+# default. Reopened, the dialog shows the saved value, and its ✕ closes it with nothing changed.
+#
+# Virtual-lane only: it takes shots.
+fixture: one-repo
+await idle 30000
+assert screen == Hub && overlay absent
+
+click titlebar.settings
+await dialog.name == Settings 10000
+await targets["settings.section[2]"] exists 10000
+assert dialog.fields[0].value == General
+
+click settings.section[2]
+await dialog.fields[0].value == Sleep 5000
+assert dialog.fields[1].value == "Sleep on switch = on" && targets["settings.switch"] exists
+click settings.switch
+await dialog.fields[1].value == "Sleep on switch = off" 5000
+shot dirty
+
+click dialog.button[1]
+await overlay absent 10000
+assert screen == Hub && mode == Normal && dialog absent
+
+click titlebar.settings
+await dialog.name == Settings 10000
+await targets["settings.section[2]"] exists 10000
+click settings.section[2]
+await dialog.fields[1].value == "Sleep on switch = off" 5000
+shot saved
+click dialog.close
+await overlay absent 5000
+assert screen == Hub && dialog absent
+quit

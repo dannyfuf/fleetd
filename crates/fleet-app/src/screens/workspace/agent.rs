@@ -15,7 +15,7 @@ use crate::{
     screens::agent_thread::{
         AgentThreadEvent, AgentThreadView, ThreadHost,
         picker::PickerKind,
-        presentation::{self, header_word, title_subject},
+        presentation::{self, title_subject},
     },
     views::workspace_tabs::TabTarget,
 };
@@ -230,6 +230,11 @@ fn create_thread(
         });
         return;
     }
+    // Recorded before the request leaves, so the summary the daemon broadcasts for the new
+    // thread can select it however it races the reply (`AgentThreads::begin_create`).
+    let token = state.update(cx, |app, _| {
+        app.agents.begin_create(worktree.clone(), provider)
+    });
     let reply = bridge.request_agent(BridgeCommand::AgentThreadCreate {
         worktree,
         provider,
@@ -244,25 +249,28 @@ fn create_thread(
         let Some(state) = state.upgrade() else {
             return;
         };
-        cx.update(|cx| match answer {
-            Ok(Ok(ResponseBody::AgentThreadCreated(summary))) => {
-                let thread = summary.thread;
-                state.update(cx, |app, cx| {
-                    app.agents.apply_summary(summary);
-                    if !app.select_agent_thread(thread) {
-                        app.agents.close(thread);
+        cx.update(|cx| {
+            state.update(cx, |app, cx| {
+                let selected_on_sight = app.agents.finish_create(token);
+                match answer {
+                    Ok(Ok(ResponseBody::AgentThreadCreated(summary))) => {
+                        let thread = summary.thread;
+                        app.agents.apply_summary(summary);
+                        // Selecting again would re-arm the composer focus the first selection
+                        // already delivered, and undo any tab the user has moved to since.
+                        if selected_on_sight != Some(thread) && !app.select_agent_thread(thread) {
+                            app.agents.close(thread);
+                        }
                     }
-                    cx.notify();
-                });
-            }
-            Ok(Err(error)) => state.update(cx, |app, cx| {
-                record_mutation_failure(app, create_failure(&error.message));
+                    Ok(Err(error)) => {
+                        record_mutation_failure(app, create_failure(&error.message));
+                    }
+                    Ok(Ok(_)) | Err(_) => {
+                        record_mutation_failure(app, create_failure("the daemon did not answer"));
+                    }
+                }
                 cx.notify();
-            }),
-            Ok(Ok(_)) | Err(_) => state.update(cx, |app, cx| {
-                record_mutation_failure(app, create_failure("the daemon did not answer"));
-                cx.notify();
-            }),
+            });
         });
     })
     .detach();
@@ -358,6 +366,9 @@ impl WorkspaceScreen {
                         move |command| reopen_bridge.send_agent(command),
                         cx,
                     );
+                }
+                AgentThreadEvent::AttachDelegation(delegation) => {
+                    attach_delegation_child(&relay_state, *delegation, cx);
                 }
                 AgentThreadEvent::SelectCard(card) => {
                     super::actions::jump_to_card(
@@ -557,30 +568,6 @@ impl WorkspaceScreen {
             .bg(theme.colors.bg)
             .child(body)
             .into_any_element()
-    }
-
-    /// The session-header word for the active agent tab (§3.3).
-    pub(super) fn agent_header_word(
-        &self,
-        state: &AppState,
-        model: &Model,
-        cx: &App,
-    ) -> Option<SharedString> {
-        let thread = model.agent?;
-        // spec-B §B5.5 rule 4: `stopping…` is held until the daemon reports liveness
-        // cleared, not until the interrupt request returns, so it is the view — not the
-        // summary — that knows whether one is still in flight.
-        if self
-            .agent_view(thread)
-            .is_some_and(|view| view.read(cx).is_stopping())
-        {
-            return Some(SharedString::new_static("stopping\u{2026}"));
-        }
-        // The tab badge and the context-bar counters read this same value, which is what §3.3
-        // means by "the tab, the header and the context bar agree".
-        Some(SharedString::new_static(header_word(
-            state.agents.attention(thread),
-        )))
     }
 
     /// The native-agent action listeners, installed beside the terminal ones.

@@ -1,0 +1,46 @@
+# UX-SPEC.md §Board ("Drag and drop") · BOARD.md §8 · ADR 0023 — a card is dragged to move it,
+# and the drop goes down the path `[` / `]` take, with a place in the column.
+#
+# gpui starts a drag on the first motion after a press, and holds the preview at the offset the
+# pointer had from the tile at that moment; the motions after it are what the columns hear. So
+# the mid-drag frame is `press`, a short `move` onto the card's own ⋯ (the preview is held by that
+# corner, as a hand would pick it up), then the `move`s into Todo that open the slot the `shot`
+# photographs — the faded place FLT-1 left in Backlog, the lifted tile under the pointer, Todo's
+# accent hairline and the dashed `Drop to move FLT-1 to Todo`.
+#
+# The pointer lands on a target's centre, which is the boundary between "before" and "after" a
+# tile: at a tile's centre the slot opens after it. So a drop on Todo's first card puts FLT-1
+# second in Todo — a place `]` cannot reach, since `]` always appends — and the counts plus the
+# cursor on `card[1]` are the proof. Then a drag inside Todo reorders it: its last card, dragged
+# up onto its first, opens the slot under that first card and lands second; nothing leaves the
+# column. (Upward, because a slot opening under the pointer's path pushes the tiles below it
+# down, and `drag` aims at where its target was when the drag began.)
+#
+# Virtual-lane only: it drags and takes shots.
+fixture: board
+await idle 20000
+key g b
+await hub_tab == Board 10000
+assert lists.board.rows[0].badges[0] == "2" && lists.board.rows[1].badges[0] == "2"
+dump before
+
+press board.column[0].card[0]
+move board.column[0].card[0].menu
+move board.column[1].card[0]
+move board.column[1].card[0]
+shot dragging
+release board.column[1].card[0]
+await lists.board.rows[0].badges[0] == "1" 10000
+assert lists.board.rows[1].badges[0] == "3"
+await focused == "board.column[1].card[1]" 5000
+shot dropped
+dump dropped
+
+# Within Todo: FLT-4, last, dropped on FLT-3, first, lands second.
+assert lists["board.cards"].rows[2].badges[0] == "FLT-4"
+drag board.column[1].card[2] board.column[1].card[0]
+await lists["board.cards"].rows[1].badges[0] == "FLT-4" 10000
+assert focused == "board.column[1].card[1]"
+assert lists.board.rows[1].badges[0] == "3" && lists.board.rows[0].badges[0] == "1"
+dump reordered
+quit

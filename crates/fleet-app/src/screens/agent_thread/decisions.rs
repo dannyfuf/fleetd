@@ -60,16 +60,6 @@ impl QuestionWizard {
         }
     }
 
-    /// A wizard sized for `questions` whose keys address question `cursor`.
-    ///
-    /// The status bar mirrors the drawer's keys and rebuilds the decision from `AppState` rather
-    /// than from the view's live selection, so it needs the cursor without the choices.
-    pub(crate) fn at(questions: usize, cursor: usize) -> Self {
-        let mut wizard = Self::new(questions);
-        wizard.cursor = cursor.min(questions.saturating_sub(1));
-        wizard
-    }
-
     /// Resize the wizard for a different request, keeping nothing.
     pub(crate) fn resize(&mut self, questions: usize) {
         if self.selected.len() != questions {
@@ -258,7 +248,15 @@ pub(crate) fn decisions(
     let mut pending: Vec<Decision> = projection
         .gates
         .iter()
-        .map(|gate| decision_for(gate, projection.provider, wizard))
+        .map(|gate| {
+            let mut decision = decision_for(gate, projection.provider, wizard);
+            // `codex wants to edit README.md`: the file a permission is about, when its item
+            // names one, finishes the sentence the title starts.
+            if let Some(subject) = approval_subject(projection, gate) {
+                decision.title = SharedString::from(format!("{} {subject}", decision.title));
+            }
+            decision
+        })
         .collect();
     if let Some(plan) = plan_ready(projection) {
         pending.push(plan);
@@ -368,7 +366,7 @@ pub(crate) fn decision_for(
                 SharedString::from(format!(
                     "{} wants to {}",
                     provider.executable(),
-                    kind_word(tool)
+                    approval_verb(tool)
                 )),
                 DecisionKind::Approval(approval),
             )
@@ -401,6 +399,36 @@ pub(crate) fn decision_for(
             )
         }
     }
+}
+
+/// What a permission asks to do, as the drawer's title says it: `run a command`, `edit`.
+fn approval_verb(tool: &fleet_core::agents::ToolKind) -> String {
+    use fleet_core::agents::ToolKind;
+    match tool {
+        ToolKind::Bash => "run a command".to_owned(),
+        ToolKind::Search | ToolKind::Grep => "search".to_owned(),
+        ToolKind::Agent => "start a subagent".to_owned(),
+        ToolKind::Mcp { .. } | ToolKind::Unknown { .. } => format!("use {}", kind_word(tool)),
+        _ => kind_word(tool),
+    }
+}
+
+/// The file a permission gate's item is about — its base name — when the item names one.
+fn approval_subject(projection: &ThreadProjection, gate: &OpenGate) -> Option<String> {
+    let GateKind::Permission {
+        item: Some(item), ..
+    } = &gate.kind
+    else {
+        return None;
+    };
+    let ItemKind::Tool(call) = &projection.item(*item)?.kind else {
+        return None;
+    };
+    let path = super::rows::item::tool_path(call)?;
+    let name = std::path::Path::new(&path)
+        .file_name()
+        .map_or_else(|| path.clone(), |name| name.to_string_lossy().into_owned());
+    Some(name)
 }
 
 /// One harness question, as the drawer draws it.
@@ -437,15 +465,15 @@ fn question_for(question: &Question) -> DecisionQuestion {
 /// The `[a]` label of one permission, which always states the scope it really grants.
 fn session_label(gate: &OpenGate) -> SharedString {
     let GateKind::Permission { options, .. } = &gate.kind else {
-        return SharedString::new_static("allow for this session");
+        return SharedString::new_static("Allow for this session");
     };
     if options
         .iter()
         .any(|option| option.label == PermissionChoice::AllowDirectory)
     {
-        return SharedString::new_static("allow for this directory");
+        return SharedString::new_static("Allow for this directory");
     }
-    SharedString::new_static("allow for this session")
+    SharedString::new_static("Allow for this session")
 }
 
 /// The wider grant `[a]` means for this gate, narrowed to what the adapter mapped.

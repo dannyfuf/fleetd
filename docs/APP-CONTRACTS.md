@@ -104,7 +104,7 @@ impl ActiveDialog {
 // dialogs/mod.rs
 pub enum Dialogs { CreateWorktree, CloneRepo, Confirm, NewContext, EditContext, AssignRepo,
                    EditHooks, Settings, RenameTerminal, Help, Quit, QuitDaemon,
-                   CardDetail, CardCreate, CardPicker, BoardSettings }
+                   CardDetail, CardCreate, CardPicker, BoardSettings, ChangesDiff }
 impl Dialogs {
     pub const fn context_name(&self) -> &'static str;   // the `Dialog > <name>` word
     fn render(/* state, bridge, focus, window, cx */) -> AnyElement;   // called by ActiveDialog
@@ -134,7 +134,7 @@ Rules that come with those signatures:
    `state.update(cx, |state, cx| { …; cx.notify(); })` for writes. The shell observes the
    entity, so a `cx.notify()` inside that closure repaints the whole frame.
 3. **The daemon is only reachable through `Bridge`** (§4). Clone it into your listeners.
-4. **Do not draw the context bar, the status bar, the banner or the toasts.** The shell owns all
+4. **Do not draw the title bar, the status bar, the banner or the toasts.** The shell owns all
    four, on every screen, at the same pixel positions (§2.1).
 5. The `Dialogs` variant **names** and the strings from `context_name()` are stable, because
    `keymap.rs` binds against them. A dialog's own data lives in its draft entity, not in the
@@ -144,7 +144,7 @@ Rules that come with those signatures:
 
 Do not re-implement these; they arrive as `AppState` changes:
 
-* opening and closing every overlay, and the mode word that follows it;
+* opening and closing every overlay, and the mode that follows it;
 * `Esc` (`fleet::Cancel`, `dialog::Cancel`, `filter::Escape`) including the two-stage filter
   escape, and `q` closing the Jobs panel;
 * the whole quit flow, `ctrl-q` and `ctrl-shift-q`, including `W` never-warn;
@@ -189,6 +189,7 @@ is always `Fleet`.
 | Filter / Palette / Jobs | `Fleet > Filter` (`> BoardFilter` on the board) \| `Palette` \| `Jobs`, then the focused editor's `FleetTextInput` context for the first two |
 | Dialog browsing | `Fleet > Dialog > CardDetail` \| `BoardSettings` \| `CardPicker` \| `Settings` \| `Create` (or the dialog's other stable name) |
 | Dialog text editing | `Fleet > Dialog > CardDetailEditing` \| `BoardSettingsEditing` \| `SettingsEditing` \| `CreateEditing`, then the focused component's `FleetTextInput` context |
+| Open kit menu (⋯, `+`, right-click, dropdown) | the chain of the element that opened it, then `FleetMenu` — the menu is painted `deferred` inside that element and holds the focus until it closes, then hands it back (`DESIGN-SYSTEM.md` §6.8) |
 | Daemon banner showing (§3.12 C) | the base chain **plus** `Daemon > Banner`, innermost — unless a live editor owns the keyboard on that base chain, when the word is absent |
 | fleetd will not start (§3.12 B) | `Fleet > Daemon > Down` |
 | First run (§3.13) | `Fleet > FirstRun` |
@@ -224,6 +225,16 @@ Two consequences worth knowing:
   query is a filter that never contains a space, so it keeps the browsing word and `space` toggles
   the highlighted card. The rule is now complete: the `Dialog` container binds no editing key of
   its own, so there is no legacy editor row left for a dialog to fall back on.
+* **A kit menu owns the focus without being an `AppState` focus owner.** A `PopoverMenu`,
+  `ContextMenu` or `Dropdown` keeps its open menu in gpui element state, not in `AppState`, so
+  `focus_owner` does not change when one opens. The shell's focus reconciliation therefore asks
+  `fleet_ui_kit::menu_holds_focus` first and changes nothing while it is true: a daemon event that
+  re-renders the Hub must not pull the keyboard out of an open ⋯ menu, wherever the menu was
+  opened from (a row, the title bar). Closing a menu hands the focus back to the element that had
+  it, and the next reconciliation proceeds as before; an item's action is dispatched only after
+  that hand-back, so an action that opens a dialog finds the shell in its usual state. The price is
+  that a state change which wants the focus somewhere else — a dialog opened by a background event
+  — waits until the menu closes, which the next click anywhere or `esc` does.
 * Inside a native agent tab, `^s` never reaches gpui's two-key matcher. The shell's keystroke
   interceptor consumes it, resolves the second key against the *live* chain through
   `keymap::chord_action_for_chain`, and consumes that key too — running its row, or toasting
@@ -263,7 +274,7 @@ changes. `AppState::agent_context_chain()` derives it from daemon state, not fro
 the thread's newest open gate picks `AgentDecision > AgentPermission` \| `AgentQuestion` \|
 `AgentPlan`, and otherwise a running session, a running turn or live background work picks
 `AgentWorking` over `AgentIdle`; a frozen transcript tail (`ctrl-s [`) takes precedence over all
-of them and picks `AgentNativeScroll`, which is also what the status bar's `SCROLL` word is read
+of them and picks `AgentNativeScroll`, which is also what the snapshot's `Scroll` mode is read
 from. Deriving it from the projection is what makes the card own the
 keyboard in the *same frame* the gate appears, instead of one frame later. `Agent > AgentRow`
 is bound, listed in Help and handled by the workspace (`ExpandRow`, `Revert`, `OpenInEditor`
@@ -296,6 +307,14 @@ interactive tree: gpui's forward capture pass first clears pending clicks and pr
 the gate stops propagation before reverse-order bubble handlers can resize, scroll, select, focus,
 or send terminal input. Agent and Workspace terminal handlers additionally verify their exact live
 terminal owner.
+
+An overlay that runs an action *for the surface under it* — Help's rows and guide buttons — does
+not dispatch it from its own element: the overlay's dispatch path reaches the Shell root's
+listeners but none of the screen's. It closes itself and leaves the action's name in
+`AppState::pending_action`; the Shell dispatches it from the same next-frame replay as a queued key
+(`shell/root/focus.rs`), once the frame that handed the surface its keyboard back has painted, and
+only from a frame of the current owner. The action therefore lands exactly where its key would,
+and `await idle` waits for it through the harness's pending-frame flag.
 
 ### Arbitrations against `KEYMAP.md`
 
@@ -493,14 +512,14 @@ is the single source of truth on the client. The parts a screen touches:
 | Field | Meaning |
 | --- | --- |
 | `snapshot: Option<Snapshot>` | the daemon's authoritative state; `None` until the first one lands |
-| `snapshot_at` / `snapshot_age(now)` | what the `stale · <age>` stamp ages (§1.3) |
+| `snapshot_at` / `snapshot_age(now)` | what the `Stale · <age>` chip ages (§1.3) |
 | `grids: HashMap<TerminalId, MirrorGrid>` | one mirror grid per terminal, diffs already applied |
 | `displayed_hub: DisplayedHub` | stable IDs and rows from the Hub's current scoped/sorted/filtered projection |
 | `board: BoardState` | active context’s `BoardView`, loading/error, `BoardFocus { column, row }`, filter and optional `GroupBy` |
 | `board_stale: bool` | authoritative refresh pending; lives outside the frozen `BoardState` fields |
 | `board_backends: Vec<BackendDescriptor>` | the daemon's backend registry, fetched once per connection; the header label and the settings dialog's rows are drawn from it |
 | `screen`, `hub_pane`, `pr_tab`, `scope`, `cursors` | where the cursor is, per list |
-| `terminal_mode`, `agent_popup`, `overlay`, `mode()` | the base Workspace mode, floating-agent mode, top overlay, and resulting mode word/key context |
+| `terminal_mode`, `agent_popup`, `overlay`, `mode()` | the base Workspace mode, floating-agent mode, top overlay, and resulting mode/key context |
 | `filter` | query + whether the input still owns the keyboard |
 | `session_mru`, `terminal_mru` | `ctrl-s w` and `ctrl-s Tab` are `Mru::alternate()` |
 | `toasts`, `sticky_error` | §2.7 and §1.8; errors are sticky, never toasts |
@@ -520,9 +539,8 @@ is a pure function so no two surfaces can disagree about a thread:
 | --- | --- |
 | Which tabs does this worktree have? | `agents.of_worktree(&worktree)`, in daemon snapshot order, excluding top-level threads in the installation's closed set and child threads outside this window's attached set |
 | Which top-level tabs did this installation close? | `AgentClosedThreads` seeds `agents.closed` before the first snapshot; `^s x` adds locally and at the daemon, while picker or top-level navigation removes both |
-| What mark does a tab carry? | `agents.attention(thread)` → `tab_badge`: spinner (`Working`) · amber dot (`NeedsYou`) · gray dot (`Unread`) · `exited <code>` (`Failed`) · nothing |
-| What does the session header say? | the same attention → `header_word`: `working` · `needs you` · `failed` · `idle` |
-| What do the context-bar chips count? | `agents.counts()` → `AgentCounts { needs_you, working, failed }`, including the thread on the current tab, each chip zero-suppressed |
+| What mark does a tab carry? | `agents.attention(thread)` → `tab_badge`: spinner (`Working`) · amber `needs you` chip (`NeedsYou`) · blue dot (`Unread`) · `exited <code>` (`Failed`) · nothing. The tab is the only place the Workspace states a thread's attention; there is no session header word |
+| What does the title bar's `needs you` count, and what does it open? | `agents.counts().needs_you`, including the thread on the current tab, zero-suppressed; a click opens `agents.waiting_thread()` when exactly one waits, else the agents picker |
 | When does a notification fire? | `agents.attention_edges()` — one toast per *edge* into `NeedsYou`/`Failed`, so a thread that stays blocked does not re-notify |
 | What has this installation shown? | `agents.seen(thread)`; selecting a tab sends monotonic `AgentMarkSeen`, which is what clears a `NeedsYou(Finished)`. Windows sharing one Fleet home share this cursor; a different installation does not |
 
@@ -892,7 +910,7 @@ the worktree scope and then selects the session's `fleet://board` terminal — o
 with `NewTerminal { name: "board", command: "fleet://board", cwd }` and selects the reply, the
 same path `ctrl-s c` takes. The tab is created on demand and never written to `windows[]`, so
 pressing the key twice is one tab, selected twice. Its listener is the shell root's, because the
-palette's `Workspace: Open board tab` row dispatches the same action from a sibling branch of
+palette's `Open the worktree's board` row dispatches the same action from a sibling branch of
 the element tree.
 Only one request is in flight per generation. Context switches
 (including A → B → A), scope switches and link changes reject old responses. Errors remain
@@ -920,9 +938,10 @@ shell's focus reconciliation hands the keyboard to whichever editor the draft sa
 | `create` + `create_branch` | `create_worktree::CreateState` + `Option<Entity<TextInput>>` | the branch text; `CreateState.branch` is its `String` mirror, and `Changed` republishes the validation message and the worktree-id preview through `set_invalid` / `set_preview`. It owns the keyboard only while `field == Branch`, which is what leaves `←` / `→` to the host cycler while browsing |
 | `clone` + `clone_query` | `clone_repo::CloneState` + `Option<Entity<TextInput>>` | the search query; `Changed` mirrors it into `CloneState.query` and re-arms the 150 ms debounce, and the leading glyph swaps between `search` and `loader-circle` in the same update paths |
 | `context` + `context_name` / `context_owners` | `context::ContextState` + two `Option<Entity<TextInput>>` fields | the display name and the comma-separated owners; `Changed` mirrors both and republishes the collision message or the id preview on the name editor |
-| `edit_hooks` + `hook_inputs` | `edit_hooks::EditHooksState` + `Vec<Entity<TextInput>>` | one editor per command row, prepare commands first and post-create after them, split by `prepare_len`. Each list always ends in a blank row; typing into that row appends the next one and renumbers the labels below it |
+| `edit_hooks` + `hook_inputs` | `edit_hooks::EditHooksState` + `Vec<Entity<TextInput>>` | one editor per command row, prepare commands first and post-create after them, split by `prepare_len`. Each list always ends in a blank row; typing into that row appends the next one and renumbers the labels below it. A row's ✕ removes it (never a trailing blank), renumbering the same way and keeping `field` on the row it was on |
 | `rename_terminal` + `rename_input` | `rename_terminal::RenameState` + `Option<Entity<TextInput>>` | the terminal name; the draft keeps only the target terminal, the refusal and the in-flight flag |
 | `settings` + `settings_input` | `settings::SettingsState` + `Option<Entity<TextInput>>` | the row `Enter` opened; `SettingsState.editing` is its `String` mirror and the `SettingsEditing` predicate, `Changed` commits through `commit_value`, and a number row filters to ASCII digits |
+| `help` + `help_input` | `Option<help::HelpState>` + `Option<Entity<TextInput>>` | Help's search, for Help's whole lifetime; `Changed` re-runs the search in the update path, and the draft also holds what runs where Help was opened (`Here`, from `AppState::base_context_chain`), the tab, the Where filter and the cursor |
 
 `DialogHost.palette + palette_input` is the §3.9 query: `PaletteState.query` is a `String`
 mirrored from a live single-line `TextInput` created when the palette opens and dropped with the
@@ -931,14 +950,15 @@ rows and returns the flat cursor to the top. `dialogs::focused_input` reports it
 focus reconciliation treats the palette exactly like a migrated dialog.
 
 `DialogHost.behind_palette` names the dialog the open palette replaced — the palette does not
-stack on a dialog, and a `Card detail:` palette row reopens that dialog instead of reseeding it
+stack on a dialog, and a card-detail palette row reopens that dialog instead of reseeding it
 over the text the user already typed. `:` is therefore bound in `Dialog > CardDetail` as well as
-in `Hub`: without a way in from the detail, `Card detail: Close` and `Card detail: Save text edit`
+in `Hub`: without a way in from the detail, the `Close the card` and `Save the edit` rows
 are rows no state could ever list and the whole `behind_palette` path is unreachable. The added fields are all local editing state; the BOARD §8
 fields keep their names and meanings. `DialogHost.card_detail_input` is the **one** live editor
 used by the three text surfaces (title, description, comment), because at most one is open.
-`Dialogs::CardDetail.width()` is 880 px — it is a two-pane surface, not a form — and
-the other three board dialogs are 560 px.
+`Dialogs::CardDetail.width()` is `sheet_w_detail` (736 px): the detail is a right-side `Sheet`
+the shell places in `AppFrame::body_overlay`, as it does the Jobs panel, so the board stays
+visible beside it. The other three board dialogs are 560 px.
 
 `card_picker::PickerKind` is `Status | Priority | Assignee | Labels | Estimate |
 DueDate | Repo | Property(String)`. Set `host.card_picker.kind` before opening
@@ -947,7 +967,8 @@ Opening a picker from detail carries its card ID, independently of the board cur
 Applying or cancelling returns to the existing detail draft without reseeding it.
 Other dialog openings seed fresh drafts.
 
-Every BOARD §8 command has a palette `Command` variant, label and action dispatch.
+Every BOARD §8 command has a palette `Command` variant and action dispatch; its label comes from
+the action catalogue (`KEYMAP.md` § *Action catalogue*).
 The exact action names are listed in `KEYMAP.md`; the namespaces are `board` and
 `card_detail`. `Shell::with_actions` registers every action. Board handlers call
 the corresponding snake_case free function in `screens::board`; detail handlers
@@ -1013,8 +1034,8 @@ land on a different fleetd) but keeps the descriptors, so the header's label nev
   `fleet_core::board::ops` reads them. `PickerKind::card_field()` maps a picker to the field
   name that list uses. `screens::board::readonly_message(state, kind)` builds
   `"<field> is read-only on <backend label> boards"`; the board's pickers and `[` / `]` show it
-  as a toast (`Icon::Lock`), and the card detail writes it to its own error line, because the
-  dialog's scrim covers the toast stack. `views::board_card_detail::PropertyRow.locked` draws
+  as a toast (`Icon::Lock`), and the card detail writes it to its own error line, at the top of
+  the sheet the row is on. `views::board_card_detail::PropertyRow.locked` draws
   the row in `Tone::Secondary` with a trailing lock glyph while keeping its picker target — a
   row that silently did nothing would look like a broken key.
 * **`x`** — `board::OpenRemote` and `card_detail::OpenRemote` open `card.remote.url` with

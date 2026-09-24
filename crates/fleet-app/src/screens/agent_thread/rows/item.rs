@@ -10,9 +10,9 @@ use fleet_core::agents::{
 };
 use fleet_ui_kit::{
     AssistantMetaRow, AssistantRow, DelegationResultCard, DelegationRow, DelegationRowStatus,
-    DiffRow, ErrorRow, GateOutcome, GateRow, Icon, PlanRow, ReasoningRow, SubagentRow, ToolRow,
-    ToolRowState, TranscriptRow, TranscriptRowId, TranscriptRowKind, UserRow, UserRowState,
-    format_duration, format_exit, parse_markdown_document,
+    DiffRow, ErrorRow, GateOutcome, GateRow, Icon, PlanRow, ReasoningRow, RowActions, SubagentRow,
+    ToolRow, ToolRowState, TranscriptRow, TranscriptRowId, TranscriptRowKind, UserRow,
+    UserRowState, format_duration, format_exit, format_file_delta, parse_markdown_document,
 };
 use gpui::SharedString;
 use std::rc::Rc;
@@ -515,28 +515,79 @@ pub(crate) fn split_plan(markdown: &str) -> (SharedString, String) {
 
 /// The presentation properties of one 30 px tool row.
 pub(crate) fn tool_row(inputs: &RowInputs<'_>, item: &Item, call: &ToolCall) -> ToolRow {
-    projected_tool_row(item, call, inputs.is_expanded(item.id))
+    projected_tool_row(
+        item,
+        call,
+        inputs.is_expanded(item.id),
+        awaits_gate(inputs.projection, item.id),
+    )
+}
+
+/// Whether an open permission gate is asking about this item, which is what makes its row say
+/// `waiting for you`.
+pub(crate) fn awaits_gate(projection: &fleet_core::agents::ThreadProjection, item: ItemId) -> bool {
+    projection.gates.iter().any(
+        |gate| matches!(gate.kind, GateKind::Permission { item: Some(gated), .. } if gated == item),
+    )
 }
 
 /// Rebuilds one existing tool row after command output grows, without rebuilding the transcript.
-pub(crate) fn projected_tool_row(item: &Item, call: &ToolCall, expanded: bool) -> ToolRow {
+pub(crate) fn projected_tool_row(
+    item: &Item,
+    call: &ToolCall,
+    expanded: bool,
+    waiting: bool,
+) -> ToolRow {
     let mut row = ToolRow::new(
         SharedString::from(item.id.to_string()),
-        SharedString::from(kind_word(&call.kind)),
+        kind_verb(&call.kind),
         SharedString::from(summary_text(item)),
     )
     .state(row_state(item.status))
     .icon(tool_icon(&call.kind))
-    .expanded(expanded);
+    .expanded(expanded)
+    .actions(RowActions {
+        copy: true,
+        diff: call.diff.is_some(),
+        open: tool_path(call).is_some(),
+        revert: false,
+    });
     // §5: an exit code is a structured field rendered explicitly, never a colour and never a
-    // substring match on English error text.
-    if let Some(code) = call.exit_code.filter(|code| *code != 0) {
-        row = row.result(format_exit(code));
+    // substring match on English error text. The chip is what carries it.
+    if waiting {
+        row = row
+            .result("waiting for you")
+            .result_tone(fleet_ui_kit::Tone::Warning);
+    } else if let Some(code) = call.exit_code.filter(|code| *code != 0) {
+        row = row
+            .result(format_exit(code))
+            .result_tone(fleet_ui_kit::Tone::Danger);
+    } else if let Some(diff) = &call.diff {
+        row = row.result(format_file_delta(diff.added, diff.removed));
+    }
+    if item.status != ItemStatus::InProgress
+        && let Some(duration) = call.duration_ms
+    {
+        row = row.detail(format_duration(duration));
     }
     if let Some(body) = expanded_body(call, &row.summary) {
         row = row.body(body);
     }
     row
+}
+
+/// The file a tool call is about: its diff's path, else the `file_path` it was given. What
+/// `o` opens, and why an edit or a read row offers "Open in editor".
+pub(crate) fn tool_path(call: &ToolCall) -> Option<String> {
+    call.diff
+        .as_ref()
+        .map(|diff| diff.path.display().to_string())
+        .or_else(|| {
+            call.input
+                .get("file_path")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned)
+        })
 }
 
 /// The lifecycle glyph a projected item status maps to.
@@ -601,6 +652,26 @@ pub(crate) fn kind_word(kind: &ToolKind) -> String {
         // An unrecognized tool shows its raw harness name (§3.2).
         ToolKind::Unknown { name } => name.clone(),
     }
+}
+
+/// The kind column of a tool row: what the call did, as a verb (`Read`, `Edit`, `Run`).
+///
+/// A tool Fleet has no verb for keeps its own name: the MCP server, or the raw harness name.
+pub(crate) fn kind_verb(kind: &ToolKind) -> SharedString {
+    SharedString::new_static(match kind {
+        ToolKind::Read => "Read",
+        ToolKind::Edit => "Edit",
+        ToolKind::Write => "Write",
+        ToolKind::Bash => "Run",
+        ToolKind::Search | ToolKind::Grep => "Search",
+        ToolKind::Fetch => "Fetch",
+        ToolKind::Agent => "Delegate",
+        ToolKind::Todo => "Plan",
+        ToolKind::Skill => "Skill",
+        ToolKind::Mcp { .. } | ToolKind::Unknown { .. } => {
+            return SharedString::from(kind_word(kind));
+        }
+    })
 }
 
 /// The glyph a tool kind draws when its state does not replace it (`spec-B` §B2).

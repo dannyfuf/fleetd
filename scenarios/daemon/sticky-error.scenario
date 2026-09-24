@@ -1,5 +1,6 @@
 # KEYMAP.md §Global [A18] · UX-SPEC.md §1.8 — a failed job fills the sticky error slot, and `!`
-# focuses it by opening the Jobs panel on the failure.
+# focuses it by opening the Jobs panel on the failure. A click on the error does what `!` does,
+# and its ✕ (`sticky_error.close`) — or `X` — clears it (ADR 0023).
 #
 # The sticky error is the one notification that never expires, so it is the only one a user can
 # still act on minutes later — which is what [A18] gives `!` to do. `job failure` submits a real
@@ -35,4 +36,38 @@ assert key_contexts[0] == "Jobs" && focused == "jobs.row[0]"
 # order, and it has been observed both ways around.
 assert lists.jobs.rows[1] exists && lists.jobs.selected exists && sticky_error exists
 dump jobs
+
+# The pointer does what `!` does: close the panel, then click the error itself.
+key escape
+await overlay absent 5000
+assert sticky_error exists && targets["sticky_error.close"] exists
+click sticky_error.retry
+await overlay == Jobs 5000
+assert key_contexts[0] == "Jobs" && sticky_error exists
+key escape
+await overlay absent 5000
+
+# Its ✕ clears the slot; the failed jobs stay in the panel.
+click sticky_error.close
+await sticky_error absent 5000
+assert targets["sticky_error.retry"] absent
+key J
+await overlay == Jobs 5000
+assert lists.jobs.rows[1] exists
+key escape
+await overlay absent 5000
+
+# `X` is the ✕'s key: retrying the clone fails the same way, which fills the slot again, and
+# `X` clears it.
+key J
+await overlay == Jobs 5000
+click jobs.filter[2]
+await lists.jobs.filter == "failed"
+click jobs.row[0].retry
+await sticky_error exists 30000
+key escape
+await overlay absent 5000
+key X
+await sticky_error absent 5000
+dump dismissed
 quit

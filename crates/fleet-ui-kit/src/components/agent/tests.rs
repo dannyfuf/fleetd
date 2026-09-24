@@ -16,7 +16,7 @@ use super::{
     ApprovalRequest, AssistantMetaRow, AssistantRow, CheckpointRow, Decision, DecisionDock,
     DecisionKind, DecisionQuestion, DiffRow, EmptyRow, ErrorRow, GateOutcome, GateRow, MetadataFit,
     MetadataRow, MetadataSegment, NoticeRow, PlanRow, QuestionOption, QuestionSet, ReasoningRow,
-    SubagentRow, ToolRow, ToolRowElement, ToolRowState, TranscriptList, TranscriptRow,
+    RowActions, SubagentRow, ToolRow, ToolRowElement, ToolRowState, TranscriptList, TranscriptRow,
     TranscriptRowId, TranscriptRowKind, TurnFoldRow, TurnFooterRow, UserRow, UserRowState,
     WorkGroupRow, WorkLiveRow, WorkingPhase, WorkingRow, turn_footer_segments,
 };
@@ -362,7 +362,7 @@ struct Panels {
 impl gpui::Render for Panels {
     fn render(
         &mut self,
-        _window: &mut gpui::Window,
+        window: &mut gpui::Window,
         cx: &mut gpui::Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme().clone();
@@ -378,13 +378,22 @@ impl gpui::Render for Panels {
         .enumerate()
         .map(|(key, state)| {
             ToolRowElement::new(
-                ToolRow::new("t", "bash", "cargo test")
+                ToolRow::new("t", "Run", "cargo test")
                     .icon(Icon::Terminal)
                     .state(state)
-                    .result("exit 1"),
+                    .result("exit 1")
+                    .detail("4.1s")
+                    .actions(RowActions {
+                        copy: true,
+                        diff: key % 2 == 0,
+                        open: key % 3 == 0,
+                        revert: false,
+                    }),
                 key,
             )
             .focused(key == 0)
+            .on_action(|_, _, _| {})
+            .harness_part("agents.tool")
             .into_any_element()
         });
         // The same segments at four widths: the memo is per width, and the pinned block never
@@ -429,7 +438,10 @@ impl gpui::Render for Panels {
                         working_label: None,
                         body: None,
                         toggle: None,
+                        action: Some(Rc::new(|_, _, _, _| {})),
+                        action_kbd: None,
                     },
+                    window,
                     cx,
                 )
             })
@@ -442,10 +454,10 @@ impl gpui::Render for Panels {
             .children(tools)
             .children(delegation_rows)
             .children(strips)
-            .children(
-                self.decisions
-                    .iter()
-                    .map(|decision| DecisionDock::new(decision.clone())),
-            )
+            .children(self.decisions.iter().map(|decision| {
+                DecisionDock::new(decision.clone())
+                    .on_action(|_, _, _| {})
+                    .kbd_for(|_, _, _| crate::components::Kbd::parse("y").ok())
+            }))
     }
 }

@@ -225,8 +225,32 @@ fn the_header_counts_are_composed_with_the_model_and_hidden_at_zero() {
         needs_you: 1,
         ..BoardMarks::default()
     });
-    assert_eq!(busy.working_label.as_deref(), Some("1/2 working"));
+    assert_eq!(busy.working_label.as_deref(), Some("1 of 2 runs working"));
     assert_eq!(busy.needs_you_label.as_deref(), Some("1 needs you"));
+}
+
+/// A card owed a run the limit has no slot for is stated as waiting, never counted over the
+/// limit as working (`2 of 1 run working` was the defect).
+#[test]
+fn the_header_states_an_owed_run_as_waiting_not_over_the_limit() {
+    let mut view = view();
+    view.board.settings.max_live_runs = Some(1);
+    let label = |working, waiting| {
+        HeaderFacts::of(
+            &view,
+            None,
+            0,
+            &BoardMarks {
+                working,
+                waiting,
+                ..BoardMarks::default()
+            },
+        )
+        .working_label
+    };
+    assert_eq!(label(1, 0).as_deref(), Some("1 of 1 run working"));
+    assert_eq!(label(2, 1).as_deref(), Some("1 working \u{b7} 1 waiting"));
+    assert_eq!(label(1, 1).as_deref(), Some("1 waiting"));
 }
 
 /// A column wears the `⚡` for what it starts, not for where it sends a card afterwards.
@@ -308,8 +332,10 @@ impl gpui::Render for BoardHarness {
                 filter: "",
                 filter_editing: false,
                 filter_input: self.filter_input.clone(),
-                focus: (0, 0),
+                focus: (1, 0),
                 syncing: false,
+                runs: false,
+                drag: &SharedDrag::default(),
             },
             &self.scroll,
             &self.lists,
@@ -327,7 +353,14 @@ fn draw_board(cx: &mut gpui::TestAppContext) -> Vec<String> {
     let lists = model
         .columns
         .iter()
-        .map(|column| ListState::new(column.rows.len(), gpui::ListAlignment::Top, gpui::px(0.0)))
+        .map(|column| {
+            // One item more than the column's tiles: its `Add card` row is the list's last item.
+            ListState::new(
+                column.rows.len() + 1,
+                gpui::ListAlignment::Top,
+                gpui::px(0.0),
+            )
+        })
         .collect();
     let filter_input =
         cx.new(|cx| fleet_ui_kit::TextInput::new(fleet_ui_kit::InputMode::SingleLine, cx));
@@ -373,6 +406,116 @@ fn the_board_names_every_column_and_card_for_the_harness(cx: &mut gpui::TestAppC
     assert!(
         names.iter().all(|name| !name.is_empty()),
         "an empty recorded name means a composite name was built with recording off: {names:?}"
+    );
+    // The pointer twins of `c`, a column's `+`, a card's ⋯ and `/` (TESTING-HARNESS §3).
+    for name in [
+        "board.new",
+        "board.settings",
+        "board.filter",
+        "board.column[0].add",
+        "board.column[1].add",
+        "board.column[1].card[0].menu",
+    ] {
+        assert!(
+            names.contains(&name.to_owned()),
+            "{name} is painted: {names:?}"
+        );
+    }
+    assert!(
+        !names.contains(&"board.column[1].card[1].menu".to_owned()),
+        "an unselected card shows its ⋯ only under the pointer: {names:?}"
+    );
+    assert!(
+        !names.contains(&"board.sync".to_owned()),
+        "a local board mirrors nothing, so it has no sync button: {names:?}"
+    );
+}
+
+/// The pill names what a column's entry starts, in words built from its action.
+#[test]
+fn an_on_enter_column_names_its_action_in_words() {
+    let action = |kind, instructions: &str, provider| fleet_core::board::Action {
+        kind,
+        instructions: instructions.to_owned(),
+        expect: String::new(),
+        agent: fleet_core::board::ColumnAgentPrefs {
+            provider,
+            ..Default::default()
+        },
+        env: Vec::new(),
+    };
+    let mut view = view();
+    let label = |view: &BoardView, index: usize| {
+        build(view, "", None, 0, &BoardMarks::default()).columns[index]
+            .automation
+            .clone()
+            .map(|label| label.to_string())
+    };
+    view.board.statuses[0].automation = Some(fleet_core::board::ColumnAutomation {
+        on_enter: Some(action(
+            fleet_core::board::ActionKind::Prompt,
+            "Implement this card in the current worktree.",
+            Some(AgentKind::Codex),
+        )),
+        ..Default::default()
+    });
+    view.board.statuses[1].automation = Some(fleet_core::board::ColumnAutomation {
+        on_enter: Some(action(
+            fleet_core::board::ActionKind::Skill {
+                name: "deep-review".to_owned(),
+                args: String::new(),
+            },
+            "",
+            None,
+        )),
+        ..Default::default()
+    });
+    assert_eq!(
+        label(&view, 0).as_deref(),
+        Some("On enter: codex implements")
+    );
+    assert_eq!(
+        label(&view, 1).as_deref(),
+        Some("On enter: agent reviews"),
+        "a column that leaves the provider to the card does not guess one"
+    );
+    assert_eq!(label(&view, 2), None, "a plain column wears no pill");
+}
+
+/// A blocked card says which card it waits for when there is one, and how many otherwise.
+#[test]
+fn a_blocked_card_names_its_blocker() {
+    let mut view = view();
+    let blocker = view.cards[0].id.clone();
+    view.cards[2].blocked_by = vec![blocker];
+    let key = view.cards[0].display_key(&view.board);
+    assert_eq!(
+        model::blocked_label(&view, &view.cards[2], 1).as_ref(),
+        format!("blocked by {key}")
+    );
+    assert_eq!(
+        model::blocked_label(&view, &view.cards[2], 3).as_ref(),
+        "blocked by 3 cards"
+    );
+}
+
+/// The header's `1 needs you` points at the first card waiting on a person, in board order.
+#[test]
+fn the_needs_you_count_points_at_the_first_card_that_needs_you() {
+    let view = view();
+    let mut marks = BoardMarks::default();
+    marks.by_card.insert(
+        view.cards[1].id.clone(),
+        TileMark {
+            run: Some(RunMark::NeedsYou),
+            blocked: None,
+        },
+    );
+    let model = build(&view, "", None, 0, &marks);
+    assert_eq!(model.needs_you_at, Some((1, 1)));
+    assert_eq!(
+        build(&view, "", None, 0, &BoardMarks::default()).needs_you_at,
+        None
     );
 }
 

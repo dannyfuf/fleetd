@@ -88,7 +88,8 @@ impl DecisionAction {
 pub struct DecisionOption {
     /// The keycap, as the canvas writes it.
     pub key: SharedString,
-    /// What the key does, spelling out its effective scope.
+    /// What the key does, spelling out its effective scope, in sentence case: it is the label
+    /// of the dock's button as well as the status bar's hint.
     pub label: SharedString,
     /// What it dispatches.
     pub action: DecisionAction,
@@ -224,7 +225,7 @@ impl ApprovalRequest {
             rationale: None,
             caution: None,
             allows_edit: false,
-            session_label: SharedString::new_static("allow for this session"),
+            session_label: SharedString::new_static("Allow for this session"),
         }
     }
 
@@ -415,20 +416,20 @@ impl Decision {
         match &self.kind {
             DecisionKind::Approval(approval) => {
                 let mut options = vec![
-                    DecisionOption::new("y", "allow once", DecisionAction::AllowOnce),
+                    DecisionOption::new("y", "Allow once", DecisionAction::AllowOnce),
                     DecisionOption::new(
                         "a",
                         approval.session_label.clone(),
                         DecisionAction::AllowSession,
                     ),
-                    DecisionOption::new("n", "deny", DecisionAction::Deny),
+                    DecisionOption::new("n", "Deny", DecisionAction::Deny),
                 ];
                 if approval.allows_edit {
-                    options.push(DecisionOption::new("e", "edit", DecisionAction::Edit));
+                    options.push(DecisionOption::new("e", "Edit", DecisionAction::Edit));
                 }
                 options.push(DecisionOption::new(
                     "esc",
-                    "deny and stop",
+                    "Deny and stop",
                     DecisionAction::DenyAndStop,
                 ));
                 options
@@ -444,35 +445,35 @@ impl Decision {
                     };
                     options.push(DecisionOption::new(
                         keys,
-                        "choose",
+                        "Choose",
                         DecisionAction::Choose(0),
                     ));
                 }
                 if set.active().is_some_and(|question| question.multi_select) {
                     options.push(DecisionOption::new(
                         "space",
-                        "toggle",
+                        "Toggle",
                         DecisionAction::Toggle,
                     ));
                 }
                 let last = set.cursor + 1 >= set.questions.len();
                 options.push(DecisionOption::new(
                     "⏎",
-                    if last { "answer" } else { "next" },
+                    if last { "Answer" } else { "Next" },
                     DecisionAction::Answer,
                 ));
                 if set.cursor > 0 {
                     options.push(DecisionOption::new(
                         "p",
-                        "previous",
+                        "Previous",
                         DecisionAction::Previous,
                     ));
                 }
                 options
             }
             DecisionKind::PlanReady { .. } => vec![
-                DecisionOption::new("y", "implement", DecisionAction::Implement),
-                DecisionOption::new("n", "refine", DecisionAction::Refine),
+                DecisionOption::new("y", "Implement", DecisionAction::Implement),
+                DecisionOption::new("n", "Refine", DecisionAction::Refine),
             ],
         }
     }

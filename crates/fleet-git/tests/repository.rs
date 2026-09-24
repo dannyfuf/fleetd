@@ -1364,3 +1364,113 @@ async fn diffs_parse_under_a_users_mnemonic_prefix_configuration() {
     assert_eq!(diff.files[0].new_path, Some(PathBuf::from("notes.txt")));
     assert_eq!(diff.files[0].hunks.len(), 1);
 }
+
+#[tokio::test]
+async fn branch_changes_list_committed_uncommitted_and_untracked_files_against_the_base() {
+    let repo = TestRepo::new().await;
+    repo.write("README.md", "one\ntwo\n");
+    repo.write("gone.txt", "bye\n");
+    repo.commit("base");
+    git(repo.path(), &["branch", "base"]);
+    repo.write("README.md", "one\nTWO\nthree\n");
+    std::fs::remove_file(repo.path().join("gone.txt")).unwrap();
+    repo.commit("edit the readme");
+    repo.write("src/run.rs", "fn main() {}\n");
+    repo.commit("add the runner");
+    repo.write("src/run.rs", "fn main() {}\nfn run() {}\n");
+    repo.write("notes.md", "a\nb\nc");
+
+    let changes = repo
+        .repository
+        .branch_changes(&Ref("base".to_owned()), 1)
+        .await
+        .unwrap()
+        .expect("the base resolves");
+
+    let files: Vec<(String, fleet_git::DiffKind, Option<u64>, Option<u64>)> = changes
+        .files
+        .iter()
+        .map(|file| {
+            (
+                file.path.to_string_lossy().into_owned(),
+                file.kind,
+                file.added,
+                file.removed,
+            )
+        })
+        .collect();
+    assert_eq!(
+        files,
+        vec![
+            (
+                "README.md".to_owned(),
+                fleet_git::DiffKind::Modified,
+                Some(2),
+                Some(1)
+            ),
+            (
+                "gone.txt".to_owned(),
+                fleet_git::DiffKind::Deleted,
+                Some(0),
+                Some(1)
+            ),
+            (
+                "notes.md".to_owned(),
+                fleet_git::DiffKind::Added,
+                Some(3),
+                Some(0)
+            ),
+            (
+                "src/run.rs".to_owned(),
+                fleet_git::DiffKind::Added,
+                Some(2),
+                Some(0)
+            ),
+        ]
+    );
+    assert_eq!(changes.ahead, 2);
+    assert_eq!(
+        changes.commits.len(),
+        1,
+        "the list is capped, the count is not"
+    );
+    assert_eq!(changes.commits[0].subject, "add the runner");
+
+    let untracked = repo
+        .repository
+        .branch_file_diff(&Ref("base".to_owned()), Path::new("notes.md"))
+        .await
+        .unwrap()
+        .expect("the base resolves");
+    assert!(untracked.contains("+++ b/notes.md"), "{untracked}");
+    let committed = repo
+        .repository
+        .branch_file_diff(&Ref("base".to_owned()), Path::new("README.md"))
+        .await
+        .unwrap()
+        .expect("the base resolves");
+    assert!(
+        committed.contains("-two") && committed.contains("+TWO"),
+        "{committed}"
+    );
+    let deleted = repo
+        .repository
+        .branch_file_diff(&Ref("base".to_owned()), Path::new("gone.txt"))
+        .await
+        .unwrap()
+        .expect("the base resolves");
+    assert!(deleted.contains("-bye"), "{deleted}");
+}
+
+#[tokio::test]
+async fn branch_changes_are_absent_for_a_base_that_names_no_commit() {
+    let repo = TestRepo::new().await;
+    repo.write("README.md", "one\n");
+    repo.commit("base");
+    let changes = repo
+        .repository
+        .branch_changes(&Ref("origin/nowhere".to_owned()), 5)
+        .await
+        .unwrap();
+    assert!(changes.is_none());
+}

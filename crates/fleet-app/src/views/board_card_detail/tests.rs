@@ -149,7 +149,7 @@ fn a_property_the_schema_calls_uneditable_wears_the_same_lock() {
 #[test]
 fn a_conflict_banner_names_the_fields_that_differ() {
     let (_, mut card) = fixture();
-    assert!(conflict_banner(&card).is_none());
+    assert!(conflict_banner(&card, &Theme::dark()).is_none());
     card.conflict = Some(fleet_core::board::Conflict {
         detected_at: "2026-09-06T12:00:00Z".into(),
         remote: fleet_core::board::RemoteCard {
@@ -158,7 +158,7 @@ fn a_conflict_banner_names_the_fields_that_differ() {
         },
         fields: vec!["title".into(), "status".into()],
     });
-    assert!(conflict_banner(&card).is_some());
+    assert!(conflict_banner(&card, &Theme::dark()).is_some());
 }
 
 /// `differing_fields` answers in wire names; the banner has to say what the rows say.
@@ -580,20 +580,44 @@ fn a_backend_that_owns_a_field_locks_the_workflow_rows_it_owns() {
     );
 }
 
-/// Contracts §5.3: the run row's keys are named beside it, and only now that phase 9 binds
-/// them. `>` reads `re-run` here because the row exists only where a run does.
+/// The run card leads with its state as a sentence and keeps a finished run's usage apart, so
+/// it can sit at the line's right end; the whole line still reads as §11.9 words it.
 #[test]
-fn the_run_row_names_the_three_keys_that_act_on_it() {
-    assert_eq!(
-        run_hints()
-            .pairs()
-            .into_iter()
-            .map(|(keys, label)| (keys.to_string(), label.map(|label| label.to_string())))
-            .collect::<Vec<_>>(),
-        vec![
-            ("A".to_owned(), Some("attach".to_owned())),
-            ("X".to_owned(), Some("cancel".to_owned())),
-            (">".to_owned(), Some("re-run".to_owned())),
-        ]
-    );
+fn the_run_card_splits_its_line_into_head_facts_and_usage() {
+    let (_, mut card) = fixture();
+    let mut run = run_on(&card, Some(RunOutcome::Succeeded));
+    run.tokens = Some(12_400);
+    run.cost_usd = Some(0.31);
+    card.runs.push(run);
+    let line = run_line(&card, None, None, at("2026-09-06T12:09:00Z"))
+        .unwrap_or_else(|| panic!("a card with a run has a run row"));
+    assert!(line.head.starts_with("Succeeded"), "{}", line.head);
+    assert_eq!(line.facts.as_ref(), "codex · gpt-5 · high");
+    assert_eq!(line.usage.as_deref(), Some("12.4k tok · $0.31"));
+    assert!(line.text.starts_with("succeeded "), "{}", line.text);
+    assert!(line.text.ends_with("12.4k tok · $0.31"), "{}", line.text);
+}
+
+/// A linked card's Remote row opens the issue, as `x` does; the rows beside it state facts.
+#[test]
+fn the_remote_row_opens_the_issue_and_a_locked_row_takes_no_click() {
+    let (board, mut card) = fixture();
+    card.remote = Some(RemoteLink {
+        parent_key: None,
+        backend: "jira".into(),
+        key: "PROJ-12".into(),
+        url: Some("https://example.test/PROJ-12".into()),
+        version: None,
+        synced_at: "2026-09-06T12:00:00Z".into(),
+        remote_updated_at: None,
+    });
+    let rows = property_rows(&board, std::slice::from_ref(&card), &card, 0);
+    let remote = row(&rows, "Remote");
+    assert_eq!(remote.target, PropertyTarget::Remote);
+    assert!(is_clickable(remote));
+    assert!(!is_clickable(row(&rows, "Synced")));
+    assert!(is_clickable(row(&rows, "Status")));
+    let mut locked = row(&rows, "Status").clone();
+    locked.locked = true;
+    assert!(!is_clickable(&locked));
 }

@@ -61,7 +61,7 @@ fn an_approval_advertises_only_the_scopes_the_harness_can_honour() {
             .into_iter()
             .find(|option| option.key == "a")
             .map(|option| option.label.to_string()),
-        Some("allow for this session".to_owned())
+        Some("Allow for this session".to_owned())
     );
 
     // Codex accepts no amended command, so `[e]` is absent rather than drawn and refused.

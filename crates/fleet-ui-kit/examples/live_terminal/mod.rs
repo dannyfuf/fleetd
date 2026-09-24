@@ -208,7 +208,14 @@ impl LiveTerminal {
             .border_color(t.colors.border)
             .overflow_hidden()
             .child(grid)
-            .child(PrefixHint::new(self.prefix));
+            .when(self.prefix, |terminal| {
+                terminal.child(crate::support::prefix_menu::sample(
+                    &t,
+                    "live-prefix-menu",
+                    true,
+                    3,
+                ))
+            });
 
         let children = vec![
             header.into_any_element(),

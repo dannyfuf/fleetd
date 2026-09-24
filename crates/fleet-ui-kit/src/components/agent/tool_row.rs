@@ -19,9 +19,11 @@ use std::rc::Rc;
 
 use gpui::{AnyElement, App, SharedString, Window, div, prelude::*};
 
+use super::transcript_list::{RowAction, RowActionKbd, RowActions};
 use crate::{
-    components::{KeyHint, Spinner},
+    components::{ButtonSize, Chip, ContextMenu, IconButton, KeyHint, MenuItem, Spinner},
     focus::FocusRing,
+    harness::HarnessTargetExt as _,
     icons::{Icon, IconSize},
     text::Text,
     theme::ActiveTheme,
@@ -154,16 +156,22 @@ pub struct ToolRow {
     pub state: ToolRowState,
     /// The glyph the row's kind draws when the state does not replace it.
     pub icon: Icon,
-    /// Fixed kind-column label.
+    /// Fixed kind-column label: a verb, `Read`, `Edit`, `Run`.
     pub kind: SharedString,
     /// One-line invocation summary.
     pub summary: SharedString,
-    /// Optional right-aligned result.
+    /// Optional right-aligned result, drawn as a chip: `exit 1`, `+1 −1`, `waiting for you`.
     pub result: Option<SharedString>,
+    /// The result chip's tone. `None` takes the state's own ([`ToolRowState::result_tone`]).
+    pub result_tone: Option<Tone>,
+    /// A muted trailing fact after the chip — how long the call took.
+    pub detail: Option<SharedString>,
     /// Optional expanded body, assembled once by the projection — never in render.
     pub body: Option<SharedString>,
     /// Whether the row's body is currently exposed.
     pub expanded: bool,
+    /// The row verbs this call offers: its hover buttons and its right-click menu.
+    pub actions: RowActions,
 }
 
 impl ToolRow {
@@ -181,8 +189,11 @@ impl ToolRow {
             kind: kind.into(),
             summary: summary.into(),
             result: None,
+            result_tone: None,
+            detail: None,
             body: None,
             expanded: false,
+            actions: RowActions::default(),
         }
     }
 
@@ -207,6 +218,21 @@ impl ToolRow {
         self
     }
 
+    /// Tone the result chip explicitly: `waiting for you` is amber on a row that is still
+    /// running, a passing run is green.
+    #[must_use]
+    pub const fn result_tone(mut self, tone: Tone) -> Self {
+        self.result_tone = Some(tone);
+        self
+    }
+
+    /// Set the muted trailing fact.
+    #[must_use]
+    pub fn detail(mut self, detail: impl Into<SharedString>) -> Self {
+        self.detail = Some(detail.into());
+        self
+    }
+
     /// Set the expanded body text.
     #[must_use]
     pub fn body(mut self, body: impl Into<SharedString>) -> Self {
@@ -221,6 +247,13 @@ impl ToolRow {
         self
     }
 
+    /// Offer these row verbs.
+    #[must_use]
+    pub const fn actions(mut self, actions: RowActions) -> Self {
+        self.actions = actions;
+        self
+    }
+
     /// Whether `⏎` on this row shows anything.
     #[must_use]
     pub fn is_expandable(&self) -> bool {
@@ -228,12 +261,34 @@ impl ToolRow {
     }
 }
 
+impl ToolRowState {
+    /// The tone a result chip takes when the projection names none: a routine failure is red
+    /// in its chip (never in its heading), a denial amber, everything else neutral.
+    #[must_use]
+    pub const fn result_tone(self) -> Tone {
+        match self {
+            ToolRowState::Failed | ToolRowState::Severe => Tone::Danger,
+            ToolRowState::Denied => Tone::Warning,
+            ToolRowState::Running | ToolRowState::Done | ToolRowState::Stopped => Tone::Secondary,
+        }
+    }
+}
+
+/// The name of the hover group one tool line forms, so its verb buttons show under the pointer.
+///
+/// One static name for every row is correct: gpui resolves a group to the innermost ancestor
+/// that declares it, which is the row being hovered.
+const TOOL_LINE_GROUP: &str = "agent-tool-line";
+
+type Toggle = Rc<dyn Fn(&mut Window, &mut App) + 'static>;
+type Verb = Rc<dyn Fn(RowAction, &mut Window, &mut App) + 'static>;
+
 /// The interactive tool row: focus ring, expanded body, and the nested children region a
 /// subagent call draws its sub-tools in.
 ///
-/// `key` rather than an [`ElementId`] because the row needs **three** stable ids — the line,
-/// the body scroller and the row itself — and `("tool-line", key)` tuples produce them with no
-/// allocation. Building them with `format!` is the exact per-frame-`String` anti-pattern
+/// `key` rather than an [`ElementId`] because the row needs several stable ids — the line, the
+/// body scroller, the menu, the row itself — and `("tool-line", key)` tuples produce them with
+/// no allocation. Building them with `format!` is the exact per-frame-`String` anti-pattern
 /// `gpui-performance` names.
 #[derive(IntoElement)]
 pub struct ToolRowElement {
@@ -242,8 +297,10 @@ pub struct ToolRowElement {
     focused: bool,
     body: Option<AnyElement>,
     children: Vec<AnyElement>,
-    #[allow(clippy::type_complexity)]
-    on_toggle: Option<Rc<dyn Fn(&mut Window, &mut App) + 'static>>,
+    on_toggle: Option<Toggle>,
+    on_action: Option<Verb>,
+    action_kbd: Option<RowActionKbd>,
+    harness_part: Option<&'static str>,
 }
 
 impl ToolRowElement {
@@ -257,6 +314,9 @@ impl ToolRowElement {
             body: None,
             children: Vec::new(),
             on_toggle: None,
+            on_action: None,
+            action_kbd: None,
+            harness_part: None,
         }
     }
 
@@ -288,10 +348,35 @@ impl ToolRowElement {
         self.on_toggle = Some(Rc::new(on_toggle));
         self
     }
+
+    /// What a row verb pressed with the pointer — a hover button or a right-click menu item —
+    /// does. The same verb pressed with its key reaches the owner by the transcript's own event.
+    #[must_use]
+    pub fn on_action(
+        mut self,
+        on_action: impl Fn(RowAction, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_action = Some(Rc::new(on_action));
+        self
+    }
+
+    /// Name the 30 px line for the harness as `part[key]`.
+    #[must_use]
+    pub const fn harness_part(mut self, part: &'static str) -> Self {
+        self.harness_part = Some(part);
+        self
+    }
+
+    /// The owner's key-chip lookup for the verbs' controls.
+    #[must_use]
+    pub fn action_kbd(mut self, resolve: RowActionKbd) -> Self {
+        self.action_kbd = Some(resolve);
+        self
+    }
 }
 
 impl RenderOnce for ToolRowElement {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
         let row = self.row;
         let key = self.key;
@@ -300,11 +385,11 @@ impl RenderOnce for ToolRowElement {
 
         let drawn_glyph = if glyph.spinning {
             Spinner::new(("tool-glyph", key))
-                .size(IconSize::Large)
+                .size(IconSize::Medium)
                 .tone(glyph.tone)
                 .into_any_element()
         } else {
-            let mut element = glyph.icon.el().size(IconSize::Large).tone(glyph.tone);
+            let mut element = glyph.icon.el().size(IconSize::Medium).tone(glyph.tone);
             if let Some(opacity) = glyph.opacity {
                 element = element.opacity(opacity);
             }
@@ -325,40 +410,123 @@ impl RenderOnce for ToolRowElement {
             summary.ellipsize()
         };
 
+        let verbs = row.actions.list();
+        let on_action = self.on_action.filter(|_| !verbs.is_empty());
+        let action_kbd = self.action_kbd;
+        // The verbs a hovered row shows. Never the only way to them: the same verbs are in the
+        // row's right-click menu, and on its keys while the row holds the focus (ADR 0023).
+        let buttons = on_action.as_ref().map(|on_action| {
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(theme.space.xxs)
+                .when(!self.focused, |el| {
+                    el.invisible()
+                        .group_hover(TOOL_LINE_GROUP, |style| style.visible())
+                })
+                .children(verbs.iter().map(|action| {
+                    let action = *action;
+                    let on_action = Rc::clone(on_action);
+                    IconButton::new((verb_id(action), key), action.icon(), action.label())
+                        .size(ButtonSize::Compact)
+                        .when_some(
+                            resolve_kbd(action_kbd.as_ref(), action, window, cx),
+                            IconButton::kbd,
+                        )
+                        .on_click(move |_, window, cx| {
+                            // The line under the button toggles on a click; this one is not
+                            // that click.
+                            cx.stop_propagation();
+                            on_action(action, window, cx);
+                        })
+                }))
+        });
+
+        let hover = theme.colors.row_hover;
+        let clickable = expandable && self.on_toggle.is_some();
+        let result_tone = row.result_tone.unwrap_or(row.state.result_tone());
         let line = div()
             .id(("tool-line", key))
+            .group(TOOL_LINE_GROUP)
             .h(theme.metrics.row_h)
             .w_full()
             .flex()
             .items_center()
             .gap(theme.space.md)
+            .px(theme.space.sm)
+            .rounded(theme.radii.sm)
+            // Pointer feedback only, and never over the focus the keyboard set.
+            .when((clickable || on_action.is_some()) && !self.focused, |el| {
+                el.hover(move |style| style.bg(hover))
+            })
             .child(div().flex_none().child(drawn_glyph))
             .child(
-                Text::data_small(row.kind.clone())
+                Text::ui(row.kind.clone())
                     .muted()
                     .w(AGENT_TOOL_KIND_W)
                     .flex_none()
                     .ellipsize(),
             )
             .child(div().flex().flex_1().min_w_0().child(summary))
+            .children(row.result.clone().map(|result| {
+                Chip::new()
+                    .id(("tool-result", key))
+                    .text(result)
+                    .tone(result_tone)
+                    .filled(true)
+            }))
             .children(
-                row.result
+                row.detail
                     .clone()
-                    .map(|result| Text::hint(result).faint().flex_none()),
+                    .map(|detail| Text::hint(detail).faint().flex_none()),
             )
-            // §7: an affordance states its key. The hint is `invisible`, not absent, when the
-            // row cannot expand — a row that gains a body must not shift its own alignment.
+            .children(buttons)
+            // The chevron is `invisible`, not absent, when the row cannot expand — a row that
+            // gains a body must not shift its own alignment.
             .child(
                 div()
                     .flex_none()
                     .when(!expandable, |el| el.invisible())
-                    .child(expand_hint(row.expanded)),
+                    .child(
+                        if row.expanded {
+                            Icon::ChevronDown
+                        } else {
+                            Icon::ChevronRight
+                        }
+                        .el()
+                        .size(IconSize::Small)
+                        .tone(Tone::Muted),
+                    ),
             )
             // The click belongs to the 30 px line, never to the body it opens: clicking inside
             // an expanded diff or a nested tool must not fold the row being read.
-            .when_some(self.on_toggle, |el, on_toggle| {
-                el.on_click(move |_, window, cx| on_toggle(window, cx))
+            .when_some(self.on_toggle.filter(|_| expandable), |el, on_toggle| {
+                el.cursor_pointer()
+                    .on_click(move |_, window, cx| on_toggle(window, cx))
             });
+
+        let line = line.harness_target_optional(self.harness_part.map(|part| (part, key)));
+        // The right-click menu carries the same verbs as the hover buttons.
+        let line = match on_action {
+            Some(on_action) => ContextMenu::new(("tool-menu", key), line)
+                .menu(move |mut menu, window, cx| {
+                    for action in &verbs {
+                        let action = *action;
+                        let on_action = Rc::clone(&on_action);
+                        let mut item = MenuItem::new(action.label())
+                            .icon(action.icon())
+                            .on_select(move |window, cx| on_action(action, window, cx));
+                        if let Some(kbd) = resolve_kbd(action_kbd.as_ref(), action, window, cx) {
+                            item = item.kbd(kbd);
+                        }
+                        menu = menu.item(item);
+                    }
+                    menu
+                })
+                .into_any_element(),
+            None => line.into_any_element(),
+        };
 
         let body = (row.expanded && (self.body.is_some() || row.body.is_some())).then(|| {
             let content = self.body.unwrap_or_else(|| {
@@ -369,7 +537,7 @@ impl RenderOnce for ToolRowElement {
             });
             div()
                 .id(("tool-body", key))
-                .ml(theme.space.lg)
+                .ml(theme.space.xl)
                 .max_h(AGENT_BODY_MAX_H)
                 .overflow_y_scroll()
                 .child(content)
@@ -377,7 +545,7 @@ impl RenderOnce for ToolRowElement {
 
         let nested = (row.expanded && !self.children.is_empty()).then(|| {
             div()
-                .ml(theme.space.lg)
+                .ml(theme.space.xl)
                 .pl(theme.space.md)
                 .border_l(theme.metrics.hairline)
                 .border_color(theme.colors.border)
@@ -398,6 +566,26 @@ impl RenderOnce for ToolRowElement {
             .id(("tool-row", key))
             .w_full()
             .child(FocusRing::cursor_row(self.focused).content(content))
+    }
+}
+
+/// The owner's chip for one verb, when it gave the row a lookup.
+fn resolve_kbd(
+    resolve: Option<&RowActionKbd>,
+    action: RowAction,
+    window: &Window,
+    cx: &App,
+) -> Option<crate::components::Kbd> {
+    resolve.and_then(|resolve| resolve(action, window, cx))
+}
+
+/// The element-id prefix of one verb's hover button.
+const fn verb_id(action: RowAction) -> &'static str {
+    match action {
+        RowAction::Copy => "tool-copy",
+        RowAction::Diff => "tool-diff",
+        RowAction::Open => "tool-open",
+        RowAction::Revert => "tool-revert",
     }
 }
 

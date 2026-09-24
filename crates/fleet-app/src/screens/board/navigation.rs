@@ -53,12 +53,33 @@ pub(super) fn step_focus(state: &Entity<AppState>, columns: isize, rows: isize, 
     });
 }
 
-/// A mouse click on a tile or a column header.
+/// A mouse click on a tile or a column header, or a card dropped on a column.
 pub(super) fn on_click(click: BoardClick, state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
     let (column, row, open) = match click {
         BoardClick::Column(column) => (column, None, false),
         BoardClick::Card(column, row) => (column, Some(row), false),
         BoardClick::OpenCard(column, row) => (column, Some(row), true),
+        BoardClick::AddCard(column) => {
+            super::actions::new_card_in(state, column, cx);
+            return;
+        }
+        BoardClick::ClearFilter => {
+            state.update(cx, |app, cx| {
+                app.board.filter.clear();
+                app.board.focus.row = 0;
+                app.clamp_board_focus();
+                cx.notify();
+            });
+            return;
+        }
+        BoardClick::ColumnSettings(column) => {
+            super::actions::column_settings(state, bridge, column, cx);
+            return;
+        }
+        BoardClick::Drop { card, column, slot } => {
+            super::actions::drop_card(state, bridge, &card, column, slot, cx);
+            return;
+        }
     };
     state.update(cx, |app, cx| {
         app.board.focus.column = column;

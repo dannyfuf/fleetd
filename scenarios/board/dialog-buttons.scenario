@@ -1,0 +1,43 @@
+# UX-SPEC §Board "The other three dialogs" · ADR 0023 · TESTING-HARNESS.md §3 — New card, Card
+# property and Board settings on the button footer. New card's primary is `dialog.button[2]`, and a
+# click on it creates the card exactly as `⏎` does; Card property lists its values as
+# `dialog.row[N]`; Board settings' `Cancel` closes a clean draft as `esc` does. The shots are the
+# review of each footer and of Board settings' General and Columns panes.
+fixture: board
+await idle 20000
+key g b
+await hub_tab == Board 10000
+assert lists.board.rows[0].badges[0] == "2"
+
+key c
+await overlay == Dialog 10000
+await idle 10000
+assert dialog.name == CardCreate && targets["dialog.button[2]"] exists
+type Pointer card
+shot card-create
+click dialog.button[2]
+await overlay absent 10000
+await idle 10000
+assert dialog absent && hub_tab == Board
+
+key s
+await overlay == Dialog 10000
+await idle 10000
+assert dialog.name == CardPicker && targets["dialog.row[0]"] exists && targets["dialog.button[1]"] exists
+shot card-picker
+click dialog.button[0]
+await overlay absent 10000
+
+key ,
+await overlay == Dialog 10000
+await idle 10000
+assert dialog.name == BoardSettings && targets["dialog.button[1]"] exists
+shot board-settings-general
+key tab tab
+assert dialog.fields[0].name == "section" && dialog.fields[0].value == "Columns"
+shot board-settings-columns
+click dialog.button[0]
+await overlay absent 10000
+assert dialog absent && hub_tab == Board
+dump closed
+quit

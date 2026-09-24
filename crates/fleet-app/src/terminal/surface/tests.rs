@@ -218,41 +218,6 @@ fn clear_removes_mouse_and_keyboard_selections_together() {
     assert!(!surface.clear_selections());
 }
 
-#[gpui::test]
-fn prefix_hints_are_cancelled_on_exit_and_restart_their_delay(cx: &mut TestAppContext) {
-    cx.update(|cx| cx.set_global(Theme::for_mode(fleet_ui_kit::ThemeMode::Dark)));
-    let state = cx.new(|_| AppState::new("/tmp/fleet-prefix-test", Instant::now()));
-    let mut hint = PrefixHintState::default();
-    cx.update(|cx| hint.reconcile(true, &state, cx));
-    cx.run_until_parked();
-    cx.executor().advance_clock(Duration::from_millis(200));
-    cx.update(|cx| hint.reconcile(false, &state, cx));
-    cx.update(|cx| hint.reconcile(true, &state, cx));
-    cx.run_until_parked();
-    cx.executor().advance_clock(Duration::from_millis(200));
-    cx.run_until_parked();
-    assert!(!hint.visible());
-    cx.executor().advance_clock(Duration::from_millis(200));
-    cx.run_until_parked();
-    assert!(hint.visible());
-    cx.update(|cx| hint.reconcile(false, &state, cx));
-    assert!(!hint.visible());
-}
-
-#[gpui::test]
-fn dropping_prefix_owner_cancels_the_pending_reveal(cx: &mut TestAppContext) {
-    cx.update(|cx| cx.set_global(Theme::for_mode(fleet_ui_kit::ThemeMode::Dark)));
-    let state = cx.new(|_| AppState::new("/tmp/fleet-prefix-test", Instant::now()));
-    let mut hint = PrefixHintState::default();
-    let visible = Rc::clone(&hint.visible);
-    cx.update(|cx| hint.reconcile(true, &state, cx));
-    cx.run_until_parked();
-    drop(hint);
-    cx.executor().advance_clock(Duration::from_secs(1));
-    cx.run_until_parked();
-    assert!(!visible.get());
-}
-
 #[test]
 fn pointer_motion_inside_the_same_cell_does_not_change_selection() {
     let point = AbsoluteCellPoint::new(0, 0);

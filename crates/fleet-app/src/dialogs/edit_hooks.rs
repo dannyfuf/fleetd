@@ -7,13 +7,13 @@
 
 use fleet_core::{ids::RepoId, model::RepoHooks};
 use fleet_proto::request::RequestBody;
-use fleet_ui_kit::{Dialog, Icon, KeyHintRow, prelude::*};
+use fleet_ui_kit::{Button, ButtonSize, ButtonStyle, Dialog, Icon, IconButton, prelude::*};
 use gpui::{AnyElement, App, AppContext, Entity, FocusHandle, Window, div};
 
 use crate::{
     actions::dialog,
     bridge::Bridge,
-    dialogs::{DialogHost, notify, read_host, root, with_host},
+    dialogs::{DialogHost, Dialogs, footer, notify, read_host, root, with_host},
     state::AppState,
 };
 
@@ -209,7 +209,13 @@ pub(crate) fn render(
     _window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let inputs = host.read(cx).hook_inputs.clone();
+    let (inputs, prepare_len) = {
+        let host = host.read(cx);
+        (
+            host.hook_inputs.clone(),
+            host.edit_hooks.prepare_len.min(host.hook_inputs.len()),
+        )
+    };
     let confirm_state = state.clone();
     let confirm_bridge = bridge.clone();
     root(focus)
@@ -248,18 +254,148 @@ pub(crate) fn render(
         })
         .child(
             Dialog::new("Repository hooks")
+                .dismiss_action(Dialogs::EditHooks.dismiss_action())
                 .icon(Icon::FilePen)
+                .width(Dialogs::EditHooks.width(cx))
                 .body(
-                    div().flex().flex_col().gap(cx.theme().space.md).children(
-                        inputs.into_iter().enumerate().map(|(index, input)| {
-                            input.harness_target_indexed("dialog.field", index)
-                        }),
-                    ),
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(cx.theme().space.lg)
+                        .child(section(
+                            state,
+                            Section::Prepare,
+                            &inputs[..prepare_len],
+                            0,
+                            cx,
+                        ))
+                        .child(section(
+                            state,
+                            Section::PostCreate,
+                            &inputs[prepare_len..],
+                            prepare_len,
+                            cx,
+                        )),
                 )
-                .hint_row(KeyHintRow::new().key("tab", "next").key("esc", "cancel"))
-                .primary("enter  save"),
+                .actions(vec![
+                    footer::cancel(&Dialogs::EditHooks),
+                    footer::primary("hooks-save", "Save", Box::new(dialog::Confirm)),
+                ]),
         )
         .into_any_element()
+}
+
+/// Which of the two command lists a row belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Section {
+    /// Commands that prepare a fresh copy of the repository.
+    Prepare,
+    /// Commands that run after a worktree is created.
+    PostCreate,
+}
+
+impl Section {
+    const fn title(self) -> &'static str {
+        match self {
+            Self::Prepare => "Prepare",
+            Self::PostCreate => "After a worktree is created",
+        }
+    }
+
+    const fn id(self) -> &'static str {
+        match self {
+            Self::Prepare => "hooks-prepare",
+            Self::PostCreate => "hooks-post-create",
+        }
+    }
+}
+
+/// One command list: its rows, each with a remove ✕, and an "Add command" button.
+///
+/// The last row of each list is always blank — it is where the next command is typed — so it
+/// has no ✕, and "Add command" puts the keyboard in it rather than growing a second blank.
+fn section(
+    state: &Entity<AppState>,
+    section: Section,
+    rows: &[Entity<TextInput>],
+    first: usize,
+    cx: &App,
+) -> AnyElement {
+    let theme = cx.theme();
+    let last = rows.len().saturating_sub(1);
+    let add_state = state.clone();
+    div()
+        .flex()
+        .flex_col()
+        .gap(theme.space.sm)
+        .child(Text::label(section.title()))
+        .children(rows.iter().enumerate().map(|(offset, input)| {
+            let index = first + offset;
+            let remove_state = state.clone();
+            // Centred on the whole field, whose label above and status line below are about
+            // the same height, so the ✕ sits level with the box it clears.
+            div()
+                .flex()
+                .items_center()
+                .gap(theme.space.xs)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(input.clone().harness_target_indexed("dialog.field", index)),
+                )
+                .child(
+                    IconButton::new((section.id(), index), Icon::X, "Remove command")
+                        .size(ButtonSize::Compact)
+                        .disabled(offset == last)
+                        .on_click(move |_, _, cx| remove_row(&remove_state, index, cx)),
+                )
+        }))
+        .child(
+            div().flex().child(
+                Button::new(section.id(), "Add command")
+                    .style(ButtonStyle::Ghost)
+                    .size(ButtonSize::Compact)
+                    .icon(Icon::Plus)
+                    .on_click(move |_, _, cx| focus_row(&add_state, first + last, cx)),
+            ),
+        )
+        .into_any_element()
+}
+
+/// Hands the keyboard to row `index`; the shell focuses the editor the marker names.
+fn focus_row(state: &Entity<AppState>, index: usize, cx: &mut App) {
+    with_host(state, cx, |host| {
+        if index < host.hook_inputs.len() {
+            host.edit_hooks.field = index;
+        }
+    });
+    notify(state, cx);
+}
+
+/// Drops command row `index`. The trailing blank row of either list is never removed, so each
+/// list keeps the row the next command is typed into.
+fn remove_row(state: &Entity<AppState>, index: usize, cx: &mut App) {
+    let removed = with_host(state, cx, |host| {
+        let prepare_len = host.edit_hooks.prepare_len;
+        let len = host.hook_inputs.len();
+        if index + 1 == prepare_len || index + 1 >= len {
+            return false;
+        }
+        host.hook_inputs.remove(index);
+        if index < prepare_len {
+            host.edit_hooks.prepare_len -= 1;
+        }
+        let field = host.edit_hooks.field;
+        if field > index {
+            host.edit_hooks.field = field - 1;
+        }
+        true
+    });
+    if removed {
+        relabel(state, cx);
+        notify(state, cx);
+    }
 }
 
 /// `Tab` / `S-Tab`: hand the keyboard to the next row, wrapping at both ends.
@@ -318,5 +454,41 @@ mod tests {
             assert_eq!(rows[1].read(cx).text(), "");
             assert_eq!(rows[2].read(cx).text(), "");
         });
+    }
+
+    #[gpui::test]
+    fn a_removed_command_leaves_its_list_and_the_blank_rows_stay(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| AppState::new("/tmp/hooks-remove", std::time::Instant::now()));
+        cx.update(|cx| seed(&state, cx));
+        let rows = cx.update(|cx| read_host(&state, cx, |host, _| host.hook_inputs.clone()));
+        cx.update(|cx| {
+            rows[0].update(cx, |input, cx| input.set_text("bundle install", cx));
+            rows[1].update(cx, |input, cx| input.set_text("make test", cx));
+        });
+        let count = |cx: &mut gpui::TestAppContext| {
+            cx.update(|cx| {
+                read_host(&state, cx, |host, _| {
+                    (host.edit_hooks.prepare_len, host.hook_inputs.len())
+                })
+            })
+        };
+        assert_eq!(count(cx), (2, 4), "each filled row grew a blank under it");
+
+        // The trailing blank of either list is where the next command goes: never removed.
+        cx.update(|cx| remove_row(&state, 1, cx));
+        cx.update(|cx| remove_row(&state, 3, cx));
+        assert_eq!(count(cx), (2, 4));
+
+        cx.update(|cx| remove_row(&state, 0, cx));
+        assert_eq!(count(cx), (1, 3), "the prepare command left its list");
+        let texts = cx.update(|cx| {
+            read_host(&state, cx, |host, cx| {
+                host.hook_inputs
+                    .iter()
+                    .map(|input| input.read(cx).text().to_owned())
+                    .collect::<Vec<_>>()
+            })
+        });
+        assert_eq!(texts, vec!["", "make test", ""]);
     }
 }

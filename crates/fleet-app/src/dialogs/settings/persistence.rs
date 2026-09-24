@@ -23,6 +23,7 @@ pub(crate) fn seed(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
         };
         seq
     });
+    seed_search(state, cx);
     request_config(state, bridge, seq, cx);
     request_matches(state, bridge, seq, cx);
 }

@@ -6,8 +6,11 @@
 //! `d`, not "edit description" — which is the same rule §3.8.6 applies to its text rows.
 //!
 //! Nothing here is optimistic. Every save sends its request and waits: the reducer applies the
-//! `Card` the daemon returns, and a refusal becomes a sticky line at the top of the dialog
+//! `Card` the daemon returns, and a refusal becomes a sticky line at the top of the sheet
 //! rather than a change the user believes happened.
+//!
+//! It is drawn as a sheet docked to the right of the board, which stays visible under its
+//! scrim; every control on it dispatches the action its key runs.
 
 use fleet_core::{
     board::{Card, CardPatch, ConflictResolution},
@@ -15,7 +18,7 @@ use fleet_core::{
 };
 use fleet_proto::{request::RequestBody, response::ResponseBody};
 use fleet_ui_kit::prelude::*;
-use gpui::{AnyElement, App, Entity, FocusHandle, Window, div, px};
+use gpui::{AnyElement, App, Entity, FocusHandle, Window, div};
 
 use crate::{
     actions::{card_detail as card_actions, dialog},
@@ -27,14 +30,10 @@ use crate::{
     views::board_card_detail::{self as detail, PropertyTarget},
 };
 
-/// The width of the right-hand property pane.
-const PROPERTIES_WIDTH: f32 = 260.0;
-/// The dialog's fixed height: the left pane scrolls inside it.
-const DETAIL_HEIGHT: f32 = 620.0;
-
 mod actions;
 mod draft;
 mod lifecycle;
+mod model;
 #[cfg(test)]
 mod tests;
 mod view;
@@ -48,4 +47,6 @@ pub(crate) use draft::CardDetailState;
 use draft::*;
 pub(crate) use lifecycle::seed;
 use lifecycle::*;
+use model::PropertyModel;
+pub(crate) use model::refresh;
 pub(crate) use view::render;

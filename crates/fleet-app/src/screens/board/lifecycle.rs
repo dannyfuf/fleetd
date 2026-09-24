@@ -220,6 +220,14 @@ pub(crate) fn send_card_reporting<T: SessionTransport>(
     refusal: Refusal,
     cx: &mut App,
 ) {
+    // A move to a place in a column renumbers its neighbours too, and the answer carries only
+    // the card that moved: the place is kept so the neighbours can be renumbered the same way.
+    let placed = match &body {
+        RequestBody::MoveCard {
+            index: Some(index), ..
+        } => Some(*index),
+        _ => None,
+    };
     let reply = bridge.request(body);
     let state = state.clone();
     cx.spawn(async move |cx| {
@@ -234,7 +242,10 @@ pub(crate) fn send_card_reporting<T: SessionTransport>(
         cx.update(|cx| match answer {
             Ok(ResponseBody::Card(card)) => state.update(cx, |app, cx| {
                 let id = card.id.clone();
-                app.apply_card(card);
+                match placed {
+                    Some(index) => app.apply_placed_card(card, index),
+                    None => app.apply_card(card),
+                }
                 focus_card(app, &id);
                 cx.notify();
             }),

@@ -229,6 +229,114 @@ pub(super) fn active_pty_terminal_of(session: &Session) -> Option<TerminalId> {
         .map(|terminal| terminal.id)
 }
 
+/// Closes one terminal tab of the active session: at once, or through the §3.8.3 confirm when a
+/// keep-alive process runs in it. `ctrl-s x` closes the active tab through here, and the strip's
+/// `✕`, middle-click and menu close any tab through the same path.
+pub(super) fn close_terminal(
+    terminal: Terminal,
+    bridge: &Bridge,
+    state: &Entity<AppState>,
+    cx: &mut App,
+) {
+    if terminal.keep_alive.is_empty() {
+        request_mutation(
+            bridge,
+            MutationRequest::close(terminal.id),
+            state.clone(),
+            cx,
+        );
+        return;
+    }
+    let index = state
+        .read(cx)
+        .active_session()
+        .and_then(|session| {
+            session
+                .terminals
+                .iter()
+                .position(|candidate| candidate.id == terminal.id)
+        })
+        .map_or(1, |index| index + 1);
+    dialogs::request_confirm(
+        cx,
+        dialogs::ConfirmRequest::CloseTerminal {
+            terminal: terminal.id,
+            index,
+            name: terminal.name,
+            running: terminal.foreground_command,
+        },
+    );
+    state.update(cx, |app, cx| {
+        app.leave_prefix();
+        app.open_overlay(Overlay::Dialog(Dialogs::Confirm));
+        cx.notify();
+    });
+}
+
+/// `ctrl-s r` for one exited terminal of the active session, named rather than read from the
+/// selection: the tab's menu offers it on the tab that was right-clicked.
+pub(super) fn restart_terminal(
+    terminal: TerminalId,
+    bridge: &Bridge,
+    state: &Entity<AppState>,
+    cx: &mut App,
+) {
+    request_mutation(
+        bridge,
+        MutationRequest {
+            body: RequestBody::RestartTerminal { terminal },
+            expected: ExpectedResponse::Terminal,
+            operation: "restart terminal",
+        },
+        state.clone(),
+        cx,
+    );
+}
+
+/// The `+` menu's Lazygit row: select the session's `fleet://lazygit` tab, or ask fleetd for one.
+///
+/// The tab is recognised by its reserved command, never by its name, exactly as `ctrl-s b`
+/// recognises the board tab.
+pub(super) fn open_lazygit_tab(
+    local: &Rc<RefCell<Local>>,
+    bridge: &Bridge,
+    state: &Entity<AppState>,
+    cx: &mut App,
+) {
+    let Some(session) = state.read(cx).active_session().cloned() else {
+        return;
+    };
+    if !matches!(session.kind, SessionKind::Worktree(_)) {
+        return;
+    }
+    match session
+        .terminals
+        .iter()
+        .find(|terminal| terminal.command == NATIVE_LAZYGIT)
+    {
+        Some(terminal) => select_target(
+            local,
+            bridge,
+            state,
+            Some(TabTarget::Terminal(terminal.id)),
+            cx,
+        ),
+        None => {
+            let request = RequestBody::NewTerminal {
+                session: session.id.clone(),
+                name: workspace_tabs::unique_terminal_name(&session, LAZYGIT_TAB_NAME),
+                command: NATIVE_LAZYGIT.to_owned(),
+                cwd: session.cwd.clone(),
+            };
+            request_shell_tab(local, request, bridge, state, cx);
+        }
+    }
+}
+
+/// The name a Lazygit tab opened from the `+` menu gets; the default `windows[]` calls it `lg`
+/// too.
+const LAZYGIT_TAB_NAME: &str = "lg";
+
 impl WorkspaceScreen {
     /// Every `ctrl-s <key>` binding the shell does not already own.
     pub(super) fn with_prefix_actions(
@@ -293,6 +401,7 @@ impl WorkspaceScreen {
                             local.borrow_mut().detach(&bridge, None);
                             state.update(cx, |app, cx| {
                                 app.leave_prefix();
+                                app.pending_worktree_focus = app.active_worktree().cloned();
                                 app.screen = Screen::hub();
                                 cx.notify();
                             });
@@ -318,6 +427,12 @@ impl WorkspaceScreen {
             let state = state.clone();
             root.on_action(move |_: &prefix::ToggleWatchPane, _, cx| {
                 crate::views::watch_pane::toggle(&state, cx)
+            })
+        };
+        let root = {
+            let state = state.clone();
+            root.on_action(move |_: &prefix::ToggleChanges, _, cx| {
+                super::changes::toggle(&state, cx);
             })
         };
         let root = {
@@ -361,39 +476,7 @@ impl WorkspaceScreen {
                 let Some(terminal) = active_terminal_record(&state, cx) else {
                     return;
                 };
-                if terminal.keep_alive.is_empty() {
-                    request_mutation(
-                        &bridge,
-                        MutationRequest::close(terminal.id),
-                        state.clone(),
-                        cx,
-                    );
-                } else {
-                    let index = state
-                        .read(cx)
-                        .active_session()
-                        .and_then(|session| {
-                            session
-                                .terminals
-                                .iter()
-                                .position(|candidate| candidate.id == terminal.id)
-                        })
-                        .map_or(1, |index| index + 1);
-                    dialogs::request_confirm(
-                        cx,
-                        dialogs::ConfirmRequest::CloseTerminal {
-                            terminal: terminal.id,
-                            index,
-                            name: terminal.name,
-                            running: terminal.foreground_command,
-                        },
-                    );
-                    state.update(cx, |app, cx| {
-                        app.leave_prefix();
-                        app.open_overlay(Overlay::Dialog(Dialogs::Confirm));
-                        cx.notify();
-                    });
-                }
+                close_terminal(terminal, &bridge, &state, cx);
             })
         };
         let root = {
@@ -1174,7 +1257,7 @@ impl WorkspaceScreen {
     /// `ctrl-s b`: this worktree's board tab, created the first time and selected every time.
     ///
     /// The listener for it is the shell's (`shell/root/routing.rs`) and not one of the
-    /// `Workspace > Prefix` listeners above, because the palette's `Workspace: Open board tab`
+    /// `Workspace > Prefix` listeners above, because the palette's `Open the worktree's board`
     /// row dispatches the same action while the palette owns the keyboard — and the palette is
     /// a *sibling* of this screen in the element tree, so only the root is on both dispatch
     /// paths. The work itself still belongs here: the tab, its selection and this screen's

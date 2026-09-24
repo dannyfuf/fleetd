@@ -158,6 +158,16 @@ impl Watches {
             .collect()
     }
 
+    /// Whether this session's watch split is showing, or `None` when it has no watch at all —
+    /// which is when the Workspace offers no Watch control.
+    #[must_use]
+    pub fn pane_visible(&self, session: &SessionId) -> Option<bool> {
+        self.entries
+            .values()
+            .any(|entry| &entry.watch.session == session)
+            .then(|| self.panes.get(session).is_some_and(|pane| pane.visible))
+    }
+
     /// Toggles local visibility, returning false if there are no watches.
     pub fn toggle(&mut self, session: &SessionId) -> bool {
         if !self

@@ -1,23 +1,32 @@
 //! `KanbanColumn` and `KanbanBoard` — the two containers of the board screen.
 //!
-//! A column is a [`super::Pane`] that scrolls in the other axis: same hairline, same
-//! `surface` ground, same 2 px focus ring, and a 30 px header that carries the status name and
-//! the count. It is a separate component rather than a `Pane` variant because its body is a
-//! **gapped stack of tiles**, not a list of flush rows, and because its header owns a category
-//! accent bar that no pane has.
+//! A column is a rounded, hairlined well that scrolls in the other axis. Its header is one row:
+//! a coloured dot for the column's category, the name as written (sentence case), the card count,
+//! and an [`KanbanColumn::add_button`] slot at the right end — normally a `+` [`super::IconButton`] that
+//! opens *New card* in this column. Under the header, a column whose entry starts something wears
+//! a pill naming it in words ([`KanbanColumn::automation`]: `On enter: codex implements`). The
+//! body is a **gapped stack of tiles**, not a list of flush rows, which is why this is not a
+//! [`super::Pane`], and it ends in an optional [`KanbanColumn::footer`] — the `Add card` row.
 //!
 //! Neither container owns a key. `h` / `l` / `j` / `k` move a cursor the screen owns, exactly
-//! as they do for [`super::ListView`]; these two only draw.
+//! as they do for [`super::ListView`]; these two only draw. Every pointer affordance is a slot
+//! the screen fills, so a drop target or a drag handle can be added to a column without the
+//! column knowing what a card is.
+//!
+//! Dragging a tile is the screen's too: it owns the drag, and tells the column two facts —
+//! [`KanbanColumn::drop_target`], that the drag is over it (an accent hairline), and
+//! [`KanbanColumn::drop_slot`], where the tile would land and what landing there does (a
+//! [`super::DropSlot`] drawn in the gap before that tile).
 
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, ElementId, Hsla, ListAlignment, ListState, Pixels, ScrollHandle, SharedString,
-    Window, div, prelude::*, px,
+    AnyElement, App, ClickEvent, ElementId, Hsla, ListAlignment, ListState, Pixels, ScrollHandle,
+    SharedString, Window, div, prelude::*, px,
 };
 
+use super::DropSlot;
 use crate::{
-    components::{Badge, EmptyState},
     focus::FocusRing,
     icons::{Icon, IconSize},
     text::Text,
@@ -38,17 +47,25 @@ const COLUMN_OVERDRAW: Pixels = px(200.0);
 /// Builds the tile at `index`. Only the rows a virtualized column can show are asked for.
 type RowRenderer = Box<dyn FnMut(usize, &mut Window, &mut App) -> AnyElement + 'static>;
 
+/// What a click on the automation pill runs.
+type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
+
 /// One board column.
 #[derive(IntoElement)]
 pub struct KanbanColumn {
     id: ElementId,
     title: SharedString,
     count: Option<usize>,
-    action: bool,
+    automation: Option<SharedString>,
+    on_automation: Option<ClickHandler>,
     accent: Option<Hsla>,
     focused: bool,
+    drop_target: bool,
+    drop_slot: Option<(usize, SharedString)>,
     width: Option<Pixels>,
     empty_hint: Option<SharedString>,
+    add: Option<AnyElement>,
+    footer: Option<AnyElement>,
     tiles: Vec<AnyElement>,
     rows: Option<(ListState, usize, RowRenderer)>,
     scroll: Option<ScrollHandle>,
@@ -60,22 +77,38 @@ impl KanbanColumn {
     ///
     /// The caller owns it, because it carries the scroll offset and the measured tile heights
     /// from one frame to the next and the column itself is a `RenderOnce` that owns nothing.
+    /// A column with a [`Self::footer`] draws it as the list's last item, so its state holds
+    /// one item more than the column has tiles: [`Self::list_state_with_footer`] starts there.
     #[must_use]
     pub fn list_state() -> ListState {
         ListState::new(0, ListAlignment::Top, COLUMN_OVERDRAW)
     }
 
-    /// A column titled `title`.
+    /// A [`Self::list_state`] already holding the footer's item, for a column built with
+    /// [`Self::footer`]. Tiles are spliced in before it: index `n` is always the footer.
+    #[must_use]
+    pub fn list_state_with_footer() -> ListState {
+        let list = Self::list_state();
+        list.splice(0..0, 1);
+        list
+    }
+
+    /// A column titled `title`, written as the board names it.
     pub fn new(id: impl Into<ElementId>, title: impl Into<SharedString>) -> Self {
         Self {
             id: id.into(),
             title: title.into(),
             count: None,
-            action: false,
+            automation: None,
+            on_automation: None,
             accent: None,
             focused: false,
+            drop_target: false,
+            drop_slot: None,
             width: None,
             empty_hint: None,
+            add: None,
+            footer: None,
             tiles: Vec::new(),
             rows: None,
             scroll: None,
@@ -89,16 +122,23 @@ impl KanbanColumn {
         self
     }
 
-    /// Whether entering this column starts something: a muted `⚡` after the count.
-    ///
-    /// The glyph is the whole statement — *cards that land here do not sit still*. What it
-    /// starts, and with which agent, belongs to the surface that can say it in words.
-    pub fn action(mut self, has_action: bool) -> Self {
-        self.action = has_action;
+    /// What entering this column starts, in words: a pill under the header led by a `⚡`
+    /// (`On enter: codex implements`). Unset, nothing is drawn.
+    pub fn automation(mut self, label: impl Into<SharedString>) -> Self {
+        self.automation = Some(label.into());
         self
     }
 
-    /// The status-category accent, as a 2 px bar above the header.
+    /// Make the automation pill clickable: normally it opens the column's settings.
+    pub fn on_automation_click(
+        mut self,
+        handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_automation = Some(Box::new(handler));
+        self
+    }
+
+    /// The column's category colour, as the dot before its name.
     ///
     /// The parameter is an `Hsla` and the call site is expected to pass a **token**
     /// (`cx.theme().colors.success`), never a literal: the category → token mapping is domain
@@ -114,15 +154,42 @@ impl KanbanColumn {
         self
     }
 
+    /// Draw the column as the place a dragged tile is over: an accent hairline around the well.
+    pub fn drop_target(mut self, drop_target: bool) -> Self {
+        self.drop_target = drop_target;
+        self
+    }
+
+    /// Draw a [`DropSlot`] saying `label` before the tile at `index`; `index` equal to the tile
+    /// count puts it after the last tile, above the footer. The empty column's hint gives way
+    /// to it.
+    pub fn drop_slot(mut self, index: usize, label: impl Into<SharedString>) -> Self {
+        self.drop_slot = Some((index, label.into()));
+        self
+    }
+
     /// Override the [`COLUMN_WIDTH_CH`] width.
     pub fn width(mut self, width: Pixels) -> Self {
         self.width = Some(width);
         self
     }
 
-    /// What an empty column says. Nothing is drawn when it is unset.
+    /// What an empty column says, in muted text. Nothing is drawn when it is unset.
     pub fn empty_hint(mut self, empty_hint: impl Into<SharedString>) -> Self {
         self.empty_hint = Some(empty_hint.into());
+        self
+    }
+
+    /// The header's trailing slot: normally a `+` [`super::IconButton`] that adds a card here.
+    pub fn add_button(mut self, add: impl IntoElement) -> Self {
+        self.add = Some(add.into_any_element());
+        self
+    }
+
+    /// The row under the last tile: normally a ghost `Add card` button. In the virtualized
+    /// [`Self::rows`] form it is the list's last item, so the caller's list holds `count + 1`.
+    pub fn footer(mut self, footer: impl IntoElement) -> Self {
+        self.footer = Some(footer.into_any_element());
         self
     }
 
@@ -171,6 +238,8 @@ impl RenderOnce for KanbanColumn {
             .map_or_else(|| self.tiles.is_empty(), |(_, count, _)| *count == 0);
         let body_id =
             ElementId::NamedChild(Arc::new(self.id.clone()), SharedString::new_static("body"));
+        let pill_id =
+            ElementId::NamedChild(Arc::new(self.id.clone()), SharedString::new_static("pill"));
 
         let header = div()
             .flex()
@@ -180,52 +249,117 @@ impl RenderOnce for KanbanColumn {
             .gap(theme.space.sm)
             .h(theme.metrics.pane_header_h)
             .w_full()
-            .px(theme.space.sm)
-            .border_b(theme.metrics.hairline)
-            .border_color(theme.colors.border)
+            .px(theme.space.xs)
+            .children(self.accent.map(|accent| {
+                div()
+                    .flex_none()
+                    .size(theme.metrics.dot_size_small)
+                    .rounded(theme.radii.pill)
+                    .bg(accent)
+            }))
             .child(
                 div()
                     .flex()
                     .flex_1()
                     .min_w_0()
-                    .child(Text::label(self.title).ellipsize()),
+                    .items_center()
+                    .gap(theme.space.sm)
+                    .child(Text::ui_strong(self.title).ellipsize())
+                    .children(
+                        self.count
+                            .map(|count| Text::caption(count.to_string()).faint().flex_none()),
+                    ),
             )
-            .children(self.count.map(|count| Badge::new(count.to_string())))
-            .children(
-                self.action
-                    .then(|| Icon::Zap.el().size(IconSize::Small).tone(Tone::Muted)),
-            );
+            .children(self.add.map(|add| div().flex_none().child(add)));
 
-        let hint = self
-            .empty_hint
-            .map(|hint| div().h_full().w_full().child(EmptyState::new(hint)));
+        let hover_bg = theme.colors.control_hover;
+        let pill = self.automation.map(|label| {
+            let clickable = self.on_automation.is_some();
+            div()
+                .id(pill_id)
+                .flex()
+                .flex_none()
+                .self_start()
+                .items_center()
+                .gap(theme.space.xxs)
+                .h(theme.metrics.tile_chip_h)
+                .px(theme.space.sm)
+                .mx(theme.space.xs)
+                .rounded(theme.radii.control)
+                .bg(theme.colors.control)
+                .border(theme.metrics.hairline)
+                .border_color(theme.colors.control_border)
+                .child(Icon::Zap.el().size(IconSize::Small).tone(Tone::Warning))
+                .child(Text::caption(label).muted())
+                .when(clickable, |el| {
+                    el.cursor_pointer().hover(move |style| style.bg(hover_bg))
+                })
+                .when_some(self.on_automation, |el, handler| {
+                    el.on_click(move |event, window, cx| handler(event, window, cx))
+                })
+        });
+
+        let mut footer = self.footer;
+        let slot = self.drop_slot;
+        let hint = self.empty_hint.filter(|_| slot.is_none()).map(|hint| {
+            div()
+                .px(theme.space.sm)
+                .py(theme.space.xs)
+                .child(Text::caption(hint).faint())
+        });
         let body = div()
             .id(body_id)
             .flex()
             .flex_col()
             .flex_1()
             .min_h_0()
-            .w_full()
-            .p(pad)
-            .when(empty, |el| el.children(hint));
+            .w_full();
         let body = match self.rows {
             // The gap lives on each row, not on the body: a virtualized list lays its items out
-            // itself, so a container gap would apply to nothing.
+            // itself, so a container gap would apply to nothing. The footer is the item after
+            // the last tile, so it follows the cards instead of sinking to the column's floor.
+            // The slot rides inside the item it precedes, so the list measures it with that
+            // item and no row is spliced in or out while the pointer moves.
             Some((list, count, mut render_row)) if count > 0 => body.child(
                 gpui::list(list, move |index, window, cx| {
+                    let item = if index < count {
+                        render_row(index, window, cx)
+                    } else {
+                        footer.take().unwrap_or_else(|| div().into_any_element())
+                    };
+                    let slot = slot
+                        .as_ref()
+                        .filter(|(at, _)| *at == index)
+                        .map(|(_, label)| DropSlot::new(label.clone()));
                     div()
+                        .flex()
+                        .flex_col()
+                        .w_full()
+                        .gap(gap)
                         .pb(gap)
-                        .child(render_row(index, window, cx))
+                        .children(slot)
+                        .child(item)
                         .into_any_element()
                 })
                 .size_full(),
             ),
-            Some(_) => body,
-            None => body
+            Some(_) => body
                 .gap(gap)
-                .overflow_y_scroll()
-                .when_some(self.scroll, |el, scroll| el.track_scroll(&scroll))
-                .children(self.tiles),
+                .children(hint)
+                .children(slot.map(|(_, label)| DropSlot::new(label)))
+                .children(footer),
+            None => {
+                let mut tiles = self.tiles;
+                if let Some((at, label)) = slot {
+                    tiles.insert(at.min(tiles.len()), DropSlot::new(label).into_any_element());
+                }
+                body.gap(gap)
+                    .overflow_y_scroll()
+                    .when_some(self.scroll, |el, scroll| el.track_scroll(&scroll))
+                    .when(empty, |el| el.children(hint))
+                    .children(tiles)
+                    .children(footer)
+            }
         };
 
         let content = div()
@@ -234,16 +368,10 @@ impl RenderOnce for KanbanColumn {
             .size_full()
             .min_h_0()
             .min_w_0()
-            // The category bar sits above the header and spans the column, so a board scanned
-            // left to right reads its statuses before it reads a single card.
-            .children(self.accent.map(|accent| {
-                div()
-                    .flex_none()
-                    .h(theme.metrics.focus_ring_w)
-                    .w_full()
-                    .bg(accent)
-            }))
+            .gap(gap)
+            .p(pad)
             .child(header)
+            .children(pill)
             .child(body);
 
         div()
@@ -254,10 +382,14 @@ impl RenderOnce for KanbanColumn {
             .h_full()
             .w(width)
             .overflow_hidden()
-            .rounded(theme.radii.md)
+            .rounded(theme.radii.dialog)
             .bg(theme.colors.surface)
             .border(theme.metrics.hairline)
-            .border_color(theme.colors.border)
+            .border_color(if self.drop_target {
+                theme.colors.accent
+            } else {
+                theme.colors.border
+            })
             .child(FocusRing::pane(self.focused).content(content))
     }
 }

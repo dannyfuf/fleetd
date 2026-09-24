@@ -1161,3 +1161,117 @@ fn deleting_a_column_with_cards_asks_where_they_go_first(cx: &mut gpui::TestAppC
         });
     });
 }
+
+// ---------------------------------------------------------------------------------------
+// The pointer (ADR 0023): every click is the key that would reach the same place.
+// ---------------------------------------------------------------------------------------
+
+struct PointerHarness {
+    focus: FocusHandle,
+}
+
+impl gpui::Render for PointerHarness {
+    fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+        div().track_focus(&self.focus)
+    }
+}
+
+/// A window the pointer verbs can focus into, over `draft`.
+fn pointer_harness(
+    cx: &mut gpui::TestAppContext,
+    draft: BoardSettingsState,
+) -> (Entity<AppState>, FocusHandle, gpui::VisualTestContext) {
+    cx.update(|cx| cx.set_global(fleet_ui_kit::Theme::dark()));
+    let state = cx.new(|_| AppState::new("/tmp/board-settings-pointer", std::time::Instant::now()));
+    cx.update(|cx| with_host(&state, cx, |host| host.board_settings = draft));
+    let window = cx.add_window(|_, cx| PointerHarness {
+        focus: cx.focus_handle(),
+    });
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    let root = window.root(&mut visual).expect("pointer harness");
+    let focus = root.read_with(&visual, |view, _| view.focus.clone());
+    (state, focus, visual)
+}
+
+#[gpui::test]
+fn a_click_on_an_option_lands_where_the_arrows_would(cx: &mut gpui::TestAppContext) {
+    let (state, focus, mut visual) = pointer_harness(cx, draft());
+    let runs = GENERAL_ROWS
+        .iter()
+        .position(|row| *row == SettingRow::MaxLiveRuns)
+        .unwrap_or_else(|| panic!("max live runs row"));
+    let start = GENERAL_ROWS
+        .iter()
+        .position(|row| *row == SettingRow::StartOnWorktree)
+        .unwrap_or_else(|| panic!("start on worktree row"));
+
+    visual.update(|window, cx| pick(&state, runs, 4, Some(0), &focus, window, cx));
+    visual.update(|_, cx| {
+        read_host(&state, cx, |host, _| {
+            assert_eq!(
+                host.board_settings.row, runs,
+                "the click moved the cursor there"
+            );
+            assert_eq!(
+                host.board_settings.live_run_limit(),
+                5,
+                "option 4 is five runs"
+            );
+        });
+    });
+    visual.update(|window, cx| pick(&state, runs, 0, Some(4), &focus, window, cx));
+    visual.update(|_, cx| {
+        read_host(&state, cx, |host, _| {
+            assert_eq!(host.board_settings.live_run_limit(), 1)
+        });
+    });
+
+    visual.update(|window, cx| switch(&state, start, true, &focus, window, cx));
+    visual.update(|_, cx| {
+        read_host(&state, cx, |host, _| {
+            assert!(host.board_settings.start_on_worktree);
+            assert_eq!(host.board_settings.row, start);
+        });
+    });
+
+    visual.update(|window, cx| select_section(&state, 2, &focus, window, cx));
+    visual.update(|_, cx| {
+        read_host(&state, cx, |host, _| {
+            assert_eq!(host.board_settings.section, BoardSection::Columns);
+        });
+    });
+}
+
+#[gpui::test]
+fn a_column_opens_on_double_click_and_its_choices_take_a_click(cx: &mut gpui::TestAppContext) {
+    let (state, focus, mut visual) = pointer_harness(cx, columns_draft());
+
+    visual.update(|window, cx| open_column(&state, 1, &focus, window, cx));
+    visual.update(|_, cx| {
+        read_host(&state, cx, |host, _| {
+            assert_eq!(host.board_settings.opened_column, Some(1));
+            assert_eq!(fields(&host.board_settings)[2], "On enter");
+        });
+    });
+
+    // On enter: `none` → `prompt`, which brings the seven action rows with it.
+    visual.update(|window, cx| pick(&state, 2, 1, Some(0), &focus, window, cx));
+    visual.update(|_, cx| {
+        read_host(&state, cx, |host, _| {
+            let draft = &host.board_settings;
+            assert_eq!(draft.columns[1].on_enter, "prompt");
+            assert!(fields(draft).contains(&"Provider"));
+        });
+    });
+
+    // Category: `unstarted` is option 1; `completed` is option 3.
+    visual.update(|window, cx| pick(&state, 1, 3, Some(1), &focus, window, cx));
+    visual.update(|_, cx| {
+        read_host(&state, cx, |host, _| {
+            assert_eq!(
+                host.board_settings.columns[1].status.category,
+                StatusCategory::Completed
+            );
+        });
+    });
+}

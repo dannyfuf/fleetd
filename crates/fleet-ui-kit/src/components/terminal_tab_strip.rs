@@ -1,37 +1,61 @@
-//! `TerminalTabStrip` — numbered tabs with activity, keep-alive, agent and exit marks.
+//! `TerminalTabStrip` — the Workspace's tabs: what each one is, its state, and the controls to
+//! open, close and manage them.
 //!
-//! §3.6: the index is the argument to `ctrl-s 1`-`9`, so the strip is the legend for that
-//! binding. The amber activity dot marks unseen output; agent glyphs show working or finished.
+//! §3.6: every tab has a kind icon and its name; the `ctrl-s 1`-`9` index is no longer painted,
+//! it is in the tab's tooltip (`Tab 2 · ⌃S 2`) with the rest of the keys. One state mark at most
+//! beside the name: a spinner while the tab starts or its agent works, an amber *needs you* chip,
+//! a blue unread-output dot, or `exited 1` in red.
 //!
-//! The strip is a **legend**, not a control surface: every tab is reachable from the keyboard
-//! without it. The click handlers ([`TerminalTabStrip::on_select`],
-//! [`TerminalTabStrip::on_new`]) exist for mouse parity only, which is why they are optional
-//! and why nothing here draws a close button — `^s x` is the way a tab is closed, and a hover
-//! target that kills a running dev server is not worth the pixel.
+//! Every verb has a key and the strip only mirrors it (ADR 0023): a click selects
+//! ([`TerminalTabStrip::on_select`]), the `✕` on a hovered or active tab and a middle-click close
+//! ([`TerminalTabStrip::on_close`]), a right-click selects and opens the tab's menu
+//! ([`TerminalTabStrip::tab_menu`]), and the `+` opens the new-tab menu
+//! ([`TerminalTabStrip::new_menu`]). All of them are optional, so the strip still draws in a
+//! gallery with none. The trailing slot holds the surface's toggles (Watch, Zoom).
+//!
+//! The active tab joins the content below it: it takes the content ground, a hairline on three
+//! sides and none underneath, while the strip's own bottom hairline runs behind every other tab.
 
-use gpui::{App, ElementId, SharedString, Window, div, prelude::*};
+use std::rc::Rc;
+
+use gpui::{App, Context, ElementId, MouseButton, SharedString, Window, div, prelude::*};
 
 use crate::{
-    components::{Spinner, StatusDot, StatusGlyph, StatusKind},
-    harness::HarnessTargetExt as _,
+    components::{
+        Chip, ContextMenu, IconButton, Kbd, Menu, PopoverMenu, Spinner, StatusDot, StatusGlyph,
+        StatusKind, Tooltip,
+    },
+    harness::{self, HarnessTargetExt as _},
     icons::{Icon, IconSize},
     text::Text,
     theme::{ActiveTheme, Theme},
     tone::Tone,
 };
 
+/// The hover group each tab names itself with, so its `✕` shows while that tab is hovered.
+const TAB_GROUP: &str = "terminal-tab";
+
 /// What draws a tab's content.
 ///
-/// The strip is the legend for `ctrl-s 1`-`9`, so a tab that is *not* a terminal has to say so:
-/// otherwise the only difference the user can see between a PTY and a Fleet-drawn pane is that
-/// one of them ignores every key they type into it.
+/// A tab that is *not* a terminal has to say so: otherwise the only difference the user can see
+/// between a PTY and a Fleet-drawn pane is that one of them ignores every key typed into it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TerminalTabKind {
-    /// A PTY. The default, and what the rest of this component assumes.
+    /// A PTY. The default; drawn with the `terminal` glyph.
     #[default]
     Pty,
-    /// A surface the app draws itself; marked with a glyph in front of the name.
+    /// A surface the app draws itself; drawn with the `git-branch` glyph unless
+    /// [`TerminalTab::icon`] names a better one.
     Native,
+}
+
+impl TerminalTabKind {
+    fn icon(self) -> Icon {
+        match self {
+            Self::Pty => Icon::Terminal,
+            Self::Native => Icon::GitBranch,
+        }
+    }
 }
 
 /// The only process states that can appear as agent activity on a terminal tab.
@@ -52,10 +76,19 @@ impl TerminalAgentState {
     }
 }
 
-/// One terminal tab.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// The one state mark a tab draws beside its name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TabMark {
+    /// Blocked on the reader: the amber `needs you` chip.
+    NeedsYou,
+    /// Output or content the reader has not seen: the blue dot.
+    Unread,
+}
+
+/// One tab.
+#[derive(Clone, Debug, PartialEq)]
 pub struct TerminalTab {
-    /// The `1`-`9` index.
+    /// The `1`-`9` index, shown in the tooltip.
     pub index: usize,
     /// Stable identity across tab reordering; falls back to the numbered index.
     pub id: Option<ElementId>,
@@ -63,31 +96,32 @@ pub struct TerminalTab {
     pub name: SharedString,
     /// Output happened since this tab was last visited.
     pub activity: bool,
-    /// The tab is blocked on the user, so its amber dot survives being selected.
+    /// The tab is blocked on the user, so its *needs you* chip survives being selected.
     ///
     /// `NATIVE-AGENTS.md` §2/§3.3: an open gate is not "news you have already read", it is work
     /// only the reader can unblock, and the strip is where the workspace says so — including on
     /// the tab that is currently open, which is the one place [`TerminalTab::activity`] is
     /// deliberately silent.
     pub attention: bool,
-    /// Content changed but nothing is waiting on the user: a neutral mark, not an amber one.
-    ///
-    /// A native agent tab distinguishes "the agent wrote while you were elsewhere" from "the
-    /// agent is blocked on you" (`NATIVE-AGENTS.md` §3.3). Amber is reserved for the second,
-    /// so unread draws the same dot in the secondary tone.
+    /// Content changed but nothing is waiting on the user: the same blue dot as
+    /// [`TerminalTab::activity`], for a tab that has no PTY output to speak of.
     pub unread: bool,
-    /// The PTY is still spawning: §3.6 "Waking a slept session" rebuilds the strip and each
-    /// tab shows a `loader-circle` until its process is up.
+    /// The tab is still spawning, or its agent is working: a spinner.
     pub starting: bool,
     /// The keep-alive kind glyph: `bot`, `server`, `file-pen`.
     pub keep_alive: Option<Icon>,
     /// Recognized agent activity.
     pub agent_status: Option<TerminalAgentState>,
     /// The command exited. `Some(None)` is a signal-killed process, which has **no** exit
-    /// code; the strip renders `—` rather than inventing one.
+    /// code; the strip writes `killed` rather than inventing one.
     pub exited: Option<Option<i32>>,
     /// Whether a process or the app itself provides the tab's content.
     pub kind: TerminalTabKind,
+    /// The kind glyph, when the caller knows better than [`TerminalTabKind`]: a board, a
+    /// provider mark.
+    pub icon: Option<Icon>,
+    /// The key that selects this tab, shown in its tooltip.
+    pub kbd: Option<Kbd>,
 }
 
 impl TerminalTab {
@@ -105,6 +139,8 @@ impl TerminalTab {
             agent_status: None,
             exited: None,
             kind: TerminalTabKind::default(),
+            icon: None,
+            kbd: None,
         }
     }
 
@@ -120,13 +156,26 @@ impl TerminalTab {
         self
     }
 
-    /// Mark output that wants the user's attention, with the amber dot.
+    /// Lead the name with this glyph instead of the kind's.
+    pub fn icon(mut self, icon: Icon) -> Self {
+        self.icon = Some(icon);
+        self
+    }
+
+    /// The key that selects this tab, for its tooltip.
+    pub fn kbd(mut self, kbd: impl Into<Option<Kbd>>) -> Self {
+        self.kbd = kbd.into();
+        self
+    }
+
+    /// Mark unseen output with the blue dot.
     pub fn activity(mut self, activity: bool) -> Self {
         self.activity = activity;
         self
     }
 
-    /// Mark the tab as blocked on the user; the amber dot then stays on while it is selected.
+    /// Mark the tab as blocked on the user; the *needs you* chip then stays while it is
+    /// selected.
     pub fn attention(mut self, attention: bool) -> Self {
         self.attention = attention;
         self
@@ -138,7 +187,7 @@ impl TerminalTab {
         self
     }
 
-    /// Mark the PTY as still spawning.
+    /// Mark the tab as still spawning, or its agent as working.
     pub fn starting(mut self, starting: bool) -> Self {
         self.starting = starting;
         self
@@ -169,45 +218,45 @@ impl TerminalTab {
             .unwrap_or_else(|| ("tab", self.index).into())
     }
 
-    /// The single dot the tab draws, if any.
+    /// The single mark the tab draws beside its name, if any.
     ///
-    /// Amber wins over neutral and an exited tab draws neither: the exit mark already says
-    /// everything a dot could, and two marks on one tab make the strip unreadable. Activity on
-    /// the tab you are already looking at is not news, so the active tab is bare — *unless* the
-    /// tab is blocked on the reader, which stays true no matter which tab is open (§3.3).
-    fn dot_tone(&self, is_active: bool) -> Option<Tone> {
+    /// *Needs you* wins over unread, and an exited tab draws neither: its `exited` word already
+    /// says everything a mark could, and two marks on one tab make the strip unreadable. Unread
+    /// output on the tab you are already looking at is not news, so the active tab draws no dot —
+    /// *unless* the tab is blocked on the reader, which stays true whichever tab is open (§3.3).
+    fn mark(&self, is_active: bool) -> Option<TabMark> {
         if self.exited.is_some() {
             return None;
         }
         if self.attention {
-            return Some(Tone::Warning);
+            return Some(TabMark::NeedsYou);
         }
-        if is_active {
-            return None;
+        if !is_active && (self.activity || self.unread) {
+            return Some(TabMark::Unread);
         }
-        if self.activity {
-            Some(Tone::Warning)
-        } else if self.unread {
-            Some(Tone::Secondary)
-        } else {
-            None
-        }
+        None
     }
 
-    /// The exit code as it is written on the tab: the number, or `—` for a signal.
+    /// The exit as it is written on the tab: `exited 1`, or `killed` for a signal.
     fn exit_label(code: Option<i32>) -> SharedString {
         match code {
-            Some(code) => SharedString::from(code.to_string()),
-            None => SharedString::new_static("\u{2014}"),
+            Some(code) => SharedString::from(format!("exited {code}")),
+            None => SharedString::new_static("killed"),
         }
     }
 }
 
-/// Mouse parity for `ctrl-s <n>`, called with the clicked tab's position. `Rc` because every
-/// tab element gets a handle to the same closure.
-type SelectHandler = std::rc::Rc<dyn Fn(usize, &mut Window, &mut App) + 'static>;
+/// A per-tab handler, called with the tab's **position**. `Rc` because every tab element gets
+/// a handle to the same closure.
+type PositionHandler = Rc<dyn Fn(usize, &mut Window, &mut App) + 'static>;
 
-/// Mouse parity for `ctrl-s c`, fired by the trailing `+` tab.
+/// Builds a tab's right-click menu for its position.
+type TabMenuBuilder = Rc<dyn Fn(usize, Menu, &mut Window, &mut Context<Menu>) -> Menu + 'static>;
+
+/// Builds the `+` menu.
+type NewMenuBuilder = Rc<dyn Fn(Menu, &mut Window, &mut Context<Menu>) -> Menu + 'static>;
+
+/// Mouse parity for `ctrl-s c` when there is no new-tab menu: the `+` runs it directly.
 type NewHandler = Box<dyn Fn(&mut Window, &mut App) + 'static>;
 
 /// The tab strip.
@@ -218,12 +267,17 @@ pub struct TerminalTabStrip {
     active: usize,
     show_plus: bool,
     agents_from: Option<usize>,
-    on_select: Option<SelectHandler>,
+    on_select: Option<PositionHandler>,
+    on_close: Option<PositionHandler>,
+    close_kbd: Option<Kbd>,
+    tab_menu: Option<TabMenuBuilder>,
+    new_menu: Option<NewMenuBuilder>,
     on_new: Option<NewHandler>,
+    trailing: Vec<gpui::AnyElement>,
 }
 
 impl TerminalTabStrip {
-    /// A strip over the session's terminals.
+    /// A strip over the session's tabs.
     pub fn new(tabs: impl IntoIterator<Item = TerminalTab>) -> Self {
         Self {
             id: ElementId::Name(SharedString::new_static("terminal-tab-strip")),
@@ -232,11 +286,16 @@ impl TerminalTabStrip {
             show_plus: true,
             agents_from: None,
             on_select: None,
+            on_close: None,
+            close_kbd: None,
+            tab_menu: None,
+            new_menu: None,
             on_new: None,
+            trailing: Vec::new(),
         }
     }
 
-    /// A stable id, so two strips in one window keep their hover and animation state apart.
+    /// A stable id, so two strips in one window keep their hover and menu state apart.
     pub fn id(mut self, id: impl Into<ElementId>) -> Self {
         self.id = id.into();
         self
@@ -248,7 +307,7 @@ impl TerminalTabStrip {
         self
     }
 
-    /// Hide the trailing `+` tab.
+    /// Hide the `+`.
     pub fn show_plus(mut self, show: bool) -> Self {
         self.show_plus = show;
         self
@@ -266,17 +325,63 @@ impl TerminalTabStrip {
         self
     }
 
-    /// Mouse parity for `ctrl-s 1`-`9`: called with the clicked tab's **position**.
+    /// Mouse parity for `ctrl-s 1`-`9`: called with the clicked tab's **position**. A
+    /// right-click selects as well, before the tab's menu opens.
     pub fn on_select(mut self, on_select: impl Fn(usize, &mut Window, &mut App) + 'static) -> Self {
-        self.on_select = Some(std::rc::Rc::new(on_select));
+        self.on_select = Some(Rc::new(on_select));
         self
     }
 
-    /// Mouse parity for `ctrl-s c`, fired by the trailing `+` tab.
+    /// Mouse parity for `ctrl-s x`: the `✕` and a middle-click, with the tab's **position**.
+    /// Without it no tab draws a `✕`.
+    pub fn on_close(mut self, on_close: impl Fn(usize, &mut Window, &mut App) + 'static) -> Self {
+        self.on_close = Some(Rc::new(on_close));
+        self
+    }
+
+    /// The close key, for the `✕`'s tooltip.
+    pub fn close_kbd(mut self, kbd: impl Into<Option<Kbd>>) -> Self {
+        self.close_kbd = kbd.into();
+        self
+    }
+
+    /// The menu a right-click on the tab at `position` opens.
+    pub fn tab_menu(
+        mut self,
+        builder: impl Fn(usize, Menu, &mut Window, &mut Context<Menu>) -> Menu + 'static,
+    ) -> Self {
+        self.tab_menu = Some(Rc::new(builder));
+        self
+    }
+
+    /// The menu the `+` opens: every kind of tab the surface can open, with its key.
+    pub fn new_menu(
+        mut self,
+        builder: impl Fn(Menu, &mut Window, &mut Context<Menu>) -> Menu + 'static,
+    ) -> Self {
+        self.new_menu = Some(Rc::new(builder));
+        self
+    }
+
+    /// Mouse parity for `ctrl-s c`, fired by the `+` when the strip has no
+    /// [`Self::new_menu`].
     pub fn on_new(mut self, on_new: impl Fn(&mut Window, &mut App) + 'static) -> Self {
         self.on_new = Some(Box::new(on_new));
         self
     }
+
+    /// A control at the strip's right end: the surface's toggles, each a compact ghost button.
+    pub fn trailing(mut self, element: impl IntoElement) -> Self {
+        self.trailing.push(element.into_any_element());
+        self
+    }
+}
+
+/// What every tab element of one strip shares.
+struct TabHandlers {
+    on_select: Option<PositionHandler>,
+    on_close: Option<PositionHandler>,
+    close_kbd: Option<Kbd>,
 }
 
 impl RenderOnce for TerminalTabStrip {
@@ -289,7 +394,12 @@ impl RenderOnce for TerminalTabStrip {
             show_plus,
             agents_from,
             on_select,
+            on_close,
+            close_kbd,
+            tab_menu,
+            new_menu,
             on_new,
+            trailing,
         } = self;
         let agents_from = agents_from.unwrap_or(usize::MAX);
 
@@ -301,6 +411,11 @@ impl RenderOnce for TerminalTabStrip {
         let identities: Vec<_> = tabs.iter().map(TerminalTab::element_id).collect();
         let scroll = state.read(cx).scroll.clone();
 
+        let handlers = Rc::new(TabHandlers {
+            on_select,
+            on_close,
+            close_kbd,
+        });
         let tab_theme = theme.clone();
         let tabs = tabs.into_iter().enumerate().map(move |(pos, tab)| {
             let part = if pos >= agents_from {
@@ -308,20 +423,40 @@ impl RenderOnce for TerminalTabStrip {
             } else {
                 "tabs.tab"
             };
-            tab_element(tab, pos, pos == active, &tab_theme, on_select.clone())
-                .harness_target_indexed(part, pos)
+            let element = tab_element(tab, pos, pos == active, part, &tab_theme, &handlers)
+                .harness_target_indexed(part, pos);
+            match &tab_menu {
+                Some(builder) => {
+                    let builder = Rc::clone(builder);
+                    ContextMenu::new(("terminal-tab-menu", pos), element)
+                        .menu(move |menu, window, cx| builder(pos, menu, window, cx))
+                        .into_any_element()
+                }
+                None => element.into_any_element(),
+            }
         });
 
         div()
             .id(strip_id)
+            .relative()
             .flex()
-            .items_stretch()
-            .h(theme.metrics.pane_header_h)
+            .flex_none()
+            .items_end()
+            .h(theme.metrics.tab_strip_h)
             .w_full()
-            .bg(theme.colors.bg)
-            .border_b(theme.metrics.hairline)
-            .border_color(theme.colors.border)
-            .overflow_hidden()
+            .px(theme.space.sm)
+            .bg(theme.colors.chrome)
+            // The strip's bottom hairline runs *behind* the tabs, so the active tab, which
+            // reaches the bottom edge on the content ground, covers it and joins the content.
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .h(theme.metrics.hairline)
+                    .bg(theme.colors.border),
+            )
             .child(
                 div()
                     .on_children_prepainted(move |_, window, cx| {
@@ -329,84 +464,126 @@ impl RenderOnce for TerminalTabStrip {
                     })
                     .id("tabs")
                     .flex()
-                    .items_stretch()
+                    .items_end()
+                    .gap(theme.space.xxs)
                     .min_w_0()
                     .h_full()
                     .overflow_x_scroll()
                     .track_scroll(&scroll)
                     .children(tabs),
             )
-            .children(show_plus.then(|| new_tab_button(&theme, on_new)))
+            .children(show_plus.then(|| new_tab_control(&theme, new_menu, on_new)))
+            .child(div().flex_1())
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(theme.space.xxs)
+                    .h_full()
+                    .children(trailing),
+            )
     }
 }
 
-/// One tab: the index, the name, and whatever marks apply to it.
+/// One tab: the kind glyph, the name, its state mark and, when it can be closed, the `✕`.
 fn tab_element(
     tab: TerminalTab,
     pos: usize,
     is_active: bool,
+    part: &'static str,
     theme: &Theme,
-    on_select: Option<SelectHandler>,
+    handlers: &Rc<TabHandlers>,
 ) -> gpui::Stateful<gpui::Div> {
     let hover_bg = theme.colors.row_hover;
     // The strip is a row of anonymous hit targets without this: the tab's own name is the only
     // thing that tells `nvim` from `cc` outside the pixels.
     let name = tab.name.clone();
+    let tooltip_kbd = tab.kbd.clone();
+    let index = tab.index;
+    let close = handlers.on_close.as_ref().map(|on_close| {
+        close_button(
+            pos,
+            is_active,
+            part,
+            Rc::clone(on_close),
+            handlers.close_kbd.clone(),
+            theme,
+        )
+    });
+    let tooltip_delay = std::time::Duration::from_millis(theme.motion.tooltip_delay);
 
     div()
         .id(tab.element_id())
+        .group(TAB_GROUP)
         .flex()
-        .flex_col()
-        .justify_between()
         .flex_none()
+        .items_center()
+        .gap(theme.space.xs)
         .min_w(theme.metrics.terminal_tab_min_w)
         .max_w(theme.metrics.terminal_tab_max_w)
-        .h_full()
-        .border_r(theme.metrics.hairline)
-        .border_color(theme.colors.border)
-        // The active tab sits one step above the strip so the eye finds "where am I" before it
-        // reads any name.
-        .when(is_active, |el| el.bg(theme.colors.surface))
-        .when(!is_active, |el| el.hover(move |s| s.bg(hover_bg)))
-        .when_some(on_select, |el, select| {
+        .h(theme.metrics.terminal_tab_h)
+        .pl(theme.space.md)
+        .pr(theme.space.xs)
+        .rounded_t(theme.radii.control)
+        .map(|el| {
+            if is_active {
+                // The active tab is cut from the content below it: same ground, a hairline on
+                // three sides, and nothing underneath.
+                el.bg(theme.colors.bg)
+                    .border_t(theme.metrics.hairline)
+                    .border_l(theme.metrics.hairline)
+                    .border_r(theme.metrics.hairline)
+                    .border_color(theme.colors.border)
+            } else {
+                el.hover(move |s| s.bg(hover_bg))
+            }
+        })
+        // The index is the argument to `ctrl-s <n>`; it lives in the tooltip beside that key,
+        // which is where the reader who wants it is already looking.
+        .tooltip(move |window, cx| {
+            Tooltip::new(SharedString::from(format!("Tab {index}")))
+                .kbd(tooltip_kbd.clone())
+                .build(window, cx)
+        })
+        .tooltip_show_delay(tooltip_delay)
+        .when_some(handlers.on_select.clone(), |el, select| {
+            let right = Rc::clone(&select);
             super::control::on_activate(el, name, move |window, cx| select(pos, window, cx))
+                // A right-click is about this tab, so it selects it before its menu opens;
+                // the menu's verbs then act on what the reader is looking at.
+                .on_mouse_down(MouseButton::Right, move |_, window, cx| {
+                    right(pos, window, cx);
+                })
+        })
+        .when_some(handlers.on_close.clone(), |el, close| {
+            el.on_aux_click(move |event, window, cx| {
+                if event.is_middle_click() {
+                    close(pos, window, cx);
+                }
+            })
         })
         .child(tab_body(tab, is_active, theme))
-        .child(
-            div()
-                .flex_none()
-                .h(theme.metrics.focus_ring_w)
-                .w_full()
-                .bg(if is_active {
-                    theme.colors.accent
-                } else {
-                    gpui::transparent_black()
-                }),
-        )
+        .children(close)
 }
 
-/// The tab's single line: index, kind glyph, name, then the status marks.
+/// The glyph, the name, then the status marks.
 fn tab_body(tab: TerminalTab, is_active: bool, theme: &Theme) -> gpui::Div {
     let exited = tab.exited;
-    let dot = tab.dot_tone(is_active);
+    let mark = tab.mark(is_active);
+    let icon = tab.icon.unwrap_or_else(|| tab.kind.icon());
+    let fg = if is_active {
+        theme.colors.text
+    } else {
+        theme.colors.text_secondary
+    };
     div()
         .flex()
         .flex_1()
         .min_w_0()
         .items_center()
         .gap(theme.space.xs)
-        .px(theme.space.sm)
-        // The index is the argument to `ctrl-s <n>`; it never dims away, because the moment it
-        // does the binding stops being discoverable.
-        .child(Text::hint(tab.index.to_string()).faint())
-        // A Fleet-drawn pane is not a terminal: the glyph is the only thing on the strip that
-        // says why this tab answers `j` and `k` instead of typing them.
-        .children((tab.kind == TerminalTabKind::Native).then(|| {
-            Icon::GitBranch
-                .el()
-                .size(IconSize::Small)
-                .color(theme.colors.text_secondary)
-        }))
+        .child(icon.el().size(IconSize::Medium).color(fg))
         .child(
             if exited.is_some() {
                 Text::ui(tab.name).faint()
@@ -418,9 +595,8 @@ fn tab_body(tab: TerminalTab, is_active: bool, theme: &Theme) -> gpui::Div {
             .ellipsize(),
         )
         .children(
-            // §2: "gray spinner (running), amber dot (needs you)". Colour is semantic, so
-            // progress is gray everywhere on the strip; amber belongs to the attention dot
-            // alone, and an amber spinner beside it collides with that one signal.
+            // §2: "gray spinner (running), amber (needs you)". Colour is semantic, so progress
+            // is gray everywhere on the strip; amber belongs to the attention chip alone.
             tab.starting.then(|| {
                 Spinner::new("starting")
                     .size(IconSize::Small)
@@ -438,42 +614,104 @@ fn tab_body(tab: TerminalTab, is_active: bool, theme: &Theme) -> gpui::Div {
                 .id("agent")
         }))
         .children(exited.map(|code| {
-            div()
-                .flex()
+            Text::hint(TerminalTab::exit_label(code))
+                .tone(Tone::Danger)
                 .flex_none()
-                .items_center()
-                .gap(theme.space.xxs)
-                .child(
-                    Icon::CircleX
-                        .el()
-                        .size(IconSize::Small)
-                        .color(theme.colors.text_muted),
-                )
-                .child(Text::hint(TerminalTab::exit_label(code)).faint())
         }))
-        .children(dot.map(StatusDot::small))
+        .children(mark.map(|mark| {
+            match mark {
+                TabMark::NeedsYou => Chip::new()
+                    .text("needs you")
+                    .tone(Tone::Warning)
+                    .filled(true)
+                    .into_any_element(),
+                TabMark::Unread => StatusDot::small(Tone::Info).into_any_element(),
+            }
+        }))
 }
 
-/// The trailing `+`: mouse parity for `ctrl-s c`.
-fn new_tab_button(theme: &Theme, on_new: Option<NewHandler>) -> gpui::Stateful<gpui::Div> {
+/// The `✕`: always on the active tab, on the others while they are hovered.
+fn close_button(
+    pos: usize,
+    is_active: bool,
+    part: &'static str,
+    on_close: PositionHandler,
+    kbd: Option<Kbd>,
+    theme: &Theme,
+) -> impl IntoElement {
+    let hover_bg = theme.colors.control_hover;
+    // Formatted only while the harness records, so production pays one flag read.
+    let target = if harness::is_recording() {
+        SharedString::from(format!("{part}[{pos}].close"))
+    } else {
+        SharedString::new_static("")
+    };
     div()
-        .id("new")
+        .id(("close", pos))
         .flex()
         .flex_none()
         .items_center()
         .justify_center()
-        .w(theme.metrics.new_terminal_tab_w)
-        .h_full()
-        .hover(|s| s.bg(theme.colors.row_hover))
-        .when_some(on_new, |el, on_new| {
-            super::control::on_activate(el, "new terminal", on_new)
+        .size(theme.metrics.tab_close_size)
+        .rounded(theme.radii.sm)
+        .hover(move |s| s.bg(hover_bg))
+        // Hidden, not removed: the box keeps its width, so hovering a tab never reflows the
+        // strip.
+        .when(!is_active, |el| {
+            el.invisible()
+                .group_hover(TAB_GROUP, |style| style.visible())
         })
+        .map(|el| {
+            super::control::on_click_named(el, "Close tab", move |_, window, cx| {
+                cx.stop_propagation();
+                on_close(pos, window, cx);
+            })
+        })
+        .tooltip(move |window, cx| Tooltip::new("Close tab").kbd(kbd.clone()).build(window, cx))
+        .tooltip_show_delay(std::time::Duration::from_millis(theme.motion.tooltip_delay))
         .child(
-            Icon::Plus
+            Icon::X
                 .el()
-                .size(IconSize::Medium)
-                .color(theme.colors.text_muted),
+                .size(IconSize::Small)
+                .color(theme.colors.text_secondary),
         )
+        .harness_target(target)
+}
+
+/// The `+`: the new-tab menu, or `ctrl-s c` directly when the strip has no menu.
+fn new_tab_control(
+    theme: &Theme,
+    new_menu: Option<NewMenuBuilder>,
+    on_new: Option<NewHandler>,
+) -> impl IntoElement {
+    let control = match new_menu {
+        Some(builder) => PopoverMenu::new("terminal-tab-new")
+            .trigger_with(|open, _, _| {
+                IconButton::new("terminal-tab-new-trigger", Icon::Plus, "New tab")
+                    .size(super::ButtonSize::Compact)
+                    .selected(open)
+            })
+            .menu(move |menu, window, cx| builder(menu, window, cx))
+            .into_any_element(),
+        None => {
+            let button = IconButton::new("terminal-tab-new-trigger", Icon::Plus, "New terminal")
+                .size(super::ButtonSize::Compact);
+            match on_new {
+                Some(on_new) => button
+                    .on_click(move |_, window, cx| on_new(window, cx))
+                    .into_any_element(),
+                None => button.disabled(true).into_any_element(),
+            }
+        }
+    };
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .h_full()
+        .ml(theme.space.xs)
+        .child(control)
+        .harness_target("tabs.new")
 }
 
 #[derive(Default)]
@@ -511,56 +749,61 @@ mod tests {
     use super::*;
 
     #[test]
-    fn one_dot_at_most_and_amber_outranks_unread() {
+    fn one_mark_at_most_and_needs_you_outranks_unread() {
         let plain = TerminalTab::new(1, "sh");
-        assert_eq!(plain.dot_tone(false), None);
+        assert_eq!(plain.mark(false), None);
         assert_eq!(
-            plain.clone().unread(true).dot_tone(false),
-            Some(Tone::Secondary)
+            plain.clone().unread(true).mark(false),
+            Some(TabMark::Unread)
         );
         assert_eq!(
-            plain.clone().activity(true).dot_tone(false),
-            Some(Tone::Warning)
+            plain.clone().activity(true).mark(false),
+            Some(TabMark::Unread)
         );
         assert_eq!(
-            plain.clone().activity(true).unread(true).dot_tone(false),
-            Some(Tone::Warning)
+            plain.clone().activity(true).attention(true).mark(false),
+            Some(TabMark::NeedsYou)
         );
         // The tab you are looking at, and an exited tab, draw no dot at all.
-        assert_eq!(plain.clone().unread(true).dot_tone(true), None);
-        assert_eq!(plain.clone().activity(true).dot_tone(true), None);
-        assert_eq!(plain.clone().unread(true).exited(0).dot_tone(false), None);
-        // …except a tab that is blocked on the reader: §3.3's amber dot survives selection,
-        // and only the exit mark still outranks it.
+        assert_eq!(plain.clone().unread(true).mark(true), None);
+        assert_eq!(plain.clone().activity(true).mark(true), None);
+        assert_eq!(plain.clone().unread(true).exited(0).mark(false), None);
+        // …except a tab that is blocked on the reader: §3.3's chip survives selection, and
+        // only the exit word still outranks it.
         assert_eq!(
-            plain.clone().attention(true).dot_tone(true),
-            Some(Tone::Warning)
+            plain.clone().attention(true).mark(true),
+            Some(TabMark::NeedsYou)
         );
-        assert_eq!(
-            plain.clone().attention(true).unread(true).dot_tone(true),
-            Some(Tone::Warning)
-        );
-        assert_eq!(plain.attention(true).exited(0).dot_tone(true), None);
+        assert_eq!(plain.attention(true).exited(0).mark(true), None);
     }
 
     struct TestStrip {
         tabs: usize,
         selected: Option<usize>,
+        closed: Option<usize>,
         created: bool,
     }
 
     impl Render for TestStrip {
         fn render(&mut self, _: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
             let weak = cx.weak_entity();
-            let new_weak = weak.clone();
+            let (new_weak, close_weak) = (weak.clone(), weak.clone());
             div().w(gpui::px(300.0)).child(
                 TerminalTabStrip::new((0..self.tabs).map(|ix| TerminalTab::new(ix + 1, "sh")))
                     .active(self.tabs - 1)
                     .on_select(move |index, _, cx| {
-                        let _ = weak.update(cx, |view, _| view.selected = Some(index));
+                        weak.update(cx, |view, _| view.selected = Some(index))
+                            .unwrap_or_else(|error| panic!("{error}"));
+                    })
+                    .on_close(move |index, _, cx| {
+                        close_weak
+                            .update(cx, |view, _| view.closed = Some(index))
+                            .unwrap_or_else(|error| panic!("{error}"));
                     })
                     .on_new(move |_, cx| {
-                        let _ = new_weak.update(cx, |view, _| view.created = true);
+                        new_weak
+                            .update(cx, |view, _| view.created = true)
+                            .unwrap_or_else(|error| panic!("{error}"));
                     }),
             )
         }
@@ -568,13 +811,14 @@ mod tests {
 
     #[gpui::test]
     fn overflow_reveals_the_active_tab_and_preserves_the_new_button(cx: &mut gpui::TestAppContext) {
-        use gpui::{AppContext, Modifiers, point, px};
+        use gpui::{AppContext, Modifiers, MouseButton, point, px};
         cx.update(|cx| cx.set_global(crate::Theme::dark()));
         let window = cx.update(|cx| {
             cx.open_window(Default::default(), |_, cx| {
                 cx.new(|_| TestStrip {
                     tabs: 8,
                     selected: None,
+                    closed: None,
                     created: false,
                 })
             })
@@ -583,10 +827,24 @@ mod tests {
         let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
         let view = window.root(&mut cx).expect("test strip");
         cx.run_until_parked();
-        cx.simulate_mouse_move(point(px(250.0), px(12.0)), None, Modifiers::none());
-        cx.simulate_click(point(px(250.0), px(12.0)), Modifiers::none());
+        // The tabs sit at the bottom of the 40 px strip; y = 30 is inside every one of them.
+        let tab_y = px(30.0);
+        cx.simulate_mouse_move(point(px(200.0), tab_y), None, Modifiers::none());
+        cx.simulate_click(point(px(200.0), tab_y), Modifiers::none());
         view.read_with(&cx, |view, _| assert_eq!(view.selected, Some(7)));
-        cx.simulate_click(point(px(282.0), px(12.0)), Modifiers::none());
+        // A middle-click closes the tab under the pointer, and does not select it.
+        cx.simulate_mouse_down(
+            point(px(200.0), tab_y),
+            MouseButton::Middle,
+            Modifiers::none(),
+        );
+        cx.simulate_mouse_up(
+            point(px(200.0), tab_y),
+            MouseButton::Middle,
+            Modifiers::none(),
+        );
+        view.read_with(&cx, |view, _| assert_eq!(view.closed, Some(7)));
+        cx.simulate_click(point(px(279.0), px(20.0)), Modifiers::none());
         view.read_with(&cx, |view, _| assert!(view.created));
         view.update(&mut cx, |view, cx| {
             view.tabs = 2;
@@ -594,15 +852,15 @@ mod tests {
             cx.notify();
         });
         cx.run_until_parked();
-        cx.simulate_mouse_move(point(px(250.0), px(12.0)), None, Modifiers::none());
-        cx.simulate_click(point(px(190.0), px(12.0)), Modifiers::none());
+        cx.simulate_mouse_move(point(px(250.0), tab_y), None, Modifiers::none());
+        cx.simulate_click(point(px(195.0), px(20.0)), Modifiers::none());
         view.read_with(&cx, |view, _| assert!(view.created));
     }
 
     #[test]
-    fn a_signal_killed_tab_shows_a_dash_and_never_a_number() {
-        assert_eq!(TerminalTab::exit_label(Some(1)).as_ref(), "1");
-        assert_eq!(TerminalTab::exit_label(None).as_ref(), "\u{2014}");
+    fn a_signal_killed_tab_says_killed_and_never_a_number() {
+        assert_eq!(TerminalTab::exit_label(Some(1)).as_ref(), "exited 1");
+        assert_eq!(TerminalTab::exit_label(None).as_ref(), "killed");
     }
 
     #[test]
@@ -616,13 +874,16 @@ mod tests {
     /// mark this component can draw is previewable lives here, beside the marks themselves.
     #[test]
     fn every_mark_this_strip_draws_appears_in_a_gallery_panel() {
-        const MARKS: [&str; 5] = [
+        const MARKS: [&str; 7] = [
             ".attention(true)",
             ".unread(true)",
+            ".starting(true)",
+            ".exited(",
             "TerminalAgentState::Working",
             "TerminalAgentState::Finished",
             "TerminalTabKind::Native",
         ];
+        const CONTROLS: [&str; 3] = [".on_close(", ".tab_menu(", ".new_menu("];
         for (gallery, source) in [
             (
                 "gallery_terminal.rs",
@@ -633,7 +894,7 @@ mod tests {
                 include_str!("../../examples/kit_gallery.rs"),
             ),
         ] {
-            for mark in MARKS {
+            for mark in MARKS.iter().chain(CONTROLS.iter()) {
                 assert!(
                     source.contains(mark),
                     "{gallery} has no tab-strip panel showing `{mark}`"

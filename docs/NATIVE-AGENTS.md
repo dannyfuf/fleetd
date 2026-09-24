@@ -66,11 +66,17 @@ The canvas fixes these decisions; do not relitigate them in code.
   agent tab first. A selection sent to the daemon while a thread is still active is obeyed there
   and invisible here.
 - **The pane is a transcript above a docked composer.** The transcript is bottom-anchored. The
-  composer is a multi-line input (`❯` glyph, placeholder `Message claude… (@ file · / command ·
-  $ skill)`), Enter sends, Shift+Enter inserts a newline, no send button, and a 22 px metadata row:
-  `agent mode · claude-sonnet-5 · high · asks before edits` on the left, `context 34% · $0.42 ·
-  48m` on the right. Every left-hand segment the harness reports is shown and no segment is
-  invented.
+  composer is one framed panel: a multi-line input (placeholder `Message claude… @ files ·
+  $ skills · / commands`; Enter sends, Shift+Enter inserts a newline) over a settings strip. On the
+  left, the model chip `claude-sonnet-5 · high` (a menu of the harness's models and, under a
+  separator, their efforts — the `^s m` / `^s e` candidates), the access chip `asks before edits`
+  (a menu of the declared ladder — `^s t`) and a Build | Plan `SegmentedControl` (`⇧⇥`); on the right, the
+  context meter `34%`, the facts `$0.42 · 48m · account`, and **Send** (`⏎`), which reads **Steer**
+  with a draft while the agent works and **Stop** (`esc`) without one. Each control calls the
+  method its key's action calls. Nothing is invented: a model with no published effort reads as the
+  model alone, and a harness that reports no cost has no cost. The links a thread works for — its
+  caller (`for [2] claude — design`) or its card (`for FLT-5 · In review · Fleet`) — stay a muted,
+  clickable line above the composer, unmounted under an approval.
 - **Tab titles differ per harness, and that is the harness's limit.** Codex publishes
   `thread/name/updated` and it replaces the fallback as soon as it arrives. Claude publishes no
   title on any frame, so a Claude tab keeps the fallback — the first user message, normalised and
@@ -83,7 +89,7 @@ The canvas fixes these decisions; do not relitigate them in code.
   its line structure in a horizontal scroller; a vertical wheel over it continues scrolling the
   transcript.
   Reasoning is one collapsed muted line. Every tool call is one 30 px row: `state glyph · 60 px
-  kind column · one-line summary · right-aligned result`. Completed work folds to
+  kind column · one-line summary · result chip · duration · chevron`. Completed work folds to
   `worked 22s · 14 steps  ⌄`. A turn ends with one right-aligned footer.
 - **Approvals and questions dock above the composer. Only the proposed plan is an in-transcript
   card.** This **reverses** the previous revision of this document, which put all three in the
@@ -96,11 +102,11 @@ The canvas fixes these decisions; do not relitigate them in code.
 - **Where state shows.** Tab: gray spinner (running), amber dot (needs you), gray dot (unread
   output), `exited 1` in red (dead). The amber dot is the one mark that survives selection — a
   thread blocked on you is blocked whether or not you are reading it. Session header: `working` or
-  `needs you`. Context bar: `3 needs you · 2 working · 1 failed`, which includes the current tab
-  and omits every segment whose count is zero.
+  `needs you`. Title bar: `3 needs you`, which includes the current tab, is absent at zero, and
+  opens the waiting thread (the agents picker when more than one waits).
   **The board reuses this vocabulary unchanged.** A card whose column runs an action wears the same
   gray spinner for progress and the same amber dot for "wants you", on the tile and in the card
-  detail alike, and its pane header counts `1/1 working · 1 needs you` the way the context bar
+  detail alike, and its pane header counts `1/1 working · 1 needs you` the way the title bar
   counts threads — same words, same tones, zero-suppressed the same way. Nothing about a run
   invents a colour or a glyph of its own (`DESIGN-SYSTEM.md` §5.2, `UX-SPEC.md` §Board).
 
@@ -296,16 +302,17 @@ shutdown's synthetic `SessionStateChanged(Stopped)` is not unread transcript out
 writer transaction advances only cursors that were already exactly caught up before that event.
 
 Derived **attention**, in priority order, carried in the thread summary so the tab, the header and
-the context-bar counts agree:
+the title bar's count agree. The title bar counts only what needs a person; working, waiting and
+failed threads show on their tabs and in the palette's `AGENTS` section:
 
-| Attention | When | Tab | Header | Context bar |
+| Attention | When | Tab | Header | Title bar |
 | --- | --- | --- | --- | --- |
 | `NeedsYou(Permission)` | an open permission gate | amber dot | `needs you` | `needs you` |
 | `NeedsYou(Question)` | an open **blocking** question gate | amber dot | `needs you` | `needs you` |
 | `NeedsYou(Plan)` | a settled plan waiting for a decision | amber dot | `needs you` | `needs you` |
-| `Working` | `session == Running` or `turn == Running` or background tasks alive | gray spinner | `working` | `working` |
-| `Waiting(UsageLimit)` | a rejected rate-limit window with no allowed overage | gray spinner + countdown | `waiting` | `waiting` |
-| `Failed` | turn failed, session error, or unexpected exit | `exited 1` red | `failed` | `failed` |
+| `Working` | `session == Running` or `turn == Running` or background tasks alive | gray spinner | `working` | — |
+| `Waiting(UsageLimit)` | a rejected rate-limit window with no allowed overage | gray spinner + countdown | `waiting` | — |
+| `Failed` | turn failed, session error, or unexpected exit | `exited 1` red | `failed` | — |
 | `NeedsYou(Finished)` | a turn settled and its `seq` is newer than `last_seen_seq` | amber dot | `needs you` | `needs you` |
 | `Unread` | new non-terminal output since `last_seen_seq` | gray dot | — | — |
 | `Idle` | otherwise | plain | `idle` | — |
@@ -823,6 +830,20 @@ not a sibling element. Paragraphs and table cells shape as one wrapping text ele
 code preserves its lines in a horizontal, axis-restricted scroller so vertical wheel input still
 belongs to the transcript.
 
+Tool rows are pointer-first rows (ADR 0023): the line is a click target with a pointer cursor and
+a hover band, and a click toggles the row exactly as `⏎` does on the focused row. The kind column
+is a verb — `Read`, `Edit`, `Write`, `Run`, `Search`, `Fetch` — or, for a tool Fleet has no verb
+for, the MCP server or the harness's own name. The result is a chip: `+1 −1` for a file change,
+`exit 1` in the danger tone for a nonzero exit, `waiting for you` in amber while an open
+permission gate names the call; a settled call adds its duration. Under the pointer the row shows
+its verbs as icon buttons — **Copy** (`y`), **Diff** (`d`, a call with a diff), **Open in
+editor** (`o`, a call that names a file) — and a right-click opens a menu with the same ones. Each
+reports the same `RowAction` its key reports on the focused row; the chips appear only in scroll
+mode with a row focused, because that is the only place the keys are bound. The turn footer
+carries **Diff** (every file change of the turn, unfolding it) and **Revert turn** (only where a
+checkpoint exists) as compact ghost buttons, reporting `d` and `u`. A delegation row is a click
+target too: a click attaches its child, which is what `⏎` on the focused row does.
+
 Tool rows keep their 30 px geometry while streaming. Five states and no more —
 `Running | Done | Failed | Denied | Stopped` — plus `Severe`, reserved for a runtime error or a
 broken side effect, *"not that a command exited nonzero"*. A `git grep` finding nothing is not
@@ -913,8 +934,8 @@ what the run left behind rather than what any one turn produced (`BOARD.md` §11
 ### 6.1 Placement
 
 **Permission approvals and model questions render in a drawer docked to the top edge of the
-composer. The proposed plan renders as an in-transcript card with no buttons. Nothing is ever a
-modal.** This reverses the previous revision of §2 and §5, deliberately:
+composer. The proposed plan renders as an in-transcript card with no actions of its own. Nothing
+is ever a modal.** This reverses the previous revision of §2 and §5, deliberately:
 
 - **A transcript card can be scrolled off screen while it owns the keyboard.** Fleet's decision
   contexts derive from daemon state, so `y` answers a permission whether or not the card is
@@ -933,8 +954,17 @@ modal.** This reverses the previous revision of §2 and §5, deliberately:
   was asked.
 
 One slot, one occupant, strict priority **approval > question > plan-ready**. When several
-requests are pending only the head is actionable and the rest are a `1/N` counter, sorted
+requests are pending only the head is actionable and the rest are a `1 of N` counter, sorted
 ascending by creation time, and there is **no "approve all"**.
+
+Every option is a real control (ADR 0023). The drawer's header leads with the occupant's glyph —
+a lock for a permission, a question mark for a question, a checklist for a plan — and its title
+names the subject: `codex wants to edit README.md`, `claude wants to run a command`. Its verbs
+are buttons in canvas order, the first one primary and a stop set apart at the right as a
+`GhostDanger` button; each shows its key as a `Kbd` chip read from the live keymap for the
+decision's own context, and a click reports the very `DecisionAction` the key resolves to, so the
+pointer and the keyboard share one path. While a reply is in flight every control is disabled and
+the row says `answering…`.
 
 ### 6.2 Permission approvals
 
@@ -942,15 +972,16 @@ The payload is a code well, `whitespace: pre`, bounded to about three lines with
 both axes, focusable so a keyboard user can scroll it, and **never truncated and never
 line-clamped**. It is the **invocation**, never the model's prose about the invocation, because it
 is what `[e]` seeds the composer with. For an edit approval Fleet shows what t3code cannot: **the
-diff**, joined by `itemId` and rendered by `DiffView` at bounded height.
+diff**, joined by `itemId` and rendered by `DiffView` at bounded height under a one-line file
+header (`README.md  +1 −1`).
 
-| Action | Copy | Claude | Codex |
+| Action | Button | Claude | Codex |
 | --- | --- | --- | --- |
-| `[y]` | `allow once` | `{behavior:"allow", updatedInput}` | `accept` |
-| `[a]` | `allow for this session` | allow + suggestions rescoped to `destination:"session"`, or a whole-tool session rule when none is offered | `acceptForSession` |
-| `[n]` | `deny` | `{behavior:"deny", interrupt:false}` | `decline` — **the turn continues** |
-| `[esc]` | `deny and stop` | `{behavior:"deny", interrupt:true}` | `cancel` — **the turn is interrupted** |
-| `[e]` | `edit` | offered — the allow carries the corrected `updatedInput` | **not offered**; the key is unbound and the hint absent |
+| `[y]` | **Allow once** (primary) | `{behavior:"allow", updatedInput}` | `accept` |
+| `[a]` | Allow for this session | allow + suggestions rescoped to `destination:"session"`, or a whole-tool session rule when none is offered | `acceptForSession` |
+| `[n]` | Deny | `{behavior:"deny", interrupt:false}` | `decline` — **the turn continues** |
+| `[esc]` | Deny and stop (ghost danger, at the right) | `{behavior:"deny", interrupt:true}` | `cancel` — **the turn is interrupted** |
+| `[e]` | Edit | offered — the allow carries the corrected `updatedInput` | **not offered**; the key is unbound and the button absent |
 | — | always / forever | not offered for commands or file changes on either harness | Codex's wire has no "always"; t3code downgrades it silently |
 
 The decline/cancel distinction is not cosmetic and both must be reachable. **The word "always"
@@ -960,8 +991,8 @@ v1.
 **`Enter` is not bound.** A queued Return keystroke must never approve a shell command — the one
 t3code property worth keeping exactly. Keys are bare letters in a derived context
 (`Agent > AgentDecision > AgentPermission`) so they cannot fire anywhere else, there is no default
-focus and no focus ring, and the status bar mirrors the card's hints **from the same source** so
-it can never advertise a scope the card does not offer.
+focus and no focus ring, and the card's controls read their keys **from the same source** so
+they can never advertise a scope the card does not offer.
 
 Cancellation, death and staleness: a withdrawn request closes as `Withdrawn` with **no** response
 sent; a turn ending with a native question open resolves it as dismissed, because a terminal turn
@@ -974,6 +1005,11 @@ timeouts** — a request is open until answered, withdrawn, or declared stale. A
 thread settlement.
 
 ### 6.3 Model questions
+
+In the drawer a question is its header, its prompt and one clickable row per option, each led by
+its digit's `Kbd` chip; a click reports `Choose(n)`, as the digit does. A multi-select question's
+rows carry a checkbox and a click toggles the option. **Answer** (`⏎`, **Next** before the last
+question) is the primary button and **Previous** (`p`) appears past the first question.
 
 Normalised `Question`: a stable id, `header`, `prompt`, `options`, `multi_select`, `allows_other`,
 `is_secret`, `blocking`. Claude keys answers by the **exact question text** (the CLI looks them up
@@ -989,9 +1025,10 @@ gate rather than duplicating it, and the answer is delivered as a **new message*
 
 ### 6.4 Proposed plans
 
-The only rich decision artifact in the transcript, and it carries **no buttons**. The title is the
-plan's first Markdown heading, promoted out of the body and removed from it. Actions live on the
-composer: `[y] implement`, `[n] refine`. One plan per turn, upserted, keyed `(thread, turn)`.
+The only rich decision artifact in the transcript, and it carries **no actions of its own**. The
+title is the plan's first Markdown heading, promoted out of the body and removed from it. Actions
+live in the decision dock: **Implement** (`y`, primary) and **Refine** (`n`), buttons that report
+the same actions as their keys. One plan per turn, upserted, keyed `(thread, turn)`.
 Claude's arrives as an always-denied `ExitPlanMode`; Codex's as an `item/completed` of type
 `plan`.
 
@@ -1301,6 +1338,21 @@ once to a fresh bounded newest-window open. A replay answer — the ladder admit
 only a windowed answer replaces a projection, and a replay for a thread the client no longer
 holds is a gap that re-opens the newest window.
 
+The summary list has three writers with no order between them: the snapshot, the `AgentSummary`
+broadcast and the `AgentThreadCreated` reply. fleetd broadcasts a new thread's summary *before*
+it replies to the create, and assembles snapshots asynchronously without the create stamping
+one, so the client makes both rules explicit rather than trusting arrival order:
+
+- **A snapshot forgets only threads a snapshot has listed.** A thread a summary or reply
+  introduced is kept, with its latest summary, until a snapshot lists it; a snapshot assembled a
+  moment before the thread existed is otherwise a removal, and it took the tab `^s a` had just
+  selected with it. Such a thread still goes when no snapshot lists its worktree, and a new link's
+  first snapshot is authoritative about everything.
+- **`^s a` / `^s A` selects its thread on first sight.** The press is recorded before the create
+  is sent, and the first summary or snapshot that lists a new top-level thread of that provider in
+  that worktree selects it and asks for its composer's focus. The reply selects only when first
+  sight did not, so the focus it delivered is not re-armed.
+
 ### 9.3 Remote
 
 > **The remote daemon owns the transcript and the sequence. The local daemon is a re-framing proxy
@@ -1554,10 +1606,10 @@ The CLI drives the same requests: `fleet agent list|new|send|respond|interrupt|s
 | `TranscriptList` | Variable-height rows over GPUI `list`, bottom-aligned, keyed rows, overdraw, jump-to-latest, `^s [` scroll mode. Not `uniform_list`; ADR 0005's uniform-row rule applies to diffs, which stay uniform inside their row. Structural `set_rows` calls splice only for `diff_rows`; streaming `patch_row(index, row)` replaces one row and calls `remeasure_items`, preserving the reader's in-row scroll offset. `ListState::reset` remains exclusive to `set_thread`. The scroll callback consumes only `ListScrollEvent`; geometry and the scroll thumb are refreshed in a deferred entity update after GPUI releases the list's mutable lease. It reports reaching the oldest row it holds (`TranscriptEvent::ReachedOldest`, once per row set) and never decides whether older history exists — that is the owner's page cursor. |
 | `MultilineInput` | Thin composer chrome over the shared multi-line `TextInput`: prompt history, owner-routed Enter submit, Shift-Enter newline, and `@` `/` `$` trigger reports. All editing, IME, selection, pointer geometry and scrolling stay in `TextInput`; history recalls at the *visual* buffer edge. |
 | `Markdown` | Parses a *prefix* safely: every decided block stays a block, at the same index, as the stream grows. A table's header is the one two-line opener and stays the last paragraph until its delimiter arrives. `MarkdownDocument::append` reparses only that open tail and reuses its highlight cache. A partial fence is not highlighted and never reaches the cache. Prose is one wrapping `StyledText` per block; tables wrap equal-width cells; fenced code scrolls horizontally without capturing a vertical wheel. Images remain literal in v1. |
-| `ToolRow` | The 30 px row: state glyph, kind column, summary, result, optional nested children region. Five states plus `Severe`. The click target is the 30 px line only, so clicking inside an expanded body does not fold the row, and the expand chevron is `invisible` rather than absent when a row cannot expand. |
+| `ToolRow` | The 30 px row: state glyph, verb kind column, summary, result chip, duration, hover verbs and right-click menu (`RowActions`), chevron, optional nested children region. Five states plus `Severe`. The click target is the 30 px line only, so clicking inside an expanded body does not fold the row, and the expand chevron is `invisible` rather than absent when a row cannot expand. |
 | `DelegationRow` | Two lines: `↳`, provider glyph, title, the seven-state kit status word and its one mark, then the optional headline; elapsed time and the attach hint trail. It takes no domain type, is never grouped and stays exposed while live. |
 | `DelegationResultCard` | Header `↳ <provider> finished · <word> · <elapsed> · <n> files` plus a Markdown body, collapsed to eight lines with the ordinary fold affordance and attach hint. |
-| `DecisionDock` | The docked drawer: approval / question variants, amber left bar, keycap actions, `1/N` counter, owns key routing while open. Attaches to the composer by overlapping it and masking the shared border so the two read as one panel. |
+| `DecisionDock` | The docked drawer: approval / question / plan variants, a glyph-led title, button actions carrying live `Kbd` chips, clickable option rows, `1 of N` counter; the owner routes keys and clicks to one action. Attaches to the composer by overlapping it and masking the shared border so the two read as one panel. |
 | `MetadataRow` | A measured, ordered list of collapsible blocks; collapses from the right into an overflow menu. The hidden count is memoised **per width**, never recomputed per frame. A `MetadataSegment` may carry an opaque target: it renders in link tone with a focus ring and activates through click or `Enter`, which is how a child's pinned caller segment navigates without giving the kit a thread id. |
 | `DiffView` | Lives in `fleet_lazygit::diff_view`, not the kit — it takes unified-diff text and keeps the ADR 0005 row stack. |
 | `KeyHint` | Reused for every visible shortcut. |

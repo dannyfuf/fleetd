@@ -22,6 +22,9 @@ pub struct Fact {
     pub risk: bool,
     /// True when the fact could not be determined. Forces the `Y` key.
     pub unknown: bool,
+    /// How many leading bytes of `text` render in bold: the number that makes the fact
+    /// (`**3 uncommitted files**`, `**2 commits** not on origin/main`). `0` for none.
+    pub strong_len: usize,
 }
 
 impl Fact {
@@ -31,6 +34,7 @@ impl Fact {
             text: text.into(),
             risk: false,
             unknown: false,
+            strong_len: 0,
         }
     }
 
@@ -40,6 +44,7 @@ impl Fact {
             text: text.into(),
             risk: true,
             unknown: false,
+            strong_len: 0,
         }
     }
 
@@ -49,7 +54,41 @@ impl Fact {
             text: text.into(),
             risk: true,
             unknown: true,
+            strong_len: 0,
         }
+    }
+
+    /// Bold the leading `lead` of the sentence: the key number a reader scans for. Ignored
+    /// unless the text starts with it, so a caller cannot bold the wrong words.
+    pub fn strong(mut self, lead: &str) -> Self {
+        if self.text.starts_with(lead) {
+            self.strong_len = lead.len();
+        }
+        self
+    }
+
+    /// The sentence as the confirm draws it, its lead in bold.
+    pub(crate) fn sentence(&self, theme: &crate::theme::Theme) -> gpui::AnyElement {
+        let tone = if self.is_risk() {
+            Tone::Default
+        } else {
+            Tone::Secondary
+        };
+        if self.strong_len == 0 {
+            return Text::ui(self.text.clone()).tone(tone).into_any_element();
+        }
+        crate::styled_with(div(), crate::text::TextRole::Ui.style(theme), theme)
+            .min_w_0()
+            .text_color(tone.color(theme))
+            .child(gpui::StyledText::new(self.text.clone()).with_highlights([(
+                0..self.strong_len,
+                gpui::HighlightStyle {
+                    // Semibold, as a title is: medium beside regular does not read as bold.
+                    font_weight: Some(theme.text.section_title.weight),
+                    ..Default::default()
+                },
+            )]))
+            .into_any_element()
     }
 
     /// Whether this fact must be presented as a reason to stop.
@@ -60,12 +99,13 @@ impl Fact {
         self.risk || self.unknown
     }
 
-    /// The glyph for this fact.
+    /// The glyph for this fact: `triangle-alert` for a reason to stop, a plain `check` for a
+    /// safe one.
     pub fn icon(&self) -> Icon {
         if self.is_risk() {
             Icon::TriangleAlert
         } else {
-            Icon::CircleCheck
+            Icon::Check
         }
     }
 
@@ -193,7 +233,7 @@ impl RenderOnce for FactList {
                     .items_center()
                     .gap(theme.space.sm)
                     .child(fact.icon().el().size(IconSize::Medium).color(color))
-                    .child(Text::ui(fact.text.clone()))
+                    .child(fact.sentence(theme))
             })
             .collect();
 
@@ -232,6 +272,7 @@ mod tests {
             text: "inspection unavailable".into(),
             risk: false,
             unknown: true,
+            strong_len: 0,
         };
         let list = FactList::from_facts([fact.clone()]);
 
@@ -240,5 +281,16 @@ mod tests {
         assert_eq!(list.risk_count(), 1);
         assert!(!list.is_compact());
         assert_eq!(list.confirm_key(), ConfirmKey::Upper);
+    }
+
+    #[test]
+    fn only_a_leading_phrase_can_be_bold() {
+        assert_eq!(
+            Fact::risk("2 commits not on origin/main")
+                .strong("2 commits")
+                .strong_len,
+            "2 commits".len()
+        );
+        assert_eq!(Fact::risk("clean").strong("dirty").strong_len, 0);
     }
 }

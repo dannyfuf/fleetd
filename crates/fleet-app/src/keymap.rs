@@ -26,7 +26,7 @@
 //! literal `ctrl-s`.
 //!
 //! A native agent tab spells its prefix as two-keystroke rows (`ctrl-s s`) rather than as a
-//! context, because its chain is derived from daemon state and has no room for a mode word. Those
+//! context, because its chain is derived from daemon state and has no room for a one-shot context. Those
 //! rows are still never matched by GPUI: the shell's keystroke interceptor takes `ctrl-s` and the
 //! key after it, and resolves the pair here through [`chord_action_for_chain`]. GPUI replays the
 //! keystrokes of a sequence that matched nothing as *input*, so leaving the chord to it typed a
@@ -40,7 +40,7 @@
 //!   query untypable, because bindings outrank the text input. Only `Esc` closes the palette;
 //!   see `docs/APP-CONTRACTS.md`.
 
-use fleet_ui_kit::text_input;
+use fleet_ui_kit::{menu_actions, text_input};
 use gpui::{Action, App, DummyKeyboardMapper, KeyBinding, KeyBindingContextPredicate, Keystroke};
 
 use crate::actions::fleet::Cancel;
@@ -48,8 +48,8 @@ use crate::actions::{
     agent, board, board_settings, card_detail, confirm, context_dialog, create_worktree, daemon,
     dialog, filter, first_run,
     fleet::{
-        FocusStickyError, OpenAgentClaude, OpenAgentCodex, OpenHelp, OpenJobs, OpenPalette,
-        OpenSettings, Quit, QuitAndStopDaemon, Refresh, UpdateFleet,
+        DismissStickyError, FocusStickyError, OpenAgentClaude, OpenAgentCodex, OpenHelp, OpenJobs,
+        OpenPalette, OpenSettings, Quit, QuitAndStopDaemon, Refresh, UpdateFleet,
     },
     help, hub, jobs, native_agent, palette, prefix, prs, quit_daemon_dialog, quit_dialog, repos,
     scroll, settings, workspace, worktrees,
@@ -302,12 +302,14 @@ const AGENT_SESSION_ROWS: &[SharedRow] = &[
     ("ctrl-s y", || Box::new(prefix::CopyWorktreePath)),
     ("ctrl-s z", || Box::new(prefix::ToggleZoom)),
     ("ctrl-s v", || Box::new(prefix::ToggleWatchPane)),
+    ("ctrl-s g", || Box::new(prefix::ToggleChanges)),
     ("ctrl-s V", || Box::new(prefix::DismissWatch)),
     ("ctrl-s N", || Box::new(prefix::NextWatch)),
     ("ctrl-s P", || Box::new(prefix::PrevWatch)),
     ("ctrl-s !", || Box::new(FocusStickyError)),
     ("ctrl-s J", || Box::new(OpenJobs)),
     ("ctrl-s ?", || Box::new(OpenHelp)),
+    ("ctrl-s k", || Box::new(OpenPalette)),
     ("ctrl-s escape", || Box::new(prefix::Cancel)),
 ];
 
@@ -327,65 +329,56 @@ const AGENT_CONTROL_ROWS: &[SharedRow] = &[
     ("ctrl-s F", || Box::new(native_agent::TerminalFallback)),
 ];
 
-/// The context × row products the table registers after its literal rows, in that order.
-///
-/// The first field is the sub-head the help overlay lists the product under: a reader sees each
-/// of these once, under the family it belongs to, instead of thirty-odd identical rows repeated
-/// beneath every sub-mode.
-const SHARED_TABLES: &[(&str, &[&str], &[SharedRow])] = &[
-    (
-        "any mode: select",
-        AGENT_THREAD_CONTEXTS,
-        AGENT_SELECTION_ROWS,
-    ),
-    (
-        "any mode: session",
-        AGENT_THREAD_CONTEXTS,
-        AGENT_SESSION_ROWS,
-    ),
-    (
-        "with a composer",
-        AGENT_CONTROL_CONTEXTS,
-        AGENT_CONTROL_ROWS,
-    ),
+/// The palette's second key beside `:`: ⌘K on macOS, `ctrl-k` everywhere else (KEYMAP.md
+/// § Palette mode). It is bound only where `:` is, so a focused text field keeps its own
+/// `ctrl-k` (delete to the line end): `FleetTextInput` sits deeper on the chain and wins.
+const PALETTE_KEY: &str = if cfg!(target_os = "macos") {
+    "cmd-k"
+} else {
+    "ctrl-k"
+};
+
+/// Every context where `:` opens the palette, and so where [`PALETTE_KEY`] does too.
+const PALETTE_KEY_CONTEXTS: &[&str] = &["Hub", "Dialog > CardDetail"];
+
+/// [`PALETTE_KEY`] as a row.
+const PALETTE_KEY_ROWS: &[SharedRow] = &[(PALETTE_KEY, || Box::new(OpenPalette))];
+
+/// The Workspace's terminal and native tabs and the agent thread: `ctrl-k` belongs to the
+/// shell and the composer there, so only macOS, whose ⌘K no terminal program sees, binds it.
+/// Every platform also has `ctrl-s k` (the prefix table and [`AGENT_SESSION_ROWS`]).
+const WORKSPACE_PALETTE_CONTEXTS: &[&str] = &[
+    "Workspace > Terminal",
+    "Workspace > Native",
+    "Agent > AgentIdle",
+    "Agent > AgentWorking",
+    "Agent > AgentNativeScroll",
+    "Agent > AgentDecision > AgentPermission",
+    "Agent > AgentDecision > AgentQuestion",
+    "Agent > AgentDecision > AgentPlan",
 ];
 
-/// One product of [`SHARED_TABLES`], as a reader should see it: the rows once, and where they
-/// apply.
-#[derive(Debug, Clone)]
-pub struct SharedTable {
-    /// The sub-head this product is listed under.
-    pub label: &'static str,
-    /// Every key context the rows are registered against.
-    pub contexts: &'static [&'static str],
-    /// One representative spec per row, as registered against the first of those contexts.
-    pub rows: Vec<BindingSpec>,
-}
+/// ⌘K on macOS; nothing elsewhere.
+const WORKSPACE_PALETTE_ROWS: &[SharedRow] = if cfg!(target_os = "macos") {
+    PALETTE_KEY_ROWS
+} else {
+    &[]
+};
 
-/// The shared products, so the help overlay can list each one once.
-#[must_use]
-pub fn shared_tables() -> Vec<SharedTable> {
-    SHARED_TABLES
-        .iter()
-        .map(|(label, contexts, table)| SharedTable {
-            label,
-            contexts,
-            rows: table
-                .iter()
-                .map(|(keys, action)| BindingSpec {
-                    keys,
-                    context: contexts[0],
-                    action: action().name(),
-                })
-                .collect(),
-        })
-        .collect()
-}
+/// The context × row products the table registers after its literal rows, in that order: every
+/// row of a family is registered under each context of that family.
+const SHARED_TABLES: &[(&[&str], &[SharedRow])] = &[
+    (AGENT_THREAD_CONTEXTS, AGENT_SELECTION_ROWS),
+    (AGENT_THREAD_CONTEXTS, AGENT_SESSION_ROWS),
+    (AGENT_CONTROL_CONTEXTS, AGENT_CONTROL_ROWS),
+    (PALETTE_KEY_CONTEXTS, PALETTE_KEY_ROWS),
+    (WORKSPACE_PALETTE_CONTEXTS, WORKSPACE_PALETTE_ROWS),
+];
 
 /// Every `(spec, action)` pair [`SHARED_TABLES`] stands for, built once per consumer.
 fn shared_rows() -> Vec<(BindingSpec, Box<dyn Action>)> {
     let mut rows = Vec::new();
-    for (_, contexts, table) in SHARED_TABLES {
+    for (contexts, table) in SHARED_TABLES {
         for context in *contexts {
             for (keys, action) in *table {
                 let action = action();
@@ -419,12 +412,32 @@ pub fn is_prefix_key(keystroke: &Keystroke) -> bool {
         && !modifiers.function
 }
 
+/// The keystrokes of the first row binding `action` in exactly `context`.
+///
+/// For a control whose chip must name a key of a context the focus is not in right now: the
+/// Workspace's chrome shows `⌃S ?` for Help, and `?` is bound in `Workspace > Prefix`, a context
+/// the window is in for one key only. [`fleet_ui_kit::Kbd::for_action`] resolves against the
+/// focused context and would find nothing there.
+#[must_use]
+pub fn keystrokes_in(context: &str, action: &dyn Action) -> Option<Vec<Keystroke>> {
+    let name = action.name();
+    let spec = cached_table()
+        .iter()
+        .find(|spec| spec.context == context && spec.action == name)?;
+    spec.keys
+        .split_whitespace()
+        .map(Keystroke::parse)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| tracing::error!(keys = spec.keys, %error, "unparsable key table row"))
+        .ok()
+}
+
 /// How deep a context predicate matches a live chain, or `None` if it does not match.
 ///
 /// gpui reads `A > B` as "B somewhere below A", not "B's parent is A", so the words are matched
 /// as a subsequence and the answer is the chain index the last word landed on — which is the
 /// depth `cx.bind_keys` ranks competing rows by.
-fn context_depth(context: &str, chain: &[&str]) -> Option<usize> {
+pub(crate) fn context_depth(context: &str, chain: &[&str]) -> Option<usize> {
     let mut index = 0;
     let mut depth = 0;
     // The live chain carries identifiers but not attributes. Attribute predicates can never be
@@ -527,6 +540,14 @@ key_table! {
     ">", "Dialog > CardDetail" => board::RunNow;
     "b", "Dialog > CardDetail" => board::PickBlockedBy;
     "m", "Dialog > CardDetail" => board::PickAgent;
+    // The board's field keys, answered on the card on show: each selects the property row it
+    // edits and opens it, exactly as a click on that row does (UX-SPEC § Card detail).
+    "s", "Dialog > CardDetail" => board::PickStatus;
+    "p", "Dialog > CardDetail" => board::PickPriority;
+    "a", "Dialog > CardDetail" => board::PickAssignee;
+    "t", "Dialog > CardDetail" => board::PickLabels;
+    "e", "Dialog > CardDetail" => board::PickEstimate;
+    "o", "Dialog > CardDetail" => board::OpenWorktree;
     // The palette replaces the dialog it is opened over and remembers which one it was, so the
     // `Card detail:` rows can save or cancel an edit already typed instead of reseeding one over
     // it. Without a way in from the detail those rows can never be listed and that path is dead.
@@ -534,6 +555,7 @@ key_table! {
     "escape", "Dialog > CardDetailEditing" => card_detail::Close;
     "enter", "Dialog > CardDetailEditing" => card_detail::EditProperty;
     "ctrl-s", "Dialog > CardDetailEditing" => card_detail::Save;
+    "ctrl-enter", "Dialog > CardDetailEditing" => card_detail::Save;
     "ctrl-enter", "Dialog > CardCreate" => board::CreateAndOpen;
     "space", "Dialog > CardPicker" => settings::Toggle;
     "j", "Dialog > BoardSettings" => settings::MoveDown;
@@ -600,6 +622,7 @@ key_table! {
     "?",            "Hub" => OpenHelp;
     "J",            "Hub" => OpenJobs;
     "!",            "Hub" => FocusStickyError;
+    "X",            "Hub" => DismissStickyError;
     "i",            "Hub" => hub::ToggleDetail;
     "H",            "Hub" => hub::ToggleRepoRail;
     "a",            "Hub" => OpenAgentClaude;
@@ -696,12 +719,15 @@ key_table! {
     "F",            "Workspace > Prefix" => native_agent::TerminalFallback;
     "z",            "Workspace > Prefix" => prefix::ToggleZoom;
     "v",            "Workspace > Prefix" => prefix::ToggleWatchPane;
+    "g",            "Workspace > Prefix" => prefix::ToggleChanges;
     "V",            "Workspace > Prefix" => prefix::DismissWatch;
     "N",            "Workspace > Prefix" => prefix::NextWatch;
     "P",            "Workspace > Prefix" => prefix::PrevWatch;
     "!",            "Workspace > Prefix" => FocusStickyError;
     "J",            "Workspace > Prefix" => OpenJobs;
     "?",            "Workspace > Prefix" => OpenHelp;
+    // The palette's Workspace key: `ctrl-k` is the shell's here (KEYMAP.md § Palette mode).
+    "k",            "Workspace > Prefix" => OpenPalette;
     "escape",       "Workspace > Prefix" => prefix::Cancel;
 
     "shift-pageup",   "Workspace > Terminal" => scroll::TerminalPageUp;
@@ -858,6 +884,14 @@ key_table! {
     "n",             "Agent > AgentDecision > AgentPlan" => native_agent::Refine;
     "enter",         "Agent > AgentDecision > AgentPlan" => native_agent::Send;
 
+    // An open kit menu (ADR 0023): navigated like a list under a text field, so never `j`/`k`.
+    "down",   "FleetMenu" => menu_actions::SelectNext;
+    "ctrl-n", "FleetMenu" => menu_actions::SelectNext;
+    "up",     "FleetMenu" => menu_actions::SelectPrevious;
+    "ctrl-p", "FleetMenu" => menu_actions::SelectPrevious;
+    "enter",  "FleetMenu" => menu_actions::Confirm;
+    "escape", "FleetMenu" => menu_actions::Cancel;
+
     "left", "FleetTextInput" => text_input::MoveLeft;
     "right", "FleetTextInput" => text_input::MoveRight;
     "alt-left", "FleetTextInput" => text_input::MoveWordLeft;
@@ -957,8 +991,10 @@ key_table! {
     "alt-enter",    "Dialog > Create" => create_worktree::CreateWithoutOpening;
     "alt-enter",    "Dialog > CreateEditing" => create_worktree::CreateWithoutOpening;
 
-    "y",            "Dialog > Confirm" => confirm::Accept;
+    // `enter` first: the later row is the higher-precedence binding, and that is the one the
+    // action button's key chip shows — the confirm teaches `y`, and `enter` still works.
     "enter",        "Dialog > Confirm" => confirm::Accept;
+    "y",            "Dialog > Confirm" => confirm::Accept;
     "Y",            "Dialog > Confirm" => confirm::AcceptStrong;
     "n",            "Dialog > Confirm" => confirm::Reject;
     "q",            "Dialog > Confirm" => confirm::Reject;
@@ -986,10 +1022,18 @@ key_table! {
     "k",            "Dialog > Settings" => settings::MoveUp;
     "E",            "Dialog > Settings" => settings::OpenConfigFile;
     "D",            "Dialog > Settings" => settings::RunDoctor;
+    "/",            "Dialog > Settings" => settings::Search;
     "enter",        "Dialog > SettingsEditing" => dialog::Confirm;
+    // The header's search field owns the printable keys; `↓`/`↑` move over its hits through
+    // the `Dialog` rows, `Enter` jumps to the selected one and `Esc` clears it rather than
+    // discarding the dialog.
+    "enter",        "Dialog > SettingsSearch" => dialog::Confirm;
+    "escape",       "Dialog > SettingsSearch" => settings::EndSearch;
 
     "escape",       "Dialog > Help" => help::Close;
     "?",            "Dialog > Help" => help::Close;
+    "ctrl-tab",     "Dialog > Help" => help::SwitchTab;
+    "ctrl-shift-tab", "Dialog > Help" => help::SwitchTab;
 
     "y",            "Dialog > Quit" => quit_dialog::Accept;
     "n",            "Dialog > Quit" => quit_dialog::Reject;
@@ -1081,6 +1125,7 @@ mod tests {
         "Dialog > Assign",
         "Dialog > Settings",
         "Dialog > SettingsEditing",
+        "Dialog > SettingsSearch",
         "Dialog > Help",
         "Dialog > Quit",
         "Dialog > QuitDaemon",
@@ -1103,6 +1148,7 @@ mod tests {
         "Dialog > BoardSettingsEditing",
         "Dialog > CardPicker",
         "Dialog > SettingsEditing",
+        "Dialog > SettingsSearch",
         "Dialog > CreateEditing",
         "Dialog > CardCreate",
         "Dialog > Clone",
@@ -1140,6 +1186,9 @@ mod tests {
     /// moment a field owns typing; full-window surfaces are here because they draw no editor;
     /// the `FleetTextInput` rows are the editor itself rather than a host around it.
     const NO_LIVE_EDITOR_CONTEXTS: &[&str] = &[
+        // An open kit menu holds only items today; a filter field in one would move it to the
+        // host list, which its non-printable keys already satisfy.
+        "FleetMenu",
         "FleetTextInput",
         "FleetTextInput && mode == multiline",
         "FleetTextInput && mode == multiline && enter == newline",
@@ -1687,6 +1736,7 @@ mod tests {
             ("ctrl-s y", "prefix::CopyWorktreePath"),
             ("ctrl-s z", "prefix::ToggleZoom"),
             ("ctrl-s v", "prefix::ToggleWatchPane"),
+            ("ctrl-s g", "prefix::ToggleChanges"),
             ("ctrl-s V", "prefix::DismissWatch"),
             ("ctrl-s N", "prefix::NextWatch"),
             ("ctrl-s P", "prefix::PrevWatch"),
@@ -1839,6 +1889,18 @@ mod tests {
                 "{keys} must reach the agent PTY"
             );
         }
+    }
+
+    /// The confirm's action button shows the highest-precedence binding of `confirm::Accept`,
+    /// which is the later row: it must teach `y`, the key §3.8.3 names, not `enter`.
+    #[test]
+    fn the_confirm_teaches_y_and_still_accepts_enter() {
+        let accept: Vec<&str> = table()
+            .iter()
+            .filter(|spec| spec.context == "Dialog > Confirm" && spec.action == "confirm::Accept")
+            .map(|spec| spec.keys)
+            .collect();
+        assert_eq!(accept, ["enter", "y"]);
     }
 
     #[test]

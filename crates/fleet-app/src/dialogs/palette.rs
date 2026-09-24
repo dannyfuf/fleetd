@@ -1,39 +1,56 @@
-//! §3.9 Command palette (`:`) — *jump to anything by name, or do the thing whose key I do not
+//! §3.9 Command palette (`:`, ⌘K / `ctrl-k`) — *jump to anything by name, or do the thing whose
+//! key I do not remember.*
+//!
+//! One ranked list over commands, worktrees and sessions, cards, pull requests and agent
+//! threads. A leading `>` narrows it to commands, `@` to worktrees and sessions, `#` to cards and
+//! `!` to agent threads. The rows are prepared in the update path (`refresh`), memoised on
+//! [`PreparedKey`]; `render` only maps them onto the kit's [`fleet_ui_kit::Palette`].
 
 #[cfg(test)]
 use fleet_core::agents::Seq;
 use fleet_core::{
     agents::{AgentThreadSummary, Attention, AttentionKind, ThreadId},
+    github::PrTab,
     ids::{CardId, ContextId, JobId, RepoId, SessionId, WorktreeId},
     sessions::{AgentActivity, SessionKind, SessionState},
 };
 use fleet_proto::{request::RequestBody, snapshot::Snapshot};
 use fleet_ui_kit::{
-    Icon, IconSize, InputMode, Spinner, StatusDot, TextInput, TextInputEvent, Tone, prelude::*,
+    Icon, IconSize, InputMode, Kbd, Spinner, StatusDot, TextInput, TextInputEvent, Tone, prelude::*,
 };
-use gpui::{AnyElement, App, Entity, FocusHandle, Window, div};
+use gpui::{AnyElement, App, Entity, FocusHandle, Keystroke, ScrollHandle, Window, div};
 
 use crate::{
+    action_catalogue::{self, ActionInfo, Place},
     actions::{board, card_detail, fleet, palette as palette_actions},
     bridge::Bridge,
     dialogs::{
         ConfirmRequest, DialogHost, Dialogs, SessionTransport, notify, open_agent_session,
-        open_agent_thread_worktree, open_worktree, request_confirm, step, with_host,
+        open_agent_thread, open_worktree, request_confirm, step, with_host,
     },
     keymap,
-    presentation::{FuzzyQuery, SnapshotIndex, pretty_keys, selected_worktree_id},
+    presentation::{FuzzyQuery, SnapshotIndex, selected_worktree_id},
     screens::agent_thread::presentation::tab_title,
     screens::workspace::status_kind,
     state::{
-        AppState, Cursors, HubPane, HubTab, Overlay, RepoScope, Screen, latest_failed_job,
-        running_jobs,
+        AppState, Cursors, FilterState, HubPane, HubTab, Overlay, RepoScope, Screen,
+        latest_failed_job, running_jobs,
     },
 };
 
-/// The palette's total row cap (§3.9).
-pub const ROW_CAP: usize = 10;
-/// How many rows each section shows on an empty query (§3.9 "States").
-pub const IDLE_ROWS: usize = 5;
+/// How many rows the results show before they scroll (§3.9).
+pub const VISIBLE_ROWS: usize = 10;
+/// How many recently used sessions an empty query lists.
+pub const RECENT_ROWS: usize = 5;
+/// How many suggested commands an empty query lists after them.
+pub const SUGGESTED_ROWS: usize = 6;
+/// The most rows one query lists. Not a per-section cap: the ranked list is cut once, far
+/// below the fold, so a one-letter query cannot build thousands of rows every keystroke.
+pub const RESULT_CAP: usize = 200;
+/// What a destructive command says in place of its place.
+const ASKS_FIRST: &str = "asks first";
+/// The prefix legend shown while the query is empty.
+const PREFIX_HINT: [(&str, &str); 3] = [(">", "commands"), ("@", "worktrees"), ("#", "cards")];
 const ATTENTION_MARK_SIZE: f32 = 16.0;
 
 /// The palette's draft.
@@ -44,10 +61,145 @@ pub struct PaletteState {
     /// The flat cursor across all sections.
     pub(crate) cursor: usize,
     rows: std::rc::Rc<[Entry]>,
-    total: usize,
+    /// The results' scroll position, so a cursor move can keep its row in view.
+    scroll: ScrollHandle,
+    /// The pull requests the PR screen had loaded when the palette opened.
+    prs: std::rc::Rc<[PalettePr]>,
     /// Every input [`candidates`] read to build [`Self::rows`], so a notification that changed
     /// none of them does not rebuild them.
     prepared: Option<PreparedKey>,
+}
+
+/// One pull request the palette can go to, as the PR screen lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PalettePr {
+    /// The PR screen's tab that lists it.
+    pub tab: PrTab,
+    /// Its repository.
+    pub repo: RepoId,
+    /// `#number`.
+    pub number: u64,
+    /// The single-line title.
+    pub title: String,
+    /// The local worktree already checked out for it, which `Enter` opens.
+    pub local: Option<WorktreeId>,
+}
+
+/// The sections of the list. On a typed query they are ordered by their best row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Section {
+    /// The empty query's most recently used sessions.
+    Recent,
+    /// The empty query's highest-ranked commands for where you are.
+    Suggested,
+    /// Sessions, worktrees, repositories and contexts.
+    GoTo,
+    /// Valid commands and the jobs worth cancelling.
+    Commands,
+    /// Cards of the board the app holds.
+    Cards,
+    /// Pull requests the PR screen has loaded.
+    PullRequests,
+    /// Native agent threads.
+    Agents,
+}
+
+impl Section {
+    /// The heading a person reads.
+    #[must_use]
+    pub const fn title(self) -> &'static str {
+        match self {
+            Self::Recent => "Recent",
+            Self::Suggested => "Suggested",
+            Self::GoTo => "Go to",
+            Self::Commands => "Commands",
+            Self::Cards => "Cards",
+            Self::PullRequests => "Pull requests",
+            Self::Agents => "Agents",
+        }
+    }
+}
+
+/// What a query's leading character narrowed the palette to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    /// No prefix: everything, ranked together.
+    All,
+    /// `>`: commands only.
+    Commands,
+    /// `@`: worktrees and sessions (with repositories and contexts).
+    GoTo,
+    /// `#`: cards.
+    Cards,
+    /// `!`: agent threads.
+    Agents,
+}
+
+impl Scope {
+    /// The scope chip's word.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Commands => "Commands",
+            Self::GoTo => "Worktrees",
+            Self::Cards => "Cards",
+            Self::Agents => "Agents",
+        }
+    }
+}
+
+/// A query split into its scope and the text that is matched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ParsedQuery<'a> {
+    pub(crate) scope: Scope,
+    pub(crate) needle: &'a str,
+    /// `^s W`'s session switcher: running sessions only, most recent first.
+    pub(crate) sessions_only: bool,
+}
+
+/// Reads the scope prefix off a query.
+///
+/// `>`, `@`, `#` and `!` are the prefixes. The words `sessions` and `agents <filter>` are what
+/// `^s W` and `^s d` used to seed, and stay accepted so a hand that learned them keeps working.
+pub(crate) fn parse_query(query: &str) -> ParsedQuery<'_> {
+    let trimmed = query.trim_start();
+    let mut chars = trimmed.chars();
+    let scope = match chars.next() {
+        Some('>') => Some(Scope::Commands),
+        Some('@') => Some(Scope::GoTo),
+        Some('#') => Some(Scope::Cards),
+        Some('!') => Some(Scope::Agents),
+        _ => None,
+    };
+    if let Some(scope) = scope {
+        return ParsedQuery {
+            scope,
+            needle: chars.as_str().trim(),
+            sessions_only: false,
+        };
+    }
+    if trimmed.trim_end() == "sessions" {
+        return ParsedQuery {
+            scope: Scope::GoTo,
+            needle: "",
+            sessions_only: true,
+        };
+    }
+    if let Some(rest) = trimmed.strip_prefix("agents")
+        && (rest.is_empty() || rest.starts_with(char::is_whitespace))
+    {
+        return ParsedQuery {
+            scope: Scope::Agents,
+            needle: rest.trim(),
+            sessions_only: false,
+        };
+    }
+    ParsedQuery {
+        scope: Scope::All,
+        needle: query.trim(),
+        sessions_only: false,
+    }
 }
 
 /// Every input the prepared rows are derived from, as revisions and cheap values.
@@ -141,1086 +293,85 @@ pub enum Run {
     Command(Command),
     /// Cancel a background job.
     CancelJob(JobId),
+    /// Select a card on its board and open its detail.
+    OpenCard(CardId),
+    /// Open a pull request's worktree, or show it on the PR screen when it has none.
+    GoToPr {
+        tab: PrTab,
+        repo: RepoId,
+        number: u64,
+        local: Option<WorktreeId>,
+    },
 }
 
 /// One palette row, already resolved against the snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     /// Which section it belongs to.
-    pub(crate) section: PaletteSectionKind,
+    pub(crate) section: Section,
     /// The row label, which is also what the query matches against.
     pub(crate) label: String,
-    /// The muted right-hand description.
+    /// More text the query may match that the row does not show (a provider name, a repo).
+    pub(crate) search: Option<String>,
+    /// The muted right-hand description: a place, a state, or `asks first`.
     pub(crate) detail: Option<String>,
     /// The muted second line.
     pub(crate) secondary: Option<String>,
     /// The right-aligned row verb.
     pub(crate) trailing: Option<String>,
-    /// The bound key, right-aligned.
-    pub(crate) key: Option<String>,
-    /// Whether the row is prefixed with `triangle-alert`.
+    /// A status word after the label (a card's column).
+    pub(crate) badge: Option<String>,
+    /// The row's own key, from the key table.
+    pub(crate) key: Option<Vec<Keystroke>>,
+    /// The label characters the query matched.
+    pub(crate) matches: Vec<usize>,
+    /// Whether the row wears the danger tile.
     pub(crate) destructive: bool,
     /// The glyph, when it is not derived from a session state.
     pub(crate) icon: Icon,
-    /// The §2.5 glyph this row wears, for `GO` rows.
+    /// The §2.5 glyph this row wears, for session and worktree rows.
     ///
     /// It is a resolved [`StatusKind`] and not a raw [`SessionState`] on purpose: `detached`
     /// alone cannot tell `circle` from `moon`, and §5 invariant 1 requires the palette to
     /// draw exactly the glyph the Hub draws for the same worktree.
     pub(crate) status: Option<StatusKind>,
-    /// The native-thread attention mark, when this is an `AGENTS` row.
+    /// The native-thread attention mark, when this is an agent row.
     pub(crate) attention: Option<Attention>,
     /// What `Enter` does.
     pub(crate) run: Run,
 }
 
-/// Every command the palette can run.
-///
-/// The list is deliberately small: only the commands that are worth reaching without their key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Command {
-    /// Go to board.
-    BoardGoBoard,
-    /// Previous column.
-    BoardPrevColumn,
-    /// Next column.
-    BoardNextColumn,
-    /// Next card.
-    BoardNextCard,
-    /// Previous card.
-    BoardPrevCard,
-    /// Open card.
-    BoardOpenCard,
-    /// New card.
-    BoardNewCard,
-    /// Status picker.
-    BoardPickStatus,
-    /// Priority picker.
-    BoardPickPriority,
-    /// Assignee picker.
-    BoardPickAssignee,
-    /// Labels picker.
-    BoardPickLabels,
-    /// Estimate picker.
-    BoardPickEstimate,
-    /// Move card to previous column.
-    BoardMovePrevColumn,
-    /// Move card to next column.
-    BoardMoveNextColumn,
-    /// Create worktree from card.
-    BoardCreateWorktree,
-    /// Open linked worktree.
-    BoardOpenWorktree,
-    /// Sync.
-    BoardSync,
-    /// Full sync.
-    BoardFullSync,
-    /// Open remote issue.
-    BoardOpenRemote,
-    /// Delete card.
-    BoardDeleteCard,
-    /// Settings.
-    BoardSettings,
-    /// Reload.
-    BoardReload,
-    /// Filter cards.
-    BoardFilter,
-    /// Attach the focused card's run.
-    BoardAttachRun,
-    /// Cancel the focused card's run.
-    BoardCancelRun,
-    /// Run the column's action now.
-    BoardRunNow,
-    /// Pick the cards this one is blocked by.
-    BoardPickBlockedBy,
-    /// Pick the agent that runs this card.
-    BoardPickAgent,
-    /// Board settings, on its Columns section.
-    BoardColumns,
-    /// Close.
-    CardDetailClose,
-    /// Edit title.
-    CardDetailEditTitle,
-    /// Edit description.
-    CardDetailEditDescription,
-    /// Add comment.
-    CardDetailAddComment,
-    /// Next property.
-    CardDetailNextProperty,
-    /// Previous property.
-    CardDetailPrevProperty,
-    /// Edit selected property.
-    CardDetailEditProperty,
-    /// Create worktree.
-    CardDetailCreateWorktree,
-    /// Open remote issue.
-    CardDetailOpenRemote,
-    /// Resolve conflict: keep local.
-    CardDetailKeepLocal,
-    /// Resolve conflict: take remote.
-    CardDetailTakeRemote,
-    /// Save text edit.
-    CardDetailSave,
-
-    /// Open or select the active worktree session's board tab.
-    WorkspaceOpenBoard,
-
-    /// Open §3.8.1.
-    NewWorktree,
-    /// Open §3.8.2.
-    CloneRepo,
-    /// Delete the worktree under the cursor, through its confirm.
-    DeleteWorktree,
-    /// Prune the selected repository, through its confirm.
-    PruneWorktrees,
-    /// Sleep the session of the worktree under the cursor.
-    SleepSession,
-    /// Kill that session, through its confirm.
-    KillSession,
-    /// Re-inspect the worktree under the cursor.
-    InspectWorktree,
-    /// Open §3.8.5.
-    MoveRepo,
-    /// Open §3.8.4 for a new context.
-    NewContext,
-    /// Open §3.8.4 for the active context.
-    EditContext,
-    /// Delete the active context, through its confirm.
-    DeleteContext,
-    /// Go to the pull-requests screen.
-    PullRequests,
-    /// Go back to the worktrees list.
-    Worktrees,
-    /// Open the Jobs panel.
-    JobsPanel,
-    /// Open §3.8.6.
-    Settings,
-    /// Open §3.8.7.
-    Help,
-    /// Refresh statuses.
-    Refresh,
-    /// Update Fleet.
-    UpdateFleet,
-    /// Open the Claude agent session.
-    OpenClaude,
-    /// Open the Codex agent session.
-    OpenCodex,
-    /// Quit the app; the daemon keeps running.
-    Quit,
-    /// Quit and stop the daemon.
-    QuitDaemon,
-}
-
-impl Command {
-    /// Every command, in the order the `DO` section lists them.
-    pub const ALL: &'static [Self] = &[
-        Self::BoardGoBoard,
-        Self::BoardPrevColumn,
-        Self::BoardNextColumn,
-        Self::BoardNextCard,
-        Self::BoardPrevCard,
-        Self::BoardOpenCard,
-        Self::BoardNewCard,
-        Self::BoardPickStatus,
-        Self::BoardPickPriority,
-        Self::BoardPickAssignee,
-        Self::BoardPickLabels,
-        Self::BoardPickEstimate,
-        Self::BoardMovePrevColumn,
-        Self::BoardMoveNextColumn,
-        Self::BoardCreateWorktree,
-        Self::BoardOpenWorktree,
-        Self::BoardSync,
-        Self::BoardFullSync,
-        Self::BoardOpenRemote,
-        Self::BoardDeleteCard,
-        Self::BoardSettings,
-        Self::BoardReload,
-        Self::BoardFilter,
-        Self::BoardAttachRun,
-        Self::BoardCancelRun,
-        Self::BoardRunNow,
-        Self::BoardPickBlockedBy,
-        Self::BoardPickAgent,
-        Self::BoardColumns,
-        Self::CardDetailClose,
-        Self::CardDetailEditTitle,
-        Self::CardDetailEditDescription,
-        Self::CardDetailAddComment,
-        Self::CardDetailNextProperty,
-        Self::CardDetailPrevProperty,
-        Self::CardDetailEditProperty,
-        Self::CardDetailCreateWorktree,
-        Self::CardDetailOpenRemote,
-        Self::CardDetailKeepLocal,
-        Self::CardDetailTakeRemote,
-        Self::CardDetailSave,
-        Self::WorkspaceOpenBoard,
-        Self::NewWorktree,
-        Self::CloneRepo,
-        Self::PruneWorktrees,
-        Self::DeleteWorktree,
-        Self::SleepSession,
-        Self::KillSession,
-        Self::InspectWorktree,
-        Self::MoveRepo,
-        Self::NewContext,
-        Self::EditContext,
-        Self::DeleteContext,
-        Self::PullRequests,
-        Self::Worktrees,
-        Self::JobsPanel,
-        Self::Settings,
-        Self::Help,
-        Self::Refresh,
-        Self::UpdateFleet,
-        Self::OpenClaude,
-        Self::OpenCodex,
-        Self::Quit,
-        Self::QuitDaemon,
-    ];
-
-    /// The row label.
-    #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::BoardGoBoard => "Board: Go to board",
-            Self::BoardPrevColumn => "Board: Previous column",
-            Self::BoardNextColumn => "Board: Next column",
-            Self::BoardNextCard => "Board: Next card",
-            Self::BoardPrevCard => "Board: Previous card",
-            Self::BoardOpenCard => "Board: Open card",
-            Self::BoardNewCard => "Board: New card",
-            Self::BoardPickStatus => "Board: Status picker",
-            Self::BoardPickPriority => "Board: Priority picker",
-            Self::BoardPickAssignee => "Board: Assignee picker",
-            Self::BoardPickLabels => "Board: Labels picker",
-            Self::BoardPickEstimate => "Board: Estimate picker",
-            Self::BoardMovePrevColumn => "Board: Move card to previous column",
-            Self::BoardMoveNextColumn => "Board: Move card to next column",
-            Self::BoardCreateWorktree => "Board: Create worktree from card",
-            Self::BoardOpenWorktree => "Board: Open linked worktree",
-            Self::BoardSync => "Board: Sync",
-            Self::BoardFullSync => "Board: Full sync",
-            Self::BoardOpenRemote => "Board: Open remote issue",
-            Self::BoardDeleteCard => "Board: Delete card",
-            Self::BoardSettings => "Board: Settings",
-            Self::BoardReload => "Board: Reload",
-            Self::BoardFilter => "Board: Filter cards",
-            Self::BoardAttachRun => "Board: Attach run",
-            Self::BoardCancelRun => "Board: Cancel run",
-            Self::BoardRunNow => "Board: Run now",
-            Self::BoardPickBlockedBy => "Board: Blocked by",
-            Self::BoardPickAgent => "Board: Agent",
-            Self::BoardColumns => "Board: Columns",
-            Self::CardDetailClose => "Card detail: Close",
-            Self::CardDetailEditTitle => "Card detail: Edit title",
-            Self::CardDetailEditDescription => "Card detail: Edit description",
-            Self::CardDetailAddComment => "Card detail: Add comment",
-            Self::CardDetailNextProperty => "Card detail: Next property",
-            Self::CardDetailPrevProperty => "Card detail: Previous property",
-            Self::CardDetailEditProperty => "Card detail: Edit selected property",
-            Self::CardDetailCreateWorktree => "Card detail: Create worktree",
-            Self::CardDetailOpenRemote => "Card detail: Open remote issue",
-            Self::CardDetailKeepLocal => "Card detail: Resolve conflict: keep local",
-            Self::CardDetailTakeRemote => "Card detail: Resolve conflict: take remote",
-            Self::CardDetailSave => "Card detail: Save text edit",
-
-            Self::WorkspaceOpenBoard => "Workspace: Open board tab",
-            Self::NewWorktree => "New worktree",
-            Self::CloneRepo => "Clone repo",
-            Self::DeleteWorktree => "Delete worktree",
-            Self::PruneWorktrees => "Prune worktrees",
-            Self::SleepSession => "Sleep session",
-            Self::KillSession => "Kill session",
-            Self::InspectWorktree => "Inspect worktree",
-            Self::MoveRepo => "Move repo to context",
-            Self::NewContext => "New context",
-            Self::EditContext => "Edit context",
-            Self::DeleteContext => "Delete context",
-            Self::PullRequests => "Pull requests",
-            Self::Worktrees => "Worktrees",
-            Self::JobsPanel => "Jobs panel",
-            Self::Settings => "Settings",
-            Self::Help => "Keymap",
-            Self::Refresh => "Refresh",
-            Self::UpdateFleet => "Update Fleet",
-            Self::OpenClaude => "Open Claude agent",
-            Self::OpenCodex => "Open Codex agent",
-            Self::Quit => "Quit Fleet",
-            Self::QuitDaemon => "Quit and stop fleetd",
-        }
-    }
-
-    /// The glyph, the same one the action wears elsewhere.
-    #[must_use]
-    pub const fn icon(self) -> Icon {
-        match self {
-            Self::BoardGoBoard => Icon::Boxes,
-            Self::BoardPrevColumn => Icon::ChevronLeft,
-            Self::BoardNextColumn => Icon::ChevronRight,
-            Self::BoardNextCard => Icon::CircleArrowDown,
-            Self::BoardPrevCard => Icon::CircleArrowUp,
-            Self::BoardOpenCard => Icon::Eye,
-            Self::BoardNewCard => Icon::Plus,
-            Self::BoardPickStatus => Icon::CircleDot,
-            Self::BoardPickPriority => Icon::Flag,
-            Self::BoardPickAssignee => Icon::Bot,
-            Self::BoardPickLabels => Icon::FilePen,
-            Self::BoardPickEstimate => Icon::Hourglass,
-            Self::BoardMovePrevColumn => Icon::ChevronLeft,
-            Self::BoardMoveNextColumn => Icon::ChevronRight,
-            Self::BoardCreateWorktree => Icon::GitBranchPlus,
-            Self::BoardOpenWorktree => Icon::GitBranch,
-            Self::BoardSync => Icon::CloudDownload,
-            Self::BoardFullSync => Icon::CloudDownload,
-            Self::BoardOpenRemote => Icon::Globe,
-            Self::BoardDeleteCard => Icon::Trash,
-            Self::BoardSettings => Icon::Settings2,
-            Self::BoardReload => Icon::RefreshCw,
-            Self::BoardFilter => Icon::Search,
-            Self::BoardAttachRun => Icon::Paperclip,
-            Self::BoardCancelRun => Icon::CircleStop,
-            Self::BoardRunNow => Icon::Zap,
-            Self::BoardPickBlockedBy => Icon::CircleSlash,
-            Self::BoardPickAgent => Icon::Bot,
-            Self::BoardColumns => Icon::Boxes,
-            Self::CardDetailClose => Icon::X,
-            Self::CardDetailEditTitle => Icon::FilePen,
-            Self::CardDetailEditDescription => Icon::FilePen,
-            Self::CardDetailAddComment => Icon::Plus,
-            Self::CardDetailNextProperty => Icon::CircleArrowDown,
-            Self::CardDetailPrevProperty => Icon::CircleArrowUp,
-            Self::CardDetailEditProperty => Icon::FilePen,
-            Self::CardDetailCreateWorktree => Icon::GitBranchPlus,
-            Self::CardDetailOpenRemote => Icon::Globe,
-            Self::CardDetailKeepLocal => Icon::CloudUpload,
-            Self::CardDetailTakeRemote => Icon::CloudDownload,
-            Self::CardDetailSave => Icon::Check,
-
-            Self::WorkspaceOpenBoard => Icon::Boxes,
-            Self::NewWorktree => Icon::GitBranchPlus,
-            Self::CloneRepo => Icon::CloudDownload,
-            Self::DeleteWorktree | Self::DeleteContext => Icon::Trash,
-            Self::PruneWorktrees => Icon::Scissors,
-            Self::SleepSession => Icon::Moon,
-            Self::KillSession | Self::QuitDaemon => Icon::Power,
-            Self::InspectWorktree => Icon::Eye,
-            Self::MoveRepo => Icon::ArrowRightLeft,
-            Self::NewContext | Self::EditContext => Icon::Boxes,
-            Self::PullRequests => Icon::GitPullRequest,
-            Self::Worktrees => Icon::GitBranch,
-            Self::JobsPanel => Icon::Clock,
-            Self::Settings => Icon::Settings2,
-            Self::Help => Icon::CircleQuestionMark,
-            Self::Refresh => Icon::LoaderCircle,
-            Self::UpdateFleet => Icon::CircleArrowUp,
-            Self::OpenClaude | Self::OpenCodex => Icon::Bot,
-            Self::Quit => Icon::CircleX,
-        }
-    }
-
-    /// Whether the row wears `triangle-alert`. It still goes through its confirm.
-    #[must_use]
-    pub const fn destructive(self) -> bool {
-        matches!(
-            self,
-            Self::BoardDeleteCard
-                | Self::DeleteWorktree
-                | Self::DeleteContext
-                | Self::PruneWorktrees
-                | Self::KillSession
-                | Self::QuitDaemon
-        )
-    }
-
-    /// The action whose bound key this row shows.
-    #[must_use]
-    pub const fn action(self) -> &'static str {
-        match self {
-            Self::BoardGoBoard => "board::GoBoard",
-            Self::BoardPrevColumn => "board::PrevColumn",
-            Self::BoardNextColumn => "board::NextColumn",
-            Self::BoardNextCard => "board::NextCard",
-            Self::BoardPrevCard => "board::PrevCard",
-            Self::BoardOpenCard => "board::OpenCard",
-            Self::BoardNewCard => "board::NewCard",
-            Self::BoardPickStatus => "board::PickStatus",
-            Self::BoardPickPriority => "board::PickPriority",
-            Self::BoardPickAssignee => "board::PickAssignee",
-            Self::BoardPickLabels => "board::PickLabels",
-            Self::BoardPickEstimate => "board::PickEstimate",
-            Self::BoardMovePrevColumn => "board::MovePrevColumn",
-            Self::BoardMoveNextColumn => "board::MoveNextColumn",
-            Self::BoardCreateWorktree => "board::CreateWorktree",
-            Self::BoardOpenWorktree => "board::OpenWorktree",
-            Self::BoardSync => "board::Sync",
-            Self::BoardFullSync => "board::FullSync",
-            Self::BoardOpenRemote => "board::OpenRemote",
-            Self::BoardDeleteCard => "board::DeleteCard",
-            Self::BoardSettings => "board::Settings",
-            Self::BoardReload => "board::Reload",
-            Self::BoardFilter => "board::Filter",
-            Self::BoardAttachRun => "board::AttachRun",
-            Self::BoardCancelRun => "board::CancelRun",
-            Self::BoardRunNow => "board::RunNow",
-            Self::BoardPickBlockedBy => "board::PickBlockedBy",
-            Self::BoardPickAgent => "board::PickAgent",
-            Self::BoardColumns => "board::Columns",
-            Self::CardDetailClose => "card_detail::Close",
-            Self::CardDetailEditTitle => "card_detail::EditTitle",
-            Self::CardDetailEditDescription => "card_detail::EditDescription",
-            Self::CardDetailAddComment => "card_detail::AddComment",
-            Self::CardDetailNextProperty => "card_detail::NextProperty",
-            Self::CardDetailPrevProperty => "card_detail::PrevProperty",
-            Self::CardDetailEditProperty => "card_detail::EditProperty",
-            Self::CardDetailCreateWorktree => "card_detail::CreateWorktree",
-            Self::CardDetailOpenRemote => "card_detail::OpenRemote",
-            Self::CardDetailKeepLocal => "card_detail::KeepLocal",
-            Self::CardDetailTakeRemote => "card_detail::TakeRemote",
-            Self::CardDetailSave => "card_detail::Save",
-
-            Self::WorkspaceOpenBoard => "prefix::OpenBoard",
-            Self::NewWorktree => "worktrees::Create",
-            Self::CloneRepo => "repos::Clone",
-            Self::DeleteWorktree => "worktrees::Delete",
-            Self::PruneWorktrees => "worktrees::Prune",
-            Self::SleepSession => "worktrees::Sleep",
-            Self::KillSession => "worktrees::Kill",
-            Self::InspectWorktree => "worktrees::Inspect",
-            Self::MoveRepo => "repos::MoveToContext",
-            Self::NewContext => "hub::NewContext",
-            Self::EditContext => "hub::EditContext",
-            Self::DeleteContext => "hub::DeleteContext",
-            Self::PullRequests => "hub::GoPrs",
-            Self::Worktrees => "hub::GoWorktrees",
-            Self::JobsPanel => "fleet::OpenJobs",
-            Self::Settings => "fleet::OpenSettings",
-            Self::Help => "fleet::OpenHelp",
-            Self::Refresh => "fleet::Refresh",
-            Self::UpdateFleet => "fleet::UpdateFleet",
-            Self::OpenClaude => "fleet::OpenAgentClaude",
-            Self::OpenCodex => "fleet::OpenAgentCodex",
-            Self::Quit => "fleet::Quit",
-            Self::QuitDaemon => "fleet::QuitAndStopDaemon",
-        }
-    }
-
-    /// Whether the command can run right now. Invalid commands are not listed (§3.9).
-    ///
-    /// Listing goes through [`Self::valid_with`], which resolves the board's card once for the
-    /// whole of `ALL`; this is the same question asked about one command in isolation.
-    #[cfg(test)]
-    #[must_use]
-    pub fn valid(self, state: &AppState) -> bool {
-        self.valid_with(state, card_context(state, None, None))
-    }
-
-    /// `valid` with the board lookup hoisted out.
-    ///
-    /// [`card_context`] sorts a column and lowercases every card field a filter touches. Doing
-    /// that once per command, for all of `ALL`, on every palette keystroke is the whole cost of
-    /// listing the palette on a board of any size.
-    fn valid_with(self, state: &AppState, card: CardContext) -> bool {
-        let has_card = card.present;
-        let snapshot = state.snapshot.as_ref();
-        let has_repo = snapshot.is_some_and(|snapshot| !snapshot.repos.is_empty());
-        let connected = state.daemon.is_connected();
-        let on_prs = matches!(state.screen, Screen::Hub { tab: HubTab::Prs });
-        let on_board = matches!(state.screen, Screen::Hub { tab: HubTab::Board });
-        match self {
-            Self::BoardGoBoard => state.active_context().is_some(),
-            Self::BoardPrevColumn
-            | Self::BoardNextColumn
-            | Self::BoardNextCard
-            | Self::BoardPrevCard
-            | Self::BoardNewCard
-            | Self::BoardSync
-            | Self::BoardFullSync
-            | Self::BoardSettings
-            | Self::BoardReload
-            | Self::BoardFilter => on_board,
-            Self::BoardOpenCard | Self::BoardCreateWorktree => has_card,
-            // `d` refuses every mirrored card — the sync would file the issue again as a new
-            // card — so on a linked board this row could only ever fail (§3.9).
-            Self::BoardDeleteCard => has_card && !card.mirrored,
-            // A field the board's backend owns can only answer the read-only refusal, so the
-            // row is not listed at all — the same rule `BoardOpenRemote` follows (§3.9).
-            Self::BoardPickStatus | Self::BoardMovePrevColumn | Self::BoardMoveNextColumn => {
-                has_card && !state.is_readonly_field("status_id")
-            }
-            Self::BoardPickPriority => has_card && !state.is_readonly_field("priority"),
-            Self::BoardPickAssignee => has_card && !state.is_readonly_field("assignee"),
-            Self::BoardPickLabels => has_card && !state.is_readonly_field("labels"),
-            Self::BoardPickEstimate => has_card && !state.is_readonly_field("estimate"),
-            // Runs exist only on a worktree board: over the Hub's context board the three rows
-            // could only ever answer the daemon's capability refusal (contracts §5.5). The
-            // board pane is the second surface the keys are bound on, and the palette lists a
-            // row exactly where its key would fire.
-            Self::BoardAttachRun | Self::BoardCancelRun | Self::BoardRunNow => {
-                matches!(
-                    state.board.scope,
-                    Some(crate::state::BoardScope::Worktree(_))
-                ) && ((state.board_pane_is_active()
-                    && crate::screens::board::selected_card(state).is_some())
-                    || (card.detail && has_card))
-            }
-            // Both edit a field every board has, so they follow the pickers above; `blocked_by`
-            // is Fleet's own link and no backend owns it.
-            Self::BoardPickBlockedBy | Self::BoardPickAgent => has_card,
-            Self::BoardColumns => on_board,
-            // A card the backend has not linked, or linked without publishing an address, has
-            // no remote issue: the row would open a browser tab at nothing.
-            Self::BoardOpenRemote | Self::CardDetailOpenRemote => has_card && card.remote,
-            // Opening the worktree of a card that has none is a row with nothing behind it.
-            Self::BoardOpenWorktree => has_card && card.worktree,
-            // Closing and saving only mean anything on a detail that is already open behind
-            // the palette: from the board they seed a fresh one, act on nothing, and leave a
-            // dialog the user never asked for (§3.9 lists no row that cannot run).
-            Self::CardDetailClose | Self::CardDetailSave => has_card && card.detail,
-            Self::CardDetailEditTitle => has_card,
-            Self::CardDetailEditDescription => has_card,
-            Self::CardDetailAddComment => has_card,
-            Self::CardDetailNextProperty => has_card,
-            Self::CardDetailPrevProperty => has_card,
-            Self::CardDetailEditProperty => has_card,
-            Self::CardDetailCreateWorktree => has_card,
-            // A resolution needs something to resolve; on a clean card both rows open the
-            // detail and then return without doing anything.
-            Self::CardDetailKeepLocal | Self::CardDetailTakeRemote => has_card && card.conflicted,
-            // The key is a Workspace prefix row, and its handler lives on the Workspace root:
-            // listed anywhere else the row would dispatch an action nothing is listening for.
-            Self::WorkspaceOpenBoard => {
-                connected
-                    && state
-                        .active_session()
-                        .is_some_and(|session| matches!(session.kind, SessionKind::Worktree(_)))
-            }
-            Self::NewWorktree | Self::PruneWorktrees => {
-                connected && crate::dialogs::focused_repo(state).is_some()
-            }
-            Self::CloneRepo => connected && state.active_context().is_some(),
-            Self::MoveRepo => connected && crate::dialogs::focused_repo(state).is_some(),
-            Self::DeleteWorktree | Self::InspectWorktree | Self::SleepSession => {
-                connected && selected_worktree(state).is_some()
-            }
-            Self::KillSession => connected && target_session(state).is_some(),
-            Self::EditContext | Self::DeleteContext => {
-                connected && state.active_context().is_some()
-            }
-            Self::PullRequests => !on_prs && has_repo,
-            Self::Worktrees => on_prs || on_board,
-            Self::UpdateFleet => connected && state.update_version.is_some(),
-            Self::NewContext
-            | Self::Settings
-            | Self::Refresh
-            | Self::OpenClaude
-            | Self::OpenCodex
-            | Self::QuitDaemon => connected,
-            Self::JobsPanel | Self::Help | Self::Quit => true,
-        }
-    }
-}
-
-/// Whether the board tab has a focused card for the `Board:` and `Card detail:` rows.
-/// What the board's selection and the palette's backdrop offer the card rows.
-///
-/// Resolved once per palette render and handed to every command, because finding the selected
-/// card sorts a column and lowercases every field the filter touches.
-#[derive(Debug, Clone, Copy, Default)]
-struct CardContext {
-    /// A card is selected on the board tab.
-    present: bool,
-    /// That card carries an unresolved conflict.
-    conflicted: bool,
-    /// That card owns a worktree.
-    worktree: bool,
-    /// That card is linked to a remote issue with a browsable address.
-    remote: bool,
-    /// That card is linked to a remote issue at all, address or not.
-    ///
-    /// `remote` answers "can `x` open something"; this answers "does the backend own this
-    /// card", which is what `d` refuses on — a linked card with no site setting is neither
-    /// openable nor deletable, and one flag cannot say both.
-    mirrored: bool,
-    /// The card detail is the dialog the palette was opened over.
-    detail: bool,
-}
-
-fn card_context(
-    state: &AppState,
-    behind: Option<Dialogs>,
-    detail_card: Option<&CardId>,
-) -> CardContext {
-    let detail = behind == Some(Dialogs::CardDetail);
-    let selected = matches!(state.screen, Screen::Hub { tab: HubTab::Board })
-        .then(|| crate::screens::board::selected_card(state))
-        .flatten();
-    // The `Card detail:` rows act on the card the open dialog is holding, and that card
-    // deliberately survives a refresh that moves the board's selection. Asking the board
-    // instead hides "Open remote issue" for a card that has one, and offers "Keep local" for a
-    // card with no conflict.
-    let card = detail
-        .then(|| {
-            detail_card.and_then(|id| {
-                state
-                    .board()
-                    .and_then(|view| view.cards.iter().find(|card| card.id == *id))
-            })
-        })
-        .flatten()
-        .or(selected);
-    CardContext {
-        present: card.is_some(),
-        conflicted: card.is_some_and(|card| card.conflict.is_some()),
-        worktree: card.is_some_and(|card| card.worktree_id.is_some()),
-        remote: card.is_some_and(|card| crate::screens::board::remote_url(card).is_some()),
-        mirrored: card.is_some_and(|card| card.remote.is_some()),
-        detail,
-    }
-}
-
-/// The key bound to an action, formatted for the right-hand column.
-#[must_use]
-pub fn key_for(action: &str) -> Option<String> {
-    static HINTS: std::sync::OnceLock<std::collections::HashMap<&'static str, String>> =
-        std::sync::OnceLock::new();
-    HINTS
-        .get_or_init(|| {
-            let mut hints = std::collections::HashMap::new();
-            for spec in keymap::table() {
-                hints
-                    .entry(spec.action)
-                    .or_insert_with(|| pretty_keys(spec.keys));
-            }
-            hints
-        })
-        .get(action)
-        .cloned()
-}
-
-/// The §2.5 detail wording a `GO` row carries on its right.
-///
-/// §3.9 wants the row's **state** there (`session attached`, `sleeping`, `PR · mine`, `repo`),
-/// not a type word: "worktree" repeats what the id already says, while the state is the thing
-/// that decides whether jumping there resumes work or starts it.
-#[must_use]
-pub fn session_detail(session: SessionState, slept: bool) -> &'static str {
-    match session {
-        SessionState::Attached => "session attached",
-        SessionState::Detached if slept => "sleeping",
-        SessionState::Detached => "running, detached",
-        SessionState::Unknown => "unknown",
-        SessionState::None => "no session",
-    }
-}
-
-/// Every candidate row, in section order, before the cap.
-///
-/// Filtering runs on the borrowed snapshot strings, so a row is only built once it has
-/// survived the query and the section's idle cap — this runs on every keystroke.
-#[must_use]
-pub fn candidates(
-    state: &AppState,
-    query: &str,
-    behind: Option<Dialogs>,
-    detail_card: Option<&CardId>,
-) -> Vec<Entry> {
-    if let Some(filter) = agents_picker_filter(query) {
-        return agents_rows(state, &FuzzyQuery::new(filter), usize::MAX);
-    }
-    let sessions_only = is_session_switcher(query);
-    let effective_query = if sessions_only { "" } else { query };
-    let idle = effective_query.trim().is_empty();
-    let matcher = FuzzyQuery::new(effective_query);
-    let Some(snapshot) = state.snapshot.as_ref() else {
-        return Vec::new();
-    };
-    let index = SnapshotIndex::new(snapshot);
-    // §3.9 shows only the first `IDLE_ROWS` of each section until a query narrows it.
-    let limit = if sessions_only {
-        usize::MAX
-    } else if idle {
-        IDLE_ROWS
-    } else {
-        usize::MAX
-    };
-
-    let mut rows = go_rows(state, snapshot, &index, &matcher, sessions_only, limit);
-    if !sessions_only {
-        let card = card_context(state, behind, detail_card);
-        rows.extend(do_rows(state, snapshot, &matcher, card, limit));
-        rows.extend(context_rows(snapshot, &matcher));
-    }
-    rows
-}
-
-/// Native threads reachable from the selected worktree, in caller/child order.
-fn agents_rows(state: &AppState, matcher: &FuzzyQuery, limit: usize) -> Vec<Entry> {
-    let current = selected_worktree_id(state);
-    let summaries = state.agents.summaries();
-    let callers: Vec<_> = summaries
-        .iter()
-        .filter(|summary| {
-            summary.parent.is_none()
-                && current
-                    .as_ref()
-                    .is_none_or(|worktree| &summary.worktree == worktree)
-        })
-        .collect();
-    let caller_ids: std::collections::HashSet<_> =
-        callers.iter().map(|summary| summary.thread).collect();
-    let children: Vec<_> = summaries
-        .iter()
-        .filter(|summary| {
-            summary
-                .parent
-                .is_some_and(|parent| caller_ids.contains(&parent))
-        })
-        .collect();
-
-    callers
-        .into_iter()
-        .chain(children.iter().copied().filter(|summary| {
-            current
-                .as_ref()
-                .is_none_or(|worktree| &summary.worktree == worktree)
-        }))
-        .chain(children.iter().copied().filter(|summary| {
-            current
-                .as_ref()
-                .is_some_and(|worktree| &summary.worktree != worktree)
-        }))
-        .filter(|summary| agent_matches(summary, matcher))
-        .take(limit)
-        .map(|summary| agent_entry(state, summary, current.as_ref()))
-        .collect()
-}
-
-fn agent_matches(summary: &AgentThreadSummary, matcher: &FuzzyQuery) -> bool {
-    matcher.matches(&summary.title)
-        || matcher.matches(summary.provider.executable())
-        || matcher.matches(summary.provider.display_name())
-}
-
-fn agent_entry(
-    state: &AppState,
-    summary: &AgentThreadSummary,
-    current: Option<&WorktreeId>,
-) -> Entry {
-    let child = summary.parent.is_some();
-    let other_worktree = child && current.is_some_and(|worktree| worktree != &summary.worktree);
-    let mut label = tab_title(summary);
-    if other_worktree {
-        label.push_str(" \u{b7} ");
-        label.push_str(summary.worktree.as_str());
-    }
-    let attached = state.agents.is_attached(summary.thread);
-    let attention = state.agents.attention(summary.thread);
-    Entry {
-        section: PaletteSectionKind::Agents,
-        label,
-        detail: None,
-        secondary: Some(agent_detail(summary, attention)),
-        trailing: Some(if attached || !child { "go" } else { "attach" }.to_owned()),
-        key: Some(
-            agent_strip_index(state, summary)
-                .map_or_else(|| "\u{b7}".to_owned(), |index| index.to_string()),
-        ),
-        destructive: false,
-        icon: Icon::Bot,
-        status: None,
-        attention: Some(attention),
-        run: Run::OpenAgentThread(summary.thread),
-    }
-}
-
-fn agent_strip_index(state: &AppState, summary: &AgentThreadSummary) -> Option<usize> {
-    if !state.agents.is_attached(summary.thread) {
-        return None;
-    }
-    let session = state.snapshot.as_ref()?.sessions.iter().find(|session| {
-        matches!(&session.kind, SessionKind::Worktree(worktree) if worktree == &summary.worktree)
-    })?;
-    let offset = state.agents.strip_offset(summary.thread)?;
-    Some(session.terminals.len() + offset + 1)
-}
-
-fn agent_detail(summary: &AgentThreadSummary, attention: Attention) -> String {
-    let word = match attention {
-        Attention::NeedsYou(AttentionKind::Permission) => "blocked \u{b7} permission",
-        Attention::NeedsYou(AttentionKind::Question) => "blocked \u{b7} question",
-        Attention::NeedsYou(AttentionKind::Plan) => "blocked \u{b7} plan",
-        Attention::NeedsYou(AttentionKind::Finished) => "done",
-        Attention::Working => "working",
-        Attention::Waiting => "waiting",
-        Attention::Failed => "failed",
-        Attention::Unread => "unread",
-        Attention::Idle => "idle",
-    };
-    if matches!(
-        attention,
-        Attention::NeedsYou(
-            AttentionKind::Permission | AttentionKind::Question | AttentionKind::Plan
-        )
-    ) {
-        return word.to_owned();
-    }
-    let age = summary.last_activity.map_or_else(
-        || "\u{2013}".to_owned(),
-        |last| {
-            let seconds = chrono::Utc::now()
-                .signed_duration_since(last)
-                .num_seconds()
-                .max(0);
-            fleet_ui_kit::format_age(seconds)
-        },
-    );
-    format!("{word} \u{b7} {age}")
-}
-
-/// GO: sessions first, because reaching one from inside another is the point (§3.9).
-fn go_rows(
-    state: &AppState,
-    snapshot: &Snapshot,
-    index: &SnapshotIndex<'_>,
-    matcher: &FuzzyQuery,
-    sessions_only: bool,
-    limit: usize,
-) -> Vec<Entry> {
-    let mut rows: Vec<Entry> = Vec::new();
-    // The rank is read once per session, so it is resolved through a map built once rather
-    // than by rescanning the MRU inside the sort key — this list is rebuilt on every
-    // `AppState` notification while the palette is open.
-    let ranks: std::collections::HashMap<&SessionId, usize> = state
-        .session_mru
-        .entries()
-        .iter()
-        .enumerate()
-        .map(|(rank, id)| (id, rank))
-        .collect();
-    let mut sessions: Vec<_> = snapshot.sessions.iter().collect();
-    sessions.sort_by_key(|session| ranks.get(&session.id).copied().unwrap_or(usize::MAX));
-    for session in sessions {
-        if rows.len() == limit {
-            return rows;
-        }
-        // §5 invariant 1: the row wears the Hub's glyph and the Hub's wording for the same
-        // worktree, so both are resolved from the one `WorktreeStatus` the Hub reads.
-        // `slept_at` alone cannot tell `attached` from `running, detached` — it only tells
-        // `awake` from `sleeping` — and reading it as "attached" is how the palette came to
-        // call a detached session green.
-        let worktree = match &session.kind {
-            SessionKind::Worktree(id) => index.worktree(id),
-            SessionKind::Agent { .. } => None,
-        };
-        // §3.9 lists worktrees by their `WorktreeId`; a session id is a different id scheme
-        // and mixing the two in one section makes the list unreadable.
-        let label = worktree.map_or_else(|| session.id.as_str(), |worktree| worktree.id.as_str());
-        if !matcher.matches(label) {
-            continue;
-        }
-        let slept = session.slept_at.is_some();
-        let runtime_status = worktree.and_then(|worktree| index.status(&worktree.id));
-        let agent_activity = runtime_status.map_or_else(
-            || state.session_agent_activity(&session.id),
-            |status| status.agent_activity,
-        );
-        let session_state = runtime_status.map_or(
-            // An agent session has no `WorktreeStatus`; the session record itself is then the
-            // only evidence, and it can only say awake or slept.
-            if slept {
-                SessionState::Detached
-            } else {
-                SessionState::Attached
-            },
-            |status| status.session,
-        );
-        let degraded = worktree.is_some_and(|worktree| worktree.degraded.is_some());
-        rows.push(Entry {
-            section: PaletteSectionKind::Go,
-            label: label.to_owned(),
-            detail: Some(session_detail(session_state, slept).to_owned()),
-            secondary: None,
-            trailing: None,
-            key: None,
-            destructive: false,
-            icon: Icon::GitBranch,
-            status: Some(status_kind(session_state, slept, agent_activity, degraded)),
-            attention: None,
-            run: match (&session.kind, worktree) {
-                (SessionKind::Agent(agent), _) => Run::OpenSession {
-                    session: session.id.clone(),
-                    agent: *agent,
-                },
-                (SessionKind::Worktree(id), _) => Run::OpenWorktree(id.clone()),
-            },
-        });
-    }
-    if sessions_only {
-        return rows;
-    }
-
-    let attached: std::collections::HashSet<&str> = snapshot
-        .sessions
-        .iter()
-        .map(|session| session.id.as_str())
-        .collect();
-    for worktree in &snapshot.worktrees {
-        if rows.len() == limit {
-            return rows;
-        }
-        if attached.contains(worktree.session.as_str()) || !matcher.matches(worktree.id.as_str()) {
-            continue;
-        }
-        // §1.3: until the daemon reports a status the state is `unknown`, never a false
-        // `none` — the same rule the worktrees list follows.
-        let status = index.status(&worktree.id);
-        let session = status.map_or(SessionState::Unknown, |status| status.session);
-        rows.push(Entry {
-            section: PaletteSectionKind::Go,
-            label: worktree.id.as_str().to_owned(),
-            detail: Some(session_detail(session, false).to_owned()),
-            secondary: None,
-            trailing: None,
-            key: None,
-            destructive: false,
-            icon: Icon::GitBranch,
-            status: Some(status_kind(
-                session,
-                false,
-                status.map_or(AgentActivity::Unknown, |status| status.agent_activity),
-                worktree.degraded.is_some(),
-            )),
-            attention: None,
-            run: Run::OpenWorktree(worktree.id.clone()),
-        });
-    }
-    for repo in &snapshot.repos {
-        if rows.len() == limit {
-            return rows;
-        }
-        if !matcher.matches(repo.id.as_str()) {
-            continue;
-        }
-        rows.push(Entry {
-            section: PaletteSectionKind::Go,
-            label: repo.id.as_str().to_owned(),
-            detail: Some("repo".to_owned()),
-            secondary: None,
-            trailing: None,
-            key: None,
-            destructive: false,
-            icon: Icon::FolderGit2,
-            status: None,
-            attention: None,
-            run: Run::SelectRepo(repo.id.clone()),
-        });
-    }
-    rows
-}
-
-/// DO: valid commands, then the jobs worth cancelling.
-fn do_rows(
-    state: &AppState,
-    snapshot: &Snapshot,
-    matcher: &FuzzyQuery,
-    card: CardContext,
-    limit: usize,
-) -> Vec<Entry> {
-    let mut rows: Vec<Entry> = Vec::new();
-    for command in Command::ALL.iter().copied() {
-        if rows.len() == limit {
-            return rows;
-        }
-        if !command.valid_with(state, card) || !matcher.matches(command.label()) {
-            continue;
-        }
-        rows.push(Entry {
-            section: PaletteSectionKind::Do,
-            label: command.label().to_owned(),
-            detail: None,
-            secondary: None,
-            trailing: None,
-            key: key_for(command.action()),
-            destructive: command.destructive(),
-            icon: command.icon(),
-            status: None,
-            attention: None,
-            run: Run::Command(command),
-        });
-    }
-    for job in running_jobs(&snapshot.jobs) {
-        if rows.len() == limit {
-            return rows;
-        }
-        if !job.cancellable {
-            continue;
-        }
-        let label = format!("Cancel job: {} {}", super::quit::kind_word(job), job.target);
-        if !matcher.matches(&label) {
-            continue;
-        }
-        rows.push(Entry {
-            section: PaletteSectionKind::Do,
+impl Entry {
+    /// A bare row: a label in a section that runs `run`.
+    pub(crate) fn new(section: Section, label: String, run: Run) -> Self {
+        Self {
+            section,
             label,
+            search: None,
             detail: None,
             secondary: None,
             trailing: None,
-            key: key_for("fleet::OpenJobs"),
+            badge: None,
+            key: None,
+            matches: Vec::new(),
             destructive: false,
-            icon: Icon::CircleStop,
+            icon: Icon::Command,
             status: None,
             attention: None,
-            run: Run::CancelJob(job.id.clone()),
-        });
-    }
-    if rows.len() < limit
-        && let Some(failed) = latest_failed_job(&snapshot.jobs)
-    {
-        let label = format!("Show failed job: {}", failed.title);
-        if matcher.matches(&label) {
-            rows.push(Entry {
-                section: PaletteSectionKind::Do,
-                label,
-                detail: None,
-                secondary: None,
-                trailing: None,
-                key: key_for("fleet::FocusStickyError"),
-                destructive: false,
-                icon: Icon::CircleX,
-                status: None,
-                attention: None,
-                run: Run::Command(Command::JobsPanel),
-            });
+            run,
         }
     }
-    rows
 }
 
-/// CONTEXT: the digit that switches to it is the key hint, so the position is the one before
-/// filtering.
-fn context_rows(snapshot: &Snapshot, matcher: &FuzzyQuery) -> Vec<Entry> {
-    snapshot
-        .contexts
-        .iter()
-        .enumerate()
-        .filter(|(_, context)| matcher.matches(&context.name))
-        .map(|(index, context)| Entry {
-            section: PaletteSectionKind::Context,
-            label: context.name.clone(),
-            detail: None,
-            secondary: None,
-            trailing: None,
-            key: (index < 9).then(|| (index + 1).to_string()),
-            destructive: false,
-            icon: Icon::Boxes,
-            status: None,
-            attention: None,
-            run: Run::SwitchContext(context.id.clone()),
-        })
-        .collect()
-}
+mod command;
+mod rows;
+#[cfg(test)]
+mod tests;
+
+pub use command::Command;
+use command::{CardContext, card_context, here};
+use rows::candidates;
+pub(crate) use rows::session_rows;
 
 /// Renders the palette overlay (§3.9): the palette card inside the kit's top-anchored
 /// [`fleet_ui_kit::Overlay`].
@@ -1232,13 +383,13 @@ pub(super) fn render(
     _window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let (query, cursor, rows, total, input) = {
+    let (query, cursor, rows, scroll, input) = {
         let host = host.read(cx);
         (
             host.palette.query.clone(),
             host.palette.cursor,
             host.palette.rows.clone(),
-            host.palette.total,
+            host.palette.scroll.clone(),
             host.palette_input.clone(),
         )
     };
@@ -1248,52 +399,39 @@ pub(super) fn render(
         return div().track_focus(focus).size_full().into_any_element();
     };
 
-    let windowed = is_session_switcher(&query) || is_agents_picker(&query);
-    let (visible_rows, visible_cursor) = visible_rows(&rows, cursor, windowed);
+    let click_state = state.clone();
+    let click_bridge = bridge.clone();
     let mut card = fleet_ui_kit::Palette::new(input)
-        .cursor(visible_cursor)
-        .cap(ROW_CAP)
-        .total(total)
-        .empty(format!("Nothing matches \"{query}\"."));
-    for kind in [
-        PaletteSectionKind::Go,
-        PaletteSectionKind::Do,
-        PaletteSectionKind::Context,
-        PaletteSectionKind::Agents,
-    ] {
-        let section: Vec<PaletteRow> = visible_rows
+        .cursor(cursor)
+        .visible_rows(VISIBLE_ROWS)
+        .track_scroll(&scroll)
+        .scope(parse_query(&query).scope.label())
+        .run_action(Box::new(palette_actions::Run))
+        .empty(format!("Nothing matches \"{query}\"."))
+        .on_click(move |index, window, cx| {
+            // A press is `Enter` on that row: move the cursor there, then run what it runs.
+            with_host(&click_state, cx, |host| host.palette.cursor = index);
+            run_selected(&click_state, &click_bridge, window, cx);
+        });
+    if query.is_empty() {
+        card = card.prefix_hint(PREFIX_HINT);
+    }
+    if let Some(entry) = rows.get(cursor) {
+        card = card.selected_label(entry.label.clone());
+    }
+    // The rows arrive ranked and grouped; each run of one section becomes one kit section.
+    let mut start = 0;
+    while let Some(first) = rows.get(start) {
+        let len = rows[start..]
             .iter()
-            .filter(|entry| entry.section == kind)
+            .take_while(|entry| entry.section == first.section)
+            .count();
+        let section = rows[start..start + len]
+            .iter()
             .enumerate()
-            .map(|(index, entry)| {
-                let mut row = PaletteRow::new(entry.label.clone())
-                    .destructive(entry.destructive)
-                    .icon(entry.icon);
-                if let Some(status) = entry.status {
-                    row = row.leading(StatusGlyph::new(status).id(gpui::SharedString::from(
-                        format!("palette-glyph-{}", entry.label),
-                    )));
-                } else if let Some(attention) = entry.attention {
-                    row = row.leading(attention_mark(index, attention));
-                }
-                if let Some(detail) = entry.detail.clone() {
-                    row = row.detail(detail);
-                }
-                if let Some(secondary) = entry.secondary.clone() {
-                    row = row.secondary(secondary);
-                }
-                if let Some(trailing) = entry.trailing.clone() {
-                    row = row.trailing(trailing);
-                }
-                if let Some(key) = entry.key.clone() {
-                    row = row.key(key);
-                }
-                row
-            })
-            .collect();
-        if !section.is_empty() {
-            card = card.section(PaletteSection::new(kind, section));
-        }
+            .map(|(offset, entry)| palette_row(start + offset, entry));
+        card = card.section(PaletteSection::new(first.section.title(), section));
+        start += len;
     }
 
     let (top, width) = {
@@ -1322,9 +460,39 @@ pub(super) fn render(
                 .top(top)
                 .width(width)
                 .scrim(true)
+                .dismiss_action(Box::new(palette_actions::Close))
                 .content(card),
         )
         .into_any_element()
+}
+
+/// One prepared entry as a kit row. Composes only: every string was built in `refresh`.
+fn palette_row(index: usize, entry: &Entry) -> PaletteRow {
+    let mut row = PaletteRow::new(entry.label.clone())
+        .destructive(entry.destructive)
+        .icon(entry.icon)
+        .matches(entry.matches.iter().copied());
+    if let Some(status) = entry.status {
+        row = row.leading(StatusGlyph::new(status).id(("palette-glyph", index)));
+    } else if let Some(attention) = entry.attention {
+        row = row.leading(attention_mark(index, attention));
+    }
+    if let Some(detail) = entry.detail.clone() {
+        row = row.detail(detail);
+    }
+    if let Some(secondary) = entry.secondary.clone() {
+        row = row.secondary(secondary);
+    }
+    if let Some(trailing) = entry.trailing.clone() {
+        row = row.trailing(trailing);
+    }
+    if let Some(badge) = entry.badge.clone() {
+        row = row.badge(badge);
+    }
+    if let Some(keys) = entry.key.as_deref() {
+        row = row.kbd(Kbd::new(keys));
+    }
+    row
 }
 
 fn attention_mark(index: usize, attention: Attention) -> AnyElement {
@@ -1357,22 +525,15 @@ const fn attention_has_visible_mark(attention: Attention) -> bool {
     !matches!(attention, Attention::Idle)
 }
 
-fn visible_rows(rows: &[Entry], cursor: usize, windowed: bool) -> (&[Entry], usize) {
-    if !windowed || rows.len() <= ROW_CAP {
-        return (rows, cursor);
-    }
-    let cursor = cursor.min(rows.len() - 1);
-    let start = cursor.saturating_sub(ROW_CAP - 1).min(rows.len() - ROW_CAP);
-    (&rows[start..start + ROW_CAP], cursor - start)
-}
-
 /// Builds the query editor and resets the draft when the palette opens.
 ///
 /// The editor lives exactly as long as the palette: `host::close_with` drops it with the rest
 /// of the drafts, so a reopened palette never inherits the last one's text, selection or undo
 /// history.
 pub(super) fn seed(state: &Entity<AppState>, cx: &mut App) {
-    let seed = state.update(cx, |app, _| app.palette_seed.take());
+    let (seed, prs) = state.update(cx, |app, _| {
+        (app.palette_seed.take(), app.palette_prs.take())
+    });
     if with_host(state, cx, |host| host.palette_open) {
         refresh(state, cx);
         return;
@@ -1380,9 +541,9 @@ pub(super) fn seed(state: &Entity<AppState>, cx: &mut App) {
     let query = seed.unwrap_or_default();
     let input = cx.new(|cx| {
         let mut input = TextInput::new(InputMode::SingleLine, cx);
-        // §3.9's query row is the palette's own 44 px chrome, so the editor brings no box.
+        // §3.9's query row is the palette's own chrome, so the editor brings no box.
         input.set_embedded(true, cx);
-        input.set_placeholder("go to, or do", cx);
+        input.set_placeholder("Search or run a command", cx);
         input.set_text(query.clone(), cx);
         input
     });
@@ -1402,14 +563,16 @@ pub(super) fn seed(state: &Entity<AppState>, cx: &mut App) {
                 return;
             }
             host.palette.query = query;
-            // A re-ranked palette must never keep a cursor past the end of its new rows.
+            // A re-ranked palette starts on its best match, at the top of the list.
             host.palette.cursor = 0;
+            fleet_ui_kit::Palette::reveal(&host.palette.scroll, 0);
         });
         notify(&watched, cx);
     });
     with_host(state, cx, |host| {
         host.palette = PaletteState {
             query,
+            prs: prs.unwrap_or_default(),
             ..PaletteState::default()
         };
         host.palette_input = Some(input);
@@ -1422,11 +585,12 @@ pub(super) fn seed(state: &Entity<AppState>, cx: &mut App) {
 pub(super) fn refresh(state: &Entity<AppState>, cx: &mut App) {
     // The backdrop and the card the detail is holding decide which `Board:` and `Card detail:`
     // rows exist at all, so they are read with the query the rows are prepared from.
-    let (query, behind, detail_card) = with_host(state, cx, |host| {
+    let (query, behind, detail_card, prs) = with_host(state, cx, |host| {
         (
             host.palette.query.clone(),
             host.behind_palette.clone(),
             host.card_detail.card_id.clone(),
+            host.palette.prs.clone(),
         )
     });
     let key = PreparedKey::new(state.read(cx), query, behind, detail_card);
@@ -1443,21 +607,14 @@ pub(super) fn refresh(state: &Entity<AppState>, cx: &mut App) {
         &key.query,
         key.behind.clone(),
         key.detail_card.as_ref(),
+        &prs,
     );
-    let total = rows.len();
-    let cap = if is_session_switcher(&key.query) || is_agents_picker(&key.query) {
-        usize::MAX
-    } else {
-        ROW_CAP
-    };
-    let rows: Vec<Entry> = rows.into_iter().take(cap).collect();
     with_host(state, cx, |host| {
         // A revision moves for changes the palette does not list, so rows that came out the
         // same keep the `Rc` the card already drew instead of a fresh one.
         if host.palette.rows.as_ref() != rows.as_slice() {
             host.palette.rows = rows.into();
         }
-        host.palette.total = total;
         host.palette.prepared = Some(key);
         // A snapshot can lose rows under an open palette; an unclamped cursor would point past
         // the end and make `Enter` a silent no-op (§3.9).
@@ -1476,6 +633,7 @@ pub(super) fn refresh_query(state: &Entity<AppState>, cx: &mut App) {
 fn move_cursor(state: &Entity<AppState>, delta: isize, cx: &mut App) {
     with_host(state, cx, |host| {
         host.palette.cursor = step(host.palette.cursor, delta, host.palette.rows.len());
+        fleet_ui_kit::Palette::reveal(&host.palette.scroll, host.palette.cursor);
     });
     notify(state, cx);
 }
@@ -1500,32 +658,7 @@ fn run_selected<T: SessionTransport>(
         cx.notify();
     });
     match entry.run {
-        Run::OpenAgentThread(thread) => {
-            let reopen_transport = transport.clone();
-            let worktree = if crate::screens::workspace::reopen_agent_tab(
-                state,
-                thread,
-                move |command| reopen_transport.send(command.into()),
-                cx,
-            ) {
-                None
-            } else {
-                state.update(cx, |app, _| {
-                    app.agents.summary(thread).and_then(|summary| {
-                        let worktree = summary.worktree.clone();
-                        // `select_agent_thread` also returns false when the combined strip is
-                        // full. That refusal already showed its toast and must not fall through
-                        // to EnsureSession, which could switch or wake an unrelated session.
-                        (app.agents.is_attached(thread)
-                            || app.workspace_has_tab_capacity(&worktree))
-                        .then_some(worktree)
-                    })
-                })
-            };
-            if let Some(worktree) = worktree {
-                open_agent_thread_worktree(worktree, thread, state, transport, cx);
-            }
-        }
+        Run::OpenAgentThread(thread) => open_agent_thread(thread, state, transport, cx),
         Run::OpenSession { agent, .. } => open_agent_session(agent, state, transport, cx),
         Run::OpenWorktree(id) => open_worktree(id, state, transport, cx),
         Run::SelectRepo(repo) => {
@@ -1540,7 +673,45 @@ fn run_selected<T: SessionTransport>(
         }
         Run::CancelJob(job) => transport.send(RequestBody::CancelJob { job }),
         Run::Command(command) => run_command(command, behind, state, transport, window, cx),
+        Run::OpenCard(card) => open_card(&card, state, cx),
+        Run::GoToPr {
+            tab,
+            repo,
+            number,
+            local,
+        } => match local {
+            // What `Enter` on the PR screen does with a checked-out PR.
+            Some(worktree) => open_worktree(worktree, state, transport, cx),
+            None => state.update(cx, |app, cx| {
+                app.screen = Screen::Hub { tab: HubTab::Prs };
+                app.pr_tab = tab;
+                app.hub_pane = HubPane::List;
+                app.filter = FilterState::default();
+                // The Hub anchors its PR cursor by identity, so the row is named, not indexed.
+                app.pending_pr_focus = Some((repo, number));
+                cx.notify();
+            }),
+        },
     }
+}
+
+/// Selects `card` on the board and opens its detail: over the Workspace when the palette was
+/// opened there (its board tab holds the mirror), on the Hub's board tab otherwise.
+fn open_card(card: &CardId, state: &Entity<AppState>, cx: &mut App) {
+    state.update(cx, |app, cx| {
+        if !matches!(app.screen, Screen::Workspace { .. }) {
+            app.screen = Screen::Hub { tab: HubTab::Board };
+        }
+        app.select_card(card);
+        // A filter that hides the card would leave the selection somewhere else.
+        let selected = crate::screens::board::selected_card(app).map(|found| found.id.clone());
+        if selected.as_ref() != Some(card) {
+            app.board.filter.clear();
+            app.select_card(card);
+        }
+        cx.notify();
+    });
+    crate::screens::board::open_dialog(state, Dialogs::CardDetail, cx);
 }
 
 /// Runs one command. Destructive rows open their confirm rather than acting (§3.9).
@@ -1786,1237 +957,4 @@ fn kill_request(state: &AppState) -> Option<ConfirmRequest> {
             .collect(),
         unsaved: false,
     })
-}
-
-fn is_session_switcher(query: &str) -> bool {
-    query.trim() == "sessions"
-}
-
-fn is_agents_picker(query: &str) -> bool {
-    agents_picker_filter(query).is_some()
-}
-
-fn agents_picker_filter(query: &str) -> Option<&str> {
-    let query = query.trim();
-    let rest = query.strip_prefix("agents")?;
-    (rest.is_empty() || rest.chars().next().is_some_and(char::is_whitespace)).then(|| rest.trim())
-}
-
-#[cfg(test)]
-mod tests {
-    use std::{cell::RefCell, collections::VecDeque, rc::Rc, time::Instant};
-
-    use gpui::{Context, Render};
-
-    use super::*;
-
-    type TestReplySender = async_channel::Sender<
-        Result<fleet_proto::response::ResponseBody, fleet_proto::error::ProtoError>,
-    >;
-
-    #[derive(Debug, PartialEq)]
-    enum RecordedRequest {
-        Sent(RequestBody),
-        Requested(RequestBody),
-    }
-
-    #[derive(Clone, Default)]
-    struct FakeTransport {
-        requests: Rc<RefCell<Vec<RecordedRequest>>>,
-        replies: Rc<RefCell<VecDeque<TestReplySender>>>,
-    }
-
-    impl SessionTransport for FakeTransport {
-        fn send(&self, body: RequestBody) {
-            self.requests.borrow_mut().push(RecordedRequest::Sent(body));
-        }
-
-        fn request(
-            &self,
-            body: RequestBody,
-        ) -> async_channel::Receiver<
-            Result<fleet_proto::response::ResponseBody, fleet_proto::error::ProtoError>,
-        > {
-            let (sender, receiver) = async_channel::bounded(1);
-            self.requests
-                .borrow_mut()
-                .push(RecordedRequest::Requested(body));
-            self.replies.borrow_mut().push_back(sender);
-            receiver
-        }
-    }
-
-    struct PaletteFixture;
-
-    impl Render for PaletteFixture {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            div()
-        }
-    }
-
-    #[test]
-    fn a_go_row_says_its_state_not_its_type() {
-        // §3.9's right-hand column is the §2.5 state; "worktree" is what the id already says.
-        assert_eq!(
-            session_detail(SessionState::Attached, false),
-            "session attached"
-        );
-        assert_eq!(session_detail(SessionState::Detached, true), "sleeping");
-        assert_eq!(
-            session_detail(SessionState::Detached, false),
-            "running, detached"
-        );
-        assert_eq!(session_detail(SessionState::None, false), "no session");
-        assert_eq!(session_detail(SessionState::Unknown, false), "unknown");
-    }
-    #[test]
-    fn every_command_has_a_label_and_a_bound_key() {
-        for command in Command::ALL {
-            assert!(!command.label().is_empty());
-            assert!(
-                key_for(command.action()).is_some(),
-                "`{}` is bound to nothing",
-                command.action()
-            );
-        }
-    }
-
-    #[test]
-    fn destructive_commands_are_marked_and_are_the_ones_with_confirms() {
-        assert!(Command::DeleteWorktree.destructive());
-        assert!(Command::PruneWorktrees.destructive());
-        assert!(Command::QuitDaemon.destructive());
-        assert!(!Command::Settings.destructive());
-    }
-
-    #[test]
-    fn commands_that_need_a_connection_or_snapshot_are_not_listed_without_one() {
-        let state = AppState::new("/tmp/fleet", Instant::now());
-        assert!(!Command::NewWorktree.valid(&state));
-        assert!(!Command::DeleteWorktree.valid(&state));
-        assert!(!Command::Settings.valid(&state));
-        assert!(Command::Help.valid(&state));
-        assert!(!Command::UpdateFleet.valid(&state));
-    }
-
-    #[test]
-    fn an_empty_snapshot_still_offers_the_always_valid_commands() {
-        let state = AppState::new("/tmp/fleet", Instant::now());
-        let rows = candidates(&state, "", None, None);
-        assert!(
-            rows.is_empty(),
-            "without a snapshot the palette has nothing to point at"
-        );
-    }
-
-    fn go_snapshot(state: SessionState, slept: bool) -> fleet_proto::snapshot::Snapshot {
-        use fleet_core::sessions::{Session, SessionKind};
-        let id: WorktreeId = "acme/widgets#feature-one"
-            .parse()
-            .unwrap_or_else(|error| panic!("{error}"));
-        let mut snapshot = fleet_proto::snapshot::Snapshot {
-            boards: Vec::new(),
-            generated_at: "2026-09-04T12:00:00Z".to_owned(),
-            revision: None,
-            contexts: Vec::new(),
-            repos: Vec::new(),
-            clones: Vec::new(),
-            worktrees: Vec::new(),
-            active_context: None,
-            sessions: Vec::new(),
-            agent_threads: Vec::new(),
-            statuses: Vec::new(),
-            pools: Vec::new(),
-            hosts: Vec::new(),
-            jobs: Vec::new(),
-            daemon: fleet_proto::snapshot::DaemonInfo {
-                version: "0.1.0".to_owned(),
-                pid: 1,
-                started_at: "2026-09-04T09:00:00Z".to_owned(),
-                home: "/tmp/fleet".to_owned(),
-            },
-        };
-        snapshot.worktrees = vec![fleet_core::model::Worktree {
-            id: id.clone(),
-            repo_id: "acme/widgets"
-                .parse()
-                .unwrap_or_else(|error| panic!("{error}")),
-            slug: "feature-one".to_owned(),
-            branch: "feature-one".to_owned(),
-            base_ref: "main".to_owned(),
-            path: "/tmp/widgets/feature-one".to_owned(),
-            session: "widgets/feature-one".to_owned(),
-            host: None,
-            created_at: "2026-09-04T09:00:00Z".to_owned(),
-            last_opened_at: None,
-            degraded: None,
-        }];
-        snapshot.sessions = vec![Session {
-            id: "widgets/feature-one"
-                .parse()
-                .unwrap_or_else(|error| panic!("{error}")),
-            host: None,
-            kind: SessionKind::Worktree(id.clone()),
-            cwd: "/tmp/widgets/feature-one".to_owned(),
-            terminals: Vec::new(),
-            active_terminal: None,
-            slept_at: slept.then(|| "2026-09-04T11:00:00Z".to_owned()),
-            kept_terminals: Vec::new(),
-        }];
-        snapshot.statuses = vec![fleet_core::sessions::WorktreeStatus {
-            worktree_id: id,
-            session: state,
-            windows: Vec::new(),
-            running: Vec::new(),
-            agent_activity: fleet_core::sessions::AgentActivity::Unknown,
-            agent_activity_changed_at: None,
-        }];
-        snapshot
-    }
-
-    fn multi_session_snapshot(count: usize) -> fleet_proto::snapshot::Snapshot {
-        let template = go_snapshot(SessionState::Detached, false);
-        let worktree = template.worktrees[0].clone();
-        let session = template.sessions[0].clone();
-        let mut snapshot = template;
-        snapshot.worktrees.clear();
-        snapshot.sessions.clear();
-        snapshot.statuses.clear();
-        for index in 0..count {
-            let worktree_id: WorktreeId = format!("acme/widgets#feature-{index}")
-                .parse()
-                .unwrap_or_else(|error| panic!("{error}"));
-            let session_id: SessionId = format!("widgets/feature-{index}")
-                .parse()
-                .unwrap_or_else(|error| panic!("{error}"));
-            snapshot.worktrees.push(fleet_core::model::Worktree {
-                id: worktree_id.clone(),
-                slug: format!("feature-{index}"),
-                branch: format!("feature-{index}"),
-                session: session_id.as_str().to_owned(),
-                ..worktree.clone()
-            });
-            snapshot.sessions.push(fleet_core::sessions::Session {
-                id: session_id,
-                kind: SessionKind::Worktree(worktree_id),
-                ..session.clone()
-            });
-        }
-        snapshot
-    }
-
-    fn displayed_worktrees(count: usize) -> Vec<crate::presentation::DisplayedWorktree> {
-        (0..count)
-            .map(|index| crate::presentation::DisplayedWorktree {
-                id: format!("acme/widgets#feature-{index}")
-                    .parse()
-                    .unwrap_or_else(|error| panic!("{error}")),
-                repo: "acme/widgets"
-                    .parse()
-                    .unwrap_or_else(|error| panic!("{error}")),
-            })
-            .collect()
-    }
-
-    fn picker_summary(
-        worktree: &str,
-        provider: fleet_core::agents::AgentKind,
-        title: &str,
-        parent: Option<ThreadId>,
-    ) -> AgentThreadSummary {
-        let worktree = worktree.parse().unwrap_or_else(|error| panic!("{error}"));
-        let mut projection =
-            fleet_core::agents::ThreadProjection::new(ThreadId::new(), worktree, provider);
-        projection.title = title.to_owned();
-        projection.last_activity = Some(chrono::Utc::now() - chrono::Duration::minutes(14));
-        let mut summary = projection.summary(Seq::default());
-        summary.parent = parent;
-        summary
-    }
-
-    fn agents_picker_state() -> (AppState, Vec<AgentThreadSummary>) {
-        let now = Instant::now();
-        let mut snapshot = multi_session_snapshot(2);
-        let caller = picker_summary(
-            "acme/widgets#feature-0",
-            fleet_core::agents::AgentKind::Claude,
-            "current caller",
-            None,
-        );
-        let closed = picker_summary(
-            "acme/widgets#feature-0",
-            fleet_core::agents::AgentKind::Claude,
-            "closed caller",
-            None,
-        );
-        let child = picker_summary(
-            "acme/widgets#feature-0",
-            fleet_core::agents::AgentKind::Codex,
-            "local child",
-            Some(caller.thread),
-        );
-        let other_child = picker_summary(
-            "acme/widgets#feature-1",
-            fleet_core::agents::AgentKind::Codex,
-            "remote child",
-            Some(caller.thread),
-        );
-        let unrelated = picker_summary(
-            "acme/widgets#feature-1",
-            fleet_core::agents::AgentKind::Claude,
-            "other caller",
-            None,
-        );
-        let summaries = vec![
-            child.clone(),
-            caller.clone(),
-            other_child.clone(),
-            closed.clone(),
-            unrelated,
-        ];
-        snapshot.agent_threads = summaries.clone();
-        let mut state = AppState::new("/tmp/fleet", now);
-        state.apply_snapshot(snapshot, now);
-        state.screen = Screen::Workspace {
-            session: "widgets/feature-0"
-                .parse()
-                .unwrap_or_else(|error| panic!("{error}")),
-        };
-        state.agents.attach(child.thread);
-        state.agents.close(closed.thread);
-        (state, summaries)
-    }
-
-    #[test]
-    fn agents_picker_orders_callers_then_local_and_other_worktree_children() {
-        let (state, _) = agents_picker_state();
-        let rows = candidates(&state, "agents", None, None);
-        assert_eq!(
-            rows.iter()
-                .map(|row| row.label.as_str())
-                .collect::<Vec<_>>(),
-            [
-                "claude — current caller",
-                "claude — closed caller",
-                "↳ codex — local child",
-                "↳ codex — remote child · acme/widgets#feature-1",
-            ]
-        );
-        assert!(
-            rows.iter()
-                .all(|row| row.section == PaletteSectionKind::Agents)
-        );
-    }
-
-    #[test]
-    fn idle_agent_attention_has_no_picker_glyph() {
-        assert!(!attention_has_visible_mark(Attention::Idle));
-        assert!(attention_has_visible_mark(Attention::Working));
-        assert!(attention_has_visible_mark(Attention::Failed));
-    }
-
-    #[test]
-    fn prepared_key_uses_scalar_agent_revisions() {
-        let (mut state, summaries) = agents_picker_state();
-        let first = PreparedKey::new(&state, String::new(), None, None);
-        let same = PreparedKey::new(&state, String::new(), None, None);
-        assert_eq!(first, same);
-
-        state.agents.mark_seen(summaries[0].thread, Seq(1));
-        let seen = PreparedKey::new(&state, String::new(), None, None);
-        assert_eq!(seen.agent_summaries, first.agent_summaries);
-        assert_ne!(seen.agent_seen, first.agent_seen);
-    }
-
-    #[test]
-    fn agents_picker_keeps_a_closed_caller_reachable() {
-        let (state, summaries) = agents_picker_state();
-        let closed = summaries
-            .iter()
-            .find(|summary| summary.title == "closed caller")
-            .expect("closed caller fixture");
-        assert!(state.agents.is_closed(closed.thread));
-        let rows = candidates(&state, "agents", None, None);
-        let row = rows
-            .iter()
-            .find(|row| row.label.contains("closed caller"))
-            .expect("closed caller row");
-        assert_eq!(row.key.as_deref(), Some("·"));
-        assert_eq!(row.trailing.as_deref(), Some("go"));
-    }
-
-    #[test]
-    fn agents_picker_shows_a_strip_index_only_for_an_attached_thread() {
-        let (state, _) = agents_picker_state();
-        let rows = candidates(&state, "agents", None, None);
-        let caller = rows
-            .iter()
-            .find(|row| row.label == "claude — current caller")
-            .expect("caller row");
-        let child = rows
-            .iter()
-            .find(|row| row.label.contains("local child"))
-            .expect("local child row");
-        let hidden = rows
-            .iter()
-            .find(|row| row.label.contains("remote child"))
-            .expect("remote child row");
-        assert_eq!(caller.key.as_deref(), Some("1"));
-        assert_eq!(child.key.as_deref(), Some("2"));
-        assert_eq!(hidden.key.as_deref(), Some("·"));
-    }
-
-    #[gpui::test]
-    fn capacity_refused_agent_selection_does_not_ensure_a_session(cx: &mut gpui::TestAppContext) {
-        let (mut app, summaries) = agents_picker_state();
-        let target = summaries
-            .iter()
-            .find(|summary| summary.title == "remote child")
-            .expect("remote child fixture")
-            .thread;
-        let target_worktree = summaries
-            .iter()
-            .find(|summary| summary.thread == target)
-            .expect("target summary")
-            .worktree
-            .clone();
-        let session = app
-            .snapshot
-            .as_mut()
-            .and_then(|snapshot| {
-                snapshot.sessions.iter_mut().find(|session| {
-                    matches!(&session.kind, SessionKind::Worktree(worktree) if worktree == &target_worktree)
-                })
-            })
-            .expect("target worktree session");
-        while session.terminals.len() < crate::state::WORKSPACE_TAB_LIMIT - 1 {
-            let index = session.terminals.len();
-            session.terminals.push(fleet_core::sessions::Terminal {
-                id: fleet_core::ids::TerminalId(index as u64 + 10),
-                name: format!("terminal-{index}"),
-                command: "shell".to_owned(),
-                cwd: session.cwd.clone(),
-                shell_pid: None,
-                foreground_command: None,
-                status: fleet_core::sessions::TerminalStatus::Running,
-                title: None,
-                keep_alive: Vec::new(),
-                has_unseen_output: false,
-                agent_attention: None,
-                kind: fleet_core::sessions::TerminalKind::Pty,
-            });
-        }
-        app.overlay = Some(Overlay::Palette);
-        let rows = candidates(&app, "agents", None, None);
-        let cursor = rows
-            .iter()
-            .position(|row| row.run == Run::OpenAgentThread(target))
-            .expect("target palette row");
-        let state = cx.new(|_| app);
-        cx.update(|cx| {
-            with_host(&state, cx, |host| {
-                host.palette.rows = rows.into();
-                host.palette.cursor = cursor;
-            });
-        });
-        let transport = FakeTransport::default();
-        let window = cx.add_window(|_, _| PaletteFixture);
-
-        window
-            .update(cx, |_, window, cx| {
-                run_selected(&state, &transport, window, cx)
-            })
-            .expect("run capacity-refused selection");
-
-        assert!(
-            transport.requests.borrow().is_empty(),
-            "a full strip must not issue EnsureSession"
-        );
-        cx.read(|cx| assert!(!state.read(cx).agents.is_attached(target)));
-    }
-
-    #[gpui::test]
-    fn reopening_a_closed_caller_from_the_picker_sends_agent_thread_reopen(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let (mut app, summaries) = agents_picker_state();
-        let target = summaries
-            .iter()
-            .find(|summary| summary.title == "closed caller")
-            .expect("closed caller fixture")
-            .thread;
-        app.overlay = Some(Overlay::Palette);
-        let rows = candidates(&app, "agents", None, None);
-        let cursor = rows
-            .iter()
-            .position(|row| row.run == Run::OpenAgentThread(target))
-            .expect("closed caller palette row");
-        let state = cx.new(|_| app);
-        cx.update(|cx| {
-            with_host(&state, cx, |host| {
-                host.palette.rows = rows.into();
-                host.palette.cursor = cursor;
-            });
-        });
-        let transport = FakeTransport::default();
-        let window = cx.add_window(|_, _| PaletteFixture);
-
-        window
-            .update(cx, |_, window, cx| {
-                run_selected(&state, &transport, window, cx)
-            })
-            .expect("run closed caller selection");
-
-        assert_eq!(
-            transport.requests.borrow().as_slice(),
-            [RecordedRequest::Sent(RequestBody::AgentThreadReopen {
-                thread: target
-            })]
-        );
-        cx.read(|cx| assert!(!state.read(cx).agents.is_closed(target)));
-    }
-
-    #[gpui::test]
-    fn selecting_an_already_open_top_level_thread_from_the_picker_sends_nothing(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let (mut app, summaries) = agents_picker_state();
-        let target = summaries
-            .iter()
-            .find(|summary| summary.title == "current caller")
-            .expect("current caller fixture")
-            .thread;
-        app.overlay = Some(Overlay::Palette);
-        let rows = candidates(&app, "agents", None, None);
-        let cursor = rows
-            .iter()
-            .position(|row| row.run == Run::OpenAgentThread(target))
-            .expect("current caller palette row");
-        let state = cx.new(|_| app);
-        cx.update(|cx| {
-            with_host(&state, cx, |host| {
-                host.palette.rows = rows.into();
-                host.palette.cursor = cursor;
-            });
-        });
-        let transport = FakeTransport::default();
-        let window = cx.add_window(|_, _| PaletteFixture);
-
-        window
-            .update(cx, |_, window, cx| {
-                run_selected(&state, &transport, window, cx)
-            })
-            .expect("run open caller selection");
-
-        assert!(transport.requests.borrow().is_empty());
-    }
-
-    #[test]
-    fn agents_picker_filters_on_the_provider_name() {
-        let (state, _) = agents_picker_state();
-        let rows = candidates(&state, "agents codex", None, None);
-        assert_eq!(rows.len(), 2);
-        assert!(rows.iter().all(|row| row.label.contains("codex")));
-    }
-
-    #[test]
-    fn agents_picker_projects_cached_attention_without_attaching_a_blocked_child() {
-        let (mut state, summaries) = agents_picker_state();
-        let mut child = summaries
-            .iter()
-            .find(|summary| summary.title == "remote child")
-            .expect("remote child fixture")
-            .clone();
-        child.attention = Attention::NeedsYou(AttentionKind::Question);
-        state.apply_agent_summary(child.clone(), Instant::now());
-        let row = candidates(&state, "agents", None, None)
-            .into_iter()
-            .find(|row| row.label.contains("remote child"))
-            .expect("blocked child row");
-        assert_eq!(row.secondary.as_deref(), Some("blocked · question"));
-        assert_eq!(
-            row.attention,
-            Some(Attention::NeedsYou(AttentionKind::Question))
-        );
-        assert!(!state.agents.is_attached(child.thread));
-    }
-
-    #[test]
-    fn kill_targets_highlighted_session() {
-        let mut app = AppState::new("/tmp/fleet", Instant::now());
-        app.snapshot = Some(multi_session_snapshot(2));
-        app.displayed_hub.worktrees = displayed_worktrees(2);
-        app.cursors.worktrees = 1;
-        let request = kill_request(&app).expect("highlighted worktree has a session");
-        assert!(matches!(
-            request,
-            ConfirmRequest::KillSession { session, .. }
-                if session.as_str() == "widgets/feature-1"
-        ));
-
-        app.screen = Screen::Workspace {
-            session: "widgets/feature-0"
-                .parse()
-                .unwrap_or_else(|error| panic!("{error}")),
-        };
-        assert_eq!(
-            target_session(&app).map(|session| session.id.as_str()),
-            Some("widgets/feature-0"),
-            "the active Workspace session outranks the Hub's retained cursor"
-        );
-    }
-
-    #[test]
-    fn commands_require_executable_current_targets() {
-        let mut app = AppState::new("/tmp/fleet", Instant::now());
-        app.snapshot = Some(multi_session_snapshot(1));
-        app.displayed_hub.worktrees = displayed_worktrees(1);
-        assert!(!Command::SleepSession.valid(&app));
-        assert!(!Command::KillSession.valid(&app));
-        assert!(!Command::Settings.valid(&app));
-
-        app.daemon = crate::state::DaemonLink::Connected;
-        assert!(Command::SleepSession.valid(&app));
-        assert!(Command::KillSession.valid(&app));
-        assert!(Command::Settings.valid(&app));
-
-        app.cursors.worktrees = 9;
-        assert!(!Command::SleepSession.valid(&app));
-        assert!(!Command::KillSession.valid(&app));
-    }
-
-    /// `Workspace: Open board tab` dispatches a `Workspace > Prefix` action, and that handler
-    /// exists only while the Workspace is showing a worktree session. Listed anywhere else the
-    /// row would be one `Enter` that does nothing at all (§3.9 lists no row that cannot run).
-    #[test]
-    fn the_board_tab_row_needs_a_worktree_session_on_screen() {
-        let mut app = AppState::new("/tmp/fleet", Instant::now());
-        app.daemon = crate::state::DaemonLink::Connected;
-        app.snapshot = Some(multi_session_snapshot(1));
-        assert!(
-            !Command::WorkspaceOpenBoard.valid(&app),
-            "the Hub has no board tab to open"
-        );
-
-        app.screen = Screen::Workspace {
-            session: "widgets/feature-0"
-                .parse()
-                .unwrap_or_else(|error| panic!("{error}")),
-        };
-        assert!(Command::WorkspaceOpenBoard.valid(&app));
-
-        if let Some(snapshot) = app.snapshot.as_mut() {
-            snapshot.sessions[0].kind = SessionKind::Agent(fleet_core::config::Agent::Claude);
-        }
-        assert!(
-            !Command::WorkspaceOpenBoard.valid(&app),
-            "an agent session has no worktree, so it has no board"
-        );
-    }
-
-    #[test]
-    fn destructive_target_matches_row() {
-        let mut app = AppState::new("/tmp/fleet", Instant::now());
-        app.snapshot = Some(multi_session_snapshot(2));
-        app.displayed_hub.worktrees = displayed_worktrees(2).into_iter().rev().collect();
-        app.cursors.worktrees = 0;
-
-        assert_eq!(
-            selected_worktree_id(&app).as_ref().map(WorktreeId::as_str),
-            Some("acme/widgets#feature-1"),
-            "the destructive target follows the first displayed row, not snapshot index zero"
-        );
-    }
-
-    #[test]
-    fn session_switcher_is_mru_and_uncapped() {
-        let mut app = AppState::new("/tmp/fleet", Instant::now());
-        app.snapshot = Some(multi_session_snapshot(ROW_CAP + 4));
-        app.touch_session(
-            "widgets/feature-2"
-                .parse()
-                .unwrap_or_else(|error| panic!("{error}")),
-        );
-        app.touch_session(
-            "widgets/feature-6"
-                .parse()
-                .unwrap_or_else(|error| panic!("{error}")),
-        );
-
-        let rows = candidates(&app, "sessions", None, None);
-        assert_eq!(rows.len(), ROW_CAP + 4);
-        assert_eq!(rows[0].label, "acme/widgets#feature-6");
-        assert_eq!(rows[1].label, "acme/widgets#feature-2");
-        for cursor in 0..rows.len() {
-            let (visible, local_cursor) = visible_rows(&rows, cursor, true);
-            assert_eq!(visible.len(), ROW_CAP);
-            assert!(local_cursor < visible.len());
-            assert_eq!(visible[local_cursor], rows[cursor]);
-        }
-    }
-
-    #[test]
-    fn a_go_row_takes_its_state_and_its_id_from_the_same_place_the_hub_does() {
-        let now = Instant::now();
-        let mut app = AppState::new("/tmp/fleet", now);
-        app.apply_snapshot(go_snapshot(SessionState::Detached, false), now);
-        let rows = candidates(&app, "", None, None);
-        let go: Vec<_> = rows
-            .iter()
-            .filter(|entry| entry.section == PaletteSectionKind::Go)
-            .collect();
-        assert_eq!(go.len(), 1, "one worktree is one GO row, {go:?}");
-        assert_eq!(
-            go[0].label, "acme/widgets#feature-one",
-            "\u{a7}3.9 labels a GO row with its WorktreeId, never a session id"
-        );
-        assert_eq!(go[0].detail.as_deref(), Some("running, detached"));
-        assert_eq!(go[0].status, Some(StatusKind::DetachedAwake));
-
-        // The same worktree, actually attached, and slept.
-        let mut app = AppState::new("/tmp/fleet", now);
-        app.apply_snapshot(go_snapshot(SessionState::Attached, false), now);
-        let rows = candidates(&app, "", None, None);
-        assert_eq!(rows[0].status, Some(StatusKind::Attached));
-        let mut app = AppState::new("/tmp/fleet", now);
-        app.apply_snapshot(go_snapshot(SessionState::Detached, true), now);
-        let rows = candidates(&app, "", None, None);
-        assert_eq!(rows[0].status, Some(StatusKind::Sleeping));
-        assert_eq!(rows[0].detail.as_deref(), Some("sleeping"));
-    }
-
-    fn board_with_one_card() -> AppState {
-        let mut state = AppState::new("/tmp/fleet-palette-board", Instant::now());
-        state.screen = Screen::Hub { tab: HubTab::Board };
-        let context = fleet_core::model::Context {
-            id: "work".parse().unwrap_or_else(|error| panic!("{error}")),
-            name: "Work".into(),
-            owners: Vec::new(),
-            created_at: "2026-09-06T12:00:00Z".into(),
-        };
-        let mut board = fleet_core::board::new_board(&context, &context.created_at);
-        let card = fleet_core::board::create_card(
-            &mut board,
-            &[],
-            "card-1".parse().unwrap_or_else(|error| panic!("{error}")),
-            fleet_core::board::CardDraft {
-                title: "Fix login".into(),
-                ..Default::default()
-            },
-            &context.created_at,
-        )
-        .unwrap_or_else(|error| panic!("{error}"));
-        let column = board
-            .statuses
-            .iter()
-            .position(|status| status.id == card.status_id)
-            .unwrap_or_else(|| panic!("no column"));
-        state.board.view = Some(fleet_core::board::BoardView {
-            board,
-            cards: vec![card],
-            live_runs: Vec::new(),
-        });
-        state.board.focus = crate::state::BoardFocus { column, row: 0 };
-        state
-    }
-
-    /// Contracts §5.5: the three run rows belong to a worktree board, and the Hub's context
-    /// board is the surface they are never offered on — its cards can hold no run at all.
-    #[test]
-    fn the_run_rows_are_offered_over_a_worktree_board_only() {
-        let mut state = board_with_one_card();
-        assert!(!Command::BoardAttachRun.valid(&state));
-        assert!(!Command::BoardCancelRun.valid(&state));
-        assert!(!Command::BoardRunNow.valid(&state));
-
-        let over_context_board = card_context(&state, Some(Dialogs::CardDetail), None);
-        assert!(!Command::BoardAttachRun.valid_with(&state, over_context_board));
-
-        state.board.scope = Some(crate::state::BoardScope::Worktree(
-            "acme/api#agent"
-                .parse()
-                .unwrap_or_else(|error| panic!("{error}")),
-        ));
-        let over_worktree_board = card_context(&state, Some(Dialogs::CardDetail), None);
-        assert!(Command::BoardAttachRun.valid_with(&state, over_worktree_board));
-        assert!(Command::BoardCancelRun.valid_with(&state, over_worktree_board));
-        assert!(Command::BoardRunNow.valid_with(&state, over_worktree_board));
-        // The detail is what makes them valid here; the Hub's own board tab does not.
-        assert!(!Command::BoardRunNow.valid(&state));
-    }
-
-    /// The other three rows of §5.5 follow the pickers and the settings row beside them.
-    #[test]
-    fn the_link_agent_and_columns_rows_follow_the_board_they_edit() {
-        let state = board_with_one_card();
-        assert!(Command::BoardPickBlockedBy.valid(&state));
-        assert!(Command::BoardPickAgent.valid(&state));
-        assert!(Command::BoardColumns.valid(&state));
-
-        let elsewhere = AppState::new("/tmp/fleet-palette-no-board", Instant::now());
-        assert!(!Command::BoardPickBlockedBy.valid(&elsewhere));
-        assert!(!Command::BoardPickAgent.valid(&elsewhere));
-        assert!(!Command::BoardColumns.valid(&elsewhere));
-    }
-
-    /// P9-T04: every one of §5.5's rows runs its key's own code path.
-    ///
-    /// `run_command` dispatches the row's action rather than calling a handler of its own, so
-    /// what makes the two paths one is that the name the row advertises is a name the keymap
-    /// binds. A row naming an action no context binds would dispatch into nothing.
-    #[test]
-    fn every_run_row_dispatches_the_action_its_key_is_bound_to() {
-        let table = crate::keymap::table();
-        for command in [
-            Command::BoardAttachRun,
-            Command::BoardCancelRun,
-            Command::BoardRunNow,
-            Command::BoardPickBlockedBy,
-            Command::BoardPickAgent,
-            Command::BoardColumns,
-        ] {
-            let action = command.action();
-            let contexts: Vec<&str> = table
-                .iter()
-                .filter(|spec| spec.action == action)
-                .map(|spec| spec.context)
-                .collect();
-            assert!(
-                contexts.contains(&"Workspace > Native > Board"),
-                "`{}` is offered where its key is unbound: {action}",
-                command.label()
-            );
-        }
-    }
-
-    #[test]
-    fn card_rows_that_could_only_do_nothing_are_not_listed() {
-        let mut state = board_with_one_card();
-        assert!(Command::CardDetailEditTitle.valid(&state));
-        // §3.9: a row that opens a dialog and then returns is not a valid row.
-        assert!(!Command::CardDetailClose.valid(&state));
-        assert!(!Command::CardDetailSave.valid(&state));
-        assert!(!Command::CardDetailKeepLocal.valid(&state));
-        assert!(!Command::CardDetailTakeRemote.valid(&state));
-        assert!(!Command::BoardOpenWorktree.valid(&state));
-
-        // Over an open detail, closing and saving are exactly what the palette is for.
-        let behind = card_context(&state, Some(Dialogs::CardDetail), None);
-        assert!(Command::CardDetailClose.valid_with(&state, behind));
-        assert!(Command::CardDetailSave.valid_with(&state, behind));
-        assert!(!Command::CardDetailKeepLocal.valid_with(&state, behind));
-
-        let card = &mut state
-            .board
-            .view
-            .as_mut()
-            .unwrap_or_else(|| panic!("no board"))
-            .cards[0];
-        card.worktree_id = Some(
-            "acme/api#wor-1"
-                .parse()
-                .unwrap_or_else(|error| panic!("{error}")),
-        );
-        card.conflict = Some(fleet_core::board::Conflict {
-            detected_at: "2026-09-06T12:00:00Z".into(),
-            remote: fleet_core::board::RemoteCard::default(),
-            fields: vec!["title".into()],
-        });
-        assert!(Command::BoardOpenWorktree.valid(&state));
-        assert!(Command::CardDetailKeepLocal.valid(&state));
-        assert!(Command::CardDetailTakeRemote.valid(&state));
-    }
-
-    /// The card detail deliberately keeps the card it opened on when a refresh moves the
-    /// board's selection, so the `Card detail:` rows have to be judged against *that* card.
-    #[test]
-    fn the_card_detail_rows_follow_the_open_dialog_and_not_the_board_selection() {
-        let mut state = board_with_one_card();
-        let view = state
-            .board
-            .view
-            .as_mut()
-            .unwrap_or_else(|| panic!("no board"));
-        let mut second = view.cards[0].clone();
-        second.id = "card-two".parse().unwrap_or_else(|error| panic!("{error}"));
-        second.number = 2;
-        second.conflict = Some(fleet_core::board::Conflict {
-            detected_at: "2026-09-06T12:00:00Z".into(),
-            remote: fleet_core::board::RemoteCard::default(),
-            fields: vec!["title".into()],
-        });
-        let held = second.id.clone();
-        view.cards.push(second);
-        // The board is focused on the first card, which has no conflict; the dialog holds the
-        // second, which does.
-        let selection = card_context(&state, Some(Dialogs::CardDetail), None);
-        assert!(!Command::CardDetailKeepLocal.valid_with(&state, selection));
-        let held = card_context(&state, Some(Dialogs::CardDetail), Some(&held));
-        assert!(Command::CardDetailKeepLocal.valid_with(&state, held));
-        assert!(Command::CardDetailTakeRemote.valid_with(&state, held));
-    }
-
-    #[test]
-    fn opening_a_remote_issue_needs_a_link_that_carries_an_address() {
-        let mut state = board_with_one_card();
-        assert!(
-            !Command::BoardOpenRemote.valid(&state),
-            "an unlinked card has no issue to open"
-        );
-        let card = &mut state
-            .board
-            .view
-            .as_mut()
-            .unwrap_or_else(|| panic!("no board"))
-            .cards[0];
-        card.remote = Some(fleet_core::board::RemoteLink {
-            parent_key: None,
-            backend: "jira".into(),
-            key: "SP-1".into(),
-            url: None,
-            version: None,
-            synced_at: "2026-09-06T12:00:00Z".into(),
-            remote_updated_at: None,
-        });
-        assert!(
-            !Command::BoardOpenRemote.valid(&state),
-            "a backend that publishes no URL leaves nothing to open"
-        );
-        let card = &mut state
-            .board
-            .view
-            .as_mut()
-            .unwrap_or_else(|| panic!("no board"))
-            .cards[0];
-        if let Some(remote) = card.remote.as_mut() {
-            remote.url = Some("https://example.test/browse/SP-1".into());
-        }
-        assert!(Command::BoardOpenRemote.valid(&state));
-        assert!(Command::CardDetailOpenRemote.valid(&state));
-    }
-
-    #[gpui::test]
-    fn palette_uses_normal_transition(cx: &mut gpui::TestAppContext) {
-        let now = Instant::now();
-        let snapshot = go_snapshot(SessionState::Detached, true);
-        let session = snapshot.sessions[0].clone();
-        let state = cx.new(|_| {
-            let mut app = AppState::new("/tmp/fleet", now);
-            app.apply_snapshot(snapshot, now);
-            app.overlay = Some(Overlay::Palette);
-            app.terminal_mode = crate::state::TerminalMode::Scroll;
-            app
-        });
-        cx.update(|cx| {
-            let rows = candidates(state.read(cx), "sessions", None, None).into();
-            with_host(&state, cx, |host| {
-                host.palette.rows = rows;
-                host.palette.cursor = 0;
-            });
-        });
-        let transport = FakeTransport::default();
-        let window = cx.add_window(|_, _| PaletteFixture);
-
-        window
-            .update(cx, |_, window, cx| {
-                run_selected(&state, &transport, window, cx)
-            })
-            .expect("run palette selection");
-
-        assert!(matches!(
-            transport.requests.borrow().as_slice(),
-            [
-                RecordedRequest::Sent(RequestBody::TouchWorktreeOpened { id }),
-                RecordedRequest::Requested(RequestBody::EnsureSession {
-                    worktree: Some(ensured),
-                    agent: None,
-                    sleep_previous: true,
-                }),
-            ] if id == ensured && id.as_str() == "acme/widgets#feature-one"
-        ));
-        transport
-            .replies
-            .borrow_mut()
-            .pop_front()
-            .expect("ensure reply")
-            .try_send(Ok(fleet_proto::response::ResponseBody::Session(session)))
-            .expect("send ensure reply");
-        cx.run_until_parked();
-
-        cx.read(|cx| {
-            let app = state.read(cx);
-            assert_eq!(app.overlay, None);
-            assert_eq!(app.terminal_mode, crate::state::TerminalMode::Terminal);
-            assert_eq!(app.mode(), crate::state::Mode::Terminal);
-            assert!(matches!(
-                app.screen,
-                Screen::Workspace { ref session }
-                    if session.as_str() == "widgets/feature-one"
-            ));
-        });
-    }
-
-    #[gpui::test]
-    fn palette_wakes_agent_session_before_entering(cx: &mut gpui::TestAppContext) {
-        let now = Instant::now();
-        let mut snapshot = go_snapshot(SessionState::Detached, true);
-        snapshot.worktrees.clear();
-        snapshot.statuses.clear();
-        let agent = fleet_core::config::Agent::Claude;
-        let session = &mut snapshot.sessions[0];
-        session.id = fleet_core::sessions::agent_session_id(agent).expect("agent session id");
-        session.kind = SessionKind::Agent(agent);
-        let response = session.clone();
-        let state = cx.new(|_| {
-            let mut app = AppState::new("/tmp/fleet", now);
-            app.apply_snapshot(snapshot, now);
-            app.overlay = Some(Overlay::Palette);
-            app
-        });
-        cx.update(|cx| {
-            let rows = candidates(state.read(cx), "sessions", None, None).into();
-            with_host(&state, cx, |host| {
-                host.palette.rows = rows;
-                host.palette.cursor = 0;
-            });
-        });
-        let transport = FakeTransport::default();
-        let window = cx.add_window(|_, _| PaletteFixture);
-
-        window
-            .update(cx, |_, window, cx| {
-                run_selected(&state, &transport, window, cx)
-            })
-            .expect("run agent palette selection");
-
-        assert!(matches!(
-            transport.requests.borrow().as_slice(),
-            [RecordedRequest::Requested(RequestBody::EnsureSession {
-                worktree: None,
-                agent: Some(fleet_core::config::Agent::Claude),
-                sleep_previous: true,
-            })]
-        ));
-        transport
-            .replies
-            .borrow_mut()
-            .pop_front()
-            .expect("agent ensure reply")
-            .try_send(Ok(fleet_proto::response::ResponseBody::Session(response)))
-            .expect("send agent ensure reply");
-        cx.run_until_parked();
-
-        cx.read(|cx| {
-            assert!(matches!(state.read(cx).screen, Screen::Workspace { .. }));
-        });
-    }
-
-    #[gpui::test]
-    fn palette_reports_ensure_failure(cx: &mut gpui::TestAppContext) {
-        let now = Instant::now();
-        let snapshot = go_snapshot(SessionState::Detached, true);
-        let state = cx.new(|_| {
-            let mut app = AppState::new("/tmp/fleet", now);
-            app.apply_snapshot(snapshot, now);
-            app.overlay = Some(Overlay::Palette);
-            app
-        });
-        cx.update(|cx| {
-            let rows = candidates(state.read(cx), "sessions", None, None).into();
-            with_host(&state, cx, |host| host.palette.rows = rows);
-        });
-        let transport = FakeTransport::default();
-        let window = cx.add_window(|_, _| PaletteFixture);
-        window
-            .update(cx, |_, window, cx| {
-                run_selected(&state, &transport, window, cx)
-            })
-            .expect("run palette selection");
-        transport
-            .replies
-            .borrow_mut()
-            .pop_front()
-            .expect("ensure reply")
-            .try_send(Err(fleet_proto::error::ProtoError {
-                kind: fleet_proto::error::ErrorKind::Tmux,
-                message: "session refused".to_owned(),
-            }))
-            .expect("send ensure refusal");
-        cx.run_until_parked();
-
-        cx.read(|cx| {
-            let app = state.read(cx);
-            assert_eq!(
-                app.sticky_error.as_ref().map(|error| error.text.as_str()),
-                Some("session refused")
-            );
-            assert!(matches!(app.screen, Screen::Hub { .. }));
-        });
-    }
-
-    #[test]
-    fn the_section_order_is_fixed() {
-        assert!(PaletteSectionKind::Go < PaletteSectionKind::Do);
-        assert!(PaletteSectionKind::Do < PaletteSectionKind::Context);
-        assert!(PaletteSectionKind::Context < PaletteSectionKind::Agents);
-    }
-
-    #[gpui::test]
-    fn a_shrinking_refresh_clamps_the_palette_cursor(cx: &mut gpui::TestAppContext) {
-        // §3.9: `Enter` runs the highlighted row. A snapshot that loses sessions under an
-        // open palette must not leave the cursor past the last row, where `Enter` is inert.
-        let now = Instant::now();
-        let state = cx.new(|_| {
-            let mut app = AppState::new("/tmp/fleet", now);
-            app.apply_snapshot(multi_session_snapshot(6), now);
-            app.overlay = Some(Overlay::Palette);
-            app.palette_seed = Some("sessions".into());
-            app
-        });
-        cx.update(|cx| {
-            seed(&state, cx);
-            with_host(&state, cx, |host| {
-                assert_eq!(host.palette.rows.len(), 6);
-                host.palette.cursor = 5;
-            });
-        });
-
-        cx.update(|cx| {
-            state.update(cx, |app, _| {
-                app.apply_snapshot(multi_session_snapshot(2), now);
-            });
-            refresh(&state, cx);
-            with_host(&state, cx, |host| {
-                assert_eq!(host.palette.rows.len(), 2);
-                assert!(
-                    host.palette.rows.get(host.palette.cursor).is_some(),
-                    "the cursor still selects a row, cursor {} of {} rows",
-                    host.palette.cursor,
-                    host.palette.rows.len()
-                );
-            });
-        });
-    }
-
-    #[gpui::test]
-    fn an_unrelated_notify_does_not_rebuild_the_palette(cx: &mut gpui::TestAppContext) {
-        // `host::watch` refreshes the open palette from every `AppState` notification, and a
-        // busy workspace notifies several times a second. Rebuilding the candidates there
-        // indexes the whole snapshot and allocates a label and a detail per row on the
-        // foreground thread, which is the projection work `docs/APP-CONTRACTS.md` keeps out of
-        // the per-frame path: a notification that moved none of the inputs must not do it.
-        let now = Instant::now();
-        let state = cx.new(|_| {
-            let mut app = AppState::new("/tmp/fleet", now);
-            app.apply_snapshot(multi_session_snapshot(3), now);
-            app.overlay = Some(Overlay::Palette);
-            app.palette_seed = Some("sessions".into());
-            app
-        });
-        cx.update(|cx| {
-            seed(&state, cx);
-            with_host(&state, cx, |host| {
-                assert_eq!(host.palette.rows.len(), 3);
-                // A row no rebuild could ever produce: it survives exactly as long as
-                // `refresh` returns without calling `candidates` again.
-                host.palette.rows = std::rc::Rc::from(vec![Entry {
-                    section: PaletteSectionKind::Do,
-                    label: "sentinel".to_owned(),
-                    detail: None,
-                    secondary: None,
-                    trailing: None,
-                    key: None,
-                    destructive: false,
-                    icon: Icon::Boxes,
-                    status: None,
-                    attention: None,
-                    run: Run::Command(Command::Help),
-                }]);
-            });
-        });
-
-        cx.update(|cx| {
-            refresh(&state, cx);
-            with_host(&state, cx, |host| {
-                assert_eq!(
-                    host.palette
-                        .rows
-                        .iter()
-                        .map(|row| row.label.as_str())
-                        .collect::<Vec<_>>(),
-                    ["sentinel"],
-                    "a notify that changed nothing rebuilt the candidates"
-                );
-            });
-        });
-
-        cx.update(|cx| {
-            // A snapshot the rows *are* derived from still rebuilds them.
-            state.update(&mut *cx, |app, _| {
-                app.apply_snapshot(multi_session_snapshot(4), now);
-            });
-            refresh(&state, cx);
-            with_host(&state, cx, |host| {
-                assert_eq!(host.palette.rows.len(), 4);
-            });
-        });
-    }
-
-    #[gpui::test]
-    fn a_refresh_that_changes_nothing_keeps_the_prepared_rows(cx: &mut gpui::TestAppContext) {
-        // The open palette is refreshed from every `AppState` notification, so a rebuild that
-        // lands on the same rows must not swap the prepared list out from under the card.
-        let now = Instant::now();
-        let state = cx.new(|_| {
-            let mut app = AppState::new("/tmp/fleet", now);
-            app.apply_snapshot(multi_session_snapshot(3), now);
-            app.overlay = Some(Overlay::Palette);
-            app.palette_seed = Some("sessions".into());
-            app
-        });
-        let before = cx.update(|cx| {
-            seed(&state, cx);
-            with_host(&state, cx, |host| {
-                assert_eq!(host.palette.rows.len(), 3);
-                host.palette.rows.clone()
-            })
-        });
-
-        cx.update(|cx| {
-            refresh(&state, cx);
-            let after = with_host(&state, cx, |host| host.palette.rows.clone());
-            assert!(
-                std::rc::Rc::ptr_eq(&before, &after),
-                "unchanged rows are kept, not rebuilt into a fresh Rc"
-            );
-        });
-    }
-
-    #[gpui::test]
-    fn palette_seeding_and_cursor_motion_reuse_prepared_matches(cx: &mut gpui::TestAppContext) {
-        let state = cx.new(|_| {
-            let mut state = AppState::new("/tmp/palette", std::time::Instant::now());
-            state.snapshot = Some(go_snapshot(SessionState::Detached, false));
-            state.palette_seed = Some("sessions".into());
-            state
-        });
-        let before = cx.update(|cx| {
-            seed(&state, cx);
-            with_host(&state, cx, |host| {
-                assert_eq!(host.palette.query, "sessions");
-                assert!(!host.palette.rows.is_empty());
-                host.palette.rows.clone()
-            })
-        });
-        cx.update(|cx| {
-            move_cursor(&state, 1, cx);
-            let after = with_host(&state, cx, |host| host.palette.rows.clone());
-            assert!(std::rc::Rc::ptr_eq(&before, &after));
-            with_host(&state, cx, |host| host.palette.query.push_str("missing"));
-            super::super::notify(&state, cx);
-            let after = with_host(&state, cx, |host| host.palette.rows.clone());
-            assert!(after.is_empty());
-            assert!(!std::rc::Rc::ptr_eq(&before, &after));
-        });
-    }
 }

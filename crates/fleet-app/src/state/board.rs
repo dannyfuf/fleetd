@@ -78,6 +78,9 @@ pub struct CardMarks {
     pub by_card: HashMap<CardId, TileMarks>,
     /// Cards with a live or pending run, which is the header's numerator.
     pub working: u32,
+    /// Of those, the cards only owed a run: a pending run and no live one, which is a card
+    /// waiting for a slot the board's `max_live_runs` has not freed yet.
+    pub waiting: u32,
     /// Cards waiting on a person (`ops::query::attention`).
     pub needs_you: u32,
     /// Bumped only when the map or a counter actually differs.
@@ -278,6 +281,31 @@ impl AppState {
         self.refresh_card_marks(Utc::now());
     }
 
+    /// Applies the daemon's answer to a move that named a place in the column.
+    ///
+    /// The answer is the moved card alone, but `ops::move_card` renumbered every card of the
+    /// destination column. Replaying that same function over the shown cards puts the
+    /// neighbours where the daemon did, so the column never draws a tie between the card and
+    /// the one it was dropped above while the `BoardChanged` reload is on its way.
+    pub fn apply_placed_card(&mut self, card: Card, index: usize) {
+        if let Some(view) = self.board.view.as_mut()
+            && view.board.id == card.board_id
+            && let Err(error) = fleet_core::board::move_card(
+                &view.board,
+                &mut view.cards,
+                &card.id,
+                &card.status_id,
+                Some(index),
+                &card.updated_at,
+            )
+        {
+            // The shown board disagrees with the daemon's; the reload it triggers settles it.
+            tracing::debug!(%error, "replaying a placed move over the shown board failed");
+            self.board_stale = true;
+        }
+        self.apply_card(card);
+    }
+
     /// Re-derives [`BoardState::marks`] from the shown board and the delegation mirror.
     ///
     /// Called after `apply_board_view`, after `apply_card`, after `apply_delegation` for a
@@ -328,13 +356,18 @@ impl AppState {
             // The numerator is what occupies a run slot, which is the live and the owed runs —
             // not the marks, because a `Blocked` child is still holding its checkout. A child
             // the mirror has and the view has not is holding one too.
-            if card.pending_run.is_some()
-                || live_child.is_some()
-                || card.runs.last().is_some_and(CardRun::is_live)
-            {
+            let live = live_child.is_some() || card.runs.last().is_some_and(CardRun::is_live);
+            if live || card.pending_run.is_some() {
                 marks.working = marks.working.saturating_add(1);
             }
-            if attention(card, &stamp) {
+            if !live && card.pending_run.is_some() {
+                marks.waiting = marks.waiting.saturating_add(1);
+            }
+            // `attention` reads the card alone, so it cannot see a child that is still out and
+            // parked on a person's answer: only the delegation mirror knows, and the tile already
+            // says `needs you` from it (BOARD.md §11.8). The header counts what the tiles say.
+            let parked = live && run == Some(RunMark::NeedsYou);
+            if parked || attention(card, &stamp) {
                 marks.needs_you = marks.needs_you.saturating_add(1);
             }
             if run.is_some() || blocked.is_some() {

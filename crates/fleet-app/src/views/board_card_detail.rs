@@ -1,12 +1,13 @@
 //! The card-detail surface (BOARD §8, UX-SPEC §board).
 //!
-//! Two panes. The left one is the card as prose — key, title, markdown description, comments,
-//! activity. The right one is the card as **facts**: one row per property, `j` / `k` selects
-//! and `Enter` opens the picker that edits it. The split is the whole idea: everything on the
-//! right is a value with a closed set of answers, so it never needs a text editor, and
-//! everything on the left is text, so it never needs a picker.
+//! Two columns inside a right-side sheet. The left one is the card as prose — title, run,
+//! markdown description, comments. The right one is the card as **facts**: one row per
+//! property, `j` / `k` selects, `Enter` or a click opens the picker that edits it, and the
+//! activity folds under them. The split is the whole idea: everything on the right is a value
+//! with a closed set of answers, so it never needs a text editor, and everything on the left is
+//! text, so it never needs a picker.
 
-use std::collections::HashSet;
+use std::{collections::HashSet, rc::Rc};
 
 use fleet_core::{
     agents::DelegationStatus,
@@ -16,13 +17,15 @@ use fleet_core::{
     },
 };
 use fleet_ui_kit::{
-    ActiveTheme, Badge, BadgeStyle, Banner, Icon, IconSize, KeyHintRow, MarkdownText,
-    PriorityGlyph, Row, RowColumn, RunMark, SectionHeader, Spinner, StatusDot, Text, Theme, Tone,
-    format_cost, format_duration, format_token_count,
+    ActiveTheme, Avatar, Badge, BadgeStyle, Button, ButtonSize, ButtonStyle, Callout, ColumnAlign,
+    Icon, IconSize, InfoCard, Kbd, KbdSize, MarkdownText, Row, RowColumn, RunMark, Spinner,
+    StatusDot, Text, Theme, Tone, format_cost, format_duration, format_token_count,
+    harness::HarnessTargetExt as _,
 };
-use gpui::{AnyElement, App, SharedString, div, prelude::*, px};
+use gpui::{AnyElement, App, SharedString, Window, div, prelude::*};
 
 use crate::{
+    actions::{board, card_detail},
     dialogs::card_picker::PickerKind,
     presentation::{age_label, parse_timestamp},
     // How many lines of a run's report the card shows before `⏎ expand`. The transcript's own
@@ -34,14 +37,14 @@ use crate::{
 #[cfg(test)]
 mod tests;
 
-/// How many activity entries §8 shows.
+/// How many activity entries §8 shows once the section is open.
 const ACTIVITY_ROWS: usize = 10;
-/// The width of a property row's label column.
-const LABEL_WIDTH: f32 = 78.0;
-/// The width of an activity entry's age column, which the messages line up against.
-const ACTIVITY_AGE_WIDTH: f32 = 44.0;
-/// The trailing slot the lock glyph of a backend-owned row sits in, in `ch`.
-const LOCK_COLUMN_CH: f32 = 2.0;
+/// How many it shows folded, under the properties.
+const ACTIVITY_FOLDED: usize = 3;
+/// The width of a property row's label column, in `ch`: `Blocked by` in the UI face and a gutter.
+const LABEL_COLUMN_CH: f32 = 9.0;
+/// The trailing slot the key chip or the lock glyph of a row sits in, in `ch`.
+const TRAILING_COLUMN_CH: f32 = 3.0;
 
 /// What `Enter` does on a property row.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +53,8 @@ pub(crate) enum PropertyTarget {
     Pick(PickerKind),
     /// Open the linked worktree's session.
     Worktree,
+    /// Open the remote issue in the browser, as `x` does.
+    Remote,
     /// Nothing: the row states a fact the app does not edit.
     ReadOnly,
 }
@@ -241,7 +246,7 @@ pub fn property_rows(board: &Board, cards: &[Card], card: &Card, now: i64) -> Ve
             value.push_str(" \u{00b7} dirty");
         }
         rows.push(
-            PropertyRow::new("Remote", Some(value), PropertyTarget::ReadOnly)
+            PropertyRow::new("Remote", Some(value), PropertyTarget::Remote)
                 .mono()
                 .tone(if card.dirty {
                     Tone::Warning
@@ -489,20 +494,49 @@ fn in_category(board: &Board, card: &Card, category: StatusCategory) -> bool {
         .any(|status| status.id == card.status_id && status.category == category)
 }
 
-/// Renders one property row with its selection and cursor state.
+/// What a click on property row `index` runs.
+pub(crate) type OnPropertyClick = Rc<dyn Fn(usize, &mut Window, &mut App)>;
+
+/// How one property row answers the pointer, prepared by the dialog that draws it.
+pub(crate) struct PropertyRowProps {
+    /// The row's position, which the click selects and the harness names.
+    pub(crate) index: usize,
+    /// Whether the keyboard's `j` / `k` selection is on this row.
+    pub(crate) selected: bool,
+    /// Whether the detail holds the keyboard (no text edit is open).
+    pub(crate) focused: bool,
+    /// The key that edits this row, from the live keymap, shown while the row is hovered.
+    pub(crate) kbd: Option<Kbd>,
+    /// Select this row and run what `⏎` runs on it.
+    pub(crate) on_click: Option<OnPropertyClick>,
+}
+
+/// Whether a row answers a click: it edits something, opens something, or links somewhere.
+///
+/// A backend-owned row is locked instead: it wears the lock glyph and no hover, and `⏎` on it
+/// still answers with the backend's sentence.
+#[must_use]
+pub(crate) fn is_clickable(row: &PropertyRow) -> bool {
+    !row.locked && row.target != PropertyTarget::ReadOnly
+}
+
+/// Renders one property row: label, value, and the key chip the pointer sees on hover.
 #[must_use]
 pub(crate) fn property_row(
     row: &PropertyRow,
-    selected: bool,
-    focused: bool,
+    props: PropertyRowProps,
     theme: &Theme,
 ) -> AnyElement {
-    let text = if row.mono {
-        Text::data_small(row.value.clone())
-            .tone(row.tone)
-            .ellipsize()
+    let tone = if row.target == PropertyTarget::Worktree && !row.locked {
+        // The worktree is a link: a click opens its session, as `o` does.
+        Tone::Accent
     } else {
-        Text::ui(row.value.clone()).tone(row.tone).ellipsize()
+        row.tone
+    };
+    let text = if row.mono {
+        Text::data_small(row.value.clone()).tone(tone).ellipsize()
+    } else {
+        Text::ui(row.value.clone()).tone(tone).ellipsize()
     };
     // The source rides in the value column rather than a column of its own: it exists on three
     // rows out of a dozen, and a fourth column would move the lock glyph on every board.
@@ -512,35 +546,52 @@ pub(crate) fn property_row(
         .min_w_0()
         .gap(theme.space.xs)
         .child(text)
-        .children(row.source.clone().map(Text::hint));
-    Row::new()
-        .selected(selected)
-        .cursor(selected && focused)
-        .column(RowColumn::fixed(
-            px(LABEL_WIDTH),
-            Text::label(row.label.clone()),
+        .children(
+            row.source
+                .clone()
+                .map(|source| Text::caption(source).tone(Tone::Muted).flex_none()),
+        );
+    let clickable = is_clickable(row);
+    let index = props.index;
+    let trailing = if row.locked {
+        Some(RowColumn::fixed_ch(
+            TRAILING_COLUMN_CH,
+            Icon::Lock
+                .el()
+                .size(IconSize::Small)
+                .color(Tone::Secondary.color(theme)),
+        ))
+    } else {
+        props.kbd.filter(|_| clickable).map(|kbd| {
+            RowColumn::fixed_ch(TRAILING_COLUMN_CH, kbd.size(KbdSize::Small))
+                .align(ColumnAlign::Right)
+                .hover_only()
+        })
+    };
+    Row::with_id(("card-detail-property", index))
+        .selected(props.selected)
+        .cursor(props.selected && props.focused)
+        .hoverable(clickable)
+        .column(RowColumn::fixed_ch(
+            LABEL_COLUMN_CH,
+            Text::ui(row.label.clone()).tone(Tone::Secondary),
         ))
         .column(RowColumn::flex(value))
-        // Trailing, not leading: a glyph in front of the label would push the whole value
-        // gutter one column right on exactly the boards that have locked fields.
-        .columns(row.locked.then(|| {
-            RowColumn::fixed_ch(
-                LOCK_COLUMN_CH,
-                Icon::Lock
-                    .el()
-                    .size(IconSize::Small)
-                    .color(Tone::Secondary.color(theme)),
-            )
-        }))
+        .columns(trailing)
+        .when_some(props.on_click.filter(|_| clickable), |el, on_click| {
+            el.on_click(move |_, window, cx| on_click(index, window, cx))
+        })
+        .harness_target_indexed("card_detail.property", index)
         .into_any_element()
 }
 
-/// The conflict banner of §8, with the two keys that resolve it.
+/// The conflict callout of §8: the fields that differ, and the two buttons that settle it.
 ///
 /// `field_label` lives in the core: the CLI's card report prints the same conflict list, and
 /// "Conflict — status_id, due_date" is a sentence the user has to translate on either surface.
+/// Each button dispatches the action its key runs, and shows that key.
 #[must_use]
-pub(crate) fn conflict_banner(card: &Card) -> Option<Banner> {
+pub(crate) fn conflict_banner(card: &Card, theme: &Theme) -> Option<Callout> {
     let conflict = card.conflict.as_ref()?;
     let fields = if conflict.fields.is_empty() {
         "the remote changed".to_owned()
@@ -553,25 +604,39 @@ pub(crate) fn conflict_banner(card: &Card) -> Option<Banner> {
             .join(", ")
     };
     Some(
-        Banner::danger(format!(
-            "Conflict \u{2014} {fields} differ from {}",
-            conflict.remote.key
-        ))
-        .icon(Icon::TriangleAlert)
-        .hints(
-            KeyHintRow::new()
-                .key("K", "keep local")
-                .key("R", "take remote"),
+        Callout::new(
+            Tone::Warning,
+            Icon::TriangleAlert,
+            format!(
+                "Conflict \u{2014} {fields} differ from {}",
+                conflict.remote.key
+            ),
+        )
+        .actions(
+            div()
+                .flex()
+                .gap(theme.space.xs)
+                .child(
+                    Button::new("card-detail-keep-local", "Keep local")
+                        .size(ButtonSize::Compact)
+                        .action(Box::new(card_detail::KeepLocal)),
+                )
+                .child(
+                    Button::new("card-detail-take-remote", "Take remote")
+                        .size(ButtonSize::Compact)
+                        .action(Box::new(card_detail::TakeRemote)),
+                ),
         ),
     )
 }
 
-/// The comments list, newest last, each with its author and age.
+/// The comments, newest last: avatar, author, age, then the body.
 ///
-/// A run's report carries a `run {n}` badge instead of an author and folds at
+/// A run's report carries a `run {n}` badge beside its provider and folds at
 /// [`REPORT_COLLAPSE_LINES`], the way the transcript folds a delivered child result: a report is
 /// the whole of what a run said, and three of them would otherwise bury the card's own
-/// conversation. `expanded` holds the comment ids the reader has already opened.
+/// conversation. `expanded` holds the comment ids the reader has already opened; a folded report
+/// ends in a `Show more` button that runs `⏎`, which opens every folded report.
 #[must_use]
 pub(crate) fn comments(card: &Card, now: i64, expanded: &HashSet<String>, cx: &App) -> AnyElement {
     let theme = cx.theme();
@@ -579,47 +644,76 @@ pub(crate) fn comments(card: &Card, now: i64, expanded: &HashSet<String>, cx: &A
         .flex()
         .flex_col()
         .w_full()
-        .gap(theme.space.sm)
-        .child(SectionHeader::new(format!(
-            "Comments ({})",
+        .gap(theme.space.md)
+        .child(Text::sentence_label(format!(
+            "Comments \u{00b7} {}",
             card.comments.len()
         )))
-        .children((card.comments.is_empty()).then(|| Text::ui("No comments yet.").faint()))
         .children(card.comments.iter().map(|comment| {
             let run = report_run(card, comment);
             let folded = run.is_some()
                 && comment.body.lines().count() > REPORT_COLLAPSE_LINES
                 && !expanded.contains(&comment.id);
+            let author = match run {
+                // A report is written by the run: its provider is the author, and its number is
+                // what the rest of the card refers to it by.
+                Some(index) => card.runs.get(index - 1).map_or_else(
+                    || "agent".to_owned(),
+                    |run| run.provider.executable().to_owned(),
+                ),
+                None => comment.author.clone().unwrap_or_else(|| "You".to_owned()),
+            };
+            let avatar = if run.is_some() {
+                Avatar::new(&author).tone(Tone::Secondary)
+            } else {
+                Avatar::new(&author)
+            };
             div()
                 .flex()
-                .flex_col()
                 .w_full()
-                .gap(theme.space.xxs)
+                .gap(theme.space.sm)
+                .child(avatar)
                 .child(
                     div()
                         .flex()
-                        .items_center()
-                        .gap(theme.space.xs)
-                        .child(match run {
-                            // A report has no author worth printing: the run is who wrote it,
-                            // and its number is what the rest of the card refers to it by.
-                            Some(index) => Badge::new(format!("run {index}"))
-                                .style(BadgeStyle::Outlined)
-                                .into_any_element(),
-                            None => Text::label(
-                                comment.author.clone().unwrap_or_else(|| "you".to_owned()),
+                        .flex_col()
+                        .flex_1()
+                        .min_w_0()
+                        .gap(theme.space.xxs)
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(theme.space.xs)
+                                .child(Text::ui_strong(author.clone()))
+                                .children(run.map(|index| {
+                                    Badge::new(format!("run {index}")).style(BadgeStyle::Outlined)
+                                }))
+                                .child(
+                                    Text::caption(format!(
+                                        "\u{00b7} {}",
+                                        age_label(&comment.created_at, now)
+                                    ))
+                                    .tone(Tone::Muted),
+                                ),
+                        )
+                        .child(MarkdownText::new(if folded {
+                            head_lines(&comment.body)
+                        } else {
+                            comment.body.clone()
+                        }))
+                        .children(folded.then(|| {
+                            div().flex().child(
+                                Button::new(
+                                    ("card-detail-show-more", run.unwrap_or(0)),
+                                    "Show more",
+                                )
+                                .style(ButtonStyle::Ghost)
+                                .size(ButtonSize::Compact)
+                                .action(Box::new(card_detail::EditProperty)),
                             )
-                            .tone(Tone::Secondary)
-                            .into_any_element(),
-                        })
-                        .child(Text::hint(age_label(&comment.created_at, now))),
+                        })),
                 )
-                .child(MarkdownText::new(if folded {
-                    head_lines(&comment.body)
-                } else {
-                    comment.body.clone()
-                }))
-                .children(folded.then(|| Text::hint("⏎ expand")))
         }))
         .into_any_element()
 }
@@ -647,8 +741,8 @@ fn head_lines(body: &str) -> String {
 /// The report comments still folded, oldest first.
 ///
 /// `⏎` opens these before it goes back to meaning "edit the selected property": a folded
-/// report hides the very thing the reader opened the card for. The fold is drawn only while one
-/// is closed, so the hint never names a key that would do nothing.
+/// report hides the very thing the reader opened the card for. The fold's `Show more` is drawn
+/// only while one is closed, so it never names a key that would do nothing.
 #[must_use]
 pub(crate) fn folded_reports(card: &Card, expanded: &HashSet<String>) -> Vec<String> {
     card.comments
@@ -660,66 +754,70 @@ pub(crate) fn folded_reports(card: &Card, expanded: &HashSet<String>) -> Vec<Str
         .collect()
 }
 
-/// The last [`ACTIVITY_ROWS`] activity entries, newest first.
+/// The activity section under the properties: the last [`ACTIVITY_FOLDED`] entries, newest
+/// first, and the last [`ACTIVITY_ROWS`] once `open`.
+///
+/// `on_toggle` is the `Show all` / `Show less` button's click; it is drawn only when there is
+/// more to show.
 #[must_use]
-pub(crate) fn activity(card: &Card, now: i64, cx: &App) -> AnyElement {
+pub(crate) fn activity(
+    card: &Card,
+    now: i64,
+    open: bool,
+    on_toggle: impl Fn(&mut Window, &mut App) + 'static,
+    cx: &App,
+) -> AnyElement {
     let theme = cx.theme();
-    let entries: Vec<_> = card.activity.iter().rev().take(ACTIVITY_ROWS).collect();
+    let shown = if open { ACTIVITY_ROWS } else { ACTIVITY_FOLDED };
+    let total = card.activity.len().min(ACTIVITY_ROWS);
+    let entries: Vec<_> = card.activity.iter().rev().take(shown).collect();
+    let toggle = (total > ACTIVITY_FOLDED).then(|| {
+        Button::new(
+            "card-detail-activity-toggle",
+            if open {
+                "Show less".to_owned()
+            } else {
+                format!("Show all {total}")
+            },
+        )
+        .style(ButtonStyle::Ghost)
+        .size(ButtonSize::Compact)
+        .on_click(move |_, window, cx| on_toggle(window, cx))
+    });
     div()
         .flex()
         .flex_col()
         .w_full()
-        .gap(theme.space.xxs)
-        .child(SectionHeader::new("Activity"))
-        .children(entries.is_empty().then(|| Text::ui("Nothing yet.").faint()))
-        .children(entries.into_iter().map(|entry| {
-            div()
-                .flex()
-                .items_baseline()
-                .gap(theme.space.xs)
-                .w_full()
-                .child(Text::hint(age_label(&entry.at, now)).w(px(ACTIVITY_AGE_WIDTH)))
-                .child(Text::ui(entry.message.clone()).muted().ellipsize())
-        }))
-        .into_any_element()
-}
-
-/// The card's key, priority glyph and title, as the left pane's first line.
-#[must_use]
-pub(crate) fn title_line(board: &Board, card: &Card, cx: &App) -> AnyElement {
-    let theme = cx.theme();
-    div()
-        .flex()
-        .flex_col()
-        .w_full()
-        .gap(theme.space.xxs)
+        .gap(theme.space.xs)
         .child(
             div()
                 .flex()
                 .items_center()
-                .gap(theme.space.xs)
-                .child(Text::data_small(card.display_key(board)).faint())
-                .children(
-                    (card.priority != fleet_core::board::Priority::None).then(|| {
-                        PriorityGlyph::new(super::board_screen::priority_level(card.priority))
-                            .with_label(true)
-                    }),
-                )
-                .children(card.worktree_id.is_some().then(|| {
-                    Icon::GitBranch
-                        .el()
-                        .size(IconSize::Small)
-                        .color(Tone::Secondary.color(theme))
-                })),
+                .justify_between()
+                .child(Text::sentence_label("Activity"))
+                .children(toggle),
         )
-        .child(Text::title(card.title.clone()))
+        .children(
+            entries
+                .is_empty()
+                .then(|| Text::caption("Nothing yet.").tone(Tone::Muted)),
+        )
+        .children(entries.into_iter().map(|entry| {
+            Text::caption(format!(
+                "{} \u{00b7} {}",
+                entry.message,
+                age_label(&entry.at, now)
+            ))
+            .tone(Tone::Muted)
+            .ellipsize()
+        }))
         .into_any_element()
 }
 
-/// The run row between the title and the description (contracts §5.3).
+/// The run card between the title and the description (contracts §5.3).
 ///
-/// Every string it draws is built in [`run_line`]; the renderer lays out a glyph and one line of
-/// text and computes nothing.
+/// Every string it draws is built in [`run_line`]; the renderer lays out a glyph, three texts and
+/// the buttons, and computes nothing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunLine {
     /// The mark the board's tile draws for the same card, when it has one.
@@ -728,8 +826,14 @@ pub struct RunLine {
     /// column already moved the card on — which still has a row here, because the detail is
     /// where a run is read rather than counted.
     pub(crate) mark: Option<RunMark>,
-    /// `working 4m · codex · gpt-5 · high`, or `pending 2m · waiting for a slot`.
+    /// The whole line, `working 4m · codex · gpt-5 · high`, or `pending 2m · waiting for a slot`.
     pub(crate) text: SharedString,
+    /// The state and its age, sentence-cased for the card's first line: `Working 4m`.
+    pub(crate) head: SharedString,
+    /// What follows the head: `codex · gpt-5 · high`, or `waiting for a slot`.
+    pub(crate) facts: SharedString,
+    /// A finished run's usage, `12.4k tok · $0.31`, drawn at the line's right end.
+    pub(crate) usage: Option<SharedString>,
 }
 
 /// The card's run line, or `None` when it has neither a run nor one owed to it.
@@ -746,37 +850,57 @@ pub fn run_line(
     live: Option<DelegationStatus>,
     now: i64,
 ) -> Option<RunLine> {
-    let mut parts = Vec::new();
-    if let Some(pending) = card.pending_run.as_ref() {
-        parts.push(head("pending", elapsed(&pending.since, None, now)));
+    let (head, facts, usage) = if let Some(pending) = card.pending_run.as_ref() {
         // Which is a different fact from a slow run, and the only one the reader can act on.
-        parts.push("waiting for a slot".to_owned());
+        (
+            head("pending", elapsed(&pending.since, None, now)),
+            vec!["waiting for a slot".to_owned()],
+            Vec::new(),
+        )
     } else {
         let run = latest_run(card)?;
         let word = run.outcome.map_or_else(
             || live.map_or(DelegationStatus::Running.word(), DelegationStatus::word),
             RunOutcome::word,
         );
-        parts.push(head(
-            word,
-            elapsed(&run.started_at, run.ended_at.as_deref(), now),
-        ));
-        parts.push(run.provider.executable().to_owned());
+        let mut facts = vec![run.provider.executable().to_owned()];
         // A missing model or effort drops its separator with it rather than printing a dash:
         // the harness picked one, and this row states only what is known.
-        parts.extend(run.model.clone());
-        parts.extend(run.effort.clone());
+        facts.extend(run.model.clone());
+        facts.extend(run.effort.clone());
+        let mut usage = Vec::new();
         if !run.is_live() {
-            parts.extend(
+            usage.extend(
                 run.tokens
                     .map(|tokens| format!("{} tok", format_token_count(tokens))),
             );
-            parts.extend(run.cost_usd.map(|cost| format_cost(cost).to_string()));
+            usage.extend(run.cost_usd.map(|cost| format_cost(cost).to_string()));
         }
-    }
+        (
+            head(word, elapsed(&run.started_at, run.ended_at.as_deref(), now)),
+            facts,
+            usage,
+        )
+    };
+    let text = std::iter::once(head.clone())
+        .chain(facts.iter().cloned())
+        .chain(usage.iter().cloned())
+        .collect::<Vec<_>>()
+        .join(" \u{b7} ");
     Some(RunLine {
         mark,
-        text: SharedString::from(parts.join(" · ")),
+        text: SharedString::from(text),
+        head: SharedString::from(sentence_case(&head)),
+        facts: SharedString::from(facts.join(" \u{b7} ")),
+        usage: (!usage.is_empty()).then(|| SharedString::from(usage.join(" \u{b7} "))),
+    })
+}
+
+/// `working 4m` → `Working 4m`: the run card leads with its state as a sentence.
+fn sentence_case(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect()
     })
 }
 
@@ -796,37 +920,71 @@ fn elapsed(started: &str, ended: Option<&str>, now: i64) -> Option<String> {
     Some(format_duration(seconds.saturating_mul(1_000)).to_string())
 }
 
-/// Draws the prepared run line: the board's own mark, then the line.
+/// Which of the run card's three buttons can act on this card (`CardMenu`'s answer).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct RunButtons {
+    /// `A`: the run has a thread to attach.
+    pub(crate) attach: bool,
+    /// `>`: the card's column runs an action.
+    pub(crate) rerun: bool,
+    /// `X`: the run is live or owed.
+    pub(crate) cancel: bool,
+}
+
+/// Draws the run card: the board's own mark and the prepared line, then the buttons that act
+/// on the run, each dispatching the key it shows (contracts §5.3, ADR 0023).
 #[must_use]
-pub(crate) fn run_row(line: &RunLine, cx: &App) -> AnyElement {
+pub(crate) fn run_row(line: &RunLine, buttons: RunButtons, cx: &App) -> AnyElement {
     let theme = cx.theme();
-    div()
+    let first = div()
         .flex()
         .items_center()
         .w_full()
         .min_w_0()
         .gap(theme.space.xs)
         .children(line.mark.map(run_glyph))
+        .child(Text::ui_strong(line.head.clone()).flex_none())
         .child(
-            Text::ui(line.text.clone())
+            Text::ui(line.facts.clone())
                 .tone(Tone::Secondary)
                 .ellipsize(),
         )
-        .into_any_element()
-}
-
-/// What the run row's keys do, drawn under it (contracts §5.3, P9-T01).
-///
-/// Drawn only beside a run, and only now that `A`, `X` and `>` are bound on this surface: a
-/// hint that names a key nothing has implemented is worse than no hint at all. `>` says
-/// `re-run` here, where a run already exists; the dialog's own footer says `run`, because it is
-/// drawn on cards that have never run.
-#[must_use]
-pub(crate) fn run_hints() -> KeyHintRow {
-    KeyHintRow::new()
-        .key("A", "attach")
-        .key("X", "cancel")
-        .key(">", "re-run")
+        .child(div().flex_1())
+        .children(
+            line.usage
+                .clone()
+                .map(|usage| Text::data_small(usage).faint()),
+        );
+    let actions = div()
+        .flex()
+        .items_center()
+        .gap(theme.space.xs)
+        .children(buttons.attach.then(|| {
+            Button::new("card-detail-run-attach", "Attach")
+                .style(ButtonStyle::Primary)
+                .size(ButtonSize::Compact)
+                .action(Box::new(board::AttachRun))
+                .harness_target("card_detail.run.attach")
+        }))
+        .children(buttons.rerun.then(|| {
+            Button::new("card-detail-run-rerun", "Re-run")
+                .size(ButtonSize::Compact)
+                .action(Box::new(board::RunNow))
+                .harness_target("card_detail.run.rerun")
+        }))
+        .children(buttons.cancel.then(|| {
+            Button::new("card-detail-run-cancel", "Cancel run")
+                .style(ButtonStyle::GhostDanger)
+                .size(ButtonSize::Compact)
+                .action(Box::new(board::CancelRun))
+                .harness_target("card_detail.run.cancel")
+        }));
+    let has_actions = buttons.attach || buttons.rerun || buttons.cancel;
+    let mut card = InfoCard::new().line(first);
+    if has_actions {
+        card = card.line(actions);
+    }
+    card.into_any_element()
 }
 
 /// The glyph a mark draws, which is the one the card tile draws for it.

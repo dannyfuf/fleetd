@@ -1,7 +1,8 @@
 //! The visual and behavioural test bench for the **input** group of `fleet-ui-kit`.
 //!
-//! `TextInput` · `FuzzyList` · `FilterBar` · `Cycler` · `Toggle` · `NumberField` ·
-//! `SegmentedTabs` · `Select` · `ConfirmDialog` · `Palette`.
+//! `TextInput` · `FuzzyList` · `FilterBar` · `Cycler` · `Toggle` · `NumberField` · `ValueField` ·
+//! `Switch` · `Checkbox` · `SegmentedControl` · `SegmentedTabs` · `Select` · `Callout` ·
+//! `ConfirmDialog` · `Palette`.
 //!
 //! Every component appears in every state it can be in, in both themes, and the interactive
 //! ones are *live*: the inputs really edit, the palette really filters and highlights, the
@@ -17,11 +18,11 @@
 //! | `ctrl-i` | focus the branch field · `esc` leaves it |
 //! | `/` | focus the filter bar · `esc` leaves it, `esc` again clears it |
 //! | `:` | open the palette · `esc` closes it |
-//! | `d` / `D` | the compact / expanded confirm · `y` `Y` `n` `esc` answer it |
+//! | `d` / `D` | the compact / expanded confirm · `y` `Y` `n` `esc` answer it, `I` re-checks, and every button clicks |
 //! | `ctrl-n` `ctrl-p` `↓` `↑` | move the fuzzy / palette cursor (also while typing) |
 //! | `h` `l` | previous / next tab |
 //! | `←` `→` | cycle the host value |
-//! | `space` | toggle the focused checkbox |
+//! | `space` | toggle the focused switch |
 //! | `o` | open / close the select |
 //! | `+` `-` | change the focused number field |
 //! | `ctrl-q` / `cmd-q` | quit |
@@ -40,7 +41,7 @@ const LAYOUT: support::layout::GalleryLayout = support::layout::GalleryLayout {
 use fleet_ui_kit::prelude::*;
 use gpui::{
     AnyElement, App, Context, Entity, EntityInputHandler, FocusHandle, Focusable, KeyBinding,
-    SharedString, Subscription, Window, actions, div, px,
+    ScrollHandle, SharedString, Subscription, WeakEntity, Window, actions, div, px,
 };
 
 actions!(
@@ -56,7 +57,9 @@ actions!(
         ConfirmCompact,
         ConfirmExpanded,
         ConfirmYes,
+        ConfirmStrong,
         ConfirmNo,
+        ConfirmRecheck,
         CursorNext,
         CursorPrev,
         NextTab,
@@ -165,6 +168,8 @@ struct InputGallery {
     live_numeric: Entity<TextInput>,
     /// The editor a settings number row hands to `NumberField` while it is being typed into.
     number_row_editor: Entity<TextInput>,
+    /// The editor a settings text row hands to `ValueField` while it is being typed into.
+    value_row_editor: Entity<TextInput>,
     live_labeled: Entity<TextInput>,
     live_multiline_min: Entity<TextInput>,
     live_multiline_grown: Entity<TextInput>,
@@ -176,10 +181,15 @@ struct InputGallery {
     capture: Capture,
     filter_focused: bool,
     fuzzy_cursor: usize,
+    /// The long list's cursor and scroll position: a click moves the one and reveals it in
+    /// the other.
+    long_cursor: usize,
+    long_scroll: ScrollHandle,
     palette_cursor: usize,
     palette_open: bool,
     tab: usize,
     host: usize,
+    step: usize,
     checked: bool,
     grace: i64,
     select_open: bool,
@@ -188,6 +198,8 @@ struct InputGallery {
 }
 
 const HOSTS: &[&str] = &["local", "devbox", "ci-runner"];
+/// A five-step set: one more than a segmented control holds.
+const STEPS: &[&str] = &["1 min", "5 min", "10 min", "30 min", "1 h"];
 
 impl InputGallery {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -249,7 +261,17 @@ impl InputGallery {
             input.set_mono(true, cx);
             input.set_hide_status_line(true, cx);
             input.set_filter(Some(|character| character.is_ascii_digit()), cx);
+            // A settings row draws the box; the editor is only the line and its caret.
+            input.set_embedded(true, cx);
             input.set_text("2500", cx);
+            input
+        });
+        let value_row_editor = cx.new(|cx| {
+            let mut input = TextInput::new(InputMode::SingleLine, cx);
+            input.set_mono(true, cx);
+            input.set_hide_status_line(true, cx);
+            input.set_embedded(true, cx);
+            input.set_text("claude --resume", cx);
             input
         });
         let live_labeled = cx.new(|cx| {
@@ -347,6 +369,7 @@ impl InputGallery {
             live_multiline_min,
             live_multiline_grown,
             number_row_editor,
+            value_row_editor,
             filter,
             filter_no_match,
             palette_query,
@@ -354,10 +377,13 @@ impl InputGallery {
             capture: Capture::None,
             filter_focused: true,
             fuzzy_cursor: 0,
+            long_cursor: 0,
+            long_scroll: ScrollHandle::new(),
             palette_cursor: 0,
             palette_open: false,
             tab: 0,
             host: 0,
+            step: 2,
             checked: true,
             grace: 2_000,
             select_open: true,
@@ -448,7 +474,8 @@ impl InputGallery {
             .filter_map(|(label, key, destructive)| {
                 subsequence(label, query).map(|hits| {
                     PaletteRow::new(*label)
-                        .key(*key)
+                        .kbd(chip(key))
+                        .when(*destructive, |row| row.detail("asks first"))
                         .matches(hits)
                         .destructive(*destructive)
                         .icon(if *destructive {
@@ -464,7 +491,7 @@ impl InputGallery {
             .filter_map(|(label, digit)| {
                 subsequence(label, query).map(|hits| {
                     PaletteRow::new(format!("{CONTEXT_PREFIX}{label}"))
-                        .key(*digit)
+                        .kbd(chip(digit))
                         .matches(
                             hits.into_iter()
                                 .map(|ix| ix + CONTEXT_PREFIX.chars().count()),
@@ -477,9 +504,9 @@ impl InputGallery {
         let matched = go.len() + do_rows.len() + contexts.len();
         let total = GO_ROWS.len() + DO_ROWS.len() + CONTEXT_ROWS.len();
         let sections = vec![
-            PaletteSection::new(PaletteSectionKind::Go, go),
-            PaletteSection::new(PaletteSectionKind::Do, do_rows),
-            PaletteSection::new(PaletteSectionKind::Context, contexts),
+            PaletteSection::new("Go to", go),
+            PaletteSection::new("Commands", do_rows),
+            PaletteSection::new("Contexts", contexts),
         ];
         (sections, matched, total)
     }
@@ -499,7 +526,7 @@ impl InputGallery {
     /// How many rows the cursor may land on right now.
     fn cursor_len(&self, cx: &App) -> usize {
         if self.palette_open {
-            self.palette_matches(cx).min(10)
+            self.palette_matches(cx)
         } else {
             self.ranked_branches(cx).len()
         }
@@ -655,21 +682,33 @@ impl InputGallery {
         cx.notify();
     }
 
-    fn confirm_yes(&mut self, _: &ConfirmYes, window: &mut Window, cx: &mut Context<Self>) {
-        let required = match self.confirm {
-            ConfirmDemo::None => return,
-            ConfirmDemo::Compact => ConfirmKey::Lower,
-            ConfirmDemo::Expanded => ConfirmKey::Upper,
-        };
-        if required == ConfirmKey::Upper && !window.modifiers().shift {
-            return;
-        }
-        if self.confirm != ConfirmDemo::None {
-            self.answer = Some(match self.confirm {
-                ConfirmDemo::Expanded => "confirmed with Y".into(),
-                _ => SharedString::from("confirmed with y"),
-            });
+    /// `y`, or a click on the primary `Delete`: answers only the compact confirm.
+    fn confirm_yes(&mut self, _: &ConfirmYes, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.confirm == ConfirmDemo::Compact {
+            self.answer = Some("confirmed with y".into());
             self.confirm = ConfirmDemo::None;
+        }
+        cx.notify();
+    }
+
+    /// `Y`, or a click on the red `Delete anyway`: answers either confirm.
+    fn confirm_strong(&mut self, _: &ConfirmStrong, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.confirm != ConfirmDemo::None {
+            self.answer = Some("confirmed with Y".into());
+            self.confirm = ConfirmDemo::None;
+        }
+        cx.notify();
+    }
+
+    /// `I`, or a click on `Re-check`.
+    fn confirm_recheck(
+        &mut self,
+        _: &ConfirmRecheck,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.confirm != ConfirmDemo::None {
+            self.answer = Some("re-checked".into());
         }
         cx.notify();
     }
@@ -792,7 +831,15 @@ fn text_input_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
     )
 }
 
-fn fuzzy_section(gallery: &InputGallery, theme: &Theme, cx: &App) -> AnyElement {
+/// How many rows the long list holds: well past any cap, so only the wheel reaches its end.
+const LONG_ROWS: usize = 24;
+
+fn fuzzy_section(
+    gallery: &InputGallery,
+    this: WeakEntity<InputGallery>,
+    theme: &Theme,
+    cx: &App,
+) -> AnyElement {
     let ranked = gallery.ranked_branches(cx);
     let items = ranked.iter().map(|(name, detail, hits)| {
         let mut item = FuzzyItem::new(*name).matches(hits.clone());
@@ -812,7 +859,7 @@ fn fuzzy_section(gallery: &InputGallery, theme: &Theme, cx: &App) -> AnyElement 
                 card(
                     theme,
                     px(420.0),
-                    FuzzyList::new(items)
+                    FuzzyList::new("gallery-fuzzy-ranked", items)
                         .cap(6)
                         .cursor(gallery.fuzzy_cursor)
                         .under_text_field(true)
@@ -828,17 +875,69 @@ fn fuzzy_section(gallery: &InputGallery, theme: &Theme, cx: &App) -> AnyElement 
                 card(
                     theme,
                     px(420.0),
-                    FuzzyList::new([
-                        FuzzyItem::new("buk/payroll")
-                            .secondary("Chilean payroll engine \u{b7} updated 2h ago")
-                            .matches([4, 5, 6])
-                            .trailing("2h"),
-                        FuzzyItem::new("buk/payroll-legacy")
-                            .secondary("archived")
-                            .disabled(true),
-                        FuzzyItem::new("Prune worktrees").destructive(true).key("x"),
-                    ])
+                    FuzzyList::new(
+                        "gallery-fuzzy-two-line",
+                        [
+                            FuzzyItem::new("buk/payroll")
+                                .secondary("Chilean payroll engine \u{b7} updated 2h ago")
+                                .matches([4, 5, 6])
+                                .trailing("2h"),
+                            FuzzyItem::new("buk/payroll-legacy")
+                                .secondary("archived")
+                                .disabled(true),
+                            FuzzyItem::new("Prune worktrees").destructive(true).key("x"),
+                        ],
+                    )
                     .cap(8)
+                    .cursor(0),
+                ),
+            ),
+            LAYOUT.labeled(
+                "scrolls past 6 rows · click runs a row",
+                theme,
+                card(
+                    theme,
+                    px(420.0),
+                    FuzzyList::new(
+                        "gallery-fuzzy-long",
+                        (0..LONG_ROWS).map(|ix| {
+                            let item = FuzzyItem::new(format!("origin/feat/branch-{ix:02}"));
+                            if ix == gallery.long_cursor {
+                                item.trailing("clicked")
+                            } else {
+                                item
+                            }
+                        }),
+                    )
+                    .visible_rows(6)
+                    .track_scroll(&gallery.long_scroll)
+                    .cursor(gallery.long_cursor)
+                    .on_click(move |ix, _window, cx| {
+                        let Some(gallery) = this.upgrade() else {
+                            return;
+                        };
+                        gallery.update(cx, |gallery, cx| {
+                            gallery.long_cursor = ix;
+                            FuzzyList::reveal(&gallery.long_scroll, ix);
+                            cx.notify();
+                        });
+                    }),
+                ),
+            ),
+            LAYOUT.labeled(
+                "badges + chosen check (a choice, not a launcher)",
+                theme,
+                card(
+                    theme,
+                    px(420.0),
+                    FuzzyList::new(
+                        "gallery-fuzzy-choice",
+                        [
+                            FuzzyItem::new("origin/main").badge("default").checked(true),
+                            FuzzyItem::new("origin/release/2.4").badge("previous base"),
+                            FuzzyItem::new("origin/feat/payroll-export"),
+                        ],
+                    )
                     .cursor(0),
                 ),
             ),
@@ -848,7 +947,8 @@ fn fuzzy_section(gallery: &InputGallery, theme: &Theme, cx: &App) -> AnyElement 
                 card(
                     theme,
                     px(420.0),
-                    FuzzyList::new([]).empty(Text::ui("Nothing matches \"gpu\".").muted()),
+                    FuzzyList::new("gallery-fuzzy-empty", [])
+                        .empty(Text::ui("Nothing matches \"gpu\".").muted()),
                 ),
             ),
         ],
@@ -863,7 +963,7 @@ fn filter_section(gallery: &InputGallery, theme: &Theme, cx: &App) -> AnyElement
         theme,
         vec![
             LAYOUT.labeled(
-                "live (/ to focus)",
+                "live, with its clear \u{2715} (/ to focus; clear it to see the empty bar)",
                 theme,
                 card(
                     theme,
@@ -886,8 +986,27 @@ fn filter_section(gallery: &InputGallery, theme: &Theme, cx: &App) -> AnyElement
     )
 }
 
-fn choice_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
+fn choice_section(
+    gallery: &InputGallery,
+    this: WeakEntity<InputGallery>,
+    theme: &Theme,
+) -> AnyElement {
     let host = HOSTS[gallery.host];
+    // Every click below writes the same field its key does, so the pointer and the keyboard
+    // never disagree about the value.
+    let set = move |apply: fn(&mut InputGallery, usize)| {
+        let this = this.clone();
+        move |ix: usize, _: &mut Window, cx: &mut App| {
+            this.update(cx, |gallery, cx| {
+                apply(gallery, ix);
+                cx.notify();
+            })
+            .ok();
+        }
+    };
+    let set_host = set(|gallery, ix| gallery.host = ix);
+    let set_step = set(|gallery, ix| gallery.step = ix);
+    let set_checked = set(|gallery, on| gallery.checked = on == 1);
     LAYOUT.section(
         "cycler \u{b7} toggle \u{b7} number field",
         theme,
@@ -897,17 +1016,30 @@ fn choice_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
                 theme,
                 card(
                     theme,
-                    px(420.0),
+                    px(460.0),
                     div()
                         .flex()
                         .flex_col()
+                        // Three listed options: side by side, clickable.
                         .child(
                             Cycler::labeled("host", host)
                                 .label_width(px(140.0))
+                                .options(HOSTS.iter().copied())
+                                .on_select(set_host)
                                 .focused(true)
                                 .has_prev(gallery.host > 0)
                                 .has_next(gallery.host + 1 < HOSTS.len()),
                         )
+                        // Five listed options: a dropdown whose list opens on a click.
+                        .child(
+                            Cycler::labeled("keep jobs for", STEPS[gallery.step])
+                                .label_width(px(140.0))
+                                .options(STEPS.iter().copied())
+                                .on_select(set_step)
+                                .has_prev(gallery.step > 0)
+                                .has_next(gallery.step + 1 < STEPS.len()),
+                        )
+                        // Options not listed by the caller: the field states the value only.
                         .child(
                             Cycler::labeled("on switch", "sleep")
                                 .label_width(px(140.0))
@@ -916,14 +1048,16 @@ fn choice_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
                         .child(
                             Cycler::labeled("theme", "system")
                                 .label_width(px(140.0))
+                                .options(["light", "dark", "system"])
                                 .disabled(true),
                         )
-                        // A persisted value that is no longer one of the configured steps:
-                        // both arrows stay live even though neither neighbour exists, so the
-                        // next move lands back on a known step.
+                        // A persisted value that is no longer one of the configured steps: it
+                        // is none of the segments, so it draws as a field that can show it, and
+                        // the next `\u{2190}` / `\u{2192}` lands back on a known step.
                         .child(
                             Cycler::labeled("host", "devbox (removed)")
                                 .label_width(px(140.0))
+                                .options(HOSTS.iter().copied())
                                 .off_grid(true)
                                 .has_prev(false)
                                 .has_next(false),
@@ -931,17 +1065,20 @@ fn choice_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
                 ),
             ),
             LAYOUT.labeled(
-                "toggles (space)",
+                "toggles (space, click)",
                 theme,
                 card(
                     theme,
-                    px(420.0),
+                    px(460.0),
                     div()
                         .flex()
                         .flex_col()
                         .child(
                             Toggle::labeled("Sleep on switch", gallery.checked)
                                 .label_width(px(200.0))
+                                .on_toggle(move |on, window, cx| {
+                                    set_checked(usize::from(on), window, cx)
+                                })
                                 .focused(true),
                         )
                         .child(
@@ -958,6 +1095,62 @@ fn choice_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
                                 .disabled(true),
                         ),
                 ),
+            ),
+            LAYOUT.labeled(
+                "switch",
+                theme,
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(theme.space.md)
+                    .child(Switch::new("switch-on", true).name("on"))
+                    .child(Switch::new("switch-off", false).name("off"))
+                    .child(Switch::new("switch-disabled-on", true).disabled(true))
+                    .child(Switch::new("switch-disabled-off", false).disabled(true)),
+            ),
+            LAYOUT.labeled(
+                "checkbox: checked, unchecked, disabled",
+                theme,
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(theme.space.lg)
+                    .child(Checkbox::new("checkbox-on", "Open after creating", true))
+                    .child(Checkbox::new("checkbox-off", "Open after creating", false))
+                    .child(Checkbox::new("checkbox-disabled", "Locked", true).disabled(true)),
+            ),
+            LAYOUT.labeled(
+                "callout: success, warning, with actions",
+                theme,
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(theme.space.sm)
+                    .w(px(460.0))
+                    .child(
+                        Callout::new(
+                            Tone::Success,
+                            Icon::Zap,
+                            "Prepared copy ready \u{2014} about 2 s",
+                        )
+                        .detail("Hooks: pnpm install (run in background)"),
+                    )
+                    .child(
+                        Callout::new(
+                            Tone::Warning,
+                            Icon::Hourglass,
+                            "No prepared copy \u{2014} the first create copies the repo (~40 s) in the background",
+                        )
+                        .detail("Hooks: none"),
+                    )
+                    .child(
+                        Callout::new(
+                            Tone::Danger,
+                            Icon::CloudOff,
+                            "Sync failed: acli is not signed in",
+                        )
+                        .actions(Button::new("callout-settings", "Board settings").size(ButtonSize::Compact)),
+                    ),
             ),
             LAYOUT.labeled(
                 "number fields (+ \u{2212})",
@@ -1000,6 +1193,55 @@ fn choice_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
                                 .unit("ms")
                                 .min(0)
                                 .editor(gallery.number_row_editor.clone()),
+                        )
+                        // End-aligned: the box sits where a cycler's or a switch's control does,
+                        // and the label reads at full contrast, as theirs do.
+                        .child(
+                            NumberField::labeled("Freshness", 60_000)
+                                .unit("ms")
+                                .min(0)
+                                .end_aligned(true),
+                        ),
+                ),
+            ),
+            LAYOUT.labeled(
+                "value fields (text settings)",
+                theme,
+                card(
+                    theme,
+                    px(460.0),
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            ValueField::new("value-default", "claude")
+                                .label("Terminal command")
+                                .label_width(px(150.0))
+                                .mono(true)
+                                .on_click(|_, _| {}),
+                        )
+                        .child(
+                            ValueField::new("value-focused", "claude")
+                                .label("Binary for threads")
+                                .label_width(px(150.0))
+                                .mono(true)
+                                .focused(true),
+                        )
+                        .child(
+                            ValueField::new("value-placeholder", "")
+                                .label("Default model")
+                                .label_width(px(150.0))
+                                .placeholder("Harness default"),
+                        )
+                        // Editing: the row hands the field its embedded editor, drawn inside the
+                        // same box with the focus-ring border.
+                        .child(
+                            ValueField::new("value-editing", "claude")
+                                .label("Terminal command")
+                                .label_width(px(150.0))
+                                .mono(true)
+                                .focused(true)
+                                .editor(gallery.value_row_editor.clone()),
                         ),
                 ),
             ),
@@ -1007,50 +1249,157 @@ fn choice_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
     )
 }
 
-fn tabs_and_select_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
-    let options = FuzzyList::new(BRANCHES.iter().map(|(name, detail)| {
-        let mut item = FuzzyItem::new(*name);
-        if !detail.is_empty() {
-            item = item.trailing(*detail);
-        }
-        item
-    }))
+fn tabs_and_select_section(
+    gallery: &InputGallery,
+    this: WeakEntity<InputGallery>,
+    theme: &Theme,
+) -> AnyElement {
+    let options = FuzzyList::new(
+        "gallery-select-options",
+        BRANCHES.iter().map(|(name, detail)| {
+            let mut item = FuzzyItem::new(*name);
+            if !detail.is_empty() {
+                item = item.trailing(*detail);
+            }
+            item
+        }),
+    )
     .cap(6)
     .cursor(0)
     .under_text_field(false);
 
     LAYOUT.section(
-        "segmented tabs \u{b7} select",
+        "segmented control \u{b7} tabs \u{b7} select",
         theme,
         vec![
             LAYOUT.labeled(
                 "tabs (h / l)",
                 theme,
                 SegmentedTabs::new([
-                    SegmentedTab::new("mine", 7),
-                    SegmentedTab::new("review", 4).loading(true),
-                    SegmentedTab::new("closed", 0),
+                    SegmentedTab::new("Mine", 7),
+                    SegmentedTab::new("Waiting for my review", 2).attention(true),
+                    SegmentedTab::new("Closed", 0),
                 ])
                 .active(gallery.tab),
             ),
             LAYOUT.labeled(
+                "tabs \u{b7} refreshing, zero attention",
+                theme,
+                SegmentedTabs::new([
+                    SegmentedTab::new("Mine", 7).loading(true),
+                    SegmentedTab::new("Waiting for my review", 0).attention(true),
+                ])
+                .active(0),
+            ),
+            LAYOUT.labeled(
                 "tabs \u{b7} bare",
                 theme,
-                SegmentedTabs::new([SegmentedTab::bare("keys"), SegmentedTab::bare("glossary")])
+                SegmentedTabs::new([SegmentedTab::bare("Keys"), SegmentedTab::bare("Glossary")])
                     .active(1),
             ),
             LAYOUT.labeled(
-                // The parent Hub's treatment: a selected background instead of the accent
-                // underline (DESIGN-SYSTEM.md §6 `SegmentedTabs`).
-                "tabs \u{b7} not underlined",
+                "segmented control (h / l, click)",
                 theme,
-                SegmentedTabs::new([
-                    SegmentedTab::new("mine", 7),
-                    SegmentedTab::new("review", 4),
-                    SegmentedTab::bare("closed"),
-                ])
-                .active(gallery.tab)
-                .underlined(false),
+                SegmentedControl::new(
+                    "gallery-segmented",
+                    [
+                        Segment::new("Worktrees"),
+                        Segment::new("Pull requests").count(Some(4)),
+                        Segment::new("Board")
+                            .count(Some(0))
+                            .loading(gallery.tab == 2),
+                    ],
+                )
+                .active(Some(gallery.tab))
+                .on_select({
+                    let this = this.clone();
+                    move |ix, _, cx| {
+                        this.update(cx, |gallery, cx| {
+                            gallery.tab = ix;
+                            cx.notify();
+                        })
+                        .ok();
+                    }
+                }),
+            ),
+            LAYOUT.labeled(
+                "segmented \u{b7} icons",
+                theme,
+                SegmentedControl::new(
+                    "gallery-segmented-icons",
+                    [
+                        Segment::new("Claude").icon(Icon::Sparkles),
+                        Segment::new("Codex")
+                            .icon(Icon::SquareTerminal)
+                            .kbd(Kbd::parse("ctrl-s A").ok()),
+                    ],
+                ),
+            ),
+            LAYOUT.labeled(
+                "segmented \u{b7} none raised, disabled",
+                theme,
+                div()
+                    .flex()
+                    .gap(theme.space.md)
+                    .child(
+                        SegmentedControl::new(
+                            "gallery-segmented-none",
+                            [
+                                Segment::new("Low"),
+                                Segment::new("Medium"),
+                                Segment::new("High"),
+                                Segment::new("Max"),
+                            ],
+                        )
+                        .active(None),
+                    )
+                    .child(
+                        SegmentedControl::new(
+                            "gallery-segmented-disabled",
+                            [Segment::new("ssh"), Segment::new("https")],
+                        )
+                        .disabled(true),
+                    ),
+            ),
+            LAYOUT.labeled(
+                "segmented \u{b7} one option unavailable (dimmed, not clickable)",
+                theme,
+                SegmentedControl::new(
+                    "gallery-segmented-unavailable",
+                    [
+                        Segment::new("local"),
+                        Segment::new("devbox"),
+                        Segment::new("archdev").disabled(true),
+                    ],
+                )
+                .active(Some(0))
+                .on_select(|_, _, _| {}),
+            ),
+            LAYOUT.labeled(
+                "segmented \u{b7} full width",
+                theme,
+                div().w(px(420.0)).child(
+                    SegmentedControl::new(
+                        "gallery-segmented-wide",
+                        [Segment::new("Claude"), Segment::new("Codex")],
+                    )
+                    .active(Some(1))
+                    .full_width(),
+                ),
+            ),
+            LAYOUT.labeled(
+                "segmented \u{b7} one option unavailable (dimmed, not clickable)",
+                theme,
+                SegmentedControl::new(
+                    "gallery-segmented-unavailable",
+                    [
+                        Segment::new("local"),
+                        Segment::new("devbox"),
+                        Segment::new("archdev").disabled(true),
+                    ],
+                )
+                .active(Some(0))
+                .on_select(|_, _, _| {}),
             ),
             LAYOUT.labeled(
                 "select, open (o)",
@@ -1112,38 +1461,43 @@ fn confirm_hint_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
 
 fn compact_confirm() -> ConfirmDialog {
     ConfirmDialog::new(
-        "Delete buk/payroll#fix-rut-validator?",
+        "Delete worktree fix-rut-validator?",
         FactList::from_facts([
             Fact::safe("clean"),
             Fact::safe("merged into origin/main"),
             Fact::safe("no session"),
         ]),
     )
-    .target("buk/payroll#fix-rut-validator")
+    .target("buk/payroll \u{b7} ~/worktrees/buk/payroll/fix-rut-validator")
     .icon(Icon::Trash)
-    .stamp(FreshnessStamp::new("checked", 8).action("I", "re-check"))
+    .stamp(FreshnessStamp::new("Checked", 8))
+    .recheck_action(Box::new(ConfirmRecheck))
     .consequence("Moves the copy to trash, then removes it in the background.")
-    .hints(KeyHintRow::new().key("I", "re-check"))
+    .dismiss_action(Box::new(ConfirmNo))
+    .accept_actions(Box::new(ConfirmYes), Box::new(ConfirmStrong))
     .action_label("Delete")
 }
 
 fn expanded_confirm() -> ConfirmDialog {
     ConfirmDialog::new(
-        "Delete worktree",
+        "Delete worktree feat-payroll-fix?",
         FactList::from_facts([
-            Fact::risk("12 uncommitted files"),
-            Fact::risk("3 commits not on origin/main"),
+            Fact::risk("12 uncommitted files").strong("12 uncommitted files"),
+            Fact::risk("3 commits not on origin/main").strong("3 commits"),
             Fact::risk("session attached \u{b7} claude, :3000 running"),
             Fact::unknown("unique commit count unavailable (gh unavailable)"),
             Fact::safe("PR #412 open (not merged)"),
         ]),
     )
-    .target("buk/payroll#feat-payroll-fix")
-    .stamp(FreshnessStamp::new("checked", 190).action("I", "re-check"))
+    .target("buk/payroll \u{b7} ~/worktrees/buk/payroll/feat-payroll-fix")
+    .stamp(FreshnessStamp::new("Checked", 190))
+    .recheck_action(Box::new(ConfirmRecheck))
     .consequence(
-        "Deleting kills the session and moves the copy to trash; commits that exist only here are lost.",
+        "The session is killed and the copy moves to the trash. The 3 unpushed commits and 12 \
+         uncommitted files exist only here and will be lost.",
     )
-    .hints(KeyHintRow::new().key("I", "re-check"))
+    .dismiss_action(Box::new(ConfirmNo))
+    .accept_actions(Box::new(ConfirmYes), Box::new(ConfirmStrong))
     .action_label("Delete")
 }
 
@@ -1155,16 +1509,17 @@ impl Render for InputGallery {
         let sections = vec![
             branch_section(self, &theme, cx),
             text_input_section(self, &theme),
-            fuzzy_section(self, &theme, cx),
+            fuzzy_section(self, cx.entity().downgrade(), &theme, cx),
             filter_section(self, &theme, cx),
-            choice_section(self, &theme),
-            tabs_and_select_section(self, &theme),
+            choice_section(self, cx.entity().downgrade(), &theme),
+            tabs_and_select_section(self, cx.entity().downgrade(), &theme),
             confirm_hint_section(self, &theme),
         ];
 
         let (palette_sections, matched, total) = self.palette_sections(cx);
         let palette_query = self.palette_query.clone();
         let palette_cursor = self.palette_cursor;
+        let palette_empty = self.palette_query.read(cx).text().is_empty();
 
         div()
             .id("gallery-input")
@@ -1195,6 +1550,8 @@ impl Render for InputGallery {
             .on_action(cx.listener(Self::confirm_expanded))
             .on_action(cx.listener(Self::confirm_yes))
             .on_action(cx.listener(Self::confirm_no))
+            .on_action(cx.listener(Self::confirm_strong))
+            .on_action(cx.listener(Self::confirm_recheck))
             .relative()
             .size_full()
             .flex()
@@ -1207,7 +1564,7 @@ impl Render for InputGallery {
                     .flex_none()
                     .items_center()
                     .justify_between()
-                    .h(theme.metrics.context_bar_h)
+                    .h(theme.metrics.title_bar_h)
                     .px(theme.space.lg)
                     .gap(theme.space.md)
                     .bg(theme.colors.surface)
@@ -1252,11 +1609,6 @@ impl Render for InputGallery {
                     .bg(theme.colors.surface)
                     .border_t(theme.metrics.hairline)
                     .border_color(theme.colors.border)
-                    .child(ModeWord::new(if typing {
-                        Mode::Filter
-                    } else {
-                        Mode::Normal
-                    }))
                     .child(Text::hint(if typing {
                         "typing \u{b7} bare letters go to the field"
                     } else {
@@ -1270,7 +1622,14 @@ impl Render for InputGallery {
                         palette_sections.into_iter().fold(
                             Palette::new(palette_query)
                                 .cursor(palette_cursor)
-                                .total(total)
+                                .scope("All")
+                                .when(palette_empty, |palette| {
+                                    palette.prefix_hint([
+                                        (">", "commands"),
+                                        ("@", "worktrees"),
+                                        ("#", "cards"),
+                                    ])
+                                })
                                 .empty("Nothing matches that query."),
                             Palette::section,
                         ),
@@ -1293,6 +1652,7 @@ fn main() {
         Quit,
         |cx| {
             cx.bind_keys(support::input::bindings());
+            cx.bind_keys(menu_key_bindings());
             cx.bind_keys([
                 // Always available, in both modes.
                 KeyBinding::new("ctrl-t", ToggleTheme, None),
@@ -1311,7 +1671,8 @@ fn main() {
                 KeyBinding::new("d", ConfirmCompact, Some("GalleryNormal")),
                 KeyBinding::new("shift-d", ConfirmExpanded, Some("GalleryNormal")),
                 KeyBinding::new("y", ConfirmYes, Some("GalleryNormal")),
-                KeyBinding::new("shift-y", ConfirmYes, Some("GalleryNormal")),
+                KeyBinding::new("shift-y", ConfirmStrong, Some("GalleryNormal")),
+                KeyBinding::new("shift-i", ConfirmRecheck, Some("GalleryNormal")),
                 KeyBinding::new("n", ConfirmNo, Some("GalleryNormal")),
                 KeyBinding::new("h", PrevTab, Some("GalleryNormal")),
                 KeyBinding::new("l", NextTab, Some("GalleryNormal")),
@@ -1325,4 +1686,9 @@ fn main() {
         },
         InputGallery::new,
     );
+}
+
+/// A gallery key chip. The app resolves chips from its keymap; the gallery has none.
+fn chip(keys: &str) -> Kbd {
+    Kbd::parse(keys).unwrap_or_else(|error| panic!("{keys:?}: {error}"))
 }

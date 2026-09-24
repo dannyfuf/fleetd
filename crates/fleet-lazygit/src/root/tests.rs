@@ -854,6 +854,30 @@ fn hidden_panes_stop_timers_and_watcher_reads_and_refresh_on_activation(cx: &mut
 }
 
 #[gpui::test]
+fn deactivating_a_focused_pane_gives_the_keyboard_back(cx: &mut TestAppContext) {
+    // Regression: `ctrl-s h` from the git tab to a terminal left the focus on this pane's
+    // handle after the host stopped painting it, and the next `ctrl-s` reached no key context.
+    let (window, _, _events) = test_window(cx);
+    window
+        .update(cx, |pane, window, cx| {
+            assert!(pane.focus.is_focused(window));
+            pane.set_active(false, window, cx);
+            assert!(!pane.owns_keyboard(window, cx));
+            assert!(window.focused(cx).is_none());
+        })
+        .unwrap();
+    // A pane that did not hold the keyboard leaves whatever the host focused alone.
+    window
+        .update(cx, |pane, window, cx| {
+            let host = cx.focus_handle();
+            window.focus(&host, cx);
+            pane.set_active(false, window, cx);
+            assert!(host.is_focused(window));
+        })
+        .unwrap();
+}
+
+#[gpui::test]
 fn overlay_transitions_restore_pane_focus_without_stealing_host_focus(cx: &mut TestAppContext) {
     let (window, _, _events) = test_window(cx);
     window

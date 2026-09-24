@@ -1,4 +1,4 @@
-//! `FuzzyList` — a debounced query's ranked, capped result rows.
+//! `FuzzyList` — a debounced query's ranked result rows, scrolling past its visible height.
 //!
 //! §3.8: a list **under a text field** moves with `ctrl-n` / `ctrl-p` or `↓` / `↑` and never
 //! with `j` / `k`; a dialog with no text field (Assign, Settings, Confirm) does bind `j` / `k`
@@ -12,13 +12,21 @@
 //! §3.9 caps the treatment there deliberately ("no fuzzy-match highlighting beyond a subtle
 //! weight bump"): a row painted in four colors stops reading as one label.
 //!
-//! Never render a list longer than its cap — a predictable `Enter` matters more than
-//! completeness, and the footer says `9 of 63`.
+//! The list is pointer-first (ADR 0023): its rows hover, a click on a row runs it
+//! ([`FuzzyList::on_click`] — a picker has no separate "open", so one press is `⏎`), and it
+//! scrolls by wheel once it holds more rows than [`FuzzyList::visible_rows`] shows. The caller
+//! keeps the cursor in view by calling [`FuzzyList::reveal`] from the action that moved it.
+//! [`FuzzyList::cap`] still bounds how many rows exist at all where a surface wants a
+//! predictable `Enter` over completeness, and its footer says `9 of 63`.
 
-use gpui::{AnyElement, App, FontWeight, Pixels, SharedString, Window, div, prelude::*};
+use gpui::{
+    AnyElement, App, ElementId, FontWeight, MouseDownEvent, Pixels, ScrollHandle, SharedString,
+    Window, div, prelude::*,
+};
+use std::rc::Rc;
 
 use crate::{
-    components::{ColumnAlign, Row, RowColumn},
+    components::{Badge, ColumnAlign, Kbd, KbdSize, Row, RowColumn},
     harness::HarnessTargetExt as _,
     icons::{Icon, IconSize},
     text::{Text, TextRole},
@@ -39,6 +47,10 @@ pub struct FuzzyItem {
     matches: Vec<usize>,
     destructive: bool,
     disabled: bool,
+    badge: Option<SharedString>,
+    checked: bool,
+    heading: Option<SharedString>,
+    kbd: Option<Kbd>,
 }
 
 impl FuzzyItem {
@@ -54,7 +66,42 @@ impl FuzzyItem {
             matches: Vec::new(),
             destructive: false,
             disabled: false,
+            badge: None,
+            checked: false,
+            heading: None,
+            kbd: None,
         }
+    }
+
+    /// Open a new section with this row: a sentence-case heading drawn above it, inside the
+    /// same list item. The heading scrolls with its first row and is never a row of its own,
+    /// so the cursor, [`FuzzyList::reveal`] and the harness numbering all keep counting rows.
+    pub fn heading(mut self, heading: impl Into<SharedString>) -> Self {
+        self.heading = Some(heading.into());
+        self
+    }
+
+    /// The row's own key as chips, right-aligned in the last column. Resolve it from the
+    /// keymap ([`Kbd::for_action`], or the owner's key table), never from a typed string; use
+    /// [`FuzzyItem::key`] only for a value that is not a keystroke.
+    pub fn kbd(mut self, kbd: Kbd) -> Self {
+        self.kbd = Some(kbd);
+        self
+    }
+
+    /// A neutral [`super::Badge`] after the label that names what the row *is* among its
+    /// siblings (`default`, `previous base`), where [`FuzzyItem::trailing`] states a value.
+    pub fn badge(mut self, badge: impl Into<SharedString>) -> Self {
+        self.badge = Some(badge.into());
+        self
+    }
+
+    /// End the row with an accent `✓`: the chosen value of a list that is a choice rather than
+    /// a launcher (the create dialog's base ref). The cursor band still shows where the keys
+    /// are; the check says what was chosen.
+    pub fn checked(mut self, checked: bool) -> Self {
+        self.checked = checked;
+        self
     }
 
     /// A muted second line. The row collapses to one line when this is absent (§3.8.2:
@@ -222,27 +269,41 @@ fn highlighted(role: TextRole, text: SharedString, matches: &[usize], theme: &Th
         .into_any_element()
 }
 
-/// A capped list of ranked results.
+/// `(index, window, cx)`: run the clicked row.
+type RowHandler = Rc<dyn Fn(usize, &mut Window, &mut App)>;
+
+/// A scrolling list of ranked results.
 #[derive(IntoElement)]
 pub struct FuzzyList {
+    id: ElementId,
     items: Vec<FuzzyItem>,
     cursor: usize,
-    cap: usize,
+    cap: Option<usize>,
+    visible_rows: Option<usize>,
+    scroll: Option<ScrollHandle>,
+    on_click: Option<RowHandler>,
     under_text_field: bool,
     row_height: Option<Pixels>,
+    leading_width: Option<Pixels>,
     empty: Option<AnyElement>,
     harness_rows: Option<(&'static str, usize)>,
 }
 
 impl FuzzyList {
-    /// A list over already-ranked items.
-    pub fn new(items: impl IntoIterator<Item = FuzzyItem>) -> Self {
+    /// A list over already-ranked items. `id` keys the list's scroll position, so two lists
+    /// side by side (the palette's sections) need two ids.
+    pub fn new(id: impl Into<ElementId>, items: impl IntoIterator<Item = FuzzyItem>) -> Self {
         Self {
+            id: id.into(),
             items: items.into_iter().collect(),
             cursor: 0,
-            cap: 8,
+            cap: None,
+            visible_rows: None,
+            scroll: None,
+            on_click: None,
             under_text_field: true,
             row_height: None,
+            leading_width: None,
             empty: None,
             harness_rows: None,
         }
@@ -255,9 +316,36 @@ impl FuzzyList {
         self
     }
 
-    /// How many rows to show. 8 for Clone, 6 for the Create base list, 10 for the palette.
+    /// How many rows exist at all; the rest are dropped. Unbounded by default.
+    ///
+    /// A cap is a product decision, not a layout one: set it where a predictable `Enter`
+    /// matters more than completeness (8 for Clone, 6 for the Create base list, 10 for the
+    /// palette). To bound the list's *height* and let the rest scroll, use
+    /// [`FuzzyList::visible_rows`].
     pub fn cap(mut self, cap: usize) -> Self {
-        self.cap = cap;
+        self.cap = Some(cap);
+        self
+    }
+
+    /// How many rows tall the list is before it scrolls. The height is the sum of the first
+    /// `rows` rows, one- and two-line alike, so the viewport ends on a row boundary. Unset,
+    /// the list is as tall as its rows and its container decides.
+    pub fn visible_rows(mut self, rows: usize) -> Self {
+        self.visible_rows = Some(rows);
+        self
+    }
+
+    /// Track the scroll position, so the view can call [`FuzzyList::reveal`] after a cursor
+    /// move. The caller owns the handle, which is what keeps the position across frames.
+    pub fn track_scroll(mut self, handle: &ScrollHandle) -> Self {
+        self.scroll = Some(handle.clone());
+        self
+    }
+
+    /// A press on an enabled row runs it: the handler receives the row's index in `items`,
+    /// and should do exactly what `⏎` does on that row. Disabled rows ignore the pointer.
+    pub fn on_click(mut self, handler: impl Fn(usize, &mut Window, &mut App) + 'static) -> Self {
+        self.on_click = Some(Rc::new(handler));
         self
     }
 
@@ -270,6 +358,13 @@ impl FuzzyList {
     /// Override the row height. 30 px one-line, 44 px two-line, 34 px inside the palette.
     pub fn row_height(mut self, height: Pixels) -> Self {
         self.row_height = Some(height);
+        self
+    }
+
+    /// Widen every row's leading slot, for a leading element wider than a glyph (the palette's
+    /// icon tile). See [`super::Row::leading_width`].
+    pub fn leading_width(mut self, width: Pixels) -> Self {
+        self.leading_width = Some(width);
         self
     }
 
@@ -298,7 +393,16 @@ impl FuzzyList {
 
     /// How many rows will actually render, after the cap.
     pub fn shown(&self) -> usize {
-        self.items.len().min(self.cap)
+        self.cap
+            .map_or(self.items.len(), |cap| self.items.len().min(cap))
+    }
+
+    /// Scroll `handle` so row `cursor` is inside the viewport, by the minimum amount.
+    ///
+    /// Call it from the action handler that moved the cursor, never from `render`, exactly as
+    /// [`super::ListView::reveal`] is called.
+    pub fn reveal(handle: &ScrollHandle, cursor: usize) {
+        handle.scroll_to_item(cursor);
     }
 
     /// `ctrl-n` / `↓` (and `j` when [`FuzzyList::binds_jk`]): the next row, wrapping.
@@ -331,21 +435,59 @@ impl RenderOnce for FuzzyList {
 
         let cursor = self.cursor;
         let harness_rows = self.harness_rows;
+        let on_click = self.on_click;
         let one_line_h = self.row_height.unwrap_or(theme.metrics.row_h);
         let two_line_h = self.row_height.unwrap_or(theme.metrics.job_row_h);
+        let heading_h = theme.metrics.section_header_h + theme.space.xs;
+        let line_h = |item: &FuzzyItem| {
+            if item.secondary.is_some() {
+                two_line_h
+            } else {
+                one_line_h
+            }
+        };
+        // A heading rides above its first row inside the same item, so the height the
+        // viewport sums is the row's line plus its heading.
+        let row_h = |item: &FuzzyItem| {
+            line_h(item)
+                + if item.heading.is_some() {
+                    heading_h
+                } else {
+                    Pixels::ZERO
+                }
+        };
+        let shown = self.cap.unwrap_or(usize::MAX);
+        let max_h = self.visible_rows.map(|rows| {
+            self.items
+                .iter()
+                .take(rows.min(shown))
+                .map(&row_h)
+                .fold(Pixels::ZERO, |sum, h| sum + h)
+        });
+        let danger = theme.colors.danger;
+        let accent = theme.colors.accent;
+        let leading_width = self.leading_width;
+        let header_px = theme.space.md;
+        let header_pt = theme.space.xs;
+        let header_h = theme.metrics.section_header_h;
 
         div()
+            .id(self.id)
             .flex()
             .flex_col()
             .w_full()
+            .overflow_y_scroll()
+            .when_some(max_h, |el, max_h| el.max_h(max_h))
+            .when_some(self.scroll, |el, handle| el.track_scroll(&handle))
             .children(
                 self.items
                     .into_iter()
-                    .take(self.cap)
+                    .take(shown)
                     .enumerate()
                     .map(move |(ix, item)| {
                         let selected = ix == cursor && !item.disabled;
-                        let has_secondary = item.secondary.is_some();
+                        let height = line_h(&item);
+                        let heading = item.heading.clone();
                         let mut row = Row::new()
                             // Only some items carry a glyph; the column is reserved so the
                             // primary text of every row starts at the same x.
@@ -353,20 +495,20 @@ impl RenderOnce for FuzzyList {
                             .selected(selected)
                             .cursor(selected)
                             .disabled(item.disabled)
-                            .height(if has_secondary {
-                                two_line_h
-                            } else {
-                                one_line_h
+                            .height(height)
+                            .when_some(leading_width, Row::leading_width);
+
+                        if let Some(run) = on_click.clone() {
+                            row = row.on_click(move |_: &MouseDownEvent, window, cx| {
+                                run(ix, window, cx)
                             });
+                        }
 
                         if let Some(leading) = item.leading {
                             row = row.leading(leading);
                         } else if item.destructive {
                             row = row.leading(
-                                Icon::TriangleAlert
-                                    .el()
-                                    .size(IconSize::Large)
-                                    .color(theme.colors.danger),
+                                Icon::TriangleAlert.el().size(IconSize::Large).color(danger),
                             );
                         }
 
@@ -386,6 +528,24 @@ impl RenderOnce for FuzzyList {
                                     .align(ColumnAlign::Right),
                             );
                         }
+                        if let Some(badge) = item.badge {
+                            row = row.column(
+                                RowColumn::auto(Badge::new(badge)).align(ColumnAlign::Right),
+                            );
+                        }
+                        if item.checked {
+                            row = row.column(
+                                RowColumn::auto(
+                                    Icon::Check.el().size(IconSize::Medium).color(accent),
+                                )
+                                .align(ColumnAlign::Right),
+                            );
+                        }
+                        if let Some(kbd) = item.kbd {
+                            row = row.column(
+                                RowColumn::auto(kbd.size(KbdSize::Small)).align(ColumnAlign::Right),
+                            );
+                        }
                         if let Some(key) = item.key {
                             row = row.column(
                                 RowColumn::fixed(ch(KEY_COLUMN_CH), Text::hint(key))
@@ -395,9 +555,24 @@ impl RenderOnce for FuzzyList {
                         if let Some(secondary) = item.secondary {
                             row = row.second_line(Text::ui(secondary).muted().ellipsize());
                         }
-                        row.harness_target_optional(
+                        let row = row.harness_target_optional(
                             harness_rows.map(|(part, first)| (part, first + ix)),
-                        )
+                        );
+                        div()
+                            .flex()
+                            .flex_col()
+                            .w_full()
+                            .children(heading.map(|heading| {
+                                div()
+                                    .flex()
+                                    .flex_none()
+                                    .items_end()
+                                    .h(header_h)
+                                    .mt(header_pt)
+                                    .px(header_px)
+                                    .child(Text::sentence_label(heading).muted())
+                            }))
+                            .child(row)
                     }),
             )
             .into_any_element()
@@ -452,8 +627,10 @@ mod tests {
 
     #[test]
     fn the_cap_bounds_what_renders() {
-        let list = FuzzyList::new((0..20).map(|i| FuzzyItem::new(i.to_string()))).cap(10);
+        let items = || (0..20).map(|i| FuzzyItem::new(i.to_string()));
+        let list = FuzzyList::new("capped", items()).cap(10);
         assert_eq!(list.shown(), 10);
         assert!(!list.binds_jk());
+        assert_eq!(FuzzyList::new("uncapped", items()).shown(), 20);
     }
 }

@@ -231,22 +231,21 @@ async fn concurrent_misses_share_fetch() {
         })
     };
     adapter.first_entered.wait().await;
-    let second_started = Arc::new(Barrier::new(2));
     let second = {
         let github = github.clone();
         let repo = repo.clone();
-        let second_started = Arc::clone(&second_started);
         tokio::spawn(async move {
-            second_started.wait().await;
             github
                 .list_pull_requests(Some(repo), None, PrTab::Mine, true)
                 .await
         })
     };
-    second_started.wait().await;
-    for _ in 0..20 {
-        tokio::task::yield_now().await;
-    }
+    // The second caller reads config and state on the blocking pool before it can reach the
+    // flight, so no fixed number of yields is enough under load: wait for the join itself.
+    // The timeout only turns a sharing regression into a failure instead of a hang.
+    tokio::time::timeout(Duration::from_secs(30), github.flight_joined())
+        .await
+        .unwrap_or_else(|_| panic!("the second caller never joined the fetch in flight"));
     adapter.release_first.wait().await;
 
     let first = first.await.unwrap_or_else(|error| panic!("{error}"));

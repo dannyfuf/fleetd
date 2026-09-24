@@ -1,0 +1,35 @@
+# UX-SPEC §3.8.1 — the New worktree dialog, driven by the pointer.
+#
+# The branch has to be typed; everything after it is a click. The base list is clickable
+# (`dialog.row[N]`), the "Open after creating" box (`dialog.checkbox`) changes what Create does,
+# and Create is the footer's last button (`dialog.button[1]`, Cancel being `[0]`). Unchecking the
+# box means Create keeps the Hub, exactly as `⌥⏎` would, so the new row is what the scenario
+# waits for. The one-repo daemon has no hosts, so the host row (`dialog.field[2]`) is absent.
+fixture: one-repo
+await idle 30000
+assert screen == Hub && hub_pane == List && focused == worktrees.row[0]
+
+key n
+await dialog.name == Create 10000
+assert targets["dialog.field[0]"] exists && targets["dialog.field[1]"] exists
+assert targets["dialog.field[2]"] absent
+type feat/clicked
+await targets["dialog.row[0]"] exists 20000
+await idle 20000
+shot create-typed
+
+# A click on a base row chooses it; the list takes the keyboard, as `↓` would.
+click dialog.row[0]
+await idle
+assert dialog.name == Create && targets["dialog.checkbox"] exists
+
+# Unchecked, Create creates without opening.
+click dialog.checkbox
+await idle
+shot create-stay-in-hub
+click dialog.button[1]
+await dialog absent 10000
+await lists.worktrees.rows[0].id == "acme/api#feat-clicked" 60000
+assert screen == Hub && overlay absent
+dump created
+quit

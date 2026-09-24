@@ -7,18 +7,15 @@
 
 use fleet_core::{
     agents::{
-        AccountStatus, AgentKind, AgentThreadSummary, Attention, ModelSelection, OpenGate,
-        PermissionMode, ThreadProjection,
+        AccountStatus, AgentKind, AgentThreadSummary, Attention, ModelSelection, PermissionMode,
+        ThreadProjection,
     },
     ids::CardId,
 };
-use fleet_ui_kit::{KeyHintRow, MetadataSegment, format_cost, format_duration, format_token_count};
+use fleet_ui_kit::{MetadataSegment, format_cost, format_duration, format_token_count};
 use gpui::SharedString;
 
-use super::{
-    composer::{ComposerMode, InteractionMode},
-    decisions::{QuestionWizard, decision_for},
-};
+use super::composer::{ComposerMode, InteractionMode};
 
 /// The mark a tab carries for a thread's attention (§3.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,18 +43,6 @@ pub(crate) const fn tab_badge(attention: Attention, exit_code: Option<i32>) -> T
         Attention::Working | Attention::Waiting => TabBadge::Spinner,
         Attention::Unread => TabBadge::Unread,
         Attention::Idle => TabBadge::None,
-    }
-}
-
-/// The session header word: the same vocabulary the context bar counts (§3.3).
-#[must_use]
-pub(crate) const fn header_word(attention: Attention) -> &'static str {
-    match attention {
-        Attention::NeedsYou(_) => "needs you",
-        Attention::Failed => "failed",
-        Attention::Working => "working",
-        Attention::Waiting => "waiting",
-        Attention::Unread | Attention::Idle => "idle",
     }
 }
 
@@ -171,33 +156,67 @@ pub(crate) fn child_composer_placeholder(caller_index: Option<usize>) -> String 
     format!("Steering a subagent of {caller}. It reports to its caller when it finishes.")
 }
 
-/// The left half of the 22 px composer metadata row (§2, `spec-B` §B5.1).
+/// What the composer's settings strip shows (§2, `spec-B` §B5.1): the model chip, the access
+/// chip, Build or Plan, the context meter and the remaining facts.
 ///
-/// **Every segment the harness reports is shown and no segment is invented**: a fresh Claude tab
-/// that has not published an effort has three segments, not four. The model segment is pinned,
-/// so a narrow pane truncates its name rather than losing which model is answering.
+/// **Every value the harness reports is shown and nothing is invented**: a tab that has
+/// published no model has no model chip text of its own, and a model with no effort reads as
+/// the model alone.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ComposerControls {
+    /// `gpt-5 · high`: the model the next send carries and its effort, when one is known.
+    pub(crate) model: Option<SharedString>,
+    /// The access ladder a Build send carries, spelled out (`asks before edits`).
+    pub(crate) access: SharedString,
+    /// Build or Plan, as the next send carries it.
+    pub(crate) interaction: InteractionMode,
+    /// How much of the window is used: the meter's fill and its `34%`.
+    pub(crate) context: Option<(u8, SharedString)>,
+    /// The rest of the right half: `$0.42 · 48m`, or nothing until a turn has run.
+    pub(crate) facts: Option<SharedString>,
+}
+
+/// The composer's settings, from the projection and the draft the next send will carry.
 #[must_use]
-pub(crate) fn metadata_segments(
+pub(crate) fn composer_controls(
     projection: &ThreadProjection,
+    model: Option<&ModelSelection>,
+    access: PermissionMode,
     interaction: InteractionMode,
-) -> Vec<MetadataSegment> {
-    let mut segments = Vec::new();
-    if let Some(ModelSelection { model, effort, .. }) = &projection.model {
-        segments.push(MetadataSegment::pinned(SharedString::new(model.as_str())));
-        if let Some(effort) = effort.as_deref().filter(|effort| !effort.is_empty()) {
-            segments.push(MetadataSegment::new(SharedString::new(effort)));
+) -> ComposerControls {
+    let model = model.map(|ModelSelection { model, effort, .. }| {
+        match effort.as_deref().filter(|effort| !effort.is_empty()) {
+            Some(effort) => SharedString::from(format!("{model} \u{b7} {effort}")),
+            None => SharedString::new(model.as_str()),
         }
+    });
+    let context =
+        context_percent(projection).map(|pct| (pct, SharedString::from(format!("{pct}%"))));
+    let facts = trailing_segments(projection)
+        .into_iter()
+        .skip(usize::from(context.is_some()))
+        .map(|segment| segment.text.to_string())
+        .collect::<Vec<_>>();
+    ComposerControls {
+        model,
+        access: SharedString::new_static(mode_label(access)),
+        interaction,
+        context,
+        facts: (!facts.is_empty()).then(|| SharedString::from(facts.join(" \u{b7} "))),
     }
-    segments.push(MetadataSegment::new(SharedString::new_static(mode_label(
-        projection.mode,
-    ))));
-    segments.push(MetadataSegment::new(SharedString::new_static(
-        match interaction {
-            InteractionMode::Build => "build",
-            InteractionMode::Plan => "plan",
-        },
-    )));
-    segments
+}
+
+/// The context window used, as a whole percentage, once the harness has reported one.
+fn context_percent(projection: &ThreadProjection) -> Option<u8> {
+    (projection.context_pct > 0.0).then(|| {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a context percentage is rendered as a whole number"
+        )]
+        let pct = projection.context_pct.round().clamp(0.0, 100.0) as u8;
+        pct
+    })
 }
 
 /// The right half: `34% · $0.42 · 48m` (§2), turn-derived and empty until a turn has run.
@@ -207,13 +226,7 @@ pub(crate) fn metadata_segments(
 #[must_use]
 pub(crate) fn trailing_segments(projection: &ThreadProjection) -> Vec<MetadataSegment> {
     let mut segments = Vec::new();
-    if projection.context_pct > 0.0 {
-        #[expect(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "a context percentage is rendered as a whole number"
-        )]
-        let pct = projection.context_pct.round().clamp(0.0, 100.0) as u32;
+    if let Some(pct) = context_percent(projection) {
         segments.push(MetadataSegment::new(SharedString::from(format!("{pct}%"))));
     }
     if let Some(cost) = projection.cumulative_cost_usd {
@@ -285,7 +298,7 @@ pub(crate) fn composer_placeholder(
             "add feedback to refine, or leave blank to implement".to_owned()
         }
         ComposerMode::Normal => format!(
-            "message {}\u{2026} (@ files \u{b7} $ skills \u{b7} / commands)",
+            "Message {}\u{2026} @ files \u{b7} $ skills \u{b7} / commands",
             provider.executable()
         ),
     }
@@ -316,72 +329,4 @@ pub(crate) fn unreachable_hint(host: &str) -> String {
 #[must_use]
 pub(crate) fn unreachable_notice(host: &str) -> String {
     format!("{host} is unreachable \u{b7} your message is kept in the composer")
-}
-
-/// The status-bar hints for the composer's key set (§12), as data.
-///
-/// The argument is §3.3's `Working` predicate — the very one the key context is picked from —
-/// and deliberately not [`Attention`]: a plan gate on a running turn reads `NeedsYou(Plan)`
-/// while `Agent > AgentWorking` still owns the keys, so an attention-driven row would advertise
-/// commands nothing is bound to (DESIGN-SYSTEM §4: an invalid command is not listed).
-#[must_use]
-pub(crate) const fn key_hint_set(
-    working: bool,
-    scrolling: bool,
-) -> &'static [(&'static str, &'static str)] {
-    if scrolling {
-        return &[
-            ("j/k", "row"),
-            ("\u{23ce}", "expand"),
-            ("d", "diff"),
-            ("gg/G", "ends"),
-            ("q", "leave"),
-        ];
-    }
-    if working {
-        &[
-            ("esc", "interrupt"),
-            ("\u{23ce}", "steer"),
-            ("^s [", "scroll"),
-            ("^s F", "terminal"),
-        ]
-    } else {
-        &[
-            ("\u{23ce}", "send"),
-            ("\u{21e7}\u{21e5}", "plan mode"),
-            ("^s m", "model"),
-            ("^s t", "access"),
-            ("^s [", "scroll"),
-            // The one Workspace session row the bar names: an agent tab replaces the
-            // `Workspace > …` chain rather than covering it, so the way out of a session is
-            // the row a reader is least likely to guess is still there.
-            ("^s s", "hub"),
-            ("^s F", "terminal"),
-        ]
-    }
-}
-
-/// The same set, rendered for the status bar.
-#[must_use]
-pub(crate) fn key_hints(working: bool, scrolling: bool) -> KeyHintRow {
-    key_hint_set(working, scrolling)
-        .iter()
-        .fold(KeyHintRow::new(), |row, (keys, label)| {
-            row.key(*keys, *label)
-        })
-}
-
-/// The open decision's own keys, which the status bar mirrors verbatim (§6.2).
-///
-/// Reading them off the decision is what keeps the two surfaces from disagreeing about the scope
-/// `[a]` grants or about how many options a question offers. `cursor` is the question the keys
-/// currently address: on a multi-question request the advertised `1–N` range and `space` move
-/// with it, so a fixed question 0 would put a different key set on the two surfaces.
-#[must_use]
-pub(crate) fn decision_hints(gate: &OpenGate, provider: AgentKind, cursor: usize) -> KeyHintRow {
-    let questions = match &gate.kind {
-        fleet_core::agents::GateKind::Question { questions } => questions.len(),
-        _ => 0,
-    };
-    decision_for(gate, provider, &QuestionWizard::at(questions, cursor)).key_hints()
 }

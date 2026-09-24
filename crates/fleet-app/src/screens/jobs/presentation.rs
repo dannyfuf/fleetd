@@ -17,10 +17,10 @@ impl JobsPanel {
         _window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
-        self.bind(state, cx);
+        self.bind(state, bridge, cx);
         let daemon_lost = state.read(cx).daemon.is_lost();
         let stale_age = state.read(cx).snapshot_age(std::time::Instant::now());
-        let (filter, cursor, expanded, log, following, log_offset, confirming) =
+        let (filter, cursor, expanded, log, following, log_offset, confirming, log_title) =
             self.state.read_with(cx, |panel, _| {
                 (
                     panel.filter,
@@ -30,17 +30,16 @@ impl JobsPanel {
                     panel.following,
                     panel.log_offset,
                     panel.confirming_cancel_all,
+                    panel.log_title.clone(),
                 )
             });
 
         let prepared = &self.state.read(cx).prepared;
         let visible = prepared.rows.clone();
-        let shown = visible.len();
-        let total = prepared.total;
         let counts = prepared.counts;
         let cancellable = prepared.cancellable;
-        let log_path = prepared.log_paths.get(cursor).cloned();
         let requests = actions::JobsRequests::bridge(bridge.clone());
+        let select = self.select_row(state);
         let body = if let Some(job) = expanded.clone() {
             self.log_body(
                 ExpandedLog {
@@ -54,15 +53,34 @@ impl JobsPanel {
                 cx,
             )
         } else {
-            presentation::list_body(visible, cursor, filter, &self.list_scroll, now_unix())
+            list_body(ListBody {
+                rows: visible,
+                cursor,
+                filter,
+                scroll: &self.list_scroll,
+                now: now_unix(),
+                pointer: row_pointer(&select),
+                select,
+            })
         };
 
+        let title = match (&expanded, log_title) {
+            (Some(_), Some(title)) => jobs_panel::log_header(&title, following, cx),
+            _ => jobs_panel::header(
+                jobs_panel::HeaderProps {
+                    counts,
+                    filter,
+                    cancellable,
+                    on_filter: self.pick_filter(state),
+                },
+                cx,
+            ),
+        };
         let header = div()
             .flex()
             .flex_col()
             .flex_none()
-            .child(jobs_panel::header(counts, filter, shown, total, cx))
-            .child(jobs_panel::log_path_row(log_path, cx))
+            .child(title)
             // §3.7 "States": daemon down → an amber strip at the top, rows still readable.
             .children(
                 daemon_lost.then(|| jobs_panel::daemon_down_strip(stale_age.unwrap_or(0), cx)),
@@ -91,12 +109,44 @@ impl JobsPanel {
             .when(expanded.is_some(), |el| el.key_context("Log"))
             .child(
                 Sheet::new(true)
+                    .dismiss_action(Box::new(jobs_actions::Close))
                     .expanded(expanded.is_some())
                     .header(header)
                     .body(body)
-                    .footer(jobs_panel::footer(expanded.is_some(), cx)),
+                    .footer(jobs_panel::footer(cx)),
             )
             .into_any_element()
+    }
+
+    /// Moves the cursor to a row the pointer pressed: what `j`/`k` do, minus the motion.
+    pub(super) fn select_row(&self, state: &Entity<AppState>) -> jobs_panel::SelectRow {
+        let panel = self.state.clone();
+        let state = state.clone();
+        let scroll = self.list_scroll.clone();
+        Rc::new(move |ix, _, cx| {
+            panel.update(cx, |panel, cx| {
+                let len = panel.visible_len(snapshot_jobs(&state, cx));
+                panel.cursor = ix.min(len.saturating_sub(1));
+                scroll.scroll_to_reveal_item(panel.cursor);
+                mirror_panel(panel, &state, cx);
+            });
+            notify(&state, cx);
+        })
+    }
+
+    /// Picks a filter from its segment: what `f` does, straight to the position.
+    pub(super) fn pick_filter(&self, state: &Entity<AppState>) -> jobs_panel::PickFilter {
+        let panel = self.state.clone();
+        let state = state.clone();
+        Rc::new(move |filter, _, cx| {
+            panel.update(cx, |panel, cx| {
+                panel.filter = filter;
+                let len = panel.visible_len(snapshot_jobs(&state, cx));
+                panel.clamp(len);
+                mirror_panel(panel, &state, cx);
+            });
+            notify(&state, cx);
+        })
     }
 
     /// The expanded log: the last [`LOG_TAIL_LINES`] lines of `logs/jobs/<id>.log`.
@@ -152,8 +202,6 @@ pub(super) struct PreparedJobs {
     source: Vec<JobRecord>,
     filter: JobFilter,
     pub(super) rows: Rc<[Rc<crate::presentation::JobDisplay>]>,
-    pub(super) log_paths: Vec<SharedString>,
-    pub(super) total: usize,
     pub(super) counts: jobs_panel::JobCounts,
     pub(super) cancellable: usize,
 }
@@ -163,7 +211,6 @@ impl PreparedJobs {
         &mut self,
         jobs: &[JobRecord],
         filter: JobFilter,
-        home: Option<&std::path::Path>,
         scroll: &ListState,
     ) -> bool {
         let source_changed = self.source != jobs;
@@ -171,13 +218,12 @@ impl PreparedJobs {
             return false;
         }
         let previous: std::collections::HashMap<_, _> = self
-            .source
-            .iter()
-            .filter(|job| self.filter.matches(job))
+            .filter
+            .visible(&self.source)
             .zip(self.rows.iter())
             .map(|(job, row)| (&job.id, (job, row)))
             .collect();
-        let visible: Vec<&JobRecord> = jobs.iter().filter(|job| filter.matches(job)).collect();
+        let visible: Vec<&JobRecord> = filter.visible(jobs).collect();
         let rows: Rc<[_]> = visible
             .iter()
             .map(|job| {
@@ -206,15 +252,6 @@ impl PreparedJobs {
         }
         scroll.splice(start..self.rows.len() - suffix, rows.len() - start - suffix);
         self.rows = rows;
-        self.log_paths = visible
-            .iter()
-            .map(|job| {
-                crate::presentation::tilde(&job.log_path, home)
-                    .into_owned()
-                    .into()
-            })
-            .collect();
-        self.total = jobs.len();
         self.counts = jobs_panel::job_counts(jobs);
         self.cancellable = jobs.iter().filter(|job| can_cancel(job)).count();
         if source_changed {
@@ -229,9 +266,13 @@ pub(super) fn synchronize(
     panel: &Entity<PanelState>,
     state: &Entity<AppState>,
     scroll: &ListState,
-    home: Option<&std::path::Path>,
+    opener: &LogOpener,
     cx: &mut App,
 ) {
+    // Whether this opening consumed a `View log`, and the job whose log it asked for when the
+    // panel could focus it.
+    let mut log_asked = false;
+    let mut log_job = None;
     let changed = panel.update(cx, |panel, cx| {
         let app = state.read(cx);
         if !matches!(app.overlay, Some(Overlay::Jobs)) {
@@ -242,12 +283,19 @@ pub(super) fn synchronize(
             .snapshot
             .as_ref()
             .map_or(&[][..], |snapshot| snapshot.jobs.as_slice());
-        let changed = panel.prepared.update(jobs, panel.filter, home, scroll);
+        let changed = panel.prepared.update(jobs, panel.filter, scroll);
         panel.clamp(panel.prepared.rows.len());
         if !panel.opened {
             panel.opened = true;
-            if let Some(job) = &app.jobs_focus {
-                panel.focus_job(jobs, job);
+            let focused = match &app.jobs_focus {
+                Some(job) if panel.focus_job(jobs, job) => Some(job),
+                _ => None,
+            };
+            if app.jobs_open_log {
+                log_asked = true;
+                log_job = focused
+                    .and_then(|job| jobs.iter().find(|record| &record.id == job))
+                    .cloned();
             }
         }
         // Publish even when opening did not focus a sticky-error job: the first harness
@@ -255,31 +303,82 @@ pub(super) fn synchronize(
         mirror_panel(panel, state, cx);
         changed
     });
+    if log_asked {
+        state.update(cx, |state, _| state.jobs_open_log = false);
+    }
+    if let Some(record) = log_job {
+        actions::open_log(panel, state, opener, &record, cx);
+    }
     if changed {
         notify(state, cx);
     }
 }
 
-pub(super) fn list_body(
-    rows: Rc<[Rc<crate::presentation::JobDisplay>]>,
-    cursor: usize,
-    filter: JobFilter,
-    scroll: &ListState,
-    now: i64,
-) -> AnyElement {
+/// What the job list draws, and how its rows answer the pointer.
+pub(super) struct ListBody<'a> {
+    pub(super) rows: Rc<[Rc<crate::presentation::JobDisplay>]>,
+    pub(super) cursor: usize,
+    pub(super) filter: JobFilter,
+    pub(super) scroll: &'a ListState,
+    pub(super) now: i64,
+    pub(super) pointer: ListPointer,
+    pub(super) select: jobs_panel::SelectRow,
+}
+
+/// The rows' click / double-click / right-click contract (UX-SPEC §5.1): a press selects, a
+/// double-click opens the log as `⏎` does, and a right click selects before the row's
+/// `ContextMenu` opens its menu.
+pub(super) fn row_pointer(select: &jobs_panel::SelectRow) -> ListPointer {
+    let select = select.clone();
+    ListPointer::new()
+        .on_select(move |ix, window, cx| select(ix, window, cx))
+        .on_open(|_, window, cx| window.dispatch_action(Box::new(jobs_actions::ToggleLog), cx))
+        // The row's `ContextMenu` shows the menu; this handler exists so the right click is
+        // routed through `on_select` first and the menu acts on the row under the pointer.
+        .on_menu(|_, _, _, _| {})
+}
+
+pub(super) fn list_body(body: ListBody<'_>) -> AnyElement {
+    let ListBody {
+        rows,
+        cursor,
+        filter,
+        scroll,
+        now,
+        pointer,
+        select,
+    } = body;
     if rows.is_empty() {
         return div()
             .size_full()
             .child(jobs_panel::empty_state(filter))
             .into_any_element();
     }
-    gpui::list(scroll.clone(), move |index, _, _| {
+    // The "Finished" label only means something under rows of another kind: a list that is all
+    // finished work, or the Done segment, has nothing to separate it from.
+    let grouped = filter != JobFilter::Done;
+    gpui::list(scroll.clone(), move |index, _, cx| {
         rows.get(index).map_or_else(
             || div().into_any_element(),
             |job| {
-                jobs_panel::prepared_job_row(job, index == cursor, now)
-                    .harness_target_indexed("jobs.row", index)
-                    .into_any_element()
+                let first_finished = grouped
+                    && job.is_finished()
+                    && index
+                        .checked_sub(1)
+                        .and_then(|previous| rows.get(previous))
+                        .is_some_and(|previous| !previous.is_finished());
+                jobs_panel::job_row(
+                    job,
+                    &jobs_panel::RowContext {
+                        ix: index,
+                        cursor: index == cursor,
+                        first_finished,
+                        now,
+                        pointer: &pointer,
+                        select: &select,
+                    },
+                    cx,
+                )
             },
         )
     })

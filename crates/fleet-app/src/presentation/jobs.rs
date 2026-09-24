@@ -102,13 +102,11 @@ pub fn job_outcome_toast(job: &JobRecord, jobs_panel_open: bool) -> Option<Strin
     }
     let target = domain_target(&job.target);
     match &job.kind {
-        JobKind::Clone => Some(format!("Cloned {target} \u{00b7} J")),
-        JobKind::CreateWorktree => Some(format!("Created {target} \u{00b7} J")),
-        JobKind::DeleteRepo | JobKind::DeleteWorktree => {
-            Some(format!("Deleted {target} \u{00b7} J"))
-        }
-        JobKind::Import => Some("Imported from ~/.swarm \u{00b7} J".to_owned()),
-        JobKind::Update => Some("Fleet updated \u{00b7} J".to_owned()),
+        JobKind::Clone => Some(format!("Cloned {target}")),
+        JobKind::CreateWorktree => Some(format!("Created {target}")),
+        JobKind::DeleteRepo | JobKind::DeleteWorktree => Some(format!("Deleted {target}")),
+        JobKind::Import => Some("Imported from ~/.swarm".to_owned()),
+        JobKind::Update => Some("Fleet updated".to_owned()),
         // Background cadence: the ticker and the Jobs panel already say all there is to say.
         JobKind::PoolBuild
         | JobKind::PoolRefresh
@@ -133,16 +131,93 @@ pub fn parse_percent(progress: &str) -> Option<u8> {
         .map(|value| value.min(100) as u8)
 }
 
+/// The verb phrase a job's sentence starts with when its title does not end in its target:
+/// the mapping from job kind to what the row says it does.
+const fn kind_lead(kind: &JobKind) -> &str {
+    match kind {
+        JobKind::Clone => "Clone",
+        JobKind::PoolBuild => "Prepare copies for",
+        JobKind::PoolRefresh => "Refresh copies for",
+        JobKind::CreateWorktree => "Create",
+        JobKind::DeleteWorktree | JobKind::DeleteRepo => "Delete",
+        JobKind::Prune => "Prune worktrees",
+        JobKind::Inspect => "Inspect worktrees",
+        JobKind::PostCreateHooks => "Run hooks for",
+        JobKind::PrFetch => "Fetch pull requests for",
+        JobKind::RepoFetch => "Fetch",
+        JobKind::RepoDiscovery => "Discover repositories for",
+        JobKind::Update => "Update Fleet",
+        JobKind::Import => "Import from",
+        JobKind::Custom(name) => name.as_str(),
+    }
+}
+
+/// A job as a sentence: the verb phrase and the domain id it acts on ("Clone" `acme/infra`).
+///
+/// The daemon already titles every job as a sentence ending in its target ("Create
+/// acme/api#injected-0", "Run hooks for acme/api#broken"), and that title is the most precise
+/// wording there is, so it wins: the target is split off the end to be drawn in mono. A title
+/// that does not end in the target is kept whole, and a job with no title falls back to the
+/// kind's own verb phrase.
+pub fn job_sentence(job: &JobRecord) -> (String, Option<String>) {
+    let subject = job_target(&job.kind, &job.target);
+    let title = job.title.trim();
+    if !subject.is_empty()
+        && let Some(lead) = title.strip_suffix(subject)
+        && lead.ends_with(' ')
+        && !lead.trim_end().is_empty()
+    {
+        return (lead.trim_end().to_owned(), Some(subject.to_owned()));
+    }
+    if !title.is_empty() {
+        return (title.to_owned(), None);
+    }
+    (
+        kind_lead(&job.kind).to_owned(),
+        (!subject.is_empty()).then(|| subject.to_owned()),
+    )
+}
+
+/// A failure's inline error: its first line, and a quieter second line — the last thing the
+/// job printed, or failing that the error's own next line.
+fn failure_lines(job: &JobRecord) -> Option<(String, Option<String>)> {
+    let JobStatus::Failed { error } = &job.status else {
+        return None;
+    };
+    let mut lines = error.lines().map(str::trim).filter(|line| !line.is_empty());
+    let headline = lines.next().unwrap_or("The job failed.").to_owned();
+    let detail = job
+        .progress
+        .as_deref()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && *line != headline)
+        .or_else(|| lines.next())
+        .map(str::to_owned);
+    Some((headline, detail))
+}
+
 /// Prepared at job-update boundaries; elapsed text alone depends on the current clock.
 #[derive(Debug, Clone)]
 pub struct JobDisplay {
     pub element_id: SharedString,
-    pub kind: SharedString,
-    pub target: SharedString,
+    /// The sentence's verb phrase ("Clone", "Run hooks for").
+    pub lead: SharedString,
+    /// The domain id the sentence acts on, drawn in mono.
+    pub subject: Option<SharedString>,
     pub status: RowStatus,
+    /// The last stdout line of a live job.
     pub progress: Option<SharedString>,
     pub percent: Option<u8>,
+    /// A failure's first line, shown inline.
+    pub error: Option<SharedString>,
+    /// The quieter second line under [`Self::error`].
+    pub error_detail: Option<SharedString>,
+    /// `R` would work: the job failed and the daemon can run it again.
     pub retryable: bool,
+    /// `c` would work: the job is live and the daemon can stop it.
+    pub cancellable: bool,
+    /// `D` would clear it.
+    pub dismissable: bool,
     started_at: Option<i64>,
     // None is still running; Some(None) is an unparseable completion time.
     finished_at: Option<Option<i64>>,
@@ -152,23 +227,41 @@ pub struct JobDisplay {
 
 impl JobDisplay {
     pub fn new(job: &JobRecord) -> Self {
+        let (lead, subject) = job_sentence(job);
+        let (error, error_detail) = failure_lines(job).map_or((None, None), |(error, detail)| {
+            (Some(error.into()), detail.map(Into::into))
+        });
+        let active = is_active(&job.status);
         Self {
             element_id: format!("job-{}", job.id).into(),
-            kind: job_kind_label(&job.kind).to_owned().into(),
-            target: job_target(&job.kind, &job.target).to_owned().into(),
+            lead: lead.into(),
+            subject: subject.map(Into::into),
             status: row_status(&job.status),
-            progress: sub_line(job).map(|text| text.to_owned().into()),
-            percent: if is_active(&job.status) {
+            progress: if active {
+                job.progress.as_deref().map(|text| text.to_owned().into())
+            } else {
+                None
+            },
+            percent: if active {
                 job.progress.as_deref().and_then(parse_percent)
             } else {
                 None
             },
+            error,
+            error_detail,
             retryable: matches!(job.status, JobStatus::Failed { .. }) && job.retryable,
+            cancellable: active && job.cancellable,
+            dismissable: is_dismissable(&job.status),
             started_at: parse_timestamp(&job.started_at),
             finished_at: job.finished_at.as_deref().map(parse_timestamp),
-            active: is_active(&job.status),
+            active,
             cancelled: matches!(job.status, JobStatus::Cancelled),
         }
+    }
+
+    /// Whether the row belongs to the quiet "Finished" group.
+    pub fn is_finished(&self) -> bool {
+        self.status.is_finished()
     }
 
     pub fn elapsed_seconds(&self, now: i64) -> Option<i64> {
@@ -176,17 +269,32 @@ impl JobDisplay {
         Some(end.saturating_sub(self.started_at?).max(0))
     }
 
+    /// How long ago the job finished, if it has and the daemon's time parsed.
+    fn age_seconds(&self, now: i64) -> Option<i64> {
+        self.finished_at
+            .flatten()
+            .map(|finished| now.saturating_sub(finished).max(0))
+    }
+
+    /// The trailing time: `m:ss` for a live job after 30 s, `2s · 1m ago` for an ended one
+    /// (a cancelled job's duration says nothing, so it gets only its age).
     pub fn elapsed_label(&self, now: i64) -> Option<String> {
+        let age = self
+            .age_seconds(now)
+            .map(|age| format!("{} ago", format_age(age)));
         if self.cancelled {
-            return Some("–".to_owned());
+            return Some(age.unwrap_or_else(|| "–".to_owned()));
         }
         let seconds = self.elapsed_seconds(now)?;
         if self.active {
-            (seconds >= ELAPSED_AFTER_SECONDS)
-                .then(|| format!("{}:{:02}", seconds / 60, seconds % 60))
-        } else {
-            Some(format_age(seconds))
+            return (seconds >= ELAPSED_AFTER_SECONDS)
+                .then(|| format!("{}:{:02}", seconds / 60, seconds % 60));
         }
+        let duration = format_age(seconds);
+        Some(match age {
+            Some(age) => format!("{duration} \u{b7} {age}"),
+            None => duration,
+        })
     }
 }
 
@@ -243,7 +351,11 @@ mod tests {
         assert_eq!(running.elapsed_label(29), None);
         assert_eq!(running.elapsed_label(65).as_deref(), Some("1:05"));
         assert_eq!(running.percent, Some(40));
-        assert_eq!(running.target.as_ref(), "acme/api");
+        assert_eq!(running.lead.as_ref(), "Clone api");
+        assert_eq!(
+            running.subject, None,
+            "a title that does not end in the target is kept whole"
+        );
         let mut finished = job("finished", JobStatus::Succeeded);
         finished.finished_at = Some("1970-01-01T00:01:00Z".into());
         let display = JobDisplay::new(&finished);
@@ -258,6 +370,68 @@ mod tests {
             Some("–")
         );
     }
+    #[test]
+    fn a_job_reads_as_a_sentence_ending_in_its_domain_id() {
+        let sentence = |kind: JobKind, target: &str, title: &str| {
+            let mut record = job("any", JobStatus::Running);
+            record.kind = kind;
+            record.target = target.into();
+            record.title = title.into();
+            job_sentence(&record)
+        };
+        assert_eq!(
+            sentence(
+                JobKind::CreateWorktree,
+                "acme/api#injected-0:762d2efa-4911-4a0e-8b1c-8f3e0d5b2a91",
+                "Create acme/api#injected-0",
+            ),
+            ("Create".to_owned(), Some("acme/api#injected-0".to_owned())),
+            "the daemon's title wins, with the uuid-free target split off in mono"
+        );
+        assert_eq!(
+            sentence(
+                JobKind::PostCreateHooks,
+                "acme/api#broken",
+                "Run hooks for acme/api#broken"
+            ),
+            (
+                "Run hooks for".to_owned(),
+                Some("acme/api#broken".to_owned())
+            )
+        );
+        assert_eq!(
+            sentence(JobKind::Inspect, "inspect", "Inspect worktrees"),
+            ("Inspect worktrees".to_owned(), None),
+            "a job with no domain target is one plain sentence"
+        );
+        assert_eq!(
+            sentence(JobKind::Clone, "acme/infra", ""),
+            ("Clone".to_owned(), Some("acme/infra".to_owned())),
+            "an untitled job falls back to its kind's verb"
+        );
+        assert_eq!(
+            sentence(JobKind::Clone, "api", "Clone acme/api"),
+            ("Clone acme/api".to_owned(), None),
+            "a target that is only the tail of a word is not split off"
+        );
+    }
+
+    #[test]
+    fn a_finished_job_states_its_duration_and_its_age() {
+        let mut done = job("done", JobStatus::Succeeded);
+        done.finished_at = Some("1970-01-01T00:00:02Z".into());
+        assert_eq!(
+            JobDisplay::new(&done).elapsed_label(62).as_deref(),
+            Some("2s \u{b7} 1m ago")
+        );
+        let mut cancelled = job("cancelled", JobStatus::Cancelled);
+        cancelled.finished_at = Some("1970-01-01T00:00:02Z".into());
+        assert_eq!(
+            JobDisplay::new(&cancelled).elapsed_label(62).as_deref(),
+            Some("1m ago")
+        );
+    }
+
     #[test]
     fn targets_and_percentages_preserve_existing_parsing() {
         assert_eq!(

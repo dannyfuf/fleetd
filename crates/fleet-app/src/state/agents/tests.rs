@@ -96,7 +96,7 @@ fn state_with(threads: Vec<AgentThreadSummary>) -> AppState {
 }
 
 #[test]
-fn the_context_bar_counts_every_thread_in_the_snapshot() {
+fn the_agent_counts_cover_every_thread_in_the_snapshot() {
     let state = state_with(vec![
         summary("a", Attention::NeedsYou(AttentionKind::Permission), 3),
         summary("b", Attention::NeedsYou(AttentionKind::Finished), 3),
@@ -116,6 +116,24 @@ fn the_context_bar_counts_every_thread_in_the_snapshot() {
     );
     assert!(state.agents.counts().any());
     assert!(!AgentCounts::default().any());
+    assert_eq!(
+        state.agents.waiting_thread(),
+        None,
+        "two threads need you, so `2 needs you` opens the picker rather than guessing"
+    );
+}
+
+#[test]
+fn the_waiting_thread_is_named_while_exactly_one_needs_you() {
+    let waiting = summary("a", Attention::NeedsYou(AttentionKind::Question), 3);
+    let state = state_with(vec![
+        waiting.clone(),
+        summary("b", Attention::Working, 3),
+        summary("c", Attention::Idle, 3),
+    ]);
+    assert_eq!(state.agents.waiting_thread(), Some(waiting.thread));
+    let state = state_with(vec![summary("b", Attention::Working, 3)]);
+    assert_eq!(state.agents.waiting_thread(), None);
 }
 
 #[test]
@@ -123,7 +141,7 @@ fn attention_counts_and_strip_offsets_are_prepared_before_render_reads() {
     let caller = summary("cache", Attention::Working, 4);
     let child = child_summary("cache", Attention::Idle, 1, caller.thread);
     let mut agents = AgentThreads::default();
-    agents.sync_snapshot(vec![caller.clone(), child.clone()]);
+    agents.sync_snapshot(vec![caller.clone(), child.clone()], &HashSet::new());
     agents.attach(child.thread);
 
     assert_eq!(agents.attention(caller.thread), Attention::Working);
@@ -244,6 +262,82 @@ fn children_join_the_strip_only_while_attached_and_follow_their_caller() {
             .collect::<Vec<_>>(),
         vec![caller.thread, second.thread]
     );
+}
+
+/// Regression: a snapshot assembled before `^s a`'s thread existed, applied after its summary
+/// and reply, forgot the thread and the tab it had just selected; the next summary put the tab
+/// back unselected, so the keyboard stayed on the terminal (`docs/NATIVE-AGENTS.md` §9.2).
+#[test]
+fn a_snapshot_older_than_a_new_thread_keeps_it_and_its_selected_tab() {
+    let now = Instant::now();
+    let mut state = state_with(Vec::new());
+    let created = summary("feat", Attention::Idle, 0);
+    state.apply_agent_summary(created.clone(), now);
+    assert!(state.select_agent_thread(created.thread));
+
+    state.apply_snapshot(populated(Vec::new()), now);
+    assert!(state.agents.summary(created.thread).is_some());
+    assert_eq!(state.active_agent_thread(), Some(created.thread));
+
+    // Once a snapshot has listed the thread, a later one that omits it is a removal again.
+    state.apply_snapshot(populated(vec![created.clone()]), now);
+    state.apply_snapshot(populated(Vec::new()), now);
+    assert!(state.agents.summary(created.thread).is_none());
+    assert_eq!(state.active_agent_thread(), None);
+}
+
+#[test]
+fn an_unlisted_thread_goes_with_its_worktree() {
+    let now = Instant::now();
+    let mut state = state_with(Vec::new());
+    let stray = summary("gone", Attention::Idle, 0);
+    state.apply_agent_summary(stray.clone(), now);
+
+    state.apply_snapshot(populated(Vec::new()), now);
+    assert!(
+        state.agents.summary(stray.thread).is_none(),
+        "no snapshot lists the thread's worktree, so nothing it could still be shown under exists"
+    );
+}
+
+/// Regression: the daemon broadcasts a new thread's summary before it replies to the create,
+/// and the summary used to show the tab without selecting it until the reply ran.
+#[test]
+fn a_pending_create_selects_its_thread_on_the_first_summary() {
+    let now = Instant::now();
+    let other = summary("feat", Attention::Idle, 1);
+    let mut state = state_with(vec![other.clone()]);
+    let token = state
+        .agents
+        .begin_create(worktree("feat"), AgentKind::Claude);
+
+    let mut child = child_summary("feat", Attention::Idle, 0, other.thread);
+    child.provider = AgentKind::Claude;
+    state.apply_agent_summary(child.clone(), now);
+    assert_eq!(
+        state.active_agent_thread(),
+        None,
+        "a delegated child never answers ^s a"
+    );
+
+    let created = summary("feat", Attention::Idle, 0);
+    state.apply_agent_summary(created.clone(), now);
+    assert_eq!(state.active_agent_thread(), Some(created.thread));
+    assert!(state.agents.take_composer_focus(created.thread));
+    assert_eq!(state.agents.finish_create(token), Some(created.thread));
+    assert_eq!(state.agents.finish_create(token), None);
+}
+
+#[test]
+fn a_pending_create_ignores_a_thread_of_another_provider() {
+    let now = Instant::now();
+    let mut state = state_with(Vec::new());
+    let token = state
+        .agents
+        .begin_create(worktree("feat"), AgentKind::Codex);
+    state.apply_agent_summary(summary("feat", Attention::Idle, 0), now);
+    assert_eq!(state.active_agent_thread(), None);
+    assert_eq!(state.agents.finish_create(token), None);
 }
 
 #[test]
@@ -412,7 +506,6 @@ fn an_open_gate_routes_the_keyboard_to_its_decision_context() {
     );
     assert_eq!(state.context_chain(), vec!["Agent", "AgentIdle"]);
     assert_eq!(state.mode(), crate::state::Mode::Agent);
-    assert_eq!(state.mode().word(), fleet_ui_kit::Mode::Agent);
 
     let mut projection = ThreadProjection::new(thread.thread, worktree("feat"), AgentKind::Claude);
     projection.session = AgentSessionState::Running;
@@ -601,12 +694,10 @@ fn a_daemon_restart_re_reports_every_cursor_this_window_already_read() {
     );
 }
 
-/// UX-11: the status bar mirrors the keys that fire, and a plan gate on a running turn reads
-/// `NeedsYou(Plan)` while `Agent > AgentWorking` still owns them.
+/// UX-11: a plan gate on a running turn reads `NeedsYou(Plan)` while `Agent > AgentWorking`
+/// still owns the keys.
 #[test]
-fn the_status_bar_key_set_follows_the_context_not_the_badge() {
-    use crate::screens::agent_thread::presentation::key_hint_set;
-
+fn a_plan_gate_on_a_running_turn_keeps_the_working_keys() {
     let thread = summary("feat", Attention::NeedsYou(AttentionKind::Plan), 1);
     let mut state = state_with(vec![thread.clone()]);
     state.screen = crate::state::Screen::Workspace {
@@ -639,16 +730,11 @@ fn the_status_bar_key_set_follows_the_context_not_the_badge() {
         state.agents.is_working(thread.thread),
         "a running turn is `Working` whatever the tab badge says"
     );
-    // While the plan note is being typed the card stands its keys down and the composer's set
-    // is shown — which must be the working one, since that is the context that is live.
+    // While the plan note is being typed the card stands its keys down and the composer's
+    // working set is the one that is live.
     state.agents.set_composing(thread.thread, true);
     assert_eq!(
         state.agent_context_chain(),
         Some(vec!["Agent", "AgentWorking"])
-    );
-    assert_eq!(
-        key_hint_set(state.agents.is_working(thread.thread), false).first(),
-        Some(&("esc", "interrupt")),
-        "the bar advertised idle commands nothing in `AgentWorking` is bound to"
     );
 }

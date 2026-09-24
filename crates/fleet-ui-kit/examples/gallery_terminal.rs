@@ -1,6 +1,6 @@
 //! The visual test bench for the **jobs and terminal** half of `fleet-ui-kit`.
 //!
-//! `TerminalGrid`, `TerminalTabStrip`, `ScrollPill`, `ScrollbackBadge`, `PrefixHint`,
+//! `TerminalGrid`, `TerminalTabStrip`, `ScrollPill`, `ScrollbackBadge`, `PrefixMenu`,
 //! `ExitStrip`, `JobRow`, `JobTicker`, `StickyErrorSlot` and `LogView`, each in every state
 //! the design system names, in both themes.
 //!
@@ -21,7 +21,7 @@
 //! | `v` | selection |
 //! | `u` | focus the terminal / unfocus it (hollow cursor) |
 //! | `c` | cursor shape |
-//! | `p` | prefix hint |
+//! | `p` | prefix menu |
 //! | `L` | focus the log (then `f`, `j`, `k`, `G`); `esc` returns |
 //! | `q` | quit |
 
@@ -357,27 +357,21 @@ fn overlays_section(cx: &mut App) -> AnyElement {
             stage(&t, px(48.0), ScrollbackBadge::new(0, 2000)),
         ),
         LAYOUT.labeled(
-            "prefix hint \u{b7} hidden",
-            &t,
-            stage(&t, px(48.0), PrefixHint::new(false)),
-        ),
-        LAYOUT.labeled(
-            "prefix hint \u{b7} visible",
-            &t,
-            stage(&t, px(64.0), PrefixHint::new(true)),
-        ),
-        LAYOUT.labeled(
-            "prefix hint \u{b7} custom keys",
+            "prefix menu \u{b7} over a terminal",
             &t,
             stage(
                 &t,
-                px(64.0),
-                PrefixHint::new(true).prefix("^A").hints(
-                    KeyHintRow::new()
-                        .key("s", "hub")
-                        .key("]", "paste")
-                        .key("z", "zoom"),
-                ),
+                px(300.0),
+                support::prefix_menu::sample(&t, "prefix-menu-terminal", true, 5),
+            ),
+        ),
+        LAYOUT.labeled(
+            "prefix menu \u{b7} no literal (agent thread)",
+            &t,
+            stage(
+                &t,
+                px(300.0),
+                support::prefix_menu::sample(&t, "prefix-menu-thread", false, 3),
             ),
         ),
         LAYOUT.labeled("exit strip \u{b7} failure", &t, ExitStrip::new(1)),
@@ -452,6 +446,61 @@ fn tabs_section(cx: &mut App) -> AnyElement {
             ])
             .id("tabs-waking"),
         ),
+        // The pointer twins of the `^s` keys: hover a tab for its `✕` (the active one always
+        // shows it), middle-click to close, right-click for its menu, `+` for the new-tab menu.
+        LAYOUT.labeled(
+            "controls \u{b7} close, menus, trailing toggles",
+            &t,
+            TerminalTabStrip::new([
+                TerminalTab::new(1, "zsh").kbd(Kbd::parse("ctrl-s 1").ok()),
+                TerminalTab::new(2, "cargo watch")
+                    .activity(true)
+                    .kbd(Kbd::parse("ctrl-s 2").ok()),
+                TerminalTab::new(3, "Lazygit")
+                    .kind(TerminalTabKind::Native)
+                    .kbd(Kbd::parse("ctrl-s 3").ok()),
+                TerminalTab::new(4, "board")
+                    .kind(TerminalTabKind::Native)
+                    .icon(Icon::SquareKanban),
+                TerminalTab::new(5, "apply the README fix")
+                    .kind(TerminalTabKind::Native)
+                    .icon(Icon::Sparkles)
+                    .attention(true),
+            ])
+            .id("tabs-controls")
+            .agents_from(4)
+            .on_select(|_, _, _| {})
+            .on_close(|_, _, _| {})
+            .close_kbd(Kbd::parse("ctrl-s x").ok())
+            .tab_menu(|_, menu, _, _| {
+                menu.item(MenuItem::new("Rename").on_select(|_, _| {}))
+                    .item(MenuItem::new("Close").on_select(|_, _| {}))
+                    .item(MenuItem::new("Close others").on_select(|_, _| {}))
+            })
+            .new_menu(|menu, _, _| {
+                menu.item(
+                    MenuItem::new("Terminal")
+                        .icon(Icon::Terminal)
+                        .on_select(|_, _| {}),
+                )
+                .item(
+                    MenuItem::new("Codex thread")
+                        .icon(Icon::Sparkles)
+                        .on_select(|_, _| {}),
+                )
+            })
+            .trailing(
+                Button::new("tabs-controls-watch", "Watch")
+                    .style(ButtonStyle::Ghost)
+                    .size(ButtonSize::Compact)
+                    .selected(true),
+            )
+            .trailing(
+                Button::new("tabs-controls-zoom", "Zoom")
+                    .style(ButtonStyle::Ghost)
+                    .size(ButtonSize::Compact),
+            ),
+        ),
         LAYOUT.labeled(
             "no new-tab affordance",
             &t,
@@ -475,40 +524,84 @@ fn jobs_section(cx: &mut App) -> AnyElement {
         .border_color(t.colors.border)
         .overflow_hidden()
         .child(
-            JobRow::new(JobStatus::Running, "clone", "nixos")
-                .id("job-running")
+            JobRow::new("job-running", JobStatus::Running, "Clone")
+                .subject("acme/infra")
                 .elapsed("0:42")
-                .percent(40)
-                .progress("Receiving objects: 40% (81/202)")
+                .percent(64)
+                .progress("Receiving objects: 64% (5121/8002), 18.2 MiB")
+                .hover_action(
+                    Button::new("job-running-cancel", "Cancel")
+                        .size(ButtonSize::Compact)
+                        .kbd(gallery_kbd("c")),
+                )
                 .selected(true)
                 .cursor(true),
         )
         .child(
-            JobRow::new(JobStatus::Running, "hooks", "buk/payroll#feat-rut")
-                .id("job-hooks")
+            JobRow::new("job-hooks", JobStatus::Running, "Run hooks for")
+                .subject("buk/payroll#feat-rut")
                 .elapsed("0:08")
-                .progress("pnpm install (2/3)"),
+                .progress("pnpm install (2/3)")
+                .hover_action(
+                    Button::new("job-hooks-cancel", "Cancel")
+                        .size(ButtonSize::Compact)
+                        .kbd(gallery_kbd("c")),
+                ),
         )
         .child(
-            JobRow::new(JobStatus::Cancelling, "pool", "dannyfuf/fleetd")
-                .id("job-cancelling")
-                .elapsed("1:03")
-                .progress("waiting for the current copy to finish"),
+            JobRow::new(
+                "job-cancelling",
+                JobStatus::Cancelling,
+                "Prepare copies for",
+            )
+            .subject("dannyfuf/fleetd")
+            .elapsed("1:03")
+            .progress("waiting for the current copy to finish"),
         )
-        .child(JobRow::new(JobStatus::Queued, "prune", "buk/www").id("job-queued"))
+        .child(JobRow::new(
+            "job-queued",
+            JobStatus::Queued,
+            "Prune worktrees",
+        ))
         .child(
-            JobRow::new(JobStatus::Failed, "prs", "review")
-                .id("job-failed")
-                .elapsed("1m")
-                .trailing_key("R")
-                .progress("gh: HTTP 502 upstream connect error"),
+            JobRow::new("job-failed", JobStatus::Failed, "Run hooks for")
+                .subject("acme/api#broken")
+                .elapsed("0:07")
+                .error("npm install exited with code 1")
+                .error_detail("ERR! peer dep react@18 conflicts with react@19")
+                .actions(
+                    div()
+                        .flex()
+                        .gap(t.space.xs)
+                        .child(
+                            Button::new("job-failed-retry", "Retry")
+                                .style(ButtonStyle::Primary)
+                                .size(ButtonSize::Compact)
+                                .kbd(gallery_kbd("R")),
+                        )
+                        .child(
+                            Button::new("job-failed-log", "Show log")
+                                .size(ButtonSize::Compact)
+                                .kbd(gallery_kbd("enter")),
+                        )
+                        .child(
+                            Button::new("job-failed-copy", "Copy log path")
+                                .style(ButtonStyle::Ghost)
+                                .size(ButtonSize::Compact)
+                                .kbd(gallery_kbd("y")),
+                        ),
+                ),
         )
         .child(
-            JobRow::new(JobStatus::Done, "prune", "buk/www")
-                .id("job-done")
-                .elapsed("12s"),
+            JobRow::new("job-done", JobStatus::Done, "Create")
+                .subject("acme/api#injected-1")
+                .elapsed("2s \u{b7} 1m ago"),
         )
-        .child(JobRow::new(JobStatus::Cancelled, "fetch", "dannyfuf/fleetd").id("job-cancelled"));
+        .child(
+            JobRow::new("job-cancelled", JobStatus::Cancelled, "Fetch")
+                .subject("dannyfuf/fleetd")
+                .elapsed("\u{2013}"),
+        );
 
     let confirm_rows = div()
         .flex()
@@ -520,18 +613,22 @@ fn jobs_section(cx: &mut App) -> AnyElement {
         .border_color(t.colors.border)
         .overflow_hidden()
         .child(
-            JobRow::new(JobStatus::Running, "clone", "nixos")
-                .id("confirm-1")
+            JobRow::new("confirm-1", JobStatus::Running, "Clone")
+                .subject("nixos")
                 .retryable(true),
         )
         .child(
-            JobRow::new(JobStatus::Running, "hooks", "buk/payroll")
-                .id("confirm-2")
+            JobRow::new("confirm-2", JobStatus::Running, "Run hooks for")
+                .subject("buk/payroll")
                 .retryable(false),
         );
 
     let children = vec![
-        LAYOUT.labeled("every status", &t, rows),
+        LAYOUT.labeled(
+            "every status \u{b7} hover a running row for Cancel",
+            &t,
+            rows,
+        ),
         LAYOUT.labeled("quit-and-stop confirm", &t, confirm_rows),
         LAYOUT.labeled(
             "ticker",
@@ -550,15 +647,24 @@ fn jobs_section(cx: &mut App) -> AnyElement {
         LAYOUT.labeled(
             "sticky error",
             &t,
-            StickyErrorSlot::new("gh: HTTP 502 upstream connect error").id("err-1"),
+            StickyErrorSlot::new("err-1", "gh: HTTP 502 upstream connect error")
+                .kbd(Some(gallery_kbd("!")))
+                .on_activate(|_, _| {})
+                .on_dismiss(|_, _| {}),
         ),
         LAYOUT.labeled(
             "sticky error \u{b7} repeated, prefixed key",
             &t,
-            StickyErrorSlot::new("gh: HTTP 502 upstream connect error")
-                .id("err-2")
+            StickyErrorSlot::new("err-2", "gh: HTTP 502 upstream connect error")
                 .count(7)
-                .key("^s !"),
+                .kbd(Some(gallery_kbd("ctrl-s !")))
+                .on_activate(|_, _| {})
+                .on_dismiss(|_, _| {}),
+        ),
+        LAYOUT.labeled(
+            "sticky error \u{b7} display only (no click, no \u{2715})",
+            &t,
+            StickyErrorSlot::new("err-3", "gh: HTTP 502 upstream connect error"),
         ),
     ];
     LAYOUT.section("jobs", &t, children)
@@ -637,18 +743,18 @@ impl Render for Gallery {
         ];
 
         AppFrame::new()
-            .context_bar(
-                ContextBar::new([ContextTab::new("jobs + terminal gallery", 1)])
+            .title_bar(
+                TitleBar::new()
+                    .leading(Text::ui_strong("jobs + terminal gallery"))
                     .leading_inset(px(84.0))
-                    .chip(Chip::labeled(
+                    .trailing(Chip::labeled(
                         if mode.is_dark() {
                             Icon::Moon
                         } else {
                             Icon::CircleArrowUp
                         },
                         if mode.is_dark() { "dark" } else { "light" },
-                    ))
-                    .daemon(DaemonState::Healthy),
+                    )),
             )
             .body(
                 div()
@@ -675,7 +781,6 @@ impl Render for Gallery {
             .status_bar(
                 StatusBar::new()
                     .breadcrumb("fleet-ui-kit \u{b7} jobs and terminal")
-                    .mode(Mode::Terminal)
                     .ticker(
                         KeyHintRow::new()
                             .key("t", "theme")
@@ -714,4 +819,9 @@ fn main() {
         },
         Gallery::new,
     );
+}
+
+/// A key chip for a gallery button whose action is not bound in the gallery's keymap.
+fn gallery_kbd(key: &str) -> Kbd {
+    Kbd::parse(key).unwrap_or_else(|error| panic!("gallery key {key}: {error}"))
 }

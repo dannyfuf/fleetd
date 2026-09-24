@@ -10,7 +10,7 @@ use gpui::{AnyElement, App, AppContext, Entity, FocusHandle, Window, div};
 use crate::{
     actions::dialog,
     bridge::Bridge,
-    dialogs::{DialogHost, notify, read_host, root, step, with_host},
+    dialogs::{DialogHost, Dialogs, footer, notify, read_host, root, step, with_host},
     presentation::{age_label, now_unix},
     state::AppState,
 };
@@ -420,13 +420,21 @@ async fn search_owners(
 }
 
 /// What the result list shows instead of rows: the failure, the invitation, or the miss.
-fn no_results(draft: &CloneState) -> AnyElement {
+fn no_results(draft: &CloneState, cx: &App) -> AnyElement {
     if let Some(message) = draft.error.clone() {
         return div()
             .flex()
             .flex_col()
+            .gap(cx.theme().space.sm)
+            .items_start()
             .child(Text::ui(message).tone(Tone::Danger).ellipsize())
-            .child(KeyHintRow::new().key("enter", "retry"))
+            // `⏎` retries a failed search (`submit`), so the button is that key.
+            .child(
+                Button::new("clone-retry", "Retry")
+                    .size(ButtonSize::Compact)
+                    .icon(Icon::RefreshCw)
+                    .action(Box::new(dialog::Confirm)),
+            )
             .into_any_element();
     }
     if draft.query.is_empty() {
@@ -450,30 +458,33 @@ fn no_results(draft: &CloneState) -> AnyElement {
 }
 
 /// One row per candidate repository: visibility, name, description and last push.
-fn results_list(draft: &CloneState, rows: &[RemoteRepo], now: i64) -> FuzzyList {
-    FuzzyList::new(rows.iter().map(|repo| {
-        let mut item = FuzzyItem::new(repo.full_name.clone()).leading(
-            if repo.is_private {
-                Icon::Lock
-            } else {
-                Icon::Globe
+fn results_list(draft: &CloneState, rows: &[RemoteRepo], now: i64, cx: &App) -> FuzzyList {
+    FuzzyList::new(
+        "clone-results",
+        rows.iter().map(|repo| {
+            let mut item = FuzzyItem::new(repo.full_name.clone()).leading(
+                if repo.is_private {
+                    Icon::Lock
+                } else {
+                    Icon::Globe
+                }
+                .el()
+                .size(IconSize::Medium),
+            );
+            if !repo.description.is_empty() {
+                item = item.secondary(repo.description.clone());
             }
-            .el()
-            .size(IconSize::Medium),
-        );
-        if !repo.description.is_empty() {
-            item = item.secondary(repo.description.clone());
-        }
-        if !repo.updated_at.is_empty() {
-            item = item.trailing(age_label(&repo.updated_at, now));
-        }
-        item
-    }))
+            if !repo.updated_at.is_empty() {
+                item = item.trailing(age_label(&repo.updated_at, now));
+            }
+            item
+        }),
+    )
     .cursor(draft.cursor)
     .cap(RESULT_ROWS)
     .under_text_field(true)
     .harness_rows("dialog.row", 0)
-    .empty(no_results(draft))
+    .empty(no_results(draft, cx))
 }
 
 /// Renders the dialog (§3.8.2).
@@ -496,7 +507,15 @@ pub(crate) fn render(
     };
     let search_field = search_field.harness_target_indexed("dialog.field", 0);
 
-    let list = results_list(draft, &rows, now);
+    let list = results_list(draft, &rows, now, cx).on_click({
+        let state = state.clone();
+        let bridge = bridge.clone();
+        // A click is `⏎` on that row: pick it and hand the clone to the daemon.
+        move |index, _window, cx| {
+            with_host(&state, cx, |host| host.clone.cursor = index);
+            submit(&state, &bridge, cx);
+        }
+    });
 
     let mut body = div().flex().flex_col().gap(gap).child(search_field);
     if offline && let Some(cached) = draft.cached_at.as_ref() {
@@ -506,18 +525,25 @@ pub(crate) fn render(
     let body = body.child(list);
 
     let card = Dialog::new("Clone repo")
+        .dismiss_action(crate::dialogs::Dialogs::CloneRepo.dismiss_action())
         .icon(Icon::CloudDownload)
         .width(super::Dialogs::CloneRepo.width(cx))
         .when_some(super::Dialogs::CloneRepo.height(), Dialog::height)
-        .subtitle(format!("\u{00b7} into context \"{}\"", draft.context_name))
+        .subtitle(format!("into {}", draft.context_name))
         .body(body)
-        .hint_row(
-            KeyHintRow::new()
-                .key("\u{2303}n/\u{2303}p", "move")
-                .key("esc", "cancel")
-                .key(draft.protocol_word(), "clones in the background"),
+        .footer_start(
+            Text::ui(format!(
+                "Clones over {} in the background",
+                draft.protocol_word()
+            ))
+            .muted()
+            .ellipsize(),
         )
-        .primary("\u{23ce} Clone");
+        .actions(vec![
+            footer::cancel(&Dialogs::CloneRepo),
+            footer::primary("clone-submit", "Clone", Box::new(dialog::Confirm))
+                .disabled(rows.is_empty() && draft.error.is_none()),
+        ]);
 
     let cancel_state = state.clone();
     let confirm_state = state.clone();

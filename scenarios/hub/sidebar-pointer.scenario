@@ -1,0 +1,69 @@
+# UX-SPEC §3.2 / §5.1 · TESTING-HARNESS.md §3 (`repos.row[N].menu`, `repos.clone`, `repos.collapse`,
+# `repos.resize`) — the Hub sidebar answers the pointer: a click on a repository scopes the list,
+# its ⋯ and its right-click open the same menu of `n` `e` `m` `d`, `+` clones, the foot
+# collapses it like `H`, and its edge drags between 200 and 320 px. A click scopes the list and
+# keeps the keyboard in the rail, so the menu's keys are the rail's; a double-click opens like ⏎.
+fixture: busy
+await idle 30000
+assert screen == Hub && targets["repos.rail"].w == 232
+assert targets["repos.clone"] exists && targets["repos.collapse"] exists && targets["repos.resize"] exists
+shot sidebar
+
+# A click on a repository selects it: the list is scoped to it, and the rail keeps the keys.
+click repos.row[1]
+await lists.repos.rows[1].marks[0] == scope
+assert hub_pane == Repos && focused == repos.row[1] && lists.repos.selected.label == "acme/api"
+shot sidebar-scoped
+
+# A double-click opens it like ⏎: the scoped list takes the keyboard.
+click left 2 repos.row[1]
+await hub_pane == List
+assert lists.repos.rows[1].marks[0] == scope
+
+# Hovering a repository shows its ⋯; the menu lists Clone, Edit setup commands, Move, Delete.
+hover repos.row[2] 300
+await targets["repos.row[2].menu"] exists
+shot sidebar-hover
+click repos.row[2].menu
+await targets["menu.item[3]"] exists
+assert lists.repos.selected.label == "acme/web"
+shot sidebar-row-menu
+click menu.item[1]
+await overlay == Dialog 10000
+assert dialog.name == Hooks
+key escape
+await overlay absent 10000
+
+# A right-click selects the repository under the pointer and opens the same menu there.
+click right repos.row[1]
+await targets["menu.item[0]"] exists
+assert lists.repos.selected.label == "acme/api"
+shot sidebar-context-menu
+key escape
+await targets["menu.item[0]"] absent
+
+# `+` beside the title opens Clone repo, like `n`.
+click repos.clone
+await overlay == Dialog 10000
+assert dialog.name == Clone
+key escape
+await overlay absent 10000
+
+# `All repositories` puts the scope back.
+click repos.row[0]
+await lists.repos.rows[0].marks[0] == scope
+
+# The edge drags, and stops at the ends of its range.
+drag repos.resize 300 400
+await targets["repos.rail"].w == 300
+drag repos.resize 900 400
+await targets["repos.rail"].w == 320
+shot sidebar-dragged
+
+# The foot collapses it to the icon column and back, keeping the dragged width.
+click repos.collapse
+await targets["repos.rail"].w == 44
+shot sidebar-collapsed
+click repos.collapse
+await targets["repos.rail"].w == 320
+quit

@@ -226,14 +226,9 @@ fn every_action_has_the_wording_the_spec_fixes() {
         .unwrap_or_else(|error| panic!("{error}"));
     let request = ConfirmRequest::DeleteWorktree { id };
     assert_eq!(
-        request.title(true),
-        "Delete buk/payroll#fix-rut-validator?",
-        "compact: the id is the title"
-    );
-    assert_eq!(
-        request.title(false),
-        "Delete worktree",
-        "expanded: row 1 carries the id, so the title must not repeat it"
+        request.title(),
+        "Delete worktree fix-rut-validator?",
+        "the title names the worktree; the subtitle carries the full id and the path"
     );
     let benign = Facts::default();
     assert_eq!(
@@ -244,7 +239,34 @@ fn every_action_has_the_wording_the_spec_fixes() {
         risky: true,
         ..Facts::default()
     };
-    assert!(request.consequence(&risky).contains("kills the session"));
+    assert_eq!(request.consequence(&risky), "The copy moves to the trash.");
+    let losing = Facts {
+        risky: true,
+        losses: Losses {
+            session: true,
+            unpushed: 2,
+            dirty: Some(Some(3)),
+            commits_unknown: false,
+        },
+        ..Facts::default()
+    };
+    assert_eq!(
+        request.consequence(&losing),
+        "The session is killed and the copy moves to the trash. The 2 unpushed commits and \
+         3 uncommitted files exist only here and will be lost."
+    );
+    let one = Facts {
+        risky: true,
+        losses: Losses {
+            unpushed: 1,
+            ..Losses::default()
+        },
+        ..Facts::default()
+    };
+    assert_eq!(
+        request.consequence(&one),
+        "The copy moves to the trash. The 1 unpushed commit exists only here and will be lost."
+    );
 }
 
 #[test]
@@ -412,7 +434,7 @@ fn a_confirmed_move_cancels_the_run_and_an_unstaged_column_moves_nothing(
         target: "In Progress".to_owned(),
         elapsed: "2m".to_owned(),
     };
-    assert_eq!(request.title(true), "Move FLE-1?");
+    assert_eq!(request.title(), "Move FLE-1?");
     assert_eq!(
         request.consequence(&Facts::default()),
         "FLE-1 is working (2m). Move to In Progress and cancel the run?"
@@ -430,7 +452,12 @@ fn a_confirmed_move_cancels_the_run_and_an_unstaged_column_moves_nothing(
         crate::dialogs::with_host(&state, cx, |host| {
             host.confirm = ConfirmState {
                 request: Some(request.clone()),
-                move_target: Some(status.clone()),
+                // A dropped card stages its place in the column too, and the confirmed move
+                // carries it: the dialog is the same one `[` raises, not a second path.
+                move_target: Some(MoveTarget {
+                    status: status.clone(),
+                    index: Some(1),
+                }),
                 ..ConfirmState::default()
             };
         });
@@ -446,7 +473,7 @@ fn a_confirmed_move_cancels_the_run_and_an_unstaged_column_moves_nothing(
         [RequestBody::MoveCard {
             card_id: card,
             status_id: status,
-            index: None,
+            index: Some(1),
             cancel_run: true,
         }]
     );
@@ -528,10 +555,14 @@ fn an_adopted_board_confirm_is_taken_out_of_the_staging_set(cx: &mut gpui::TestA
     let state = cx.new(|_| AppState::new("/tmp/fleet-board-confirm-staging", Instant::now()));
     let status = StatusId::try_from("done").unwrap_or_else(|error| panic!("{error}"));
     cx.update(|cx| {
-        ConfirmRequest::stage_move_target(&state, status.clone(), cx);
+        let target = MoveTarget {
+            status,
+            index: None,
+        };
+        ConfirmRequest::stage_move_target(&state, target.clone(), cx);
         adopt_staged_board_confirm(&state, cx);
         crate::dialogs::with_host(&state, cx, |host| {
-            assert_eq!(host.confirm.move_target, Some(status));
+            assert_eq!(host.confirm.move_target, Some(target));
             host.confirm = ConfirmState::default();
         });
         // The next confirm — a delete, say — must not inherit the column `[` staged.

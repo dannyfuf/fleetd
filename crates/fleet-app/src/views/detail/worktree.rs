@@ -1,286 +1,312 @@
-use super::*;
+//! The worktree detail panel (UX-SPEC §3.4): what you can do first, then the session, the git
+//! safety facts in words, and where the worktree lives.
+//!
+//! Every word comes from the row's prepared [`WorktreeDetail`]; the panel only lays it out. Its
+//! buttons run the same actions as the row's keys and menus, on the row under the cursor.
 
-use fleet_core::github::InspectionPrState;
+use fleet_ui_kit::{
+    ActiveTheme, Button, ButtonSize, ButtonStyle, CopyField, FactRow, HarnessTargetExt, Icon,
+    IconButton, IconSize, InfoCard, MenuAnchor, PopoverMenu, PrBadge, StatusGlyph, Text, Tone,
+    format_age,
+};
+use gpui::{AnyElement, App, IntoElement, SharedString, div, prelude::*};
 
-/// Everything the worktree variant needs.
+use crate::{
+    actions::{hub, worktrees},
+    views::worktrees_list::{
+        GitFacts, KnownGit, OPEN_KEY, WorktreeDetail, WorktreeRow, label, row_menu,
+    },
+};
+
+/// The primary button's label: the panel says what opening *is*.
+const OPEN_WORKSPACE: &str = "Open workspace";
+/// The Git section's title.
+const GIT: &str = "Git";
+/// The Location section's title.
+const LOCATION: &str = "Location";
+/// The Session card's title.
+const SESSION: &str = "Session";
+/// A fact git could not state (§1.3): never `0`.
+const NULL: &str = "\u{2014}";
+
+/// Everything the worktree panel needs.
 #[derive(Clone, Copy)]
 pub struct WorktreeProps<'a> {
-    /// The worktree under the cursor.
-    pub worktree: &'a Worktree,
-    /// Its runtime status, for the SESSION block.
-    pub status: Option<&'a WorktreeStatus>,
-    /// Whether its session is slept rather than merely detached.
-    pub slept: bool,
-    /// Whether its host's last probe failed.
-    pub host_unreachable: bool,
-    /// The inspection cache entry, which may be missing, loading or errored.
-    pub inspected: Option<&'a Inspected>,
-    /// `$HOME`, for tilde collapsing.
-    pub home: &'a str,
-    /// The current epoch second.
-    pub now: i64,
+    /// The row under the cursor, with its prepared detail.
+    pub row: &'a WorktreeRow,
+    /// Seconds since the row was prepared, so the ages stay current.
+    pub age_offset: i64,
+    /// Whether `u` has a delete to undo, so the menu offers it.
+    pub undo_available: bool,
 }
 
-/// §3.4's worktree panel: head, `path`, SESSION, SAFETY, times, freshness footer.
+/// §3.4's worktree panel: head, actions, Session, Git, Location.
 #[must_use]
 pub fn worktree(props: WorktreeProps<'_>, cx: &App) -> AnyElement {
-    let glyph = resolved_worktree_status(
-        props.status,
-        props.slept,
-        props.worktree.degraded.is_some(),
-        props.host_unreachable,
-        false,
-    );
-    worktree_with_status(props, glyph, cx)
-}
-
-/// Renders worktree detail with the exact status already resolved for its list row.
-#[must_use]
-pub fn worktree_with_status(props: WorktreeProps<'_>, glyph: StatusKind, cx: &App) -> AnyElement {
     let WorktreeProps {
-        worktree,
-        status,
-        slept: _,
-        host_unreachable: _,
-        inspected,
-        home,
-        now,
+        row,
+        age_offset,
+        undo_available,
     } = props;
-
-    let host = worktree
-        .host
-        .as_ref()
-        .map_or_else(|| "local".to_owned(), |host| format!("@{host}"));
-    let subtitle = format!("{} · {} · {host}", worktree.repo_id, worktree.base_ref);
-
-    let mut children = vec![
-        head(
-            Icon::GitBranch,
-            SharedString::from(worktree.branch.clone()),
-            SharedString::from(subtitle),
-            cx,
-        ),
-        block(
-            vec![
-                FactRow::new("path", path_value(&worktree.path, home, cx))
-                    .mono(true)
-                    .into_any_element(),
-            ],
-            cx,
-        ),
-        session_block(glyph, status, cx),
-    ];
-    children.push(safety_block(inspected, now, cx));
-    children.push(times_block(worktree, now, cx));
-    if let Some(footer) = freshness_footer(inspected, now, cx) {
-        children.push(footer);
-    }
-
-    variant(children)
+    let detail = &row.detail;
+    let theme = cx.theme();
+    div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .flex_none()
+        .px(theme.space.lg)
+        .py(theme.space.xl)
+        .gap(theme.space.lg)
+        .child(head(row, cx))
+        .child(actions(undo_available, cx))
+        .child(session_card(detail, age_offset, cx))
+        .child(git_section(&detail.git, cx))
+        .child(location(detail, age_offset, cx))
+        .into_any_element()
 }
 
-/// `SESSION  ◉ attached` plus one row per terminal (§3.4) — the only place window names exist.
-fn session_block(glyph: StatusKind, status: Option<&WorktreeStatus>, cx: &App) -> AnyElement {
+/// `⑂ spike` over `acme/web · from origin/main · on this Mac`.
+fn head(row: &WorktreeRow, cx: &App) -> AnyElement {
     let theme = cx.theme();
-    let header = SectionHeader::new("Session").trailing(
+    div()
+        .flex()
+        .flex_col()
+        .gap(theme.space.xs)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(theme.space.sm)
+                .child(
+                    row.name_icon
+                        .icon
+                        .el()
+                        .size(IconSize::Large)
+                        .tone(row.name_icon.tone)
+                        .spinning(row.name_icon.spins)
+                        .id("detail-name-icon"),
+                )
+                .child(Text::section_title(row.branch.clone()).ellipsize()),
+        )
+        .child(
+            Text::caption(row.detail.subtitle.clone())
+                .muted()
+                .ellipsize(),
+        )
+        .into_any_element()
+}
+
+/// `[Open workspace ⏎] [Sleep s] [⋯]`: the panel leads with what you can do.
+fn actions(undo_available: bool, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    div()
+        .flex()
+        .items_center()
+        .gap(theme.space.sm)
+        .child(
+            div().flex_1().min_w_0().child(
+                Button::new("detail-open", OPEN_WORKSPACE)
+                    .style(ButtonStyle::Primary)
+                    .full_width()
+                    .action(Box::new(worktrees::Open))
+                    .prefer_key(OPEN_KEY)
+                    .harness_target("detail.open"),
+            ),
+        )
+        .child(
+            Button::new("detail-sleep", label(&worktrees::Sleep))
+                .action(Box::new(worktrees::Sleep))
+                .harness_target("detail.sleep"),
+        )
+        .child(
+            PopoverMenu::new("detail-more")
+                .anchor(MenuAnchor::BottomRight)
+                .trigger_with(|open, _, _| {
+                    IconButton::new("detail-more-trigger", Icon::Ellipsis, "More actions")
+                        .style(ButtonStyle::Secondary)
+                        .selected(open)
+                })
+                .menu(move |menu, _, _| row_menu(menu, undo_available))
+                .harness_target("detail.menu"),
+        )
+        .into_any_element()
+}
+
+/// The Session card: the state and its age, then the tabs fleetd keeps.
+fn session_card(detail: &WorktreeDetail, age_offset: i64, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let age = detail
+        .session_age
+        .map(|age| format_age(age.saturating_add(age_offset)));
+    let card = InfoCard::new().title(SESSION).line(
+        div()
+            .flex()
+            .items_center()
+            .gap(theme.space.sm)
+            .child(StatusGlyph::new(detail.session_kind).id("detail-session-glyph"))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(Text::ui(detail.session_state.clone()).ellipsize()),
+            )
+            .children(age.map(|age| Text::caption(age).muted().flex_none())),
+    );
+    match detail.session_tabs.clone() {
+        Some(tabs) => card.line(Text::caption(tabs).muted()).into_any_element(),
+        None => card.into_any_element(),
+    }
+}
+
+/// The Git section: the safety facts in words, or why there are none yet.
+fn git_section(git: &GitFacts, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let body: AnyElement = match git {
+        // §1.3: absence of knowledge still renders — and says how to get it.
+        GitFacts::NotChecked => div()
+            .flex()
+            .items_center()
+            .gap(theme.space.sm)
+            .child(Text::ui("Not checked").faint())
+            .child(inspect_button())
+            .into_any_element(),
+        GitFacts::Checking => Text::ui("Checking\u{2026}").muted().into_any_element(),
+        GitFacts::Failed(error) => div()
+            .flex()
+            .flex_col()
+            .gap(theme.space.xs)
+            .child(Text::ui(error.clone()).tone(Tone::Danger))
+            .child(inspect_button())
+            .into_any_element(),
+        GitFacts::Known(known) => known_git(known, cx),
+    };
+    div()
+        .flex()
+        .flex_col()
+        .gap(theme.space.sm)
+        .child(Text::sentence_label(GIT))
+        .child(body)
+        .into_any_element()
+}
+
+/// `Inspect I`: how to get the facts that are missing.
+fn inspect_button() -> impl IntoElement {
+    Button::new("detail-inspect", label(&worktrees::Inspect))
+        .style(ButtonStyle::Ghost)
+        .size(ButtonSize::Compact)
+        .action(Box::new(worktrees::Inspect))
+        .harness_target("detail.inspect")
+}
+
+fn known_git(known: &KnownGit, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let fact = |label: SharedString, value: AnyElement| {
+        div()
+            .flex()
+            .items_center()
+            .gap(theme.space.sm)
+            .child(
+                div()
+                    .flex_none()
+                    .w(theme.metrics.fact_label_w)
+                    .child(Text::caption(label).muted()),
+            )
+            .child(div().flex().items_center().flex_1().min_w_0().child(value))
+            .into_any_element()
+    };
+    let changes = Text::caption(known.changes.clone())
+        .tone(if known.dirty {
+            Tone::Warning
+        } else {
+            Tone::Default
+        })
+        .into_any_element();
+    let ahead_behind = match known.ahead_behind.clone() {
+        Some(text) => Text::data_small(text).into_any_element(),
+        None => Text::caption(NULL).faint().into_any_element(),
+    };
+    let pr = known.pr.as_ref().map(|pr| {
         div()
             .flex()
             .items_center()
             .gap(theme.space.xs)
+            .min_w_0()
             .child(
-                StatusGlyph::new(glyph)
-                    .size(IconSize::Medium)
-                    .id("detail-session-glyph"),
+                Button::new("detail-pr-link", pr.link.clone())
+                    .style(ButtonStyle::Ghost)
+                    .size(ButtonSize::Compact)
+                    .action(Box::new(hub::OpenInBrowser)),
             )
-            .child(Text::ui(glyph.detail_word()).muted()),
-    );
-    let windows: Vec<AnyElement> = status
-        .map(|status| {
-            status
-                .windows
-                .iter()
-                .map(|window| {
-                    let label = if window.keep_alive.is_empty() {
-                        FactValue::Null
-                    } else {
-                        FactValue::known(window.keep_alive.join(", "))
-                    };
-                    FactRow::new(format!("{} {}", window.index + 1, window.name), label)
-                        .into_any_element()
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let mut children = vec![header.into_any_element()];
-    children.extend(windows);
-    block(children, cx)
-}
-
-/// The SAFETY block: exactly the facts the delete confirm will quote, plus their age.
-fn safety_block(inspected: Option<&Inspected>, now: i64, cx: &App) -> AnyElement {
-    let Some(inspected) = inspected else {
-        return block(
-            vec![
-                SectionHeader::new("Safety").into_any_element(),
-                Text::ui("not checked · I to check")
-                    .faint()
-                    .into_any_element(),
-            ],
-            cx,
-        );
-    };
-    if let Some(error) = inspected.failure() {
-        return block(
-            vec![
-                SectionHeader::new("Safety").into_any_element(),
-                Text::ui(format!("error: {error}"))
-                    .tone(Tone::Danger)
-                    .into_any_element(),
-                Text::hint("I  retry").into_any_element(),
-            ],
-            cx,
-        );
+            .children(pr.state.map(|state| PrBadge::state_only(state).chip()))
+            .into_any_element()
+    });
+    let mut rows = vec![
+        fact(SharedString::new_static("Changes"), changes),
+        fact(known.versus.clone(), ahead_behind),
+        fact(
+            SharedString::new_static("Published"),
+            Text::caption(known.published.clone()).into_any_element(),
+        ),
+    ];
+    if let Some(pr) = pr {
+        rows.push(fact(SharedString::new_static("Pull request"), pr));
     }
-    let Some(data) = inspected.data.as_ref() else {
-        return block(
-            vec![
-                SectionHeader::new("Safety")
-                    .trailing(Text::ui("\u{27F3} checking\u{2026}").muted())
-                    .into_any_element(),
-            ],
-            cx,
-        );
-    };
-
-    let freshness = inspection_freshness(&data.inspected_at, now);
-    let trailing = match freshness {
-        InspectionFreshness::Known(age) => FreshnessStamp::new("checked", age).into_any_element(),
-        InspectionFreshness::Unknown => Text::ui("checked unknown")
-            .tone(Tone::Warning)
-            .into_any_element(),
-    };
-    let mut list = KeyValueList::titled_with_trailing("Safety", trailing)
-        .row("dirty", dirty_value(data))
-        .row(
-            "ahead / behind",
-            match (data.ahead, data.behind) {
-                (Some(ahead), Some(behind)) => {
-                    FactValue::known(format!("\u{21E1}{ahead} \u{21E3}{behind}"))
-                }
-                _ => FactValue::Null,
-            },
-        )
-        .row(
-            "unique commits",
-            FactValue::from_option(data.unique_commits.map(|count| count.to_string())),
-        )
-        .row("published", FactValue::known(yes_no(data.published)))
-        .row("merged", FactValue::known(yes_no(data.merged)));
-    if let Some(pr) = data.pr.as_ref() {
-        list = list.row(
-            "PR",
-            FactValue::known(format!("#{} {}", pr.number, pr_state_word(pr.state))),
-        );
-    }
-
-    let mut children = vec![list.into_any_element()];
-    children.extend(
-        data.warnings
+    rows.extend(
+        known
+            .warnings
             .iter()
             .map(|warning| FactRow::warning(warning.clone()).into_any_element()),
     );
-
-    let body = block(children, cx);
-    if inspected.loading {
+    div()
+        .flex()
+        .flex_col()
+        .gap(theme.space.sm)
         // §3.4: a running inspection dims the previous values, it never blanks them.
-        return div()
-            .opacity(cx.theme().metrics.refreshing_opacity)
-            .child(body)
-            .into_any_element();
-    }
-    body
+        .when(known.refreshing, |el| {
+            el.opacity(theme.metrics.refreshing_opacity)
+        })
+        .children(rows)
+        .into_any_element()
 }
 
-/// `dirty  12 files` — a file count when the status collection succeeded.
-fn dirty_value(data: &WorktreeInspection) -> FactValue {
-    match (data.dirty, data.dirty_files) {
-        (true, Some(count)) => FactValue::known(format!("{count} files")),
-        (true, None) => FactValue::known("yes"),
-        (false, _) => FactValue::known("clean"),
-    }
-}
-
-fn yes_no(value: bool) -> &'static str {
-    if value { "yes" } else { "no" }
-}
-
-fn pr_state_word(state: InspectionPrState) -> &'static str {
-    match state {
-        InspectionPrState::Open => "open",
-        InspectionPrState::Merged => "merged",
-        InspectionPrState::Closed => "closed",
-    }
-}
-
-/// `opened 2h ago · created 5d ago` — low priority by definition, so it sits last.
-fn times_block(worktree: &Worktree, now: i64, cx: &App) -> AnyElement {
-    let opened = worktree
-        .last_opened_at
-        .as_deref()
-        .and_then(|iso| age_secs(iso, now))
-        .map(|age| format!("opened {} ago", format_age(age)));
-    let created =
-        age_secs(&worktree.created_at, now).map(|age| format!("created {} ago", format_age(age)));
-    let line = [opened, created]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join(" · ");
-    block(vec![Text::ui(line).muted().into_any_element()], cx)
-}
-
-/// `inspected <age> · I refresh`, shown only past 60 s (§2.6) so fresh facts stay quiet.
-fn freshness_footer(inspected: Option<&Inspected>, now: i64, cx: &App) -> Option<AnyElement> {
-    let data = inspected?.data.as_ref()?;
-    match inspection_freshness(&data.inspected_at, now) {
-        InspectionFreshness::Known(age) if age <= 60 => None,
-        InspectionFreshness::Known(age) => Some(
-            div()
-                .px(cx.theme().space.md)
-                .pt(cx.theme().space.sm)
-                .child(FreshnessStamp::new("inspected", age).action("I", "refresh"))
-                .into_any_element(),
-        ),
-        InspectionFreshness::Unknown => Some(
-            div()
-                .px(cx.theme().space.md)
-                .pt(cx.theme().space.sm)
-                .child(Text::ui("inspected unknown · I refresh").tone(Tone::Warning))
-                .into_any_element(),
-        ),
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum InspectionFreshness {
-    Known(i64),
-    Unknown,
-}
-
-fn inspection_freshness(inspected_at: &str, now: i64) -> InspectionFreshness {
-    age_secs(inspected_at, now).map_or(InspectionFreshness::Unknown, InspectionFreshness::Known)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn invalid_inspection_timestamp_has_unknown_freshness() {
-        assert_eq!(
-            inspection_freshness("not-an-rfc3339-timestamp", 1_788_523_200),
-            InspectionFreshness::Unknown
-        );
-    }
+/// The Location section: the path with its copy button, then when it was made and checked.
+fn location(detail: &WorktreeDetail, age_offset: i64, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let checked = match &detail.git {
+        GitFacts::Known(known) => known.checked_age,
+        _ => None,
+    };
+    let stamp = [
+        detail
+            .created_age
+            .map(|age| format!("Created {} ago", format_age(age.saturating_add(age_offset)))),
+        checked.map(|age| {
+            format!(
+                "safety checked {} ago",
+                format_age(age.saturating_add(age_offset))
+            )
+        }),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" \u{b7} ");
+    div()
+        .flex()
+        .flex_col()
+        .gap(theme.space.sm)
+        .child(Text::sentence_label(LOCATION))
+        .child(
+            CopyField::new(detail.path.clone()).button(
+                IconButton::new("detail-copy-path", Icon::Copy, label(&worktrees::CopyPath))
+                    .size(ButtonSize::Compact)
+                    .action(Box::new(worktrees::CopyPath))
+                    .harness_target("detail.copy_path"),
+            ),
+        )
+        .when(!stamp.is_empty(), |el| {
+            el.child(Text::caption(stamp).muted())
+        })
+        .into_any_element()
 }

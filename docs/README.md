@@ -51,3 +51,4 @@ what was rejected and why, and cites the research it was distilled from.
 | [0020](decisions/0020-single-text-input.md) | One live `TextInput` for every text surface: one engine, entity-owned inputs, key ownership by context word |
 | [0021](decisions/0021-hosted-worktree-boards-route-to-owner.md) | A hosted worktree's board routes to the daemon that owns the worktree (supersedes 0019's addendum) |
 | [0022](decisions/0022-board-workflows.md) | The worktree board is a control plane: a column runs a card as a native subagent, and the document version bumps lazily |
+| [0023](decisions/0023-pointer-parity.md) | Pointer parity: every action has a key and a visible control, controls are not focusable, and the mode word is retired |

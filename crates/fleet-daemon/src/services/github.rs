@@ -41,6 +41,10 @@ pub struct Github {
     in_flight: Arc<Mutex<HashMap<String, PrFetchFlight>>>,
     generations: Arc<Mutex<HashMap<String, u64>>>,
     next_generation: Arc<AtomicU64>,
+    /// Signalled each time a caller shares a fetch already in flight, so a test can wait for
+    /// the join itself instead of guessing how long the store reads before it take.
+    #[cfg(any(test, feature = "test-support"))]
+    flight_joined: Arc<tokio::sync::Notify>,
 }
 
 impl Github {
@@ -62,7 +66,15 @@ impl Github {
             in_flight: Arc::new(Mutex::new(HashMap::new())),
             generations: Arc::new(Mutex::new(HashMap::new())),
             next_generation: Arc::new(AtomicU64::new(1)),
+            #[cfg(any(test, feature = "test-support"))]
+            flight_joined: Arc::new(tokio::sync::Notify::new()),
         }
+    }
+
+    /// Resolves once a caller has joined a pull-request fetch that was already in flight.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn flight_joined(&self) {
+        self.flight_joined.notified().await;
     }
 
     /// Loads cached PR slices and refreshes them with global concurrency four.
@@ -201,6 +213,9 @@ impl Github {
                 && flight.receiver.has_changed().is_ok()
                 && (!force || flight.forced)
             {
+                // `notify_one` stores a permit, so a waiter that arrives later still wakes.
+                #[cfg(any(test, feature = "test-support"))]
+                self.flight_joined.notify_one();
                 flight.receiver.clone()
             } else {
                 let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);

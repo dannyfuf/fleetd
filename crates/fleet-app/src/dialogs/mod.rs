@@ -5,12 +5,14 @@ mod board_settings;
 mod card_create;
 pub(crate) mod card_detail;
 pub(crate) mod card_picker;
+mod changes_diff;
 mod clone_repo;
 mod confirm;
 mod context;
 mod create_worktree;
 mod edit_hooks;
 pub mod filter;
+mod footer;
 mod help;
 mod host;
 mod palette;
@@ -31,14 +33,17 @@ pub(crate) use crate::state::move_cursor as step;
 /// the section this app session last used.
 pub(crate) use board_settings::{BoardSection, open_on_section as open_board_section};
 pub use confirm::ConfirmRequest;
+pub(crate) use confirm::MoveTarget;
 pub use host::{ActiveDialog, request_confirm, request_edit_hooks};
 pub(crate) use host::{
     DialogHost, SessionTransport, dialog_fields, dialog_message, focused_input, notify,
-    open_agent_session, open_agent_thread_worktree, open_agents_picker, open_session,
-    open_worktree, read_host, retain_task, with_host,
+    open_agent_session, open_agent_thread, open_agents_picker, open_session, open_worktree,
+    read_host, retain_task, with_host,
 };
 #[cfg(test)]
 pub(crate) use host::{focused_input_text, hook_row_count};
+pub use palette::PalettePr;
+pub(crate) use palette::{Run as PaletteRun, session_rows};
 pub(crate) use settings::editor_command;
 #[cfg(test)]
 pub(crate) use settings::refresh_rows as settings_refresh_rows;
@@ -47,17 +52,29 @@ pub(crate) use settings::refresh_rows as settings_refresh_rows;
 const NARROW_W: Pixels = px(460.0);
 /// §3.8 card width for a yes/no prompt with facts above it.
 const PROMPT_W: Pixels = px(520.0);
-/// §3.8 card width for the settings rail plus pane.
+/// §3.8 card width for a rail plus pane: Board settings.
 const WIDE_W: Pixels = px(720.0);
-/// §3.8 card width for the three-column keymap.
-const HELP_W: Pixels = px(880.0);
+/// §3.8.6 Settings: a rail, a pane of controls and a search in the header, `760 × 600`.
+const SETTINGS_W: Pixels = px(760.0);
+/// §3.8.6 Settings' header search field.
+pub(crate) const SETTINGS_SEARCH_W: Pixels = px(240.0);
+/// §3.8.7 Help: a large panel, `1040 × 720`, clamped to the window on a narrow one.
+const HELP_W: Pixels = px(1040.0);
+/// §3.8.7 Help's Guides sidebar: "Here in …" and the guide list.
+pub(crate) const HELP_GUIDES_W: Pixels = px(300.0);
+/// §3.8.7 Help's All shortcuts table: the Where column.
+pub(crate) const HELP_WHERE_COL_W: Pixels = px(150.0);
+/// §3.8.7 Help's All shortcuts table: the Keys column, wide enough for `Ctrl+S 1 – 9`.
+pub(crate) const HELP_KEYS_COL_W: Pixels = px(150.0);
 
 /// §3.8.2 card height for the clone-repo list: `560 × 420`.
 const CLONE_H: Pixels = px(420.0);
-/// §3.8.6 card height for the settings rail plus pane: `720 × 560`.
-const SETTINGS_H: Pixels = px(560.0);
-/// §3.8.7 card height for the three-column keymap: `880 × 620`.
-const HELP_H: Pixels = px(620.0);
+/// Board settings' card height: `720 × 560`.
+const BOARD_SETTINGS_H: Pixels = px(560.0);
+/// §3.8.6 Settings' card height: `760 × 600`.
+const SETTINGS_H: Pixels = px(600.0);
+/// §3.8.7 card height for Help: `1040 × 720`.
+const HELP_H: Pixels = px(720.0);
 
 /// Which dialog is open (§3.8).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,6 +111,8 @@ pub enum Dialogs {
     Quit,
     /// §3.8.9 Quit and stop the daemon (`ctrl-shift-q`).
     QuitDaemon,
+    /// §3.6 One file's diff against the base, from the Workspace's Changes panel.
+    ChangesDiff,
 }
 
 impl Dialogs {
@@ -119,6 +138,7 @@ impl Dialogs {
             Self::Help => "Help",
             Self::Quit => "Quit",
             Self::QuitDaemon => "QuitDaemon",
+            Self::ChangesDiff => "ChangesDiff",
         }
     }
 
@@ -139,9 +159,38 @@ impl Dialogs {
             Self::NewContext | Self::EditContext | Self::RenameTerminal | Self::AssignRepo => {
                 NARROW_W
             }
-            Self::Settings => WIDE_W,
-            Self::CardDetail | Self::Help => HELP_W,
+            Self::Settings => SETTINGS_W,
+            // A sheet, not a card: it docks to the right of the board (UX-SPEC § Card detail).
+            Self::CardDetail | Self::ChangesDiff => cx.theme().metrics.sheet_w_detail,
+            Self::Help => HELP_W,
             Self::Quit => PROMPT_W,
+        }
+    }
+
+    /// The action `esc` dispatches in this dialog, which its close ✕ and a click on its scrim
+    /// dispatch too (ADR 0023: one path for key and pointer). The keymap test below holds this
+    /// table to the `escape` rows of `keymap::table()`.
+    #[must_use]
+    pub(crate) fn dismiss_action(&self) -> Box<dyn gpui::Action> {
+        use crate::actions;
+        match self {
+            Self::CardDetail => Box::new(actions::card_detail::Close),
+            Self::Confirm => Box::new(actions::confirm::Reject),
+            Self::Help => Box::new(actions::help::Close),
+            Self::Quit => Box::new(actions::quit_dialog::Reject),
+            Self::QuitDaemon => Box::new(actions::quit_daemon_dialog::Reject),
+            Self::BoardSettings
+            | Self::CardPicker
+            | Self::CardCreate
+            | Self::CreateWorktree
+            | Self::CloneRepo
+            | Self::NewContext
+            | Self::EditContext
+            | Self::AssignRepo
+            | Self::EditHooks
+            | Self::Settings
+            | Self::RenameTerminal
+            | Self::ChangesDiff => Box::new(actions::dialog::Cancel),
         }
     }
 
@@ -151,7 +200,8 @@ impl Dialogs {
     pub(crate) const fn height(&self) -> Option<Pixels> {
         match self {
             Self::CloneRepo => Some(CLONE_H),
-            Self::BoardSettings | Self::Settings => Some(SETTINGS_H),
+            Self::BoardSettings => Some(BOARD_SETTINGS_H),
+            Self::Settings => Some(SETTINGS_H),
             Self::Help => Some(HELP_H),
             _ => None,
         }
@@ -188,9 +238,10 @@ impl Dialogs {
             Self::EditHooks => edit_hooks::render(state, bridge, focus, host, window, cx),
             Self::Settings => settings::render(state, bridge, focus, host, window, cx),
             Self::RenameTerminal => rename_terminal::render(state, bridge, focus, host, window, cx),
-            Self::Help => help::render(state, focus, window, cx),
+            Self::Help => help::render(state, focus, host, window, cx),
             Self::Quit => quit::render_quit(state, focus, window, cx),
             Self::QuitDaemon => quit::render_quit_daemon(state, focus, window, cx),
+            Self::ChangesDiff => changes_diff::render(state, focus, host, window, cx),
         }
     }
 }
@@ -215,7 +266,8 @@ pub(crate) fn seed(dialog: &Dialogs, state: &Entity<AppState>, bridge: &Bridge, 
         Dialogs::EditHooks => edit_hooks::seed(state, cx),
         Dialogs::Settings => settings::seed(state, bridge, cx),
         Dialogs::RenameTerminal => rename_terminal::seed(state, cx),
-        Dialogs::Help => help::prepare(),
+        Dialogs::Help => help::seed(state, cx),
+        Dialogs::ChangesDiff => changes_diff::refresh(state, cx),
         Dialogs::Quit | Dialogs::QuitDaemon => {}
     }
 }
@@ -260,8 +312,50 @@ mod tests {
             Dialogs::Help,
             Dialogs::Quit,
             Dialogs::QuitDaemon,
+            Dialogs::ChangesDiff,
         ] {
             assert!(!dialog.context_name().is_empty());
+        }
+    }
+
+    /// The ✕ and the scrim dispatch what `esc` does, so the table cannot drift from the keymap.
+    #[test]
+    fn every_dialog_dismisses_through_its_escape_binding() {
+        let table = crate::keymap::table();
+        let escape_in = |context: &str| {
+            table
+                .iter()
+                .find(|spec| spec.keys == "escape" && spec.context == context)
+                .map(|spec| spec.action)
+        };
+        for dialog in [
+            Dialogs::BoardSettings,
+            Dialogs::CardPicker,
+            Dialogs::CardCreate,
+            Dialogs::CardDetail,
+            Dialogs::CreateWorktree,
+            Dialogs::CloneRepo,
+            Dialogs::Confirm,
+            Dialogs::NewContext,
+            Dialogs::EditContext,
+            Dialogs::AssignRepo,
+            Dialogs::EditHooks,
+            Dialogs::Settings,
+            Dialogs::RenameTerminal,
+            Dialogs::Help,
+            Dialogs::Quit,
+            Dialogs::QuitDaemon,
+            Dialogs::ChangesDiff,
+        ] {
+            let own = format!("Dialog > {}", dialog.context_name());
+            let expected = escape_in(&own)
+                .or_else(|| escape_in("Dialog"))
+                .unwrap_or_else(|| panic!("no escape binding reaches {dialog:?}"));
+            assert_eq!(
+                dialog.dismiss_action().name(),
+                expected,
+                "{dialog:?}'s ✕ must dispatch what esc does"
+            );
         }
     }
 

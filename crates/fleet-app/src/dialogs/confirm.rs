@@ -74,8 +74,16 @@ pub(crate) struct CardRunCancelDraft {
 struct PendingBoardConfirms {
     /// The run `X` staged, keyed by the window whose dialog will adopt it.
     cancels: HashMap<EntityId, CardRunCancelDraft>,
-    /// The column `[` / `]` would move the card into.
-    moves: HashMap<EntityId, StatusId>,
+    /// Where `[` / `]` or a dropped card would move the card to.
+    moves: HashMap<EntityId, MoveTarget>,
+}
+
+/// Where a confirmed [`ConfirmRequest::MoveCancelsRun`] puts the card: the column, and for a
+/// dropped card the place in it (`None` appends, which is what `[` / `]` ask for).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MoveTarget {
+    pub(crate) status: StatusId,
+    pub(crate) index: Option<usize>,
 }
 
 impl Global for PendingBoardConfirms {}
@@ -100,12 +108,16 @@ pub struct ConfirmState {
     /// Bumps on every seed and re-check.
     pub(crate) seq: u64,
     pub(crate) list: Option<gpui::ListState>,
+    /// The subtitle under the title, when the request's own target is not enough: a worktree
+    /// delete names its repository and where the copy is on disk. Read from the snapshot when
+    /// the dialog opens, so render only reads it.
+    pub(crate) subtitle: Option<String>,
     /// The child this window is being asked to cancel, staged by the transcript's `x`.
     pub(crate) delegation_cancel: Option<DelegationCancelDraft>,
     /// The card run this window is being asked to cancel, staged by the board's `X`.
     pub(crate) card_run_cancel: Option<CardRunCancelDraft>,
-    /// The column a confirmed `MoveCancelsRun` moves into, staged by `[` / `]`.
-    pub(crate) move_target: Option<StatusId>,
+    /// Where a confirmed `MoveCancelsRun` moves the card, staged by `[` / `]` or a drop.
+    pub(crate) move_target: Option<MoveTarget>,
 }
 
 impl ConfirmRequest {
@@ -145,11 +157,11 @@ impl ConfirmRequest {
             .insert(state.entity_id(), CardRunCancelDraft { card, key, fact });
     }
 
-    /// Stages the column a confirmed [`ConfirmRequest::MoveCancelsRun`] moves the card into.
-    pub(crate) fn stage_move_target(state: &Entity<AppState>, status: StatusId, cx: &mut App) {
+    /// Stages where a confirmed [`ConfirmRequest::MoveCancelsRun`] moves the card.
+    pub(crate) fn stage_move_target(state: &Entity<AppState>, target: MoveTarget, cx: &mut App) {
         cx.default_global::<PendingBoardConfirms>()
             .moves
-            .insert(state.entity_id(), status);
+            .insert(state.entity_id(), target);
     }
 }
 
@@ -258,6 +270,11 @@ fn card_run_cancel_card(
                 format!("Cancel {}'s run?", pending.key),
                 FactList::new().fact(Fact::risk(pending.fact)),
             )
+            .dismiss_action(crate::dialogs::Dialogs::Confirm.dismiss_action())
+            .accept_actions(
+                Box::new(confirm_actions::Accept),
+                Box::new(confirm_actions::AcceptStrong),
+            )
             .consequence(CARD_RUN_CANCEL_CONSEQUENCE)
             .icon(Icon::CircleX)
             .action_label("Cancel run")
@@ -299,6 +316,11 @@ fn delegation_cancel_card(
                     "child {} stops and reports no further work",
                     pending.child
                 ))),
+            )
+            .dismiss_action(crate::dialogs::Dialogs::Confirm.dismiss_action())
+            .accept_actions(
+                Box::new(confirm_actions::Accept),
+                Box::new(confirm_actions::AcceptStrong),
             )
             .target(pending.id.to_string())
             .consequence(DELEGATION_CANCEL_CONSEQUENCE)

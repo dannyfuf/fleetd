@@ -20,12 +20,12 @@ use fleet_proto::{
     response::{PrSlice, ResponseBody},
 };
 use fleet_ui_kit::{
-    ActiveTheme, HarnessTargetExt, Icon, InputMode, SplitLayout, StatusKind, TextInput,
-    TextInputEvent, Toast, ToastDuration,
+    ActiveTheme, HarnessTargetExt, Icon, InputMode, SplitLayout, TextInput, TextInputEvent, Toast,
+    ToastDuration,
 };
 use gpui::{
-    AnyElement, App, ClipboardItem, Entity, FocusHandle, IntoElement, ScrollHandle, SharedString,
-    Subscription, Task, UniformListScrollHandle, Window, div, prelude::*,
+    AnyElement, App, ClipboardItem, Entity, FocusHandle, IntoElement, Pixels, ScrollHandle,
+    SharedString, Subscription, Task, UniformListScrollHandle, Window, div, prelude::*,
 };
 
 use crate::{
@@ -47,7 +47,10 @@ mod actions;
 mod cache;
 mod composition;
 mod navigation;
+mod palette;
+mod pr_pointer;
 mod projection;
+mod sidebar;
 #[cfg(test)]
 pub(crate) mod tests;
 
@@ -82,13 +85,17 @@ pub const PR_TTL: Duration = Duration::from_secs(90);
 /// Below this window width the detail panel docks instead of insetting (§3.4).
 const DETAIL_INSET_MIN_WIDTH: f32 = 1120.0;
 
-/// The window geometry one frame is drawn against.
-#[derive(Debug, Clone, Copy)]
-struct Viewport {
+/// What one frame of the Hub body is drawn against: the window geometry, the clock and the
+/// pointer contract of the worktree rows.
+struct Frame<'a> {
     /// Logical window width in pixels.
     width: f32,
-    /// How many rows the list pane can show.
-    rows: usize,
+    /// The epoch second the frame is drawn at.
+    now: i64,
+    /// What a worktree row does when the pointer uses it.
+    handlers: &'a worktrees_list::RowHandlers,
+    /// What the sidebar's rows and edge do when the pointer uses them.
+    sidebar: &'a repos_rail::SidebarHandlers,
 }
 
 /// Whether the detail panel docks over the list instead of being inset (§3.4).
@@ -97,28 +104,37 @@ pub fn detail_is_docked(window_width: f32) -> bool {
     window_width < DETAIL_INSET_MIN_WIDTH
 }
 
+/// The sidebar's width this frame: its icon column while collapsed (`H`), else the width its
+/// edge was dragged to, else `metrics.sidebar_w` — always within the drag range.
+#[must_use]
+pub(crate) fn sidebar_width(state: &AppState, metrics: &fleet_ui_kit::theme::Metrics) -> Pixels {
+    if state.rail_collapsed {
+        metrics.sidebar_collapsed_w
+    } else {
+        state
+            .sidebar_w
+            .unwrap_or(metrics.sidebar_w)
+            .clamp(metrics.sidebar_min_w, metrics.sidebar_max_w)
+    }
+}
+
 /// The list pane's width in `ch`, which is what resolves every §2.9 ladder.
 ///
-/// The rail never moves and the docked panel never steals width, so the only two variables are
-/// `H` (the 44 px icon rail) and an **inset** detail panel.
+/// The sidebar never moves and the docked panel never steals width, so the only variables are
+/// the sidebar's width (collapsed, default or dragged) and an **inset** detail panel.
 #[must_use]
 fn list_pane_ch(
     window_width: f32,
-    rail_collapsed: bool,
+    sidebar_width: Pixels,
     detail_open: bool,
     metrics: &fleet_ui_kit::theme::Metrics,
 ) -> f32 {
-    let rail = if rail_collapsed {
-        repos_rail::COLLAPSED_WIDTH
-    } else {
-        f32::from(metrics.rail_w)
-    };
     let detail = if detail_open && !detail_is_docked(window_width) {
         f32::from(metrics.detail_w)
     } else {
         0.0
     };
-    ((window_width - rail - detail) / fleet_ui_kit::theme::CH).max(1.0)
+    ((window_width - f32::from(sidebar_width) - detail) / fleet_ui_kit::theme::CH).max(1.0)
 }
 
 /// The Hub's own mutable state, held as an entity so `on_action` listeners can write it.
@@ -149,6 +165,10 @@ pub struct HubState {
     pub creating: Vec<(RepoId, u64)>,
     creation_intents: HashMap<PrIdentity, PrCreateIntent>,
     restoring_trash: Option<String>,
+    /// `$HOME`, so the prepared worktree paths are tilde-collapsed once.
+    home: Option<std::path::PathBuf>,
+    /// The sidebar's Agents rows, rebuilt when the Hub synchronizes and replaced only on change.
+    agents: Rc<[repos_rail::AgentRow]>,
 }
 
 impl HubState {
@@ -330,6 +350,8 @@ pub struct HubScreen {
     /// Mirrors the editor into `FilterState.query`, which every projection and the harness
     /// dump read.
     filter_subscription: Option<Subscription>,
+    /// What a click on the PR screen's tabs and rows does, built once `bind` has the context.
+    pr_handlers: Option<prs_screen::PrHandlers>,
     home: Option<std::path::PathBuf>,
 }
 
@@ -345,7 +367,10 @@ impl HubScreen {
             input
         });
         Self {
-            hub: cx.new(|_| HubState::default()),
+            hub: cx.new(|_| HubState {
+                home: crate::presentation::home_dir(),
+                ..HubState::default()
+            }),
             rail_scroll: UniformListScrollHandle::new(),
             list_scroll: UniformListScrollHandle::new(),
             pr_scroll: UniformListScrollHandle::new(),
@@ -353,6 +378,7 @@ impl HubScreen {
             observation: None,
             filter_input,
             filter_subscription: None,
+            pr_handlers: None,
             home: crate::presentation::home_dir(),
         }
     }
@@ -391,6 +417,7 @@ impl HubScreen {
             },
         ));
         let ctx = self.context(state, bridge);
+        self.pr_handlers = Some(ctx.pr_handlers());
         let observed = ctx.clone();
         let filter_input = self.filter_input.clone();
         self.observation = Some(cx.observe(state, move |state, cx| {
@@ -527,54 +554,14 @@ fn visible_rows(window_height: f32, cx: &App) -> usize {
 }
 
 fn row_capacity(window_height: f32, metrics: fleet_ui_kit::theme::Metrics) -> usize {
-    let chrome = f32::from(metrics.context_bar_h)
+    let chrome = f32::from(metrics.title_bar_h)
         + f32::from(metrics.status_bar_h)
         + 2.0 * f32::from(metrics.pane_header_h);
     (((window_height - chrome).max(0.0) / f32::from(metrics.row_h).max(1.0)) as usize).max(2)
 }
 
-/// The Hub's screen tabs; summary counts are context scoped, independent of repo scope.
-fn hub_tabs(state: &AppState) -> fleet_ui_kit::SegmentedTabs {
-    use fleet_ui_kit::{SegmentedTab, SegmentedTabs};
-    let summary = state
-        .snapshot
-        .as_ref()
-        .and_then(|snapshot| context_board_summary(&snapshot.boards, state.active_context()));
-    let label = if summary.is_some_and(|board| board.conflict_count > 0) {
-        "Board •"
-    } else {
-        "Board"
-    };
-    let board = summary
-        .map_or_else(
-            || SegmentedTab::bare(label),
-            |summary| SegmentedTab::new(label, summary.open_count),
-        )
-        .loading(state.board.loading);
-    let active = match state.screen {
-        Screen::Hub { tab: HubTab::Prs } => 1,
-        Screen::Hub { tab: HubTab::Board } => 2,
-        _ => 0,
-    };
-    SegmentedTabs::new([
-        SegmentedTab::bare("Worktrees"),
-        SegmentedTab::bare("Pull requests"),
-        board,
-    ])
-    .active(active)
-    .underlined(false)
-    .harness_tabs("hub.tab")
-    .on_select(|index, window, cx| {
-        let action: Box<dyn gpui::Action> = match index {
-            1 => Box::new(hub::GoPrs),
-            2 => Box::new(crate::actions::board::GoBoard),
-            _ => Box::new(hub::GoWorktrees),
-        };
-        window.dispatch_action(action, cx);
-    })
-}
-
-fn context_board_summary<'a>(
+/// The context's own board, as the title bar's Board segment counts it (§2.2).
+pub(crate) fn context_board_summary<'a>(
     boards: &'a [BoardSummary],
     context: Option<&ContextId>,
 ) -> Option<&'a BoardSummary> {

@@ -25,6 +25,8 @@ pub mod fleet {
             OpenJobs,
             /// `!` — focus the sticky error slot.
             FocusStickyError,
+            /// `X` — dismiss the sticky error (its ✕). The failed jobs stay in the Jobs panel.
+            DismissStickyError,
             /// `r` — refresh status, PRs and discovery as a job.
             Refresh,
             /// `U` — update Fleet as a job.
@@ -426,6 +428,8 @@ pub mod prefix {
             ToggleZoom,
             /// `ctrl-s v` — hide/show the read-only watch split.
             ToggleWatchPane,
+            /// `ctrl-s g` — hide/show the Changes panel: what this worktree changed against its base.
+            ToggleChanges,
             /// `ctrl-s N` — select the next watch, wrapping in start order.
             NextWatch,
             /// `ctrl-s P` — select the previous watch, wrapping in start order.
@@ -496,6 +500,10 @@ pub mod filter {
             Accept,
             /// `Esc` — first press keeps the filter, second clears it. Never quits.
             Escape,
+            /// No key of its own: the empty filter state's `Clear filter` button, which clears
+            /// the query in one click wherever the keyboard is. Its chip is `Esc` (`Cancel`),
+            /// which does the same once the input has been left.
+            Clear,
             /// `ctrl-n` / `↓` — move the list cursor down while still typing.
             CursorDown,
             /// `ctrl-p` / `↑` — move the list cursor up while still typing.
@@ -648,6 +656,10 @@ pub mod settings {
             OpenConfigFile,
             /// `D` — run doctor.
             RunDoctor,
+            /// `/` — search every section's settings.
+            Search,
+            /// `Esc` in the search field — clear the search and hand the keys back to the rows.
+            EndSearch,
         ]
     );
 }
@@ -718,6 +730,8 @@ pub mod help {
         [
             /// `?` / `Esc` — close the help overlay.
             Close,
+            /// `ctrl-tab` / `ctrl-shift-tab` — switch between Guides and All shortcuts.
+            SwitchTab,
         ]
     );
 }

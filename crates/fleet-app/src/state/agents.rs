@@ -15,7 +15,7 @@ use crate::screens::agent_thread::{
     PreparedDecisionObservable, decisions::decision_context, presentation::tab_title,
 };
 
-/// The context bar's `N needs you · N working · N failed`, across every thread in the snapshot.
+/// `N needs you · N working · N failed`, across every top-level thread in the snapshot.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct AgentCounts {
     /// Threads blocked on a permission, a question, a plan, or a fresh completion.
@@ -30,6 +30,8 @@ pub struct AgentCounts {
 struct AgentDerived {
     attention: HashMap<ThreadId, Attention>,
     counts: AgentCounts,
+    /// The one top-level thread that needs you, while exactly one does.
+    waiting: Option<ThreadId>,
     strip_offsets: HashMap<ThreadId, usize>,
     /// Callers with at least one live durable child, rebuilt only when that census changes.
     live_delegation_callers: HashSet<ThreadId>,
@@ -45,8 +47,8 @@ impl AgentCounts {
 
 /// The client's native-agent mirror: daemon summaries, opened projections and seen cursors.
 ///
-/// The daemon owns thread truth, so the summary list is replaced wholesale by every snapshot;
-/// the app only adds what is local to a client — which tab is selected per worktree, the
+/// The daemon owns thread truth, so the summary list is replaced by every snapshot — except for
+/// a thread no snapshot has listed yet ([`Self::sync_snapshot`]); the app only adds what is local to a client — which tab is selected per worktree, the
 /// installation's persisted seen cursor plus this process's newer override, and resync state.
 #[derive(Debug, Default)]
 pub struct AgentThreads {
@@ -116,6 +118,12 @@ pub struct AgentThreads {
     last_applied: HashMap<ThreadId, Applied>,
     /// Threads whose authoritative projection was replaced outside the live event stream.
     projection_replaced: HashSet<ThreadId>,
+    /// Threads a summary introduced that no snapshot has listed yet (see [`Self::sync_snapshot`]).
+    unconfirmed: HashSet<ThreadId>,
+    /// `^s a` / `^s A` presses still waiting for their thread (`pending`).
+    pending_creates: Vec<pending::PendingCreate>,
+    /// The last [`CreateToken`] handed out.
+    next_create: u64,
     /// Prepared foreground data. Render getters only read this cache.
     derived: AgentDerived,
 }
@@ -490,6 +498,14 @@ impl AgentThreads {
         self.derived.counts
     }
 
+    /// The top-level thread that needs you when exactly one does: what the title bar's
+    /// `1 needs you` opens. With two or more waiting there is no single answer, and the button
+    /// opens the agents picker instead.
+    #[must_use]
+    pub fn waiting_thread(&self) -> Option<ThreadId> {
+        self.derived.waiting
+    }
+
     /// Zero-based position among the native tabs of this thread's worktree.
     #[must_use]
     pub fn strip_offset(&self, thread: ThreadId) -> Option<usize> {
@@ -528,6 +544,7 @@ impl AgentThreads {
                 .and_modify(|current| *current = std::cmp::max(*current, propagated));
         }
         let mut counts = AgentCounts::default();
+        let mut waiting = None;
         for summary in self
             .summaries
             .iter()
@@ -538,13 +555,17 @@ impl AgentThreads {
                 .copied()
                 .unwrap_or(Attention::Idle)
             {
-                Attention::NeedsYou(_) => counts.needs_you += 1,
+                Attention::NeedsYou(_) => {
+                    counts.needs_you += 1;
+                    waiting = Some(summary.thread);
+                }
                 Attention::Failed => counts.failed += 1,
                 Attention::Working | Attention::Waiting => counts.working += 1,
                 Attention::Unread | Attention::Idle => {}
             }
         }
         self.derived.attention = attention;
+        self.derived.waiting = waiting.filter(|_| counts.needs_you == 1);
         self.derived.counts = counts;
     }
 
@@ -695,8 +716,8 @@ impl AgentThreads {
 
     /// Records whether a thread's transcript has its tail frozen.
     ///
-    /// Returns whether the answer changed: it decides both the key context and the status
-    /// bar's mode word, so a change has to reach the next frame.
+    /// Returns whether the answer changed: it decides both the key context and the harness
+    /// snapshot's `mode`, so a change has to reach the next frame.
     pub fn set_scrolling(&mut self, thread: ThreadId, scrolling: bool) -> bool {
         if scrolling {
             self.scrolling.insert(thread)
@@ -1026,6 +1047,7 @@ impl AgentThreads {
                 true
             }
             None => {
+                self.unconfirmed.insert(summary.thread);
                 self.summaries.push(summary);
                 true
             }
@@ -1081,6 +1103,13 @@ impl AgentThreads {
         self.reported.insert(thread, seq);
     }
 
+    /// Makes the next snapshot authoritative about every thread, as a fresh link's first one is.
+    ///
+    /// Nothing from the previous link can be newer than the snapshot a new link opens with.
+    pub fn forget_unconfirmed(&mut self) {
+        self.unconfirmed.clear();
+    }
+
     /// Records current attentions without presenting them, the way a fresh link is adopted.
     ///
     /// A thread that was already blocked before this window connected is not news, so the first
@@ -1094,8 +1123,29 @@ impl AgentThreads {
     }
 
     /// Replaces the summary list from an authoritative snapshot and forgets vanished threads.
-    pub fn sync_snapshot(&mut self, threads: Vec<AgentThreadSummary>) {
-        let live: HashSet<ThreadId> = threads.iter().map(|summary| summary.thread).collect();
+    ///
+    /// A snapshot is authoritative about every thread it has *ever* listed, but not about one a
+    /// summary introduced since. The daemon assembles a snapshot asynchronously and creating a
+    /// thread does not stamp it, so a snapshot assembled a moment before a thread existed can be
+    /// applied after that thread's `AgentSummary` and its create reply. Its silence is not a
+    /// removal: forgetting the thread there would drop the tab `^s a` had just selected, and the
+    /// next summary would put it back unselected. Such a thread is kept, with its latest summary,
+    /// until a snapshot lists it — or until a snapshot no longer lists its worktree, which is
+    /// the one way a thread no snapshot ever listed can really be gone.
+    pub fn sync_snapshot(
+        &mut self,
+        mut threads: Vec<AgentThreadSummary>,
+        worktrees: &HashSet<&WorktreeId>,
+    ) {
+        let mut live: HashSet<ThreadId> = threads.iter().map(|summary| summary.thread).collect();
+        self.unconfirmed.retain(|thread| !live.contains(thread));
+        for summary in &self.summaries {
+            if self.unconfirmed.contains(&summary.thread) && worktrees.contains(&summary.worktree) {
+                live.insert(summary.thread);
+                threads.push(summary.clone());
+            }
+        }
+        self.unconfirmed.retain(|thread| live.contains(thread));
         if self.summaries != threads {
             self.summaries = threads;
             self.summaries_revision = self.summaries_revision.wrapping_add(1);
@@ -1161,7 +1211,7 @@ impl AgentThreads {
     ///
     /// Only the two states the design treats as signals — `needs you` and `failed` — fire, and
     /// each fires once per entry, so a thread that stays blocked does not notify on every event.
-    pub fn attention_edges(&mut self) -> Vec<(String, Attention)> {
+    pub fn attention_edges(&mut self) -> Vec<(String, Attention, ThreadId)> {
         let mut edges = Vec::new();
         for summary in self
             .summaries
@@ -1174,7 +1224,7 @@ impl AgentThreads {
                 continue;
             }
             if matches!(attention, Attention::NeedsYou(_) | Attention::Failed) {
-                edges.push((tab_title(summary), attention));
+                edges.push((tab_title(summary), attention, summary.thread));
             }
         }
         edges
@@ -1270,13 +1320,19 @@ impl AppState {
     /// Applies one broadcast summary and presents whatever attention edge it created.
     pub fn apply_agent_summary(&mut self, summary: AgentThreadSummary, now: Instant) {
         self.agents.apply_summary(summary);
+        self.adopt_created_threads();
         self.notify_agent_attention(now);
     }
 
     /// Presents every fresh `needs you` / `failed` edge through the activity notification path.
     pub(crate) fn notify_agent_attention(&mut self, now: Instant) {
-        for (label, attention) in self.agents.attention_edges() {
-            self.notify_agent_thread(&label, attention, now);
+        for (label, attention, thread) in self.agents.attention_edges() {
+            self.notify_agent_thread(
+                &label,
+                attention,
+                Some(notifications::ToastTarget::AgentThread(thread)),
+                now,
+            );
         }
     }
 }
@@ -1311,6 +1367,8 @@ mod persisted_cursor_tests {
         );
     }
 }
+
+mod pending;
 
 #[cfg(test)]
 mod tests;

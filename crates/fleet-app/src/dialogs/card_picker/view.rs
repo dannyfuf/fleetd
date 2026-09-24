@@ -24,20 +24,30 @@ pub(crate) fn render(
     let label = picker_label(state.read(cx), &draft.kind);
     let selected = draft.selected.clone();
     let accent = Tone::Accent.color(cx.theme());
-    let list = FuzzyList::new(rows.iter().map(|option| {
-        // A row that cannot be taken is drawn faint and never as the selection, so the reason
-        // in its trailing detail — `would cycle` — is the only thing left to read.
-        let mut item = FuzzyItem::new(option.label.clone()).disabled(option.disabled);
-        if let Some(detail) = option.detail.clone() {
-            item = item.trailing(detail);
-        }
-        if multi && selected.contains(&option.value) {
-            item = item.leading(Icon::Check.el().size(IconSize::Small).color(accent));
-        }
-        item
-    }))
+    let list = FuzzyList::new(
+        "card-picker-list",
+        rows.iter().map(|option| {
+            // A row that cannot be taken is drawn faint and never as the selection, so the reason
+            // in its trailing detail — `would cycle` — is the only thing left to read.
+            let mut item = FuzzyItem::new(option.label.clone()).disabled(option.disabled);
+            if let Some(detail) = option.detail.clone() {
+                item = item.trailing(detail);
+            }
+            if multi && selected.contains(&option.value) {
+                item = item.leading(Icon::Check.el().size(IconSize::Small).color(accent));
+            }
+            item
+        }),
+    )
     .cursor(draft.cursor)
-    .cap(PICKER_ROWS)
+    .visible_rows(PICKER_ROWS)
+    .track_scroll(&draft.scroll)
+    .on_click({
+        let state = state.clone();
+        let bridge = bridge.clone();
+        move |index, _window, cx| click_row(&state, &bridge, index, cx)
+    })
+    .harness_rows("dialog.row", 0)
     .under_text_field(true)
     // Telling a fixed-list kind to type one is telling it to do the thing `apply` answers with
     // "No match — pick a value": only a kind that takes free text can be typed into.
@@ -50,26 +60,11 @@ pub(crate) fn render(
         .muted(),
     );
 
-    // `ctrl-n` / `ctrl-p` are the only way to move the highlight on either branch — `j` and
-    // `k` type into the query — so the multi-select row names them too. Without it a Labels
-    // picker offered no discoverable way to reach its second row.
-    let hints = if multi {
-        KeyHintRow::new()
-            .key("\u{2303}n/\u{2303}p", "move")
-            .key("space", "toggle")
-            .key("\u{23ce}", "apply")
-            .key("esc", "cancel")
-    } else {
-        KeyHintRow::new()
-            .key("\u{2303}n/\u{2303}p", "move")
-            .key("\u{23ce}", "set")
-            .key("esc", "cancel")
-    };
-
     let mut card = Dialog::new("Card property")
+        .dismiss_action(crate::dialogs::Dialogs::CardPicker.dismiss_action())
         .icon(Icon::ArrowRightLeft)
         .width(Dialogs::CardPicker.width(cx))
-        .subtitle(format!("\u{00b7} {label}"))
+        .subtitle(label)
         // The query is this dialog's whole tab cycle, so it is `dialog.field[0]` — the field
         // `dialogs::dialog_fields` reports at the same index (`docs/TESTING-HARNESS.md` §3).
         .body(
@@ -79,8 +74,10 @@ pub(crate) fn render(
                 .child(input.harness_target_indexed("dialog.field", 0))
                 .child(list),
         )
-        .hint_row(hints)
-        .primary("\u{23ce} Apply");
+        .actions(vec![
+            footer::cancel(&Dialogs::CardPicker),
+            footer::primary("card-picker-apply", "Apply", Box::new(dialog::Confirm)),
+        ]);
     if let Some(message) = draft.error.clone() {
         card = card.error(message);
     }

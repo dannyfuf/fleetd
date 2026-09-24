@@ -388,6 +388,23 @@ impl Drop for InFlight {
     }
 }
 
+/// The requests a [`Bridge::recording`] bridge was handed, oldest first.
+#[cfg(test)]
+pub(crate) struct RecordedRequests(Receiver<Command>);
+
+#[cfg(test)]
+impl RecordedRequests {
+    /// Every request handed over since the last call.
+    pub(crate) fn take(&self) -> Vec<RequestBody> {
+        std::iter::from_fn(|| self.0.try_recv().ok())
+            .filter_map(|command| match command {
+                Command::Request { body, .. } => Some(*body),
+                Command::Reconnect | Command::Shutdown => None,
+            })
+            .collect()
+    }
+}
+
 enum Command {
     /// Send a request; the answer is forwarded when a channel was supplied.
     Request {
@@ -515,6 +532,33 @@ impl Bridge {
             settle: Arc::new(SettleCounter::default()),
             agent_seen: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// A bridge whose runtime is already gone, with no thread and no daemon behind it.
+    ///
+    /// Every `request` is answered and every `send` refused synchronously, on the caller's
+    /// thread, exactly as [`Bridge::start`]'s handle behaves once its runtime has stopped. A
+    /// GPUI test therefore sees each refusal within one `run_until_parked`, instead of racing a
+    /// real runtime thread that may not have processed its `Shutdown` yet.
+    #[cfg(test)]
+    pub(crate) fn closed() -> Self {
+        let (commands, command_rx) = async_channel::bounded(COMMAND_CAPACITY);
+        command_rx.close();
+        let (event_tx, events) = async_channel::bounded(EVENT_CAPACITY);
+        Self::with_channels(commands, events, event_tx, Arc::new(AtomicBool::new(false)))
+    }
+
+    /// A bridge with no runtime behind it that keeps every request it is handed.
+    ///
+    /// Nothing answers: the requests wait in the returned [`RecordedRequests`], so a GPUI test
+    /// can assert exactly what a gesture asked the daemon for without a daemon to ask.
+    #[cfg(test)]
+    pub(crate) fn recording() -> (Self, RecordedRequests) {
+        let (commands, command_rx) = async_channel::unbounded();
+        let (event_tx, events) = async_channel::bounded(EVENT_CAPACITY);
+        let bridge =
+            Self::with_channels(commands, events, event_tx, Arc::new(AtomicBool::new(false)));
+        (bridge, RecordedRequests(command_rx))
     }
 
     /// Persisted native-agent cursors fetched for the current daemon connection.

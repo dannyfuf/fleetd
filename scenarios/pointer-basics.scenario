@@ -1,14 +1,16 @@
-# Phase 3 acceptance — every pointer path Fleet actually paints, end to end.
+# Phase 3 acceptance — the pointer's basic moves, end to end, with no key pressed at all.
 #
-# Fleet's Hub rows carry no click handler (`views/worktrees_list.rs`, `views/repos_rail.rs`,
-# `views/prs_screen.rs` and `screens/jobs/presentation.rs` register none), so a row is *named*
-# for the pointer but only *opened* from the keyboard. The segmented tab strip is the one Hub
-# control with an `on_select`, so that is what the click half of this scenario drives.
+# Every Hub row answers the pointer now (ADR 0023, UX-SPEC §5.1): a click selects, a double-click
+# opens as ⏎ does. So this is the whole round trip by mouse: the title bar's section nav through
+# the three Hub sections, a hover and a wheel over the list, a double-click into the workspace,
+# `← Worktrees` back out, then Help from the title bar and one guide step run by its button.
+# The richer journeys live under `pointer/`; `hub/worktrees-pointer.scenario` covers a row's menus
+# and `hub/sidebar-pointer.scenario` the sidebar.
 fixture: one-repo
 await idle
 assert screen == Hub && hub_tab == Worktrees
 
-# Click the segmented tab strip through all three Hub tabs and back.
+# Click the title bar's section nav through all three Hub sections and back.
 click hub.tab[1]
 await hub_tab == Prs && screen == Hub
 shot prs-tab
@@ -28,13 +30,27 @@ scroll 0 -2 at worktrees.row[0]
 await idle
 dump after-pointer
 
-# Open the session from the keyboard, because the row has no pointer affordance, ...
-key o
+# A double-click opens the worktree, exactly like ⏎ ...
+click left 2 worktrees.row[0]
 await screen == Workspace 20000
-shot workspace
+await lists.tabs.rows[0] exists 20000
+assert targets["workspace.back"] exists
 dump workspace
 
-# ... and close it from the keyboard too: `ctrl-s s` returns to the Hub, session still running.
-key ctrl-s s
-await screen == Hub
+# ... and `← Worktrees` returns to the Hub, the session still running.
+click workspace.back
+await screen == Hub 10000
+assert hub_tab == Worktrees && overlay absent
+assert focused == worktrees.row[0] && lists.worktrees.rows[0].id == "acme/api#feature"
+
+# Help from the title bar; the first guide's first step runs `g b` on the Hub behind it.
+click titlebar.help
+await dialog.name == Help 10000
+await targets["help.guide[0]"] exists 10000
+click help.guide[0]
+await targets["help.step[0].action[0]"] exists 5000
+click help.step[0].action[0]
+await overlay absent 10000
+await hub_tab == Board 10000
+assert screen == Hub && dialog absent
 quit

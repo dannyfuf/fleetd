@@ -23,6 +23,7 @@ and also run headless.
 | `popup-open.scenario` | `a` / `A` open the floating popup, `^s q` hides it, the Hub keeps its selection | `KEYMAP.md` §Hub [A21], §Agent popup |
 | `thread-streaming.scenario` | `^s a` starts a thread; idle → working → idle, tab mark and finished toast | `KEYMAP.md` §Native agent thread; `NATIVE-AGENTS.md` §3.3 |
 | `edit-approval-allow.scenario` | the file-change gate arrives, owns the keyboard, and `[y]` is clicked on its own target | `NATIVE-AGENTS.md` §6.1, §6.2 |
+| `approval-by-pointer.scenario` | the same gate driven by the pointer: `agents.send` sends the prompt, `agents.approval.deny` answers,, a click on `agents.row[2]` opens the settled group, and its tool row `agents.tool[3]` shows its hover verbs, its right-click menu and toggles on a click | `NATIVE-AGENTS.md` §5, §6.2; ADR 0023 |
 | `edit-approval-deny.scenario` | the same gate answered `n`; the turn continues, and `Enter` is never an answer | `NATIVE-AGENTS.md` §6.2 |
 | `codex-approval-shows-the-diff.scenario` | a Codex file-change approval joins its named item and renders that item's diff | `NATIVE-AGENTS.md` §6.2; `TODO.md` §1 |
 | `codex-effort-menu.scenario` | `^s e` consumes Codex's discovered per-model effort vocabulary without sending the draft | `NATIVE-AGENTS.md` §7 |
@@ -53,7 +54,7 @@ The native-agent surfaces added to the shared UX sections have executable covera
 | `UX-SPEC.md` surface | Scenarios |
 | --- | --- |
 | §3.6 Workspace: mixed strip, attached child ordering, child tab chrome, attach/detach and caller navigation | `subagent-attach-from-row`, `subagent-detach-and-reattach`, `subagent-up-to-caller` |
-| §3.6.0 Native agent tab: streaming transcript, decisions, delegation row, blocked-child attention, result card, child caller metadata and composer boundary | `thread-streaming`, `edit-approval-allow`, `edit-approval-deny`, `subagent-runs-end-to-end`, `subagent-blocked-child-paints-caller`, `subagent-result-card`, `subagent-up-to-caller` |
+| §3.6.0 Native agent tab: streaming transcript, decisions, delegation row, blocked-child attention, result card, child caller metadata and composer boundary | `thread-streaming`, `edit-approval-allow`, `edit-approval-deny`, `approval-by-pointer`, `subagent-runs-end-to-end`, `subagent-blocked-child-paints-caller`, `subagent-result-card`, `subagent-up-to-caller` |
 | §3.9 Command palette: the `AGENTS` section and its attach, reopen, cross-worktree and focus outcomes | `subagent-attach-from-picker`, `subagent-reopen-closed-caller`, `subagent-other-worktree-child` |
 | §9.6 component inventory: `TranscriptList`, `ToolRow`, `DelegationRow`, `DelegationResultCard`, `DecisionCard`, `MultilineInput`, targeted `MetadataSegment`, `Markdown` and `DiffView` | `scroll-wheel`, `codex-approval-shows-the-diff`, `prefix-inside-a-thread`, plus the delegation scenarios above |
 

@@ -13,6 +13,10 @@
 //!   [`ListCursor::scroll_target`] computes the index to reveal and [`ListView::reveal`]
 //!   reveals it with [`gpui::ScrollStrategy::Nearest`], so the list scrolls by the minimum
 //!   amount instead of jumping the cursor to an edge.
+//! * **The pointer mirrors the keys (ADR 0023, UX-SPEC §5.1).** A press on a row moves the
+//!   cursor there, a double-click opens it like `⏎`, a right click opens its menu. The list
+//!   routes the press through one [`ListPointer`], so a screen writes only `on_select(ix)`,
+//!   `on_open(ix)` and `on_menu(ix, position)`, never a per-row closure.
 //! * **The parent owns the keys.** `j` / `k` / `gg` / `G` / `ctrl-d` / `ctrl-u` are gpui
 //!   actions ([`ListDown`] and friends) that the view binds and dispatches; the element never
 //!   listens for a key itself, because the same six motions drive lists that live in a pane,
@@ -28,12 +32,15 @@
 //! ```
 
 use gpui::{
-    AnyElement, App, ElementId, KeyBinding, Pixels, ScrollStrategy, UniformListScrollHandle,
-    Window, div, prelude::*, uniform_list,
+    AnyElement, App, ElementId, KeyBinding, MouseButton, MouseDownEvent, Pixels, Point,
+    ScrollStrategy, UniformListScrollHandle, Window, div, prelude::*, uniform_list,
 };
 use std::rc::Rc;
 
-use crate::{components::SkeletonRows, theme::ActiveTheme};
+use crate::{
+    components::{Row, SkeletonRows},
+    theme::ActiveTheme,
+};
 
 gpui::actions!(
     fleet_list,
@@ -272,6 +279,153 @@ impl ListCursor {
     }
 }
 
+/// What one press on a list row asks for (UX-SPEC §5.1).
+///
+/// Pure: derived from the button and the click count alone, so the whole pointer contract is
+/// unit-testable without a window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowPress {
+    /// A single primary press: move the cursor to the row.
+    Select,
+    /// The second press of a double-click: move the cursor there and open the row, like `⏎`.
+    Open,
+    /// A right click: move the cursor there and open the row's menu.
+    Menu,
+}
+
+impl RowPress {
+    /// Classify a press. `None` for a button rows do not answer (middle, back, forward).
+    pub fn classify(button: MouseButton, click_count: usize) -> Option<Self> {
+        match button {
+            MouseButton::Left if click_count >= 2 => Some(Self::Open),
+            MouseButton::Left => Some(Self::Select),
+            MouseButton::Right => Some(Self::Menu),
+            _ => None,
+        }
+    }
+}
+
+/// `(index, window, cx)`: a row-indexed pointer handler.
+type IndexHandler = Rc<dyn Fn(usize, &mut Window, &mut App)>;
+/// `(index, position, window, cx)`: the menu handler, with the window position to anchor at.
+type MenuHandler = Rc<dyn Fn(usize, Point<Pixels>, &mut Window, &mut App)>;
+
+/// The three pointer handlers of a list, shared by every row it draws.
+///
+/// Built once per frame by the view (or by [`ListView`]'s `on_*` builders) and cloned into each
+/// visible row — the handlers are `Rc`, because one closure serves every row. Each press first
+/// moves the cursor ([`ListPointer::on_select`]), then opens or shows the menu, so the view
+/// never has to remember to select before acting. A view whose rows are not in a [`ListView`]
+/// (a short sidebar, a board column) wires them with [`ListPointer::attach`].
+#[derive(Clone, Default)]
+pub struct ListPointer {
+    select: Option<IndexHandler>,
+    open: Option<IndexHandler>,
+    menu: Option<MenuHandler>,
+}
+
+impl ListPointer {
+    /// A pointer contract with no handlers: rows stay inert until one is set.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Move the cursor to `ix`. Normally `ListCursor::set(ix)`, focus the list's pane, reveal,
+    /// `cx.notify()` — exactly what `j`/`k` do, minus the motion.
+    pub fn on_select(mut self, handler: impl Fn(usize, &mut Window, &mut App) + 'static) -> Self {
+        self.select = Some(Rc::new(handler));
+        self
+    }
+
+    /// Open row `ix`: the same action `⏎` dispatches on the cursor row. Runs after
+    /// [`ListPointer::on_select`], so the handler may read the cursor.
+    pub fn on_open(mut self, handler: impl Fn(usize, &mut Window, &mut App) + 'static) -> Self {
+        self.open = Some(Rc::new(handler));
+        self
+    }
+
+    /// Show row `ix`'s menu at `position` (window coordinates). Runs after
+    /// [`ListPointer::on_select`], so the menu acts on the cursor row like its keys do.
+    pub fn on_menu(
+        mut self,
+        handler: impl Fn(usize, Point<Pixels>, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.menu = Some(Rc::new(handler));
+        self
+    }
+
+    /// Whether no handler is set, in which case rows get no pointer wiring at all.
+    pub fn is_empty(&self) -> bool {
+        self.select.is_none() && self.open.is_none() && self.menu.is_none()
+    }
+
+    /// Route one press on row `ix`: select, then open or menu as [`RowPress::classify`] says.
+    pub fn press(&self, ix: usize, event: &MouseDownEvent, window: &mut Window, cx: &mut App) {
+        let Some(press) = RowPress::classify(event.button, event.click_count) else {
+            return;
+        };
+        if let Some(select) = &self.select {
+            select(ix, window, cx);
+        }
+        match press {
+            RowPress::Select => {}
+            RowPress::Open => {
+                if let Some(open) = &self.open {
+                    open(ix, window, cx);
+                }
+            }
+            RowPress::Menu => {
+                if let Some(menu) = &self.menu {
+                    menu(ix, event.position, window, cx);
+                }
+            }
+        }
+    }
+
+    /// Wire row `ix` to these handlers through [`Row::on_click`], [`Row::on_double_click`] and
+    /// [`Row::on_secondary_click`].
+    pub fn attach(&self, ix: usize, row: Row) -> Row {
+        let handler = |pointer: &Self| {
+            let pointer = pointer.clone();
+            move |event: &MouseDownEvent, window: &mut Window, cx: &mut App| {
+                pointer.press(ix, event, window, cx)
+            }
+        };
+        row.when(self.select.is_some() || self.open.is_some(), |row| {
+            row.on_click(handler(self))
+        })
+        .when(self.open.is_some(), |row| {
+            row.on_double_click(handler(self))
+        })
+        .when(self.menu.is_some(), |row| {
+            row.on_secondary_click(handler(self))
+        })
+    }
+
+    /// Wrap an already-built row element so a press anywhere on it routes to `ix`. This is how
+    /// [`ListView`] serves rows it receives as `AnyElement`s; a view that builds its own
+    /// [`Row`] should prefer [`ListPointer::attach`].
+    fn wrap(&self, ix: usize, row: AnyElement) -> AnyElement {
+        let primary = self.clone();
+        let secondary = self.clone();
+        div()
+            .w_full()
+            .cursor_pointer()
+            .when(self.select.is_some() || self.open.is_some(), |el| {
+                el.on_mouse_down(MouseButton::Left, move |event, window, cx| {
+                    primary.press(ix, event, window, cx)
+                })
+            })
+            .when(self.menu.is_some(), |el| {
+                el.on_mouse_down(MouseButton::Right, move |event, window, cx| {
+                    secondary.press(ix, event, window, cx)
+                })
+            })
+            .child(row)
+            .into_any_element()
+    }
+}
+
 /// A virtualized list.
 #[derive(IntoElement)]
 pub struct ListView {
@@ -284,6 +438,7 @@ pub struct ListView {
     empty: Option<AnyElement>,
     loading: bool,
     skeleton_rows: usize,
+    pointer: ListPointer,
 }
 
 impl ListView {
@@ -306,7 +461,36 @@ impl ListView {
             empty: None,
             loading: false,
             skeleton_rows: SKELETON_ROWS,
+            pointer: ListPointer::new(),
         }
+    }
+
+    /// A press on row `ix` moves the cursor there. See [`ListPointer::on_select`].
+    pub fn on_select(mut self, handler: impl Fn(usize, &mut Window, &mut App) + 'static) -> Self {
+        self.pointer = self.pointer.on_select(handler);
+        self
+    }
+
+    /// A double-click on row `ix` opens it, after selecting it. See [`ListPointer::on_open`].
+    pub fn on_open(mut self, handler: impl Fn(usize, &mut Window, &mut App) + 'static) -> Self {
+        self.pointer = self.pointer.on_open(handler);
+        self
+    }
+
+    /// A right click on row `ix` opens its menu, after selecting it. See
+    /// [`ListPointer::on_menu`].
+    pub fn on_menu(
+        mut self,
+        handler: impl Fn(usize, Point<Pixels>, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.pointer = self.pointer.on_menu(handler);
+        self
+    }
+
+    /// Use a [`ListPointer`] the view already built, e.g. one it also hands to a detail panel.
+    pub fn pointer(mut self, pointer: ListPointer) -> Self {
+        self.pointer = pointer;
+        self
     }
 
     /// Which index carries the cursor.
@@ -382,9 +566,17 @@ impl RenderOnce for ListView {
 
         let render_row = self.render_row;
         let cursor = self.cursor;
+        // No handlers, no wrapper: a keyboard-only list keeps exactly the element tree it had.
+        let pointer = (!self.pointer.is_empty()).then_some(self.pointer);
         let list = uniform_list(self.id, self.item_count, move |range, window, cx| {
             range
-                .map(|ix| render_row(ix, cursor == Some(ix), window, cx))
+                .map(|ix| {
+                    let row = render_row(ix, cursor == Some(ix), window, cx);
+                    match &pointer {
+                        Some(pointer) => pointer.wrap(ix, row),
+                        None => row,
+                    }
+                })
                 .collect::<Vec<_>>()
         })
         .size_full();
@@ -398,7 +590,29 @@ impl RenderOnce for ListView {
 
 #[cfg(test)]
 mod tests {
-    use super::{ListCursor, ListMotion};
+    use super::{ListCursor, ListMotion, RowPress};
+    use gpui::MouseButton;
+
+    #[test]
+    fn a_press_classifies_into_select_open_or_menu() {
+        assert_eq!(
+            RowPress::classify(MouseButton::Left, 1),
+            Some(RowPress::Select)
+        );
+        assert_eq!(
+            RowPress::classify(MouseButton::Left, 2),
+            Some(RowPress::Open)
+        );
+        assert_eq!(
+            RowPress::classify(MouseButton::Left, 3),
+            Some(RowPress::Open)
+        );
+        assert_eq!(
+            RowPress::classify(MouseButton::Right, 1),
+            Some(RowPress::Menu)
+        );
+        assert_eq!(RowPress::classify(MouseButton::Middle, 1), None);
+    }
 
     #[test]
     fn default_cursor_can_page_after_population() {

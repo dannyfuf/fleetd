@@ -74,7 +74,7 @@ pub struct Shell {
     jobs: JobsPanel,
     dialogs: Entity<crate::dialogs::ActiveDialog>,
     diagnostics: Entity<crate::views::doctor_view::DiagnosticView>,
-    context_bar: Entity<chrome::Chrome>,
+    title_bar: Entity<chrome::Chrome>,
     status_bar: Entity<chrome::Chrome>,
     _subscriptions: Vec<Subscription>,
     _tasks: Vec<Task<()>>,
@@ -84,6 +84,14 @@ impl Shell {
     /// Builds the shell and installs the bridge, state observers, and owned background tasks.
     pub fn new(home: PathBuf, cx: &mut Context<Self>) -> Self {
         let bridge = Bridge::start(home.clone());
+        Self::with_bridge(home, bridge, cx)
+    }
+
+    /// Builds the shell around a bridge the caller already holds.
+    ///
+    /// Tests hand it [`Bridge::closed`], whose refusals are delivered on the GPUI executor, so
+    /// no reply depends on a background thread's wall-clock progress.
+    fn with_bridge(home: PathBuf, bridge: Bridge, cx: &mut Context<Self>) -> Self {
         let state = cx.new(|_| AppState::new(home, Instant::now()));
         // `idle` reports in-flight requests (`docs/TESTING-HARNESS.md` §2), and only the bridge
         // knows when one ends: it claims a slot on admission and releases it on the runtime
@@ -116,7 +124,7 @@ impl Shell {
         hub.bind(&state, &bridge, cx);
         let board = BoardScreen::new(cx);
         let mut jobs = JobsPanel::new(cx);
-        jobs.bind(&state, cx);
+        jobs.bind(&state, &bridge, cx);
         let overlay_focus = cx.focus_handle();
         let dialogs = cx.new(|cx| {
             crate::dialogs::ActiveDialog::new(
@@ -127,17 +135,24 @@ impl Shell {
             )
         });
         let diagnostics = cx.new(|cx| crate::views::doctor_view::DiagnosticView::new(&state, cx));
-        let context_bar =
-            cx.new(|cx| chrome::Chrome::new(state.clone(), chrome::ChromeKind::Context, cx));
-        let status_bar =
-            cx.new(|cx| chrome::Chrome::new(state.clone(), chrome::ChromeKind::Status, cx));
+        let title_bar = cx.new(|cx| {
+            chrome::Chrome::new(state.clone(), bridge.clone(), chrome::ChromeKind::Title, cx)
+        });
+        let status_bar = cx.new(|cx| {
+            chrome::Chrome::new(
+                state.clone(),
+                bridge.clone(),
+                chrome::ChromeKind::Status,
+                cx,
+            )
+        });
         Self {
             window: None,
             dialogs,
             diagnostics,
             local_files: observations::LocalFiles::default(),
             user_home: crate::presentation::home_dir(),
-            context_bar,
+            title_bar,
             status_bar,
             state,
             bridge,

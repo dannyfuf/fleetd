@@ -1,0 +1,48 @@
+# docs/NATIVE-AGENTS.md §6.2 — the decision drawer's options are buttons that dispatch the same
+#   action as their keys, and the composer's Send is the pointer's `⏎`
+# docs/TESTING-HARNESS.md §3 — `agents.send`, `agents.approval.deny`, `agents.row[N]`, `agents.tool[N]`
+#
+# The same file-change gate the keyboard scenarios answer, driven by the pointer end to end:
+# the prompt is sent with the Send button, the gate is denied with its Deny button, and the
+# settled transcript's tool row is hovered and right-clicked for its verbs.
+fixture: agents
+await idle
+key o
+await screen == Workspace 20000
+
+key ctrl-s A
+await agents.threads[0].provider == codex 20000
+# The summary can land before the create answer that selects the tab, so wait for the focus.
+await focused == agents.composer 20000
+await idle 30000
+click agents.composer
+type apply the README fix
+click agents.send
+
+await agents.threads[0].pending_gate == permission 30000
+await agents.threads[0].state == needs_you 30000
+assert key_contexts[2] == AgentPermission
+shot approval
+
+# Deny, by pointer. Codex's decline does not interrupt the turn, so it settles on its own.
+click agents.approval.deny
+await agents.threads[0].pending_gate absent 30000
+assert agents.threads[0].state != needs_you
+await agents.threads[0].state == idle 30000
+assert sticky_error absent
+shot settled
+
+# The settled turn folds its one tool call into a group, `agents.row[2]` under the prompt and
+# the first paragraph. A click opens it, so the call is a row of its own: `agents.tool[3]`.
+click agents.row[2]
+dump expanded
+# The tool row's verbs show under the pointer, and its right-click menu carries the same ones.
+hover agents.tool[3] 300
+shot tool-hover
+click right agents.tool[3]
+shot tool-menu
+key escape
+# A click on the line itself toggles the row, as `⏎` does on the focused row.
+click agents.tool[3]
+shot tool-open
+quit

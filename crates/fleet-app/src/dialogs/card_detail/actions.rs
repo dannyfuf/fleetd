@@ -25,21 +25,39 @@ pub(super) fn enter(
         return;
     }
     let row = read_host(state, cx, |host, _| host.card_detail.property_row);
-    let selected = targets.get(row);
-    match selected.map(|row| &row.target) {
-        Some(PropertyTarget::Pick(kind)) => {
+    open_row(state, bridge, targets, row, cx);
+}
+
+/// Selects property row `row` and does what it is for: the picker that edits it, the worktree
+/// or issue it links, or the sentence a locked row answers with.
+///
+/// `⏎` on the selected row, a click on any row and the board's field keys (`s`, `p`, `o`, …)
+/// all end here, so a row answers the pointer exactly as it answers the keyboard.
+pub(super) fn open_row(
+    state: &Entity<AppState>,
+    bridge: &Bridge,
+    targets: &[detail::PropertyRow],
+    row: usize,
+    cx: &mut App,
+) {
+    cx.stop_propagation();
+    let Some(selected) = targets.get(row) else {
+        return;
+    };
+    with_host(state, cx, |host| host.card_detail.property_row = row);
+    notify(state, cx);
+    match &selected.target {
+        PropertyTarget::Pick(kind) => {
             // The board applies this gate before opening the same picker (§3.12 C): without it
             // the row opens a dialog whose Enter can only fail, instead of flashing the banner.
             if board::refuses(state, cx) {
                 return;
             }
             // A field the backend owns is refused here rather than by the daemon two dialogs
-            // later. This surface's scrim covers the toast stack, so the sentence goes on the
-            // dialog's own error line — the same place every other refusal here lands.
+            // later, on the sheet's own error line — the place every other refusal here lands.
             if let Some(message) = board::readonly_message(state.read(cx), kind) {
                 with_host(state, cx, |host| host.card_detail.error = Some(message));
                 notify(state, cx);
-                cx.stop_propagation();
                 return;
             }
             let kind = kind.clone();
@@ -49,7 +67,7 @@ pub(super) fn enter(
             });
             board::open_dialog(state, Dialogs::CardPicker, cx);
         }
-        Some(PropertyTarget::Worktree) => {
+        PropertyTarget::Worktree => {
             let draft = read_host(state, cx, |host, _| host.card_detail.clone());
             let Some((id, card_id)) = card(state.read(cx), &draft)
                 .and_then(|card| Some((card.worktree_id.clone()?, card.id.clone())))
@@ -58,25 +76,22 @@ pub(super) fn enter(
             };
             board::open_session(id, board::Refusal::CardDetail(card_id), state, bridge, cx);
         }
-        Some(PropertyTarget::ReadOnly) => {
+        PropertyTarget::Remote => open_remote(state, bridge, cx),
+        PropertyTarget::ReadOnly => {
             // A locked row is a backend-declared property the remote owns; it answers with the
             // same sentence the standard read-only rows do, because two rows that carry the
             // same lock glyph must not answer `Enter` differently. Every other read-only row
-            // (Remote, URL, Synced) states a fact with nothing to say about editing.
-            let message = selected.filter(|row| row.locked).map(|row| {
+            // (URL, Synced, Parent) states a fact with nothing to say about editing.
+            if selected.locked {
                 let backend = state.read(cx).board().map_or_else(String::new, |view| {
                     state.read(cx).backend_label(&view.board.backend.kind)
                 });
-                format!("{} is read-only on {backend} boards", row.label)
-            });
-            if let Some(message) = message {
+                let message = format!("{} is read-only on {backend} boards", selected.label);
                 with_host(state, cx, |host| host.card_detail.error = Some(message));
                 notify(state, cx);
             }
         }
-        None => {}
     }
-    cx.stop_propagation();
 }
 
 /// `w`: create the card's worktree, asking for a repository first when nothing knows one.
@@ -208,7 +223,7 @@ pub(crate) fn create_worktree(state: &Entity<AppState>, bridge: &Bridge, cx: &mu
 
 /// `x` — open this card's remote issue in the browser.
 ///
-/// The dialog stays open: the browser is another window, and closing the card the user is
+/// The sheet stays open: the browser is another window, and closing the card the user is
 /// reading to show it somewhere else loses the place they were in.
 pub(crate) fn open_remote(state: &Entity<AppState>, _bridge: &Bridge, cx: &mut App) {
     let draft = read_host(state, cx, |host, _| host.card_detail.clone());
@@ -216,7 +231,7 @@ pub(crate) fn open_remote(state: &Entity<AppState>, _bridge: &Bridge, cx: &mut A
         return;
     };
     let Some(url) = board::remote_url(card) else {
-        // The toast stack sits under this dialog's scrim, so the sentence goes where every
+        // The sentence goes on the sheet itself, where every
         // other refusal on this surface goes — and it is the same sentence the board screen's
         // `x` answers with: a linked card whose board has no address for its backend is a
         // different fact from a card with no remote issue at all, and only one of them names

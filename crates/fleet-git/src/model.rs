@@ -1,11 +1,13 @@
 //! Owned data models shared by the backend and UI.
 
+mod changes;
 mod diff;
 mod mutation;
 mod refs;
 mod repository;
 mod status;
 
+pub use changes::{AheadCommit, BranchChanges, BranchFile};
 pub use diff::{
     CommitFile, ConflictChoice, ConflictFile, ConflictSection, Diff, DiffFile, DiffKind, DiffLine,
     DiffSide, Hunk, HunkSelection, LineKind, LineRange, ModeChange, PatchAction, PatchSelection,

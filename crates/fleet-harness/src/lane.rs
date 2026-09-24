@@ -69,6 +69,8 @@ const EMPTY_CHANNEL_THRESHOLD: u8 = 8;
 /// A third is far below what Fleet actually paints — the window is opaque chrome over whatever
 /// was there — and far above the nothing a capture of a covered output shows.
 const MIN_CHANGED_WINDOW_SHARE: f64 = 1.0 / 3.0;
+/// The `solitaryBlockedBy` reason Hyprland reports on every monitor while the session is locked.
+const SESSION_LOCK_REASON: &str = "LOCK";
 
 /// Where the harness window draws.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -357,6 +359,12 @@ impl HyprlandBackend {
         monitors().map_err(|error| error.context("the virtual lane needs a running compositor"))?;
         let provider = config_provider()?;
         let name = output_name(run_id);
+        if session_locked(&monitors()?) {
+            eprintln!(
+                "warning: the compositor session is locked; every `shot` in this run will be \
+                 refused until it is unlocked"
+            );
+        }
         hyprctl(&["output", "create", "headless", &name])?;
         let watchdog = spawn_watchdog(&name);
         let backend = Self {
@@ -808,6 +816,9 @@ impl LaneBackend for HyprlandBackend {
                 }),
             )
         };
+        if matches!(lane, Lane::Virtual | Lane::Attach) {
+            refuse_locked_session()?;
+        }
         match (lane, name) {
             (Lane::Virtual, Some(name)) => {
                 capture::OutputCapture::new(name).capture(output)?;
@@ -915,6 +926,42 @@ pub(crate) struct Monitor {
     pub(crate) y: i32,
     #[serde(rename = "activeWorkspace")]
     pub(crate) active_workspace: WorkspaceRef,
+    /// Why the compositor will not give this output to one fullscreen surface. Hyprland lists
+    /// `LOCK` here while a session-lock client owns every output, which is the only read-only
+    /// place `hyprctl` says the session is locked; absent on releases that predate the field.
+    #[serde(rename = "solitaryBlockedBy", default)]
+    pub(crate) solitary_blocked_by: Vec<String>,
+}
+
+/// Whether a session-lock surface covers the outputs, as the compositor itself reports it.
+///
+/// A lock is session-wide in Hyprland, so any one monitor saying so is enough. A shell that draws
+/// its own lock screen (Omarchy's quickshell does) runs no separate lock process and leaves
+/// logind's `LockedHint` unset, so this is the one signal that sees every kind of lock.
+fn session_locked(monitors: &[Monitor]) -> bool {
+    monitors.iter().any(|monitor| {
+        monitor
+            .solitary_blocked_by
+            .iter()
+            .any(|reason| reason == SESSION_LOCK_REASON)
+    })
+}
+
+/// Refuses a capture while the session is locked, before anything is photographed.
+///
+/// The compositor paints a lock surface over *every* output, the isolated one included, so a
+/// capture taken now is a photograph of the lock screen whatever the pixel guard later concludes
+/// about it — and that guard can be fooled, because the reference it compares against may have
+/// been taken before the lock surface reached a freshly created output.
+fn refuse_locked_session() -> anyhow::Result<()> {
+    if session_locked(&monitors()?) {
+        anyhow::bail!(
+            "the compositor session is locked (hyprctl monitors reports {SESSION_LOCK_REASON} in \
+             solitaryBlockedBy), so every output shows the lock screen instead of Fleet; unlock \
+             the session and keep it from idling into a lock while the run captures"
+        );
+    }
+    Ok(())
 }
 
 /// The workspace reference a monitor or client carries.
@@ -1156,6 +1203,30 @@ mod tests {
         assert!(
             parse_monitors("[]").is_err(),
             "an empty monitor list is not a usable compositor"
+        );
+    }
+
+    /// Regression: on a session locked by its shell (Omarchy's quickshell, no separate lock
+    /// process), the `virtual` lane filed a photograph of the lock screen as a passing `shot`
+    /// whenever the empty-output reference was taken before the lock surface reached the new
+    /// output. The lock is now read from the compositor before anything is captured.
+    #[test]
+    fn a_locked_session_is_read_from_the_compositor_not_from_pixels() {
+        const LOCKED: &str = r#"[{"id":0,"name":"eDP-1","width":1920,"height":1080,"x":0,"y":0,
+            "scale":1.5,"activeWorkspace":{"id":1,"name":"1"},
+            "solitaryBlockedBy":["LOCK","WINDOWED","CANDIDATE"]}]"#;
+        const UNLOCKED: &str = r#"[{"id":0,"name":"eDP-1","width":1920,"height":1080,"x":0,"y":0,
+            "scale":1.5,"activeWorkspace":{"id":1,"name":"1"},
+            "solitaryBlockedBy":["WINDOWED","CANDIDATE"]}]"#;
+        assert!(session_locked(
+            &parse_monitors(LOCKED).expect("locked monitors")
+        ));
+        assert!(!session_locked(
+            &parse_monitors(UNLOCKED).expect("unlocked monitors")
+        ));
+        assert!(
+            !session_locked(&parse_monitors(MONITORS).expect("monitors without the field")),
+            "a Hyprland that predates solitaryBlockedBy must not read as locked"
         );
     }
 

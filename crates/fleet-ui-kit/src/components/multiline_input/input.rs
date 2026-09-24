@@ -23,6 +23,7 @@ pub struct MultilineInput {
     history: PromptHistory,
     focus_visible: bool,
     read_only: bool,
+    framed: bool,
     active_trigger_id: Option<(char, usize)>,
     _subscriptions: Vec<Subscription>,
 }
@@ -66,6 +67,7 @@ impl MultilineInput {
             history: PromptHistory::new(),
             focus_visible: true,
             read_only: false,
+            framed: true,
             active_trigger_id: None,
             _subscriptions: vec![subscription],
         }
@@ -75,6 +77,16 @@ impl MultilineInput {
     pub fn set_focus_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         if self.focus_visible != visible {
             self.focus_visible = visible;
+            cx.notify();
+        }
+    }
+
+    /// Draw the field's own frame — fill, hairline, focus border and `❯` prompt — or leave all
+    /// of it to a container that frames the editor together with its own controls, as the
+    /// agent composer frames it with its settings strip. Framed by default.
+    pub fn set_framed(&mut self, framed: bool, cx: &mut Context<Self>) {
+        if self.framed != framed {
+            self.framed = framed;
             cx.notify();
         }
     }
@@ -328,23 +340,28 @@ impl Render for MultilineInput {
             .gap(theme.space.sm)
             .w_full()
             .min_h(theme.metrics.text_field_h)
-            .px(theme.space.md)
             .py(theme.space.sm)
-            .rounded(theme.radii.sm)
-            .bg(theme.colors.bg)
-            .border(theme.metrics.hairline)
-            .border_color(border)
+            .when(self.framed, |element| {
+                element
+                    .px(theme.space.md)
+                    .rounded(theme.radii.sm)
+                    .bg(theme.colors.bg)
+                    .border(theme.metrics.hairline)
+                    .border_color(border)
+            })
             .when(self.read_only, |element| {
                 element.opacity(theme.metrics.dimmed_opacity)
             })
-            .child(
-                div()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .h(style.line_height)
-                    .child(Text::data(PROMPT_GLYPH).color(glyph)),
-            )
+            .when(self.framed, |element| {
+                element.child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .h(style.line_height)
+                        .child(Text::data(PROMPT_GLYPH).color(glyph)),
+                )
+            })
             .child(self.input.clone())
     }
 }

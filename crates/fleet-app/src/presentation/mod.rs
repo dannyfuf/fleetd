@@ -9,6 +9,7 @@ mod navigation;
 mod selection;
 mod snapshot;
 mod status;
+mod workspace_keys;
 
 pub use damage::{EventDamage, event_damage};
 pub use formatting::{
@@ -16,9 +17,9 @@ pub use formatting::{
 };
 pub use jobs::{
     JobDisplay, active_job_summary, is_active, is_dismissable, job_kind_label, job_outcome_toast,
-    job_target, latest_unseen_failure, parse_percent, sub_line,
+    job_sentence, job_target, latest_unseen_failure, parse_percent, sub_line,
 };
-pub use keys::{FuzzyQuery, contains_folded, humanize, pretty_keys};
+pub use keys::{FuzzyMatch, FuzzyQuery, contains_folded, humanize, pretty_keys};
 pub use navigation::enter_session;
 pub use selection::{
     DisplayedHub, DisplayedPr, DisplayedRepo, DisplayedRepoKind, DisplayedTarget,
@@ -29,3 +30,4 @@ pub use status::{
     KeepAliveStyle, inspection_badge, keep_alive_icon, pr_badge_state, row_glyph, session_glyph,
     terminal_label,
 };
+pub(crate) use workspace_keys::{hub_jobs_key, hub_sticky_error_key, workspace_keys};

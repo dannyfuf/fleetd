@@ -250,6 +250,14 @@ impl Lazygit {
         if active && !self.owns_keyboard(window, cx) {
             window.focus(&self.wanted_focus(cx), cx);
         }
+        // A pane that stops owning the keyboard gives it back rather than leaving it on a handle
+        // the host is about to stop painting. The host's own "does my surface already hold the
+        // focus?" check reads the frame on screen, where this pane is still a descendant, so a
+        // focus left here survives into the next frame with no element under it: every key then
+        // reaches the window root alone and nothing answers it until something else repaints.
+        if was && !active && self.owns_keyboard(window, cx) {
+            window.blur();
+        }
         if was != active {
             self._ticker = active.then(|| Self::spawn_ticker(cx));
             self.prepare_models(cx);

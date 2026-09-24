@@ -3,6 +3,7 @@
 # docs/KEYMAP.md §Native agent thread — an unbound `^s <key>` is swallowed with a toast and never
 #   reaches the composer.
 # docs/DESIGN-SYSTEM.md §4 — a picker with nothing to offer draws nothing
+# docs/UX-SPEC.md §3.6 — a held `^s` shows the ⌃S command menu over the thread too
 fixture: agents
 await idle
 key o
@@ -11,6 +12,16 @@ key ctrl-s a
 await agents.threads[0].provider == claude 20000
 assert focused == agents.composer
 await idle 30000
+
+# A held `^s` shows the ⌃S command menu over the thread (UX-SPEC §3.6), with the thread's own
+# chords. The chord publishes no key context, so the menu's target is the oracle; `Esc` cancels
+# it and the composer keeps the keyboard.
+key ctrl-s
+await targets["prefix_menu"] exists 5000
+shot thread-prefix-menu
+key escape
+await targets["prefix_menu"] absent 5000
+assert focused == agents.composer && key_contexts[1] == AgentIdle && toasts[0] absent
 
 # An unbound `^s` second key runs nothing and — the regression this file exists for — types
 # nothing into the draft: gpui replays an unmatched sequence as input, so leaving the chord to it

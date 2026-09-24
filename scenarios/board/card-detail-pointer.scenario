@@ -1,0 +1,65 @@
+# UX-SPEC.md § Card detail · ADR 0023 · TESTING-HARNESS.md §3 (`card_detail.*`, `card.properties`)
+# — the card detail is a sheet docked to the right of the board, and it is worked by pointer end
+# to end: a double-click on a tile opens it, a click on a property row opens the picker `⏎` opens
+# there, the board's field keys answer on the card on show, `⌃⏎` posts a comment, and both the
+# sheet's ✕ and a click on the dimmed board beside it close it, as `esc` does.
+#
+# The oracle for the edit is `card.properties`, the property column as the sheet draws it: row 1
+# is Priority on a board nobody automated (Status, Priority, Assignee, …), and its one badge is
+# the value the daemon wrote back.
+#
+# Virtual-lane only: it clicks and takes shots.
+fixture: board
+await idle 20000
+key g b
+await hub_tab == Board 10000
+assert lists.board.rows[2].badges[0] == "1"
+
+# A double-click on a tile opens that card — the pointer twin of `⏎`.
+click left 2 board.column[2].card[0]
+await overlay == Dialog 10000
+await idle 10000
+assert dialog.name == CardDetail
+assert targets["card_detail.close"] exists && targets["sheet.close"] exists
+assert targets["card_detail.property[1]"] exists && targets["card_detail.menu"] exists
+assert lists["card.properties"].rows[0].label == "Status"
+assert lists["card.properties"].rows[1].label == "Priority"
+assert lists["card.properties"].rows[1].badges[0] == "–"
+
+# `c` focuses the composer, `⌃⏎` posts, and the comment lands under the card's prose.
+key c
+type Keep the fake for the headless lane.
+key ctrl-enter
+await idle 20000
+await targets["card_detail.comment"] exists 15000
+shot card-detail
+
+# A click on the Priority row opens the Card property picker `⏎` opens there; a click on a value
+# applies it and hands the keyboard back to the sheet.
+click card_detail.property[1]
+await dialog.name == CardPicker 10000
+assert targets["dialog.row[1]"] exists
+click dialog.row[1]
+await dialog.name == CardDetail 15000
+await idle 20000
+await lists["card.properties"].rows[1].badges[0] == "High" 15000
+shot card-detail-priority
+
+# The board's own field key answers on the card on show: `a` opens the Assignee picker.
+key a
+await dialog.name == CardPicker 10000
+key escape
+await dialog.name == CardDetail 10000
+
+# A click on the dimmed board beside the sheet closes it, as `esc` does.
+click 120 400
+await overlay absent 10000
+assert hub_tab == Board
+
+# `⏎` opens the same card again; the sheet's ✕ closes it.
+key enter
+await dialog.name == CardDetail 10000
+click card_detail.close
+await overlay absent 10000
+dump closed
+quit

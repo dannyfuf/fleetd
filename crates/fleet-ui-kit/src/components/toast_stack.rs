@@ -21,17 +21,42 @@
 //!
 //! Dwell is the caller's timer: it owns the `Vec<Toast>` and removes an entry when
 //! [`ToastDuration::millis`] has elapsed. The stack draws the supplied live entries.
+//!
+//! ## Pointer (ADR 0023)
+//!
+//! ```text
+//! [ ✓ Created acme/api#spike            View J  ✕ ]
+//! ```
+//!
+//! A toast that points somewhere carries a [`Toast::action`] label: the whole line and a small
+//! ghost `View` button both run [`ToastStack::on_activate`], and the button shows the key that
+//! does the same from the keyboard ([`ToastStack::action_keys`], resolved by the caller). Every
+//! toast gets a ✕ once the caller handles [`ToastStack::on_dismiss`], and
+//! [`ToastStack::on_hover`] tells the caller when to pause the decay — the dwell stays the
+//! caller's timer, so the stack only reports the pointer. The line, the button and the ✕ are
+//! siblings, so a click on one never also runs another.
+//!
+//! Harness names: `toasts.toast[N]` is the whole toast, `toasts.toast[N].action` its button and
+//! `toasts.toast[N].close` its ✕, `N` counting the drawn toasts from the oldest.
+
+use std::rc::Rc;
 
 use gpui::{App, SharedString, Window, deferred, div, prelude::*};
 
 use crate::{
-    components::OverlayLayer,
-    harness::HarnessTargetExt as _,
+    components::{Button, ButtonSize, ButtonStyle, IconButton, Kbd, OverlayLayer},
+    harness::{self, HarnessTargetExt as _},
     icons::{Icon, IconSize},
     text::Text,
     theme::ActiveTheme,
     tone::Tone,
 };
+
+/// A handler told which toast, by its index in the list [`ToastStack::new`] was given. `Rc`
+/// because one handler is cloned into every drawn toast.
+type ToastHandler = Rc<dyn Fn(usize, &mut Window, &mut App) + 'static>;
+/// [`ToastHandler`] plus whether the pointer entered (`true`) or left.
+type HoverHandler = Rc<dyn Fn(usize, bool, &mut Window, &mut App) + 'static>;
 
 /// The window within which identical toast text coalesces, in milliseconds (§2.7).
 pub const COALESCE_WINDOW_MS: u64 = 1_000;
@@ -56,7 +81,7 @@ impl ToastDuration {
     }
 }
 
-/// One toast: one icon, one line, no title, no close button.
+/// One toast: one icon, one line, no title; a `View` button when it points somewhere.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Toast {
     /// The line.
@@ -74,6 +99,9 @@ pub struct Toast {
     /// Left at `0` when the caller does not track time, which makes [`ToastStack::push`]
     /// coalesce identical text unconditionally.
     pub raised_at_ms: u64,
+    /// The label of the button that goes where the toast points (`View`), when it points
+    /// anywhere. What the button does is the stack's [`ToastStack::on_activate`].
+    pub action: Option<SharedString>,
 }
 
 impl Toast {
@@ -86,7 +114,15 @@ impl Toast {
             duration: ToastDuration::Normal,
             count: 1,
             raised_at_ms: 0,
+            action: None,
         }
+    }
+
+    /// Make the toast point somewhere: a button reading `label` and a click on the line both
+    /// run [`ToastStack::on_activate`].
+    pub fn action(mut self, label: impl Into<SharedString>) -> Self {
+        self.action = Some(label.into());
+        self
     }
 
     /// Set the glyph.
@@ -123,6 +159,10 @@ pub struct ToastStack {
     toasts: Vec<Toast>,
     max: usize,
     bottom_inset: Option<gpui::Pixels>,
+    action_keys: Vec<Option<Kbd>>,
+    on_activate: Option<ToastHandler>,
+    on_dismiss: Option<ToastHandler>,
+    on_hover: Option<HoverHandler>,
 }
 
 impl ToastStack {
@@ -135,7 +175,39 @@ impl ToastStack {
             toasts: toasts.into_iter().collect(),
             max: Self::MAX,
             bottom_inset: None,
+            action_keys: Vec::new(),
+            on_activate: None,
+            on_dismiss: None,
+            on_hover: None,
         }
+    }
+
+    /// The key chip each toast's action button shows, in the same order as the toasts: the key
+    /// that goes to the same place from the keyboard (`J` for Jobs), or `None` for no chip.
+    pub fn action_keys(mut self, keys: impl IntoIterator<Item = Option<Kbd>>) -> Self {
+        self.action_keys = keys.into_iter().collect();
+        self
+    }
+
+    /// Run when a toast with a [`Toast::action`] is clicked, on its line or its button.
+    pub fn on_activate(mut self, handler: impl Fn(usize, &mut Window, &mut App) + 'static) -> Self {
+        self.on_activate = Some(Rc::new(handler));
+        self
+    }
+
+    /// Run when a toast's ✕ is clicked. Setting it draws the ✕ on every toast.
+    pub fn on_dismiss(mut self, handler: impl Fn(usize, &mut Window, &mut App) + 'static) -> Self {
+        self.on_dismiss = Some(Rc::new(handler));
+        self
+    }
+
+    /// Run when the pointer enters (`true`) or leaves a toast, so the caller can hold its dwell.
+    pub fn on_hover(
+        mut self,
+        handler: impl Fn(usize, bool, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_hover = Some(Rc::new(handler));
+        self
     }
 
     /// Change the stack cap. 3 by the spec.
@@ -208,6 +280,15 @@ fn allowed_tone(tone: Tone) -> Tone {
     }
 }
 
+/// `toasts.toast[N].<part>`, formatted only while the harness records.
+fn target_name(index: usize, part: &'static str) -> SharedString {
+    if harness::is_recording() {
+        SharedString::from(format!("toasts.toast[{index}].{part}"))
+    } else {
+        SharedString::default()
+    }
+}
+
 impl RenderOnce for ToastStack {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         if self.toasts.is_empty() {
@@ -217,13 +298,14 @@ impl RenderOnce for ToastStack {
         let width = theme.metrics.toast_w;
         // Oldest first, newest nearest the corner it grew from; anything past the cap is
         // dropped from the *front*, because §2.7 evicts the oldest.
-        let visible: Vec<Toast> = self
-            .toasts
-            .into_iter()
-            .rev()
-            .take(self.max.max(1))
-            .rev()
-            .collect();
+        let first = self.toasts.len().saturating_sub(self.max.max(1));
+        let mut keys = self.action_keys;
+        keys.resize(self.toasts.len(), None);
+        let visible: Vec<(Toast, Option<Kbd>)> =
+            self.toasts.into_iter().zip(keys).skip(first).collect();
+        let (on_activate, on_dismiss, on_hover) =
+            (self.on_activate, self.on_dismiss, self.on_hover);
+        let hover_bg = theme.colors.control_hover;
 
         deferred(
             div()
@@ -236,34 +318,87 @@ impl RenderOnce for ToastStack {
                 .p(theme.metrics.toast_inset)
                 .pb(self.bottom_inset.unwrap_or(theme.metrics.toast_inset))
                 .gap(theme.space.sm)
-                .children(visible.into_iter().enumerate().map(|(index, toast)| {
-                    let tone = allowed_tone(toast.tone);
-                    let color = tone.color(theme);
-                    let text = ToastStack::resolved_text(&toast);
-                    div()
-                        .flex()
-                        .flex_none()
-                        .items_center()
-                        .gap(theme.space.sm)
-                        .w(width)
-                        .px(theme.space.md)
-                        .py(theme.space.sm)
-                        .rounded(theme.radii.md)
-                        .bg(theme.colors.elevated)
-                        .border(theme.metrics.hairline)
-                        .border_color(theme.colors.border_strong)
-                        .shadow(theme.sheet_shadow())
-                        .occlude()
-                        .children(
-                            toast
-                                .icon
-                                .map(|icon| icon.el().size(IconSize::Medium).color(color)),
-                        )
-                        .child(Text::ui(text).ellipsize())
-                        // `toasts.toast[0]` is the oldest live toast, which is the order
-                        // `docs/TESTING-HARNESS.md` §3 gives the `toasts` array as well.
-                        .harness_target_indexed("toasts.toast", index)
-                })),
+                .children(
+                    visible
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, (toast, kbd))| {
+                            let source = first + index;
+                            let tone = allowed_tone(toast.tone);
+                            let color = tone.color(theme);
+                            let text = ToastStack::resolved_text(&toast);
+                            let activate = toast
+                                .action
+                                .is_some()
+                                .then(|| on_activate.clone())
+                                .flatten();
+                            let line = div()
+                                .id(("toast-line", index))
+                                .flex()
+                                .flex_1()
+                                .min_w_0()
+                                .items_center()
+                                .gap(theme.space.sm)
+                                .children(
+                                    toast
+                                        .icon
+                                        .map(|icon| icon.el().size(IconSize::Medium).color(color)),
+                                )
+                                .child(Text::ui(text).ellipsize())
+                                .when_some(activate.clone(), |el, activate| {
+                                    super::control::on_activate(
+                                        el.rounded(theme.radii.sm).hover(move |s| s.bg(hover_bg)),
+                                        "View",
+                                        move |window, cx| activate(source, window, cx),
+                                    )
+                                });
+                            let action = toast.action.zip(activate).map(|(label, activate)| {
+                                Button::new(("toast-action", index), label)
+                                    .style(ButtonStyle::Ghost)
+                                    .size(ButtonSize::Compact)
+                                    .map(|button| match kbd {
+                                        Some(kbd) => button.kbd(kbd),
+                                        None => button,
+                                    })
+                                    .on_click(move |_, window, cx| activate(source, window, cx))
+                                    .harness_target(target_name(index, "action"))
+                            });
+                            let close = on_dismiss.clone().map(|dismiss| {
+                                IconButton::new(("toast-close", index), Icon::X, "Dismiss")
+                                    .size(ButtonSize::Compact)
+                                    .on_click(move |_, window, cx| dismiss(source, window, cx))
+                                    .harness_target(target_name(index, "close"))
+                            });
+                            let hover = on_hover.clone();
+                            div()
+                                .id(("toast", index))
+                                .flex()
+                                .flex_none()
+                                .items_center()
+                                .gap(theme.space.xs)
+                                .w(width)
+                                .pl(theme.space.md)
+                                .pr(theme.space.xs)
+                                .py(theme.space.xs)
+                                .rounded(theme.radii.md)
+                                .bg(theme.colors.elevated)
+                                .border(theme.metrics.hairline)
+                                .border_color(theme.colors.border_strong)
+                                .shadow(theme.sheet_shadow())
+                                .occlude()
+                                .when_some(hover, |el, hover| {
+                                    el.on_hover(move |hovered, window, cx| {
+                                        hover(source, *hovered, window, cx)
+                                    })
+                                })
+                                .child(line)
+                                .children(action)
+                                .children(close)
+                                // `toasts.toast[0]` is the oldest live toast, which is the order
+                                // `docs/TESTING-HARNESS.md` §3 gives the `toasts` array as well.
+                                .harness_target_indexed("toasts.toast", index)
+                        }),
+                ),
         )
         .with_priority(OverlayLayer::Toast.priority())
         .into_any_element()

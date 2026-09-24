@@ -5,15 +5,21 @@
 //! overlay is `deferred` so it paints above the body regardless of sibling order, and it does
 //! **not** ghost the base — only [`super::Dialog`] does that, because only a dialog is a
 //! decision. An overlay is a jump.
+//!
+//! An overlay with a scrim and a [`Overlay::dismiss_action`] closes on a click on the scrim, as
+//! a dialog does, unless [`Overlay::dismiss_on_scrim_click`] turns that off (the Agent popup,
+//! which ADR 0023 leaves to its own card). An overlay has no close ✕ of its own; its content
+//! draws one if it wants one.
 
 use gpui::{AnyElement, App, Pixels, Window, deferred, div, prelude::*};
 
+use super::dismiss::{Dismiss, dismiss_builders};
 use crate::theme::ActiveTheme;
 
-/// Paint order of the four floating surfaces.
+/// Paint order of the five floating surfaces.
 ///
 /// gpui draws `deferred` elements after the rest of the frame, ordered by priority, so the
-/// four layers that can be on screen at the same time state their order **here, once**,
+/// five layers that can be on screen at the same time state their order **here, once**,
 /// instead of each one inventing a number. Higher paints later, i.e. on top.
 ///
 /// The order encodes three UX-spec rules:
@@ -21,9 +27,13 @@ use crate::theme::ActiveTheme;
 /// 1. A [`super::Sheet`] is lowest, because it is *about* the rows behind it (§3.7).
 /// 2. A [`super::Dialog`] is above a palette [`Overlay`], because a dialog ghosts the base
 ///    screen and a palette does not (§3.8, §3.9).
-/// 3. The [`super::ToastStack`] is highest, because §2.7 allows a toast while a dialog is
-///    open (the "dialog-close reassurance" row) and an unreadable acknowledgement is worse
-///    than none.
+/// 3. The [`super::ToastStack`] is above every surface, because §2.7 allows a toast while a
+///    dialog is open (the "dialog-close reassurance" row) and an unreadable acknowledgement is
+///    worse than none.
+/// 4. An open [`super::Menu`] is highest: it is what the pointer is on right now, it closes on
+///    the next click anywhere, and a toast sliding over the item being clicked would take the
+///    click. A menu opened inside a dialog or sheet is a nested `deferred` and paints after
+///    that surface whatever the number.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum OverlayLayer {
     /// The right-docked panel.
@@ -35,6 +45,8 @@ pub enum OverlayLayer {
     Dialog,
     /// The bottom-right toast stack.
     Toast,
+    /// An open menu, popover or dropdown list.
+    Menu,
 }
 
 impl OverlayLayer {
@@ -45,6 +57,7 @@ impl OverlayLayer {
             OverlayLayer::Anchored => 200,
             OverlayLayer::Dialog => 300,
             OverlayLayer::Toast => 400,
+            OverlayLayer::Menu => 500,
         }
     }
 }
@@ -56,7 +69,10 @@ pub struct Overlay {
     width: Option<Pixels>,
     scrim: bool,
     layer: OverlayLayer,
+    popover_elevation: bool,
     child: Option<AnyElement>,
+    dismiss: Option<Dismiss>,
+    dismiss_on_scrim_click: bool,
 }
 
 impl Overlay {
@@ -67,8 +83,20 @@ impl Overlay {
             width: None,
             scrim: false,
             layer: OverlayLayer::Anchored,
+            popover_elevation: false,
             child: None,
+            dismiss: None,
+            dismiss_on_scrim_click: true,
         }
+    }
+
+    dismiss_builders!();
+
+    /// Whether a click on the scrim runs the dismiss. On by default; it needs
+    /// [`Self::scrim`] and a dismiss to do anything.
+    pub fn dismiss_on_scrim_click(mut self, dismiss: bool) -> Self {
+        self.dismiss_on_scrim_click = dismiss;
+        self
     }
 
     /// Override the distance from the top of the window.
@@ -98,6 +126,13 @@ impl Overlay {
         self
     }
 
+    /// Lift the card to the popover elevation (the level-4 shadow) instead of the dialog one.
+    /// For a floating window that should read as the frontmost thing on screen: the Agent popup.
+    pub fn popover_elevation(mut self, popover: bool) -> Self {
+        self.popover_elevation = popover;
+        self
+    }
+
     /// The card.
     pub fn content(mut self, child: impl IntoElement) -> Self {
         self.child = Some(child.into_any_element());
@@ -117,14 +152,28 @@ impl RenderOnce for Overlay {
         let top = self.top.unwrap_or(theme.metrics.palette_top);
         let width = self.width.unwrap_or(theme.metrics.palette_w);
         let scrim = self.scrim;
+        let (radius, shadow) = if self.popover_elevation {
+            (theme.radii.popover, theme.popover_shadow())
+        } else {
+            (theme.radii.dialog, theme.dialog_shadow())
+        };
+        let on_scrim = self
+            .dismiss
+            .as_ref()
+            .filter(|_| scrim && self.dismiss_on_scrim_click)
+            .map(Dismiss::callback);
         deferred(
             div()
+                .id("overlay-scrim")
                 .absolute()
                 .inset_0()
                 .flex()
                 .flex_col()
                 .items_center()
                 .when(scrim, |el| el.bg(theme.colors.overlay).occlude())
+                .when_some(on_scrim, |el, dismiss| {
+                    el.on_click(move |_, window, cx| dismiss(window, cx))
+                })
                 .child(
                     div()
                         .flex()
@@ -133,11 +182,11 @@ impl RenderOnce for Overlay {
                         .mb(top)
                         .w(width)
                         .min_h_0()
-                        .rounded(theme.radii.lg)
+                        .rounded(radius)
                         .bg(theme.colors.elevated)
                         .border(theme.metrics.hairline)
                         .border_color(theme.colors.border_strong)
-                        .shadow(theme.dialog_shadow())
+                        .shadow(shadow)
                         .overflow_hidden()
                         .occlude()
                         .children(self.child),

@@ -1,11 +1,11 @@
-# UX-SPEC.md §3.13 and [D-18] · KEYMAP.md §First run — the first-run card on a Fleet that has
-# never been run, and the four keys it still answers.
+# UX-SPEC.md §3.13 and [D-18] · KEYMAP.md §First run — the first-run page on a Fleet that has
+# never been run: its keys, and the step cards and footer buttons that run the same actions.
 #
-# `FirstRun` is full-window and shadows everything except `ctrl-q` (KEYMAP §Modes), so the two
-# things worth pinning are that a fresh `empty` home reaches it at all — every other preset must
-# never show it — and that shadowing the Hub does not cost the card its own documented keys.
-# `?` is the safe one of the four: `N` and `n` open dialogs that write, and `i` is only drawn
-# when `~/.swarm/state.json` exists, which a hermetic home never has.
+# `FirstRun` is full-window and shadows everything except `ctrl-q` (KEYMAP §Modes), so the things
+# worth pinning are that a fresh `empty` home reaches it at all — every other preset must never
+# show it — that shadowing the Hub does not cost the page its own documented keys, and that every
+# key it shows is also a control (ADR 0023). `i` and its import card are drawn only when
+# `~/.swarm/state.json` exists, which a hermetic home never has, so `first_run.import` is absent.
 #
 # Headless: virtual-lane only, because of its `shot`. The keyboard does reach the focused view
 # in the headless lane (§7), so everything else here would run there.
@@ -14,14 +14,47 @@ await idle 20000
 assert key_contexts[0] == "FirstRun" && key_contexts[1] absent
 assert lists.worktrees.rows[0] absent && lists.prs.rows[0] absent && lists.jobs.rows[0] absent
 assert daemon.link == connected && sticky_error absent
+assert targets["first_run.step[0]"] exists && targets["first_run.step[1]"] exists && targets["first_run.step[2]"] exists
+assert targets["first_run.help"] exists && targets["first_run.settings"] exists && targets["first_run.import"] absent
 shot first-run
 
-# The card shadows the Hub, and still answers `?`.
+# The page shadows the Hub, and still answers `?`.
 key ?
 await overlay == Dialog 5000
 assert dialog.name == "Help"
 
-# Closing it returns to the card rather than to a Hub that has nothing in it.
+# Closing it returns to the page rather than to a Hub that has nothing in it.
+key escape
+await overlay absent 5000
+assert key_contexts[0] == "FirstRun"
+
+# Step 1 is `N`: a click on its card opens the same New context dialog. Cancelling writes nothing.
+click first_run.step[0]
+await overlay == Dialog 5000
+assert dialog.name == "Context"
+key escape
+await overlay absent 5000
+
+# Step 2 is `n`: Clone a repository.
+click first_run.step[1]
+await overlay == Dialog 5000
+assert dialog.name == "Clone"
+key escape
+await overlay absent 5000
+
+# Step 3 cannot run before a repository exists: its card is drawn, dimmed, and does nothing.
+click first_run.step[2]
+assert overlay absent && key_contexts[0] == "FirstRun"
+
+# The footer's buttons are `?` and `,`.
+click first_run.help
+await overlay == Dialog 5000
+assert dialog.name == "Help"
+key escape
+await overlay absent 5000
+click first_run.settings
+await overlay == Dialog 5000
+assert dialog.name == "Settings"
 key escape
 await overlay absent 5000
 assert key_contexts[0] == "FirstRun"

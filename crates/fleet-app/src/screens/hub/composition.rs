@@ -27,25 +27,28 @@ impl HubScreen {
             let now = now_unix();
             let viewport = window.viewport_size();
             let width = f32::from(viewport.width);
-            let rows = visible_rows(f32::from(viewport.height), cx);
             let model = self.hub.read(cx).prepared.clone();
+            let handlers = ctx.row_handlers();
+            let sidebar = ctx.sidebar_handlers(bridge);
             self.body(
                 state.read(cx),
                 self.hub.read(cx),
                 &model,
-                Viewport { width, rows },
-                now,
+                Frame {
+                    width,
+                    now,
+                    handlers: &handlers,
+                    sidebar: &sidebar,
+                },
                 cx,
             )
         };
-        let tabs = hub_tabs(state.read(cx));
 
         let root = div()
             .when(!on_board, |el| el.track_focus(focus))
             .size_full()
             .flex()
             .flex_col()
-            .child(div().px(cx.theme().space.md).child(tabs))
             .child(div().flex_1().min_h_0().child(body))
             .on_action(ctx.act(|ctx, _: &hub::MoveDown, window, cx| ctx.move_by(1, window, cx)))
             .on_action(ctx.act(|ctx, _: &hub::MoveUp, window, cx| ctx.move_by(-1, window, cx)))
@@ -133,14 +136,15 @@ impl HubScreen {
         state: &AppState,
         hub: &HubState,
         model: &HubModel,
-        viewport: Viewport,
-        now: i64,
+        frame: Frame<'_>,
         cx: &App,
     ) -> AnyElement {
-        let Viewport {
+        let Frame {
             width,
-            rows: visible_rows,
-        } = viewport;
+            now,
+            handlers,
+            sidebar,
+        } = frame;
         let stale = state
             .snapshot_age(Instant::now())
             .filter(|_| !state.daemon.is_connected())
@@ -171,23 +175,22 @@ impl HubScreen {
                             .into_any_element()
                     }),
                 rows: model.rail.clone(),
+                agents: hub.agents.clone(),
                 cursor: state.cursors.repos,
                 focused: state.hub_pane == HubPane::Repos,
                 collapsed: state.rail_collapsed,
+                width: state.sidebar_w,
                 context_name: context_name.clone(),
                 filter: filter.clone().filter(|_| state.hub_pane == HubPane::Repos),
-                stale: stale.clone(),
+                handlers: sidebar.clone(),
             },
             &self.rail_scroll,
             cx,
         );
 
-        let pane_ch = list_pane_ch(
-            width,
-            state.rail_collapsed,
-            state.detail_open,
-            &cx.theme().metrics,
-        );
+        let detail_open = state.detail_visible(!detail_is_docked(width));
+        let sidebar_w = sidebar_width(state, &cx.theme().metrics);
+        let pane_ch = list_pane_ch(width, sidebar_w, detail_open, &cx.theme().metrics);
         let scope_name = match &state.scope {
             RepoScope::All => SharedString::new_static("All"),
             RepoScope::Repo(repo) => SharedString::from(repo.name().to_owned()),
@@ -196,43 +199,68 @@ impl HubScreen {
         let list = match state.screen {
             Screen::Hub {
                 tab: HubTab::Worktrees,
-            } => worktrees_list::render(
-                ListProps {
-                    header_override: (state.hub_filter_owns_keys()
-                        && state.hub_pane == HubPane::List)
-                        .then(|| {
-                            dialogs::filter::bar(state, self.filter_input.clone())
-                                .harness_target("filter.input")
-                                .into_any_element()
-                        }),
-                    rows: model.worktrees.clone(),
-                    cursor: state.cursors.worktrees,
-                    focused: state.hub_pane == HubPane::List,
-                    pane_ch,
-                    scope: scope_name.clone(),
-                    scope_is_all: state.scope == RepoScope::All,
-                    total: model.worktree_total,
-                    filter: filter.clone().filter(|_| state.hub_pane == HubPane::List),
-                    stale,
-                    visible_rows,
-                    loading: state.snapshot.is_none(),
-                },
-                &self.list_scroll,
-                now.saturating_sub(model.prepared_at),
-            ),
+            } => {
+                let list_filter = state.hub_pane == HubPane::List;
+                let filter = if state.hub_filter_owns_keys() && list_filter {
+                    let (shown, total) = crate::presentation::filter_counts(state);
+                    worktrees_list::FilterSlot::Editing {
+                        input: self.filter_input.clone(),
+                        query: SharedString::from(state.filter.query.clone()),
+                        shown,
+                        total,
+                    }
+                } else {
+                    worktrees_list::FilterSlot::Idle(filter.clone().filter(|_| list_filter))
+                };
+                worktrees_list::render(
+                    ListProps {
+                        rows: model.worktrees.clone(),
+                        cursor: state.cursors.worktrees,
+                        focused: state.hub_pane == HubPane::List,
+                        pane_ch,
+                        scope_repo: match &state.scope {
+                            RepoScope::All => None,
+                            RepoScope::Repo(repo) => Some(SharedString::from(repo.to_string())),
+                        },
+                        summary: model.worktree_summary.clone(),
+                        filter,
+                        stale,
+                        loading: state.snapshot.is_none(),
+                        // The rail's rows count its pinned `All` row too.
+                        has_repos: model.repo_total > 1,
+                        undo_available: state.last_trash_entry.is_some(),
+                        handlers: handlers.clone(),
+                    },
+                    &self.list_scroll,
+                    now.saturating_sub(model.prepared_at),
+                    cx,
+                )
+            }
             _ => {
                 let cache_key = cache::PrCacheKey::from_state(state);
                 let slice = hub.prs.slice_for(state.pr_tab, &cache_key);
                 let cache_matches_scope = hub.prs.matches(&cache_key);
+                let handlers = self
+                    .pr_handlers
+                    .clone()
+                    .unwrap_or_else(prs_screen::PrHandlers::inert);
                 prs_screen::render(
                     PrScreenProps {
-                        header_override: (state.hub_filter_owns_keys()
-                            && state.hub_pane == HubPane::List)
-                            .then(|| {
-                                dialogs::filter::bar(state, self.filter_input.clone())
-                                    .harness_target("filter.input")
-                                    .into_any_element()
-                            }),
+                        filter_slot: if state.hub_filter_owns_keys()
+                            && state.hub_pane == HubPane::List
+                        {
+                            let (shown, total) = crate::presentation::filter_counts(state);
+                            worktrees_list::FilterSlot::Editing {
+                                input: self.filter_input.clone(),
+                                query: SharedString::from(state.filter.query.clone()),
+                                shown,
+                                total,
+                            }
+                        } else {
+                            worktrees_list::FilterSlot::Idle(
+                                filter.clone().filter(|_| state.hub_pane == HubPane::List),
+                            )
+                        },
                         rows: model.prs.clone(),
                         cursor: pr_cursor(state),
                         focused: state.hub_pane == HubPane::List,
@@ -256,9 +284,14 @@ impl HubScreen {
                         hidden: model.pr_hidden,
                         pane_ch,
                         multi_repo: state.scope == RepoScope::All,
+                        covers: match &state.scope {
+                            RepoScope::All => context_name.clone(),
+                            RepoScope::Repo(repo) => SharedString::from(repo.to_string()),
+                        },
                         scope: scope_name,
                         filter: filter.filter(|_| state.hub_pane == HubPane::List),
                     },
+                    &handlers,
                     &self.pr_scroll,
                     now.saturating_sub(model.prepared_at),
                     cx,
@@ -266,17 +299,16 @@ impl HubScreen {
             }
         };
 
-        let mut split = SplitLayout::horizontal()
+        let split = SplitLayout::horizontal()
             .leading(rail)
             .trailing(list)
-            .divider(false);
-        if state.rail_collapsed {
-            split = split.leading_size(gpui::px(repos_rail::COLLAPSED_WIDTH));
-        } else {
-            split = split.leading_size(cx.theme().metrics.rail_w);
-        }
+            .divider(false)
+            .leading_size(sidebar_w);
 
-        let Some(detail) = self.detail(state, hub, model, now, cx) else {
+        let Some(detail) = detail_open
+            .then(|| self.detail(state, hub, model, now, cx))
+            .flatten()
+        else {
             return split.into_any_element();
         };
         if detail_is_docked(width) {
@@ -304,9 +336,6 @@ impl HubScreen {
         now: i64,
         cx: &App,
     ) -> Option<AnyElement> {
-        if !state.detail_open {
-            return None;
-        }
         let snapshot = state.snapshot.as_ref()?;
         let home = self
             .home
@@ -359,24 +388,12 @@ impl HubScreen {
             }
         ) {
             let row = model.worktrees.get(state.cursors.worktrees)?;
-            let worktree = snapshot
-                .worktrees
-                .iter()
-                .find(|worktree| worktree.id == row.id)?;
-            return Some(detail::worktree_with_status(
+            return Some(detail::worktree(
                 WorktreeProps {
-                    worktree,
-                    status: snapshot
-                        .statuses
-                        .iter()
-                        .find(|status| status.worktree_id == row.id),
-                    slept: row.glyph == StatusKind::Sleeping,
-                    host_unreachable: row.host_unreachable,
-                    inspected: hub.inspections.get(&row.id),
-                    home: &home,
-                    now,
+                    row,
+                    age_offset: now.saturating_sub(model.prepared_at),
+                    undo_available: state.last_trash_entry.is_some(),
                 },
-                row.glyph,
                 cx,
             ));
         }
@@ -399,6 +416,7 @@ impl HubScreen {
                         .iter()
                         .find(|status| status.worktree_id == worktree.id)
                 }),
+                creating: row.creating,
                 home: &home,
                 now,
             },
@@ -437,5 +455,12 @@ pub(super) fn publish_breadcrumb(state: &Entity<AppState>, model: &HubModel, cx:
                 .map(|row| format!("#{}", row.number)),
         }
     };
-    state.update(cx, |state, _| state.breadcrumb_row = row);
+    // The status bar prepares its model when the state notifies, so a new row has to notify;
+    // an unchanged one must not, or every synchronize would repaint the bar.
+    state.update(cx, |state, cx| {
+        if state.breadcrumb_row != row {
+            state.breadcrumb_row = row;
+            cx.notify();
+        }
+    });
 }

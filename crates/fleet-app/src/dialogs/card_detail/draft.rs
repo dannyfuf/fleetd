@@ -11,18 +11,6 @@ pub(super) enum CardEdit {
     Comment,
 }
 
-impl CardEdit {
-    /// What the footer calls this edit.
-    #[must_use]
-    pub(super) const fn label(self) -> &'static str {
-        match self {
-            Self::Title => "title",
-            Self::Description => "description",
-            Self::Comment => "comment",
-        }
-    }
-}
-
 /// Selected card and pending text edit for the detail surface.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CardDetailState {
@@ -46,6 +34,10 @@ pub(crate) struct CardDetailState {
     /// only for as long as the dialog is open: `seed` rebuilds the draft on every open, so a
     /// card the reader comes back to folds its reports again.
     pub(super) expanded_reports: std::collections::HashSet<String>,
+    /// Whether the activity under the properties shows every entry rather than the last few.
+    pub(super) activity_open: bool,
+    /// The property column, prepared by [`super::refresh`]; `None` until the card is found.
+    pub(super) properties: Option<std::rc::Rc<PropertyModel>>,
 }
 
 impl CardDetailState {
@@ -135,10 +127,15 @@ pub(super) fn begin(
     cx: &mut App,
 ) {
     let draft = read_host(state, cx, |host, _| host.card_detail.clone());
-    // `render` builds the left pane as: conflict banner (only when there is one), title,
-    // description, comments, comment editor.
-    let comment_item =
-        3 + usize::from(card(state.read(cx), &draft).is_some_and(|card| card.conflict.is_some()));
+    // `render` builds the prose column as: conflict callout (only when there is one), title,
+    // run card (only beside a run, or one owed), description, then the comments that end in
+    // the comment editor.
+    let comment_item = card(state.read(cx), &draft).map_or(2, |card| {
+        2 + usize::from(card.conflict.is_some())
+            + usize::from(
+                card.pending_run.is_some() || fleet_core::board::latest_run(card).is_some(),
+            )
+    });
     let input = cx.new(|cx| {
         let mode = match surface {
             CardEdit::Title => InputMode::SingleLine,

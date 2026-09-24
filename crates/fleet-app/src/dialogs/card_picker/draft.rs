@@ -145,6 +145,8 @@ pub(crate) struct CardPickerState {
     pub(crate) then_detail: bool,
     /// Why the current query cannot be applied.
     pub(super) error: Option<String>,
+    /// Scroll position of the offered rows, so the cursor can be kept in view past the fold.
+    pub(super) scroll: gpui::ScrollHandle,
     /// The values [`candidates`] offered for the draft below, prepared once per change.
     pub(super) rows: std::rc::Rc<[PickerOption]>,
     /// Every input those rows were derived from, so a redraw does not derive them again.
@@ -182,9 +184,29 @@ pub(super) fn move_cursor(state: &Entity<AppState>, delta: isize, cx: &mut App) 
     let len = prepared(state, cx).len();
     with_host(state, cx, |host| {
         host.card_picker.cursor = step(host.card_picker.cursor, delta, len);
+        FuzzyList::reveal(&host.card_picker.scroll, host.card_picker.cursor);
     });
     notify(state, cx);
     cx.stop_propagation();
+}
+
+/// A click on row `index`: the same as moving the cursor there and pressing the row's key —
+/// `space` on a multi-select, which keeps the dialog open for the next label, `⏎` otherwise.
+pub(super) fn click_row(state: &Entity<AppState>, bridge: &Bridge, index: usize, cx: &mut App) {
+    let len = prepared(state, cx).len();
+    if index >= len {
+        return;
+    }
+    let multi = with_host(state, cx, |host| {
+        host.card_picker.cursor = index;
+        host.card_picker.kind.clone()
+    });
+    let multi = multi.is_multi_select(property_kind(state.read(cx), &multi));
+    if multi {
+        toggle(state, cx);
+    } else {
+        super::lifecycle::apply(state, bridge, cx);
+    }
 }
 
 /// `space`: toggle the highlighted value of a multi-select.

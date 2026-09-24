@@ -1,0 +1,29 @@
+# UX-SPEC §2.2 — the title bar's `1 needs you` opens the agent that is waiting.
+#
+# A scripted Codex edit approval leaves one thread blocked on a person. Back in the Hub, the title
+# bar says so in amber, and a click on it lands on that thread's tab — the same place the
+# palette's AGENTS row goes — with the approval still open.
+fixture: agents
+await idle
+
+key o
+await screen == Workspace 20000
+key ctrl-s A
+await agents.threads[0].provider == codex 20000
+click agents.composer
+type apply the README fix
+key enter
+await agents.threads[0].pending_gate exists 30000
+
+# The Hub: the waiting thread is counted in the title bar.
+key ctrl-s s
+await screen == Hub 10000
+await targets["titlebar.needs_you"] exists 10000
+shot needs-you
+
+click titlebar.needs_you
+await screen == Workspace 20000
+await mode == Agent 10000
+assert agents.threads[0].pending_gate exists && overlay absent
+shot needs-you-opened
+quit

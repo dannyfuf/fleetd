@@ -6,7 +6,8 @@ use fleet_ui_kit::{Icon, prelude::*};
 use gpui::{AnyElement, App, Entity, FocusHandle, Window, div};
 
 use crate::{
-    dialogs::root,
+    actions::{fleet as fleet_actions, quit_daemon_dialog, quit_dialog},
+    dialogs::{Dialogs, footer, root},
     state::{AppState, running_jobs},
 };
 
@@ -135,16 +136,30 @@ pub(crate) fn render_quit(
     root(focus)
         .child(
             Dialog::new("Quit Fleet?")
+                .dismiss_action(Dialogs::Quit.dismiss_action())
                 .icon(Icon::CircleQuestionMark)
-                .width(super::Dialogs::Quit.width(cx))
+                .width(Dialogs::Quit.width(cx))
                 .body(body)
-                .hint_row(
-                    KeyHintRow::new()
-                        .key("J", "jobs")
-                        .key("W", "never warn again")
-                        .key("n", "cancel"),
+                .footer_start(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(cx.theme().space.sm)
+                        .child(
+                            Button::new("quit-jobs", "Show jobs")
+                                .style(ButtonStyle::Ghost)
+                                .action(Box::new(quit_dialog::OpenJobs)),
+                        )
+                        .child(
+                            Button::new("quit-never-warn", "Never warn again")
+                                .style(ButtonStyle::Ghost)
+                                .action(Box::new(quit_dialog::NeverWarn)),
+                        ),
                 )
-                .primary("y  Quit"),
+                .actions(vec![
+                    footer::cancel(&Dialogs::Quit),
+                    footer::primary("quit-accept", "Quit", Box::new(quit_dialog::Accept)),
+                ]),
         )
         .into_any_element()
 }
@@ -153,7 +168,7 @@ pub(crate) fn render_quit(
 pub(crate) fn render_quit_daemon(
     state: &Entity<AppState>,
     focus: &FocusHandle,
-    _window: &mut Window,
+    window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
     let gap = cx.theme().space.sm;
@@ -214,17 +229,30 @@ pub(crate) fn render_quit_daemon(
     }
     let body = body
         .child(Text::ui("Worktrees, repos and state on disk are untouched.").muted())
-        .child(Text::ui("ctrl-q quits Fleet and leaves all of this running.").muted());
+        .child(
+            // The way out is a key the live keymap owns, so its chip comes from there.
+            div()
+                .flex()
+                .items_center()
+                .gap(cx.theme().space.xs)
+                .children(Kbd::for_action(&fleet_actions::Quit, window, cx))
+                .child(Text::ui("quits Fleet and leaves all of this running.").muted()),
+        );
 
     root(focus)
         .child(
             Dialog::new("Stop fleetd and quit?")
+                .dismiss_action(Dialogs::QuitDaemon.dismiss_action())
                 .icon(Icon::Power)
-                .width(super::Dialogs::QuitDaemon.width(cx))
+                .width(Dialogs::QuitDaemon.width(cx))
                 .tone(Tone::Warning)
                 .body(body)
-                .hint_row(KeyHintRow::new().key("n", "cancel"))
-                .primary("Y  Stop and quit"),
+                .actions(vec![
+                    footer::cancel(&Dialogs::QuitDaemon),
+                    Button::new("quit-daemon-accept", "Stop and quit")
+                        .style(ButtonStyle::Danger)
+                        .action(Box::new(quit_daemon_dialog::Accept)),
+                ]),
         )
         .into_any_element()
 }

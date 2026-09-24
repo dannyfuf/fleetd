@@ -3,6 +3,9 @@ use super::*;
 /// Takes the published request and asks the daemon for the facts behind it.
 pub(crate) fn seed(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
     let request = with_host(state, cx, |host| host.pending_confirm.take());
+    let subtitle = request
+        .as_ref()
+        .and_then(|request| subtitle_for(request, state.read(cx)));
     let seq = with_host(state, cx, |host| {
         let seq = host.confirm.seq.wrapping_add(1);
         host.confirm = ConfirmState {
@@ -12,6 +15,7 @@ pub(crate) fn seed(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
                 Some(ConfirmRequest::DeleteWorktree { .. } | ConfirmRequest::Prune { .. })
             ),
             seq,
+            subtitle,
             ..ConfirmState::default()
         };
         seq
@@ -21,6 +25,27 @@ pub(crate) fn seed(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
         Some(ConfirmRequest::Prune { repo }) => dry_run(repo, seq, state, bridge, cx),
         _ => {}
     }
+}
+
+/// `acme/api · ~/worktrees/acme/api/hotfix` for a worktree delete: the repository and the copy
+/// on disk, the two things that tell two same-named worktrees apart.
+pub(super) fn subtitle_for(request: &ConfirmRequest, app: &AppState) -> Option<String> {
+    let ConfirmRequest::DeleteWorktree { id } = request else {
+        return None;
+    };
+    let path = app
+        .snapshot
+        .as_ref()?
+        .worktrees
+        .iter()
+        .find(|worktree| &worktree.id == id)
+        .map(|worktree| worktree.path.clone())?;
+    let home = crate::presentation::home_dir();
+    Some(format!(
+        "{} \u{00b7} {}",
+        id.repo(),
+        crate::presentation::tilde(&path, home.as_deref())
+    ))
 }
 
 /// Runs `inspect` and swaps the values in place when it answers.
@@ -128,12 +153,14 @@ pub(super) fn dry_run(
                 // §3.8.3: with nothing eligible the dialog is not a dialog, it is a toast.
                 state.update(cx, |app, cx| {
                     app.close_overlay();
-                    app.toast_short(
+                    // The reasons are in the prune job's log: `View` opens the Jobs panel, as `J`.
+                    app.toast_short_to(
                         format!(
-                            "Nothing to prune in {} \u{2014} {skipped} skipped \u{00b7} J for reasons",
+                            "Nothing to prune in {} \u{2014} {skipped} skipped",
                             repo.name()
                         ),
                         Icon::Scissors,
+                        crate::state::ToastTarget::Jobs,
                         Instant::now(),
                     );
                     cx.notify();
@@ -358,7 +385,7 @@ pub(super) fn commit<T: SessionTransport>(
             bridge.send(RequestBody::CloseTerminal { terminal });
         }
         // The column is not in the request — contracts §5.5 fixes its four fields — so `[` / `]`
-        // staged it beside the sentence and the dialog adopted it with the request.
+        // or the drop staged it beside the sentence and the dialog adopted it with the request.
         ConfirmRequest::MoveCancelsRun { card, .. } => {
             let staged = with_host(state, cx, |host| host.confirm.move_target.clone());
             if let Some(body) = move_cancels_run_request(card, staged) {
@@ -389,12 +416,13 @@ pub(super) fn commit<T: SessionTransport>(
 #[must_use]
 pub(super) fn move_cancels_run_request(
     card: CardId,
-    target: Option<StatusId>,
+    target: Option<super::MoveTarget>,
 ) -> Option<RequestBody> {
+    let target = target?;
     Some(RequestBody::MoveCard {
         card_id: card,
-        status_id: target?,
-        index: None,
+        status_id: target.status,
+        index: target.index,
         cancel_run: true,
     })
 }

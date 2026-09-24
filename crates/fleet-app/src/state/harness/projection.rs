@@ -76,6 +76,8 @@ struct ProjectionKey {
     settling_mutations: u32,
     link_opening: bool,
     renamed_terminals: HashSet<TerminalId>,
+    /// The Changes panel's rows (`lists.changes`, `lists["changes.commits"]`).
+    changes: u64,
 }
 
 /// The identity and generation of the mirror grid the snapshot reports.
@@ -215,6 +217,7 @@ impl AppState {
             settling_mutations: self.harness.settling_mutations(),
             link_opening: matches!(self.daemon, DaemonLink::Starting),
             renamed_terminals: self.renamed_terminals.clone(),
+            changes: self.changes.revision(),
         }
     }
 
@@ -407,12 +410,13 @@ impl AppState {
         }
     }
 
-    /// The pane header's two composed counts, as one row, or `None` while it says neither.
+    /// The board header's two counts, as one row, or `None` while it says neither.
     ///
-    /// Word for word `views::board_screen::model::HeaderFacts`'s `working_label` and
-    /// `needs_you_label` — the harness reads the sentence the user reads — joined with the
-    /// separator the board's own chrome uses, because a snapshot row is one string where the
-    /// header is two labels in a gap. A board with nothing running and nobody waiting carries
+    /// The same two numbers `views::board_screen::model::HeaderFacts` states, in the compact
+    /// `1/1 working · 1 needs you` form the scenarios were written against: the header now
+    /// spells the first `1 of 1 run working` (or `1 working · 1 waiting`), and a scenario reads
+    /// the counts, not the prose (`docs/TESTING-HARNESS.md` §3). The owed runs inside the
+    /// working count ride as a `waiting:N` mark. A board with nothing running and nobody waiting carries
     /// no counts at all, so the list is absent rather than a row saying `0/1 working`.
     fn board_summary_row(&self, view: &BoardView) -> Option<RowSnapshot> {
         let marks = &self.board.marks;
@@ -424,11 +428,16 @@ impl AppState {
         if marks.needs_you > 0 {
             parts.push(format!("{} needs you", marks.needs_you));
         }
+        // How many of the `working` count are only owed a slot, which the header states apart.
+        let marks_out = (marks.waiting > 0)
+            .then(|| format!("waiting:{}", marks.waiting))
+            .into_iter()
+            .collect();
         (!parts.is_empty()).then(|| RowSnapshot {
             id: "summary".to_owned(),
             label: parts.join(" \u{b7} "),
             badges: Vec::new(),
-            marks: Vec::new(),
+            marks: marks_out,
         })
     }
 
@@ -739,6 +748,10 @@ impl AppState {
                         if !runs.is_empty() {
                             lists.insert("card.runs".to_owned(), unselected(runs));
                         }
+                        lists.insert(
+                            "card.properties".to_owned(),
+                            unselected(card_property_rows(view, card)),
+                        );
                     }
                 }
                 Some(Overlay::Dialog(Dialogs::BoardSettings)) => {
@@ -764,6 +777,10 @@ impl AppState {
                 },
             );
         }
+        if let Some((files, commits)) = self.changes_rows() {
+            lists.insert("changes".to_owned(), files);
+            lists.insert("changes.commits".to_owned(), commits);
+        }
         if matches!(self.overlay, Some(Overlay::Palette)) {
             let rows = self.palette_rows();
             lists.insert(
@@ -776,6 +793,57 @@ impl AppState {
             );
         }
         lists
+    }
+
+    /// The Changes panel's files and commits, while it shows a reading of the Workspace's
+    /// worktree. `filter` carries the base both lists are read against.
+    fn changes_rows(&self) -> Option<(ListSnapshot, ListSnapshot)> {
+        let Screen::Workspace { .. } = &self.screen else {
+            return None;
+        };
+        let reading = self.changes.reading()?;
+        if !self.changes.is_open(&reading.worktree) {
+            return None;
+        }
+        let crate::state::ReadingBody::Ready(model) = &reading.body else {
+            return None;
+        };
+        let files = model
+            .files
+            .iter()
+            .map(|file| RowSnapshot {
+                id: file.label.to_string(),
+                label: file.label.to_string(),
+                badges: std::iter::once(file.letter.to_string())
+                    .chain(file.added.iter().map(ToString::to_string))
+                    .chain(file.removed.iter().map(ToString::to_string))
+                    .collect(),
+                marks: Vec::new(),
+            })
+            .collect();
+        let commits = model
+            .commits
+            .iter()
+            .map(|commit| RowSnapshot {
+                id: commit.short.to_string(),
+                label: commit.subject.to_string(),
+                badges: Vec::new(),
+                marks: Vec::new(),
+            })
+            .collect();
+        let base = reading.base.to_string();
+        Some((
+            ListSnapshot {
+                rows: files,
+                selected: None,
+                filter: base.clone(),
+            },
+            ListSnapshot {
+                rows: commits,
+                selected: None,
+                filter: base,
+            },
+        ))
     }
 
     /// The repos rail, exactly as the Hub last prepared it.
@@ -866,12 +934,11 @@ impl AppState {
             .collect()
     }
 
-    /// Every job the panel shows, in its filtered snapshot order.
+    /// Every job the panel shows, in the order it draws them (`JobFilter::visible`).
     fn job_rows(&self, snapshot: &fleet_proto::snapshot::Snapshot) -> Vec<RowSnapshot> {
-        snapshot
-            .jobs
-            .iter()
-            .filter(|job| self.jobs_panel.filter.matches(job))
+        self.jobs_panel
+            .filter
+            .visible(&snapshot.jobs)
             .map(|job| {
                 let mut marks = Vec::new();
                 if job.cancellable {
@@ -1105,6 +1172,30 @@ fn card_row(prefix: &str, card: &Card, marks: Option<&TileMarks>) -> RowSnapshot
         badges: vec![format!("{prefix}-{}", card.number)],
         marks: row_marks,
     }
+}
+
+/// The open card's property column, one row per row the sheet draws: `label` is the field's
+/// name (empty on a second link row) and the one badge is its value as drawn.
+fn card_property_rows(view: &BoardView, card: &Card) -> Vec<RowSnapshot> {
+    detail::property_rows(
+        &view.board,
+        &view.cards,
+        card,
+        chrono::Utc::now().timestamp(),
+    )
+    .into_iter()
+    .enumerate()
+    .map(|(index, row)| RowSnapshot {
+        id: index.to_string(),
+        label: row.label.to_string(),
+        badges: vec![row.value.to_string()],
+        marks: if row.locked {
+            vec!["locked".to_owned()]
+        } else {
+            Vec::new()
+        },
+    })
+    .collect()
 }
 
 /// `action` for a column that starts a run on arrival, and nothing otherwise.

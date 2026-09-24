@@ -1173,7 +1173,7 @@ Property rows in the card detail reuse `KeyValueList`/`FactRow`; pickers reuse
 
 - **Screen**: the board is a hub tab: `HubTab::Board`, key `g b`, tab label "Board", rendered by
   `screens/board.rs::BoardScreen` with the frozen screen signature (`docs/APP-CONTRACTS.md` §2).
-  The hub context bar scopes it: the board shown is `EnsureBoard(active_context)`.
+  The title bar's context switcher scopes it: the board shown is `EnsureBoard(active_context)`.
   A worktree Workspace's `fleet://board` tab (`ctrl-s b`) is the board's second surface and
   shows `EnsureWorktreeBoard(worktree)`. It builds nothing of its own: `Shell` owns the one
   `BoardScreen` and lends it to whichever surface is drawing, since the two are never visible
@@ -1217,14 +1217,17 @@ Property rows in the card detail reuse `KeyValueList`/`FactRow`; pickers reuse
   repo, start-on-worktree, push-new-cards, conflict policy, and the backend — a kind cycler over
   `ListBoardBackends` plus one generic row per `settings_schema` entry; see `docs/BOARD-JIRA.md`
   §6).
-- **Card detail layout** (UX-SPEC §board): two panes. Left: key + title (editable, `i`),
-  description (`MarkdownText`; `d` opens the shared multi-line `TextInput`;
-  `ctrl-s`/`esc` saves/cancels), comments (list + `c` to add through that input), activity
-  (last 10). Right: property list —
-  Status, Priority, Assignee, Labels, Estimate, Due, Parent, Repo, Worktree (enter = open its
-  session), Remote (key/url/synced/dirty), then custom properties from `board.properties`; `j/k`
-  select row, `enter` opens the matching picker. Conflict banner with `K` keep-local / `R`
-  take-remote when `card.conflict` is set.
+- **Card detail layout** (UX-SPEC § Card detail): a right-side `Sheet` `sheet_w_detail` wide in
+  the band between the two bars, over the board under its scrim. Header: key, status button
+  (`s`), backend line, `Open in <backend>` (`x`), a `⋯` (`w`, `K` / `R` while conflicted, Delete)
+  and the ✕. Left: title (a click or `i` edits it), conflict callout with `Keep local` / `Take
+  remote`, the run card and its buttons, description (`MarkdownText`; `d` opens the shared
+  multi-line `TextInput`; `ctrl-s` / `ctrl-enter` / `esc` save or cancel), comments with avatars
+  and the inline composer (`c`). Right: property list — Status, Priority, Assignee, Labels,
+  Estimate, Due, Parent, Repo, Worktree (opens its session), Remote (opens the issue), then custom
+  properties from `board.properties`; `j/k` select a row, and `enter`, a click on the row or the
+  board's own field key (`s p a t e b m o x`) opens what edits it — one path,
+  `card_detail::open_row`. Activity folds under the properties.
 - **Keymap** (`docs/KEYMAP.md` rows, contexts `Hub > Board` and `Dialog > CardDetail` etc., one
   action per row). Every `Hub > Board` row below is bound a second time, verbatim and against
   the same action, on `Workspace > Native > Board` — the board pane's key context — and
@@ -1259,12 +1262,49 @@ Property rows in the card detail reuse `KeyValueList`/`FactRow`; pickers reuse
 | `c` | Dialog > CardDetail | add comment |
 | `j` / `k` | Dialog > CardDetail | select property row |
 | `enter` | Dialog > CardDetail | edit selected property |
+| `s` / `p` / `a` / `t` / `e` | Dialog > CardDetail | the field's picker for the card on show |
+| `o` | Dialog > CardDetail | open the card's linked worktree session |
 | `w` | Dialog > CardDetail | create worktree from card |
 | `x` | Dialog > CardDetail | open the card's remote issue in the browser |
 | `K` / `R` | Dialog > CardDetail | resolve conflict keep-local / take-remote |
-| `ctrl-s` | Dialog > CardDetail | save current text edit |
+| `ctrl-s` / `ctrl-enter` | Dialog > CardDetail | save current text edit |
 
-Palette commands mirror every row above (`Board: New card`, `Board: Sync`, …).
+Palette commands mirror every row above, under their action-catalogue labels (`New card`,
+`Sync with the tracker`, …; `KEYMAP.md` § *Action catalogue*).
+
+- **Board surface** (`views/board_screen.rs`, `UX-SPEC.md` § Board): a page header (name, prefix,
+  the counts line; the sync button and its ⋯, the filter field, Board settings and its ⋯, the
+  primary New card), error callouts with the buttons that answer them, then the columns. Every
+  control dispatches the action its key runs, so the pointer adds no behaviour of its own; the
+  two that are not keys are a column's `+` / `Add card` — New card with `CardDraft.status_id` set
+  to that column, carried to the dialog's seed through `DialogHost.card_create_in` — and a
+  column's automation pill, which opens Board settings drilled into it through
+  `DialogHost.board_settings_column`. A card's `⋯` and right-click hold the card actions,
+  leaving out what could only refuse (`CardMenu`, `ReadonlyFields` in the board model). The model
+  — tile strings, run and blocked words, the linked branch and its PR badge, the menu facts — is
+  built by `screens/board/projection.rs`, keyed on the board revision, the marks revision, the
+  filter, the linked branches and, only while a run is live, the minute.
+- **Drag and drop** (`views/board_screen/drag.rs`, `screens/board/actions.rs`): a tile carries a
+  `CardDrag` (card id, key, the column and row it was drawn at) through gpui's `on_drag`; every
+  column listens with `on_drag_move` and `on_drop`. While a drag is over a column the column wears
+  an accent hairline and a `DropSlot` sits at the insertion point, read off the column list's own
+  layout (before the first tile whose middle is below the pointer). The slot says what the drop
+  does: `Drop to start FLT-3 · codex will pick it up` into a column with an `on_enter` action,
+  `Drop to move FLT-3 to Todo` into another, `Drop to put FLT-3 here` inside its own; no slot is
+  drawn where the drop would move nothing — before or after the card itself, or anywhere on a
+  board whose backend owns `status_id`. The dragged tile stays as a faded, dashed place-holder
+  and the preview under the pointer is the same tile, lifted. The drop selects the card, exactly
+  as a press on its tile does, and then takes **the path `[` / `]` take** (`move_card` with a
+  `Destination`): the unreachable-daemon refusal, the read-only toast, the confirm over a live run
+  (`MoveCancelsRun`, which stages the index beside the column) and the daemon's own refusals are
+  the same sentences. The only difference is the request's `index`: the drawn slot is mapped onto
+  `ops::move_card`'s index over the *whole* column without the card, so under a filter the card
+  lands before the drawn card it was dropped above, wherever hidden cards sit. A drop back where
+  the card stands sends nothing. The answer carries only the moved card, so the app replays
+  `ops::move_card` over the shown cards with the same index (`AppState::apply_placed_card`) and the
+  column draws the daemon's order before the `BoardChanged` reload arrives. Reordering changes only
+  `position`, which is local ordering, so it dirties nothing and needs no backend support; a board whose
+  backend owns the status refuses every drop as it refuses `[` / `]`.
 
 ### Integrated implementation decisions
 
@@ -1296,7 +1336,7 @@ card of the same board and may not close a cycle.
 The app refreshes through the request its scope names (`EnsureBoard(active_context)` on the Hub)
 after BoardChanged. `filter_editing`
 selects the Filter key context while typing, with two-stage Escape. `group_secondary` is reserved;
-Parent is read-only in this milestone. Card detail is an 880 px two-pane dialog. `ctrl-enter` in
+Parent is read-only in this milestone. Card detail is a 736 px right-side sheet with two columns. `ctrl-enter` in
 CardCreate creates and opens detail; label pickers use Space for multi-select; BoardSettings
 reuses the settings row keys. Delete uses `ConfirmRequest::DeleteCard`. These supplemental dialog
 keys are listed in KEYMAP; create-and-open exists only as that chord inside the dialog and has no
@@ -1704,22 +1744,38 @@ card-called child **for this card**, and `X` finds a run to stop on the same evi
 waits for the card's own `runs` row, because a face that says `working` and a key that says
 `{KEY} has no live run` would be two answers about one card (`UX-SPEC.md` § Board).
 
-A card's key line is a row whose right end carries either its **run mark** or its blocked count
-`⊘ n` — the run mark wins, because a card that is running has nothing left to wait for. The five
-marks are `pending`, `stalled`, `working`, `needs you` and `done` (§11.5 is where the first four
-come from); a canceled run draws nothing, and a success draws nothing either when the column that
-ran it carries the card on by itself — a check beside the key would otherwise mark every card the
-workflow already advanced. The count is muted while a blocker can still finish and amber when one
-of them is canceled, archived or gone from the board, which is `blocked()`'s own tone.
+A card's key line is a row whose right end carries one **state pill**: either its **run mark**, in
+words, or what blocks it — the run mark wins, because a card that is running has nothing left to
+wait for. The five marks are `pending`, `stalled`, `working`, `needs you` and `done` (§11.5 is
+where the first four come from), and the pill says them as `waiting`, `waiting 2m`,
+`working 4m · codex` (the age from the live run's `started_at`, the provider from its row),
+`needs you`, and `review passed` (named after what the column that ran it does); a canceled run
+draws nothing, and a success draws nothing either when the column that ran it carries the card on
+by itself — a check beside the key would otherwise mark every card the workflow already advanced.
+The blocked pill names the one unsatisfied blocker by key (`blocked by FLT-5`) or counts them
+(`blocked by 2 cards`); it is neutral while a blocker can still finish and amber when one of them is
+canceled, archived or gone from the board, which is `blocked()`'s own tone. A card whose run needs
+you carries an **Answer** button in its meta row on the worktree board, which runs `A`.
 
-A column header carries a muted `⚡` after its count when entering it runs an action — `on_enter`
-alone, never `on_success` or `advance_when_unblocked`, which move a card the column has already
-finished with.
+A column whose entry runs an action wears a pill under its header naming it — `On enter: codex
+implements` — from `on_enter` alone, never `on_success` or `advance_when_unblocked`, which move a
+card the column has already finished with. The provider is the action's own (`agent` when it
+leaves the choice to the card); the verb is read from the skill's name or the first word of the
+prompt's instructions, and falls back to `runs the card` / `runs <skill>`. Clicking the pill opens
+Board settings drilled into that column (§11.10).
 
-The pane header carries two zero-suppressed counts left of the prefix badge: `1/1 working` over
-`settings.max_live_runs`, counting the cards that hold a run slot — live **or** owed — and
-`1 needs you` from `attention()`. They are the board-face version of `BoardSummary`'s two counts
-(§11.5), computed in the app from the same definitions so a pane and a board list agree.
+The board header's subtitle carries two zero-suppressed counts: `1 of 2 runs working` over
+`settings.max_live_runs`, counting the cards that hold a run slot, or — while a card is owed a run
+the limit has no slot for — `1 working · 1 waiting`, the live and the owed runs stated apart so
+the count never reads over the limit; and, in amber, `1 needs you`: the cards `attention()` raises,
+plus any card whose child is still out and parked on a person's answer — `attention()` reads the
+card alone and cannot see that child, but its tile already says `needs you` from the delegation
+mirror (§11.8), and the header counts what the tiles say. Clicking the count selects the first
+card whose mark waits on a person.
+They are the board-face version of `BoardSummary`'s two counts (§11.5), computed in the app from
+the same definitions — the needs-you count adding only what the mirror knows before the card does. The harness's `board.summary` row keeps its
+compact `1/1 working · 1 needs you` form, whose numerator counts live **and** owed runs, and
+marks the owed ones `waiting:N` (`TESTING-HARNESS.md` §3).
 
 A run whose start never reached a thread has no mark to draw, so it raises the sticky error once
 instead, with the run's own `detail`. `UX-SPEC.md` § Board states the glyphs, tones and wording.
@@ -1730,8 +1786,9 @@ The card detail states a run rather than counting it. Between the title and the 
 card with a run — or owed one — carries a **run row**: the board's own mark, then `working 4m ·
 codex · gpt-5 · high`, with the token count and cost appended once the run is over. A missing
 model or effort drops with its separator. A card waiting for a slot reads `pending 2m · waiting
-for a slot`; an owed run wins over a finished one. `A attach · X cancel · > re-run` sits beneath
-it, drawn only beside a run.
+for a slot`; an owed run wins over a finished one. The sheet draws it as a card — the state
+sentence-cased (`Working 4m`), the usage at its right end — with `Attach A`, `Re-run >` and
+`Cancel run X` beneath, each drawn only when its key would work (`CardMenu::of`).
 
 Under `Status`, five zero-suppressed property rows: `Provider`, `Model` and `Effort` while the
 card's column runs an action — showing what `resolve_prefs` (§11.7) will actually use, with a
@@ -1741,14 +1798,15 @@ dropped, and `Blocks` is derived from everyone else's `blocked_by`, never stored
 the picker that edits it; a link that would close a cycle is offered disabled with `would cycle`,
 the same answer `validate_links` would give (§11.4).
 
-A run's report comment (§11.2) renders with a `run {n}` badge instead of an author and folds at
-eight lines, the fold a delivered child result gets in the transcript. `UX-SPEC.md` § Board,
+A run's report comment (§11.2) renders with its provider as the author and a `run {n}` badge, and
+folds at eight lines, the fold a delivered child result gets in the transcript. `UX-SPEC.md` § Board,
 "Card detail", states the rest.
 
 ### 11.10 Configuring columns in the app
 
 Board settings gained a **Columns** section beside General and Backend (`,` opens the dialog where
-it was last left, `C` opens it on Columns). It is the same read-modify-write of the whole
+it was last left, `C` opens it on Columns, and a column's automation pill on the board opens it
+drilled into that column). It is the same read-modify-write of the whole
 `statuses` vector that `fleet board columns` performs, with the same rules: a column list showing
 `⚡` where a column runs something, `n` new, `d` delete, `J`/`K` reorder, `P` for the missing
 preset columns (§11.6, never rewriting one the board already has), and `⏎` to drill into a column

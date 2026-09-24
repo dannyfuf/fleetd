@@ -1,0 +1,32 @@
+# UX-SPEC §3.8.7 — Help runs what it finds: a power user in a terminal presses `ctrl-s ?`, types
+# "zoom" and `⏎`, and the terminal zooms, exactly as `ctrl-s z` would have done.
+#
+# The cursor starts on the best action that works where Help was opened, even though the
+# Terminals guide is listed above it, and the action reaches the Workspace behind Help only
+# after Help has handed the keyboard back. Zoom hides the tab strip, so its targets are the
+# observable.
+fixture: one-repo
+await idle
+key o
+await screen == Workspace 20000
+await targets["tabs.tab[0]"] exists 20000
+
+key ctrl-s ?
+await overlay == Dialog 10000
+assert dialog.name == Help
+await targets["help.here[0]"] exists 10000
+shot help-in-terminal
+type zoom
+await dialog.fields[0].value == zoom 5000
+await targets["help.run"] exists 5000
+shot help-zoom
+key enter
+await overlay absent 10000
+await targets["tabs.tab[0]"] absent 10000
+assert screen == Workspace && mode == Terminal
+shot zoomed
+
+# `ctrl-s z` is the same toggle, so the key undoes what the row did.
+key ctrl-s z
+await targets["tabs.tab[0]"] exists 10000
+quit

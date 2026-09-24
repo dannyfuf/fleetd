@@ -20,11 +20,12 @@
 //! ## States
 //!
 //! normal · filtering (`filter`) · filter retained (`filter_chip`, accent) · stale
-//! (`· stale · 2m`, amber, §1.3 / §3.12). There is no focused, disabled or error state: the
+//! (an amber `Stale · 2m` chip, §1.3 / §3.12). There is no focused, disabled or error state: the
 //! header describes a pane, and the pane owns the focus ring.
 
 use gpui::{AnyElement, App, SharedString, Window, div, prelude::*};
 
+use super::Chip;
 use crate::{
     icons::{Icon, IconSize},
     text::Text,
@@ -89,7 +90,8 @@ impl PaneHeader {
         self
     }
 
-    /// Append `· stale · <age>` in amber (§1.3, §3.12).
+    /// Append an amber `Stale · <age>` chip (§1.3, §3.12). Draw it on one header per screen,
+    /// the list's, not on every pane: one chip says the whole mirror is frozen.
     pub fn stale(mut self, age: impl Into<SharedString>) -> Self {
         self.stale_age = Some(age.into());
         self
@@ -163,7 +165,10 @@ impl RenderOnce for PaneHeader {
                         .child(Text::hint(query).tone(Tone::Accent))
                 }))
                 .children(self.stale_age.map(|age| {
-                    Text::label(format!("\u{b7} stale \u{b7} {age}")).tone(Tone::Warning)
+                    Chip::new()
+                        .text(format!("Stale \u{b7} {age}"))
+                        .tone(Tone::Warning)
+                        .filled(true)
                 }))
                 .into_any_element(),
         };

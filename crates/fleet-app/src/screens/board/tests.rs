@@ -458,7 +458,9 @@ fn a_columns_list_follows_the_row_count_it_is_given(cx: &mut gpui::TestAppContex
         .iter()
         .map(gpui::ListState::item_count)
         .sum();
-    assert_eq!(rows, 8);
+    // Every column's list also holds its `Add card` row, after its last tile.
+    let footers = model.columns.len();
+    assert_eq!(rows, 8 + footers);
 
     state.board.filter = "Card 1".to_owned();
     let filtered = projection::prepare(&state, &cache, 1_788_523_201);
@@ -468,7 +470,11 @@ fn a_columns_list_follows_the_row_count_it_is_given(cx: &mut gpui::TestAppContex
         .iter()
         .map(gpui::ListState::item_count)
         .sum();
-    assert_eq!(rows, 1, "the lists follow the filter, not the raw board");
+    assert_eq!(
+        rows,
+        1 + footers,
+        "the lists follow the filter, not the raw board"
+    );
 }
 
 /// A card edited in the background leaves the column's scroll where the user put it.
@@ -494,7 +500,7 @@ fn an_edited_card_leaves_the_column_where_the_user_scrolled_it(cx: &mut gpui::Te
     let updated = projection::prepare(&state, &cache, 1_788_523_201);
     screen.sync_lists(&updated);
 
-    assert_eq!(screen.column_lists[column].item_count(), 50);
+    assert_eq!(screen.column_lists[column].item_count(), 50 + 1);
     assert_eq!(
         screen.column_lists[column].logical_scroll_top().item_ix,
         20,
@@ -529,7 +535,7 @@ fn a_new_card_shifts_the_anchor_by_the_row_that_arrived(cx: &mut gpui::TestAppCo
     let updated = projection::prepare(&state, &cache, 1_788_523_201);
     screen.sync_lists(&updated);
 
-    assert_eq!(screen.column_lists[column].item_count(), 51);
+    assert_eq!(screen.column_lists[column].item_count(), 51 + 1);
     assert_eq!(
         screen.column_lists[column].logical_scroll_top().item_ix,
         21,

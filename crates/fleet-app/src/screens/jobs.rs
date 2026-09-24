@@ -5,7 +5,7 @@ use std::{rc::Rc, sync::Arc, time::Duration};
 use fleet_core::ids::JobId;
 use fleet_proto::{job::JobRecord, request::RequestBody, response::ResponseBody};
 use fleet_ui_kit::{
-    ActiveTheme, Icon, LOG_TAIL_LINES, LogCommand, LogView, Sheet, Tone, prelude::*,
+    ActiveTheme, Icon, LOG_TAIL_LINES, ListPointer, LogCommand, LogView, Sheet, Tone, prelude::*,
 };
 use gpui::{
     AnyElement, App, ClipboardItem, Entity, FocusHandle, ListAlignment, ListState, ScrollStrategy,
@@ -45,6 +45,8 @@ pub struct PanelState {
     pub cursor: usize,
     /// The job whose log is expanded, if any. Widens the sheet 440 → 640 px.
     pub expanded: Option<JobId>,
+    /// How the log's toolbar names that job, prepared when the log opened.
+    pub log_title: Option<jobs_panel::LogTitle>,
     /// The tail of that log, newest last.
     pub log: Arc<[SharedString]>,
     /// Whether the log view is pinned to the tail (`f` toggles, `G` re-enables).
@@ -64,15 +66,13 @@ pub struct PanelState {
 impl PanelState {
     /// How many rows the filter leaves for the cursor to move over.
     fn visible_len(&self, jobs: &[JobRecord]) -> usize {
-        jobs.iter().filter(|job| self.filter.matches(job)).count()
+        self.filter.visible(jobs).count()
     }
 
     /// The job under the cursor.
     #[must_use]
     pub fn selected<'a>(&self, jobs: &'a [JobRecord]) -> Option<&'a JobRecord> {
-        jobs.iter()
-            .filter(|job| self.filter.matches(job))
-            .nth(self.cursor)
+        self.filter.visible(jobs).nth(self.cursor)
     }
 
     /// The job keyboard actions address. Once a log is expanded, its stable identity wins over
@@ -93,9 +93,9 @@ impl PanelState {
     /// Puts the cursor on `job` when it is visible, which is what `!` promises: the sticky
     /// error slot opens this panel *on the failure it names* (§1.8).
     pub fn focus_job(&mut self, jobs: &[JobRecord], job: &JobId) -> bool {
-        match jobs
-            .iter()
-            .filter(|job| self.filter.matches(job))
+        match self
+            .filter
+            .visible(jobs)
             .position(|record| &record.id == job)
         {
             Some(index) => {
@@ -116,6 +116,7 @@ impl PanelState {
     pub fn collapse(&mut self) -> bool {
         self.tail = None;
         self.log = Arc::default();
+        self.log_title = None;
         self.log_offset = 0;
         self.expanded.take().is_some()
     }
@@ -133,6 +134,15 @@ impl PanelState {
             }
         }
     }
+}
+
+/// What expanding a log needs besides the panel: the daemon to tail it from, the log view's
+/// scroll handle, and the home directory its title shortens the path against.
+#[derive(Clone)]
+struct LogOpener {
+    requests: actions::JobsRequests,
+    log_scroll: UniformListScrollHandle,
+    home: Option<std::path::PathBuf>,
 }
 
 /// The jobs panel.
@@ -161,28 +171,36 @@ impl JobsPanel {
     }
 
     /// Observe visibility even when the Shell no longer renders this panel.
-    pub fn bind(&mut self, state: &Entity<AppState>, cx: &mut App) {
+    pub fn bind(&mut self, state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
         if self.observation.is_some() {
             return;
         }
+        let opener = self.log_opener(actions::JobsRequests::bridge(bridge.clone()));
         let panel = self.state.downgrade();
         let scroll = self.list_scroll.clone();
-        let home = self.home.clone();
+        let observed = opener.clone();
         self.observation = Some(cx.observe(state, move |state, cx| {
             let Some(panel) = panel.upgrade() else {
                 return;
             };
-            presentation::synchronize(&panel, &state, &scroll, home.as_deref(), cx);
+            presentation::synchronize(&panel, &state, &scroll, &observed, cx);
         }));
         let panel = self.state.downgrade();
         let state = state.downgrade();
         let scroll = self.list_scroll.clone();
-        let home = self.home.clone();
         cx.defer(move |cx| {
             if let (Some(panel), Some(state)) = (panel.upgrade(), state.upgrade()) {
-                presentation::synchronize(&panel, &state, &scroll, home.as_deref(), cx);
+                presentation::synchronize(&panel, &state, &scroll, &opener, cx);
             }
         });
+    }
+
+    fn log_opener(&self, requests: actions::JobsRequests) -> LogOpener {
+        LogOpener {
+            requests,
+            log_scroll: self.log_scroll.clone(),
+            home: self.home.clone(),
+        }
     }
 }
 

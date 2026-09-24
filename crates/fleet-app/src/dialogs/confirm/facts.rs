@@ -9,6 +9,21 @@ pub struct Facts {
     pub(crate) risky: bool,
     /// The age of the facts in seconds, for the mandatory freshness stamp.
     pub(crate) age_secs: Option<i64>,
+    /// What a delete would lose, for the consequence sentence to name exactly.
+    pub(crate) losses: Losses,
+}
+
+/// What deleting a worktree loses, as the inspection reported it.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Losses {
+    /// A live session is killed with it.
+    pub(crate) session: bool,
+    /// Commits not on the base and never pushed: they exist only in this copy.
+    pub(crate) unpushed: u64,
+    /// Uncommitted work: `Some(Some(n))` files, `Some(None)` of an unknown count.
+    pub(crate) dirty: Option<Option<u64>>,
+    /// Whether the unique commit count could not be determined.
+    pub(crate) commits_unknown: bool,
 }
 
 /// The ref the daemon actually compared against.
@@ -34,19 +49,21 @@ pub fn worktree_facts(inspection: Option<&WorktreeInspection>, loading: bool, no
     let Some(inspection) = inspection else {
         return Facts {
             list: FactList::new().loading(true),
-            risky: false,
-            age_secs: None,
+            ..Facts::default()
         };
     };
     let mut list = FactList::new().loading(loading);
     let mut risky = false;
+    let mut losses = Losses::default();
 
     if inspection.dirty {
         risky = true;
-        list = list.fact(Fact::risk(match inspection.dirty_files {
-            Some(count) => format!("{count} uncommitted files"),
+        losses.dirty = Some(inspection.dirty_files);
+        let text = match inspection.dirty_files {
+            Some(count) => plural(count, "uncommitted file"),
             None => "uncommitted changes".to_owned(),
-        }));
+        };
+        list = list.fact(Fact::risk(text.clone()).strong(&text));
     } else {
         list = list.fact(Fact::safe("clean"));
     }
@@ -55,12 +72,20 @@ pub fn worktree_facts(inspection: Option<&WorktreeInspection>, loading: bool, no
         Some(0) => list = list.fact(Fact::safe("no commits of its own")),
         Some(count) => {
             risky = true;
-            list = list.fact(Fact::risk(format!(
-                "{count} commits not on {}",
-                target_ref(&inspection.target_branch)
-            )));
+            if !inspection.published {
+                losses.unpushed = count;
+            }
+            let lead = plural(count, "commit");
+            list = list.fact(
+                Fact::risk(format!(
+                    "{lead} not on {}",
+                    target_ref(&inspection.target_branch)
+                ))
+                .strong(&lead),
+            );
         }
         None => {
+            losses.commits_unknown = true;
             list = list.fact(Fact::unknown("unique commit count unavailable"));
         }
     }
@@ -98,6 +123,7 @@ pub fn worktree_facts(inspection: Option<&WorktreeInspection>, loading: bool, no
         // the one screen where a wrong session fact changes a destructive decision.
         SessionState::Detached | SessionState::Attached => {
             risky = true;
+            losses.session = true;
             let running = if inspection.running.is_empty() {
                 String::new()
             } else {
@@ -123,12 +149,59 @@ pub fn worktree_facts(inspection: Option<&WorktreeInspection>, loading: bool, no
         list,
         risky,
         age_secs: age_secs(&inspection.inspected_at, now),
+        losses,
+    }
+}
+
+/// `1 commit`, `3 commits`: a count and its noun, agreeing.
+pub(super) fn plural(count: u64, noun: &str) -> String {
+    if count == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{count} {noun}s")
+    }
+}
+
+impl Losses {
+    /// The sentence a risky delete asks the user to accept, naming exactly what goes (§3.8.3):
+    /// `The session is killed and the copy moves to the trash. The 2 unpushed commits exist only
+    /// here and will be lost.`
+    pub(crate) fn sentence(&self) -> String {
+        let mut sentence = if self.session {
+            "The session is killed and the copy moves to the trash.".to_owned()
+        } else {
+            "The copy moves to the trash.".to_owned()
+        };
+        let mut lost: Vec<(String, bool)> = Vec::new();
+        if self.unpushed > 0 {
+            lost.push((plural(self.unpushed, "unpushed commit"), self.unpushed != 1));
+        }
+        match self.dirty {
+            Some(Some(files)) => lost.push((plural(files, "uncommitted file"), files != 1)),
+            Some(None) => lost.push(("uncommitted changes".to_owned(), true)),
+            None => {}
+        }
+        match lost.as_slice() {
+            [] if self.commits_unknown => {
+                sentence.push_str(" Commits that exist only here would be lost.");
+            }
+            [] => {}
+            [(one, many)] => {
+                let verb = if *many { "exist" } else { "exists" };
+                sentence.push_str(&format!(" The {one} {verb} only here and will be lost."));
+            }
+            [(first, _), (second, _), ..] => sentence.push_str(&format!(
+                " The {first} and {second} exist only here and will be lost."
+            )),
+        }
+        sentence
     }
 }
 
 /// `K` on a worktree: the facts are what the session is running (§3.8.3).
 pub(super) fn kill_facts(terminals: usize, running: &[String], unsaved: bool) -> Facts {
-    let mut list = FactList::new().fact(Fact::risk(format!("{terminals} terminals")));
+    let lead = plural(terminals as u64, "terminal");
+    let mut list = FactList::new().fact(Fact::risk(lead.clone()).strong(&lead));
     if unsaved {
         list = list.fact(Fact::risk("an editor has unsaved changes"));
     }
@@ -138,7 +211,7 @@ pub(super) fn kill_facts(terminals: usize, running: &[String], unsaved: bool) ->
     Facts {
         list,
         risky: true,
-        age_secs: None,
+        ..Facts::default()
     }
 }
 
@@ -148,12 +221,11 @@ pub(super) fn close_terminal_facts(running: Option<&str>) -> Facts {
         Some(command) => Facts {
             list: FactList::new().fact(Fact::risk(format!("{command} is running in it"))),
             risky: true,
-            age_secs: None,
+            ..Facts::default()
         },
         None => Facts {
             list: FactList::new().fact(Fact::safe("nothing is running in it")),
-            risky: false,
-            age_secs: None,
+            ..Facts::default()
         },
     }
 }

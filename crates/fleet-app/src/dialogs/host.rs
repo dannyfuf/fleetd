@@ -32,6 +32,14 @@ pub(crate) struct DialogHost {
     pub card_picker: card_picker::CardPickerState,
     /// New card draft (BOARD §8).
     pub card_create: card_create::CardCreateState,
+    /// The column a column's `+` asked the next New card to land in, taken by its seed.
+    ///
+    /// Outside the draft on purpose: the dialog transition clears every draft before it seeds
+    /// the new one, and this is the one fact that has to survive that to reach the seed.
+    pub card_create_in: Option<fleet_core::ids::StatusId>,
+    /// The column the next Board settings opens drilled into, taken by its seed: a column's
+    /// automation pill. Outside the draft for the same reason as [`Self::card_create_in`].
+    pub board_settings_column: Option<usize>,
     /// Live title editor for the open new-card dialog.
     pub(super) card_create_title: Option<Entity<TextInput>>,
     /// Live description editor for the open new-card dialog.
@@ -77,12 +85,22 @@ pub(crate) struct DialogHost {
     /// The input materialized for the settings row that entered editing.
     pub(super) settings_input: Option<Entity<TextInput>>,
     pub(super) settings_input_subscription: Option<Subscription>,
+    /// The settings header's search field, alive for the dialog's whole lifetime.
+    pub(super) settings_search: Option<Entity<TextInput>>,
+    pub(super) settings_search_subscription: Option<Subscription>,
     /// Rename-terminal draft.
     pub rename_terminal: rename_terminal::RenameState,
     /// The rename dialog's one editor, alive for its whole lifetime.
     pub(super) rename_input: Option<Entity<TextInput>>,
     pub(super) rename_input_subscription: Option<Subscription>,
     pub palette: palette::PaletteState,
+    /// Help's draft, for as long as Help is open.
+    pub help: Option<help::HelpState>,
+    /// Help's search field.
+    pub(super) help_input: Option<Entity<TextInput>>,
+    pub(super) help_input_subscription: Option<Subscription>,
+    /// The Changes diff sheet's diff surface.
+    pub(super) changes_diff: changes_diff::ChangesDiffState,
     /// What the next Confirm dialog asks about, published by whoever opens it.
     pub pending_confirm: Option<ConfirmRequest>,
     /// Repository the next hook editor should load.
@@ -237,7 +255,7 @@ pub(crate) fn open_session(session: SessionId, state: &Entity<AppState>, cx: &mu
 pub(crate) fn open_agents_picker(state: &Entity<AppState>, cx: &mut App) {
     state.update(cx, |app, cx| {
         app.leave_prefix();
-        app.palette_seed = Some("agents".to_owned());
+        app.palette_seed = Some("!".to_owned());
         app.open_overlay(Overlay::Palette);
         cx.notify();
     });
@@ -251,6 +269,40 @@ pub(crate) fn open_worktree<T: SessionTransport>(
     cx: &mut App,
 ) {
     ensure_worktree_session(id, true, true, state, transport, cx);
+}
+
+/// Opens a native agent thread: its tab when this window already shows its worktree, else its
+/// worktree's session first. The palette's `AGENTS` rows and the title bar's `1 needs you` both
+/// run this, so a thread opens the same way whichever of them was clicked.
+pub(crate) fn open_agent_thread<T: SessionTransport>(
+    thread: ThreadId,
+    state: &Entity<AppState>,
+    transport: &T,
+    cx: &mut App,
+) {
+    let reopen_transport = transport.clone();
+    let worktree = if crate::screens::workspace::reopen_agent_tab(
+        state,
+        thread,
+        move |command| reopen_transport.send(command.into()),
+        cx,
+    ) {
+        None
+    } else {
+        state.update(cx, |app, _| {
+            app.agents.summary(thread).and_then(|summary| {
+                let worktree = summary.worktree.clone();
+                // `select_agent_thread` also returns false when the combined strip is full.
+                // That refusal already showed its toast and must not fall through to
+                // EnsureSession, which could switch or wake an unrelated session.
+                (app.agents.is_attached(thread) || app.workspace_has_tab_capacity(&worktree))
+                    .then_some(worktree)
+            })
+        })
+    };
+    if let Some(worktree) = worktree {
+        open_agent_thread_worktree(worktree, thread, state, transport, cx);
+    }
 }
 
 /// Ensures a delegated thread's worktree session, then attaches and selects that thread.
@@ -387,6 +439,18 @@ fn watch(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
         ) {
             card_picker::refresh(&state, cx);
         }
+        if matches!(
+            state.read(cx).overlay,
+            Some(Overlay::Dialog(Dialogs::CardDetail))
+        ) {
+            card_detail::refresh(&state, cx);
+        }
+        if matches!(
+            state.read(cx).overlay,
+            Some(Overlay::Dialog(Dialogs::ChangesDiff))
+        ) {
+            changes_diff::refresh(&state, cx);
+        }
         // The branch preview names the worktree the create would produce, and whether that
         // worktree already exists is a snapshot fact: a create that landed elsewhere has to
         // turn this dialog's `Create` into `Open` without a keystroke.
@@ -419,6 +483,7 @@ fn dialog_key_context(dialog: &Dialogs, host: &DialogHost) -> &'static str {
         Dialogs::CardDetail if host.card_detail.is_editing() => "CardDetailEditing",
         Dialogs::BoardSettings if host.board_settings_input.is_some() => "BoardSettingsEditing",
         Dialogs::Settings if host.settings.editing.is_some() => "SettingsEditing",
+        Dialogs::Settings if host.settings.search_focused => "SettingsSearch",
         Dialogs::CreateWorktree if host.create.field == create_worktree::Field::Branch => {
             "CreateEditing"
         }
@@ -456,7 +521,16 @@ fn focused_input_entity(state: &Entity<AppState>, cx: &mut App) -> Option<Entity
             },
             Dialogs::EditHooks => host.hook_inputs.get(host.edit_hooks.field),
             Dialogs::RenameTerminal => host.rename_input.as_ref(),
-            Dialogs::Settings => host.settings_input.as_ref(),
+            // The row editor while one is open; the header's search while it has the keyboard.
+            Dialogs::Settings => host.settings_input.as_ref().or_else(|| {
+                host.settings
+                    .search_focused
+                    .then_some(host.settings_search.as_ref())
+                    .flatten()
+            }),
+            // Typing goes to Help's search: its keys are `↑`/`↓`/`⏎`/`esc`/`?`, none printable
+            // but the last, which closes Help as it always has.
+            Dialogs::Help => host.help_input.as_ref(),
             _ => None,
         }?;
         Some(input.clone())
@@ -472,11 +546,12 @@ pub(crate) fn focused_input(state: &Entity<AppState>, cx: &mut App) -> Option<Fo
 ///
 /// Only the dialogs whose whole tab cycle is made of editors are reported, so that
 /// `dialog.fields[N]` and the painted `targets["dialog.field[N]"]` always name the same field
-/// (`docs/TESTING-HARNESS.md` §3). Create-worktree's base list and host cycler and Settings'
-/// switch rows are not editors, so those dialogs report nothing rather than a partial numbering
-/// that would not line up with their targets. Board settings is the exception in the other
-/// direction: it paints no `dialog.field[N]` target at all, so it reports its open rail section
-/// and its one row-scoped editor without any numbering to keep in step.
+/// (`docs/TESTING-HARNESS.md` §3). Create-worktree's base list and host cycler are not editors,
+/// so that dialog reports nothing rather than a partial numbering that would not line up with
+/// its targets. Board settings and Settings are the exception in the other direction: they
+/// paint no `dialog.field[N]` target at all, so each reports its open rail section and its
+/// editor — Board settings' row-scoped one, Settings' header search — without any numbering to
+/// keep in step.
 pub(crate) fn dialog_fields(state: &Entity<AppState>, cx: &mut App) -> Vec<FieldSnapshot> {
     let Some(Overlay::Dialog(dialog)) = state.read(cx).overlay.as_ref().cloned() else {
         return Vec::new();
@@ -494,6 +569,26 @@ pub(crate) fn dialog_fields(state: &Entity<AppState>, cx: &mut App) -> Vec<Field
             focused: false,
         });
     }
+    // Settings, the same way: the section the pane shows and the row under the cursor with
+    // the value the draft holds for it (`Sleep on switch = on`), then the header's search.
+    if dialog == Dialogs::Settings {
+        let (section, row) = read_host(state, cx, |host, _| {
+            (
+                host.settings.current_section().title().to_owned(),
+                host.settings.cursor_summary(),
+            )
+        });
+        fields.push(FieldSnapshot {
+            name: "section".to_owned(),
+            value: section,
+            focused: false,
+        });
+        fields.push(FieldSnapshot {
+            name: "row".to_owned(),
+            value: row,
+            focused: false,
+        });
+    }
     let inputs: Vec<(String, Entity<TextInput>)> = read_host(state, cx, |host, _| match dialog {
         Dialogs::CardCreate => named(&[
             ("title", host.card_create_title.as_ref()),
@@ -508,6 +603,8 @@ pub(crate) fn dialog_fields(state: &Entity<AppState>, cx: &mut App) -> Vec<Field
         // typed value — a model or an effort no catalogue offered — can be read back.
         Dialogs::CardPicker => named(&[("query", host.card_picker_input.as_ref())]),
         Dialogs::CloneRepo => named(&[("search", host.clone_query.as_ref())]),
+        Dialogs::Help => named(&[("search", host.help_input.as_ref())]),
+        Dialogs::Settings => named(&[("search", host.settings_search.as_ref())]),
         // The one row-scoped editor Board settings mounts, named after the row it belongs to.
         // It is the only place a value typed into that dialog can be read back — every other
         // row is a cycler the projection already carries — and it follows the `section` field
@@ -660,10 +757,14 @@ fn close_with(state: &Entity<AppState>, preserve_card_detail: bool, cx: &mut App
             ..Default::default()
         };
         host.context = Default::default();
+        host.changes_diff = Default::default();
         host.assign = Default::default();
         host.edit_hooks = Default::default();
         host.rename_terminal = Default::default();
         host.palette = Default::default();
+        host.help = None;
+        host.help_input = None;
+        host.help_input_subscription = None;
         host.card_create_title = None;
         host.card_create_description = None;
         host.card_create_input_subscriptions.clear();
@@ -684,6 +785,8 @@ fn close_with(state: &Entity<AppState>, preserve_card_detail: bool, cx: &mut App
         host.hook_input_subscriptions.clear();
         host.settings_input = None;
         host.settings_input_subscription = None;
+        host.settings_search = None;
+        host.settings_search_subscription = None;
         host.rename_input = None;
         host.rename_input_subscription = None;
         if !preserve_card_detail {

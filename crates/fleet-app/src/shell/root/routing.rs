@@ -74,11 +74,12 @@ impl Shell {
     pub(super) fn toggle_detail(
         &mut self,
         _: &hub::ToggleDetail,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let wide = !crate::screens::hub::detail_is_docked(f32::from(window.viewport_size().width));
         self.state.update(cx, |state, cx| {
-            state.detail_open = !state.detail_open;
+            state.detail_open = Some(!state.detail_visible(wide));
             cx.notify();
         });
     }
@@ -238,6 +239,7 @@ fn toggle_pr_screen_state(state: &mut AppState) -> bool {
 
 fn prefix_go_hub_state(state: &mut AppState) {
     state.leave_prefix();
+    state.pending_worktree_focus = state.active_worktree().cloned();
     route_to_hub(state, HubTab::Worktrees);
 }
 
@@ -313,6 +315,10 @@ mod tests {
         }
 
         let mut outside_hub = AppState::new("/tmp/fleet", Instant::now());
+        assert_eq!(
+            outside_hub.pending_worktree_focus, None,
+            "a route from the Hub names no worktree to land on"
+        );
         outside_hub.screen = Screen::Workspace {
             session: "owner/repo"
                 .parse()

@@ -34,11 +34,18 @@ pub fn ch(n: f32) -> Pixels {
 pub struct ColorTokens {
     /// App ground. The largest area on screen.
     pub bg: Hsla,
+    /// Window chrome: the title bar, the sidebar and the status bar. One step darker than
+    /// [`Self::bg`], so the content area reads as the lit part of the window.
+    pub chrome: Hsla,
     /// Rails, panes, lists — one step above the ground.
     pub surface: Hsla,
+    /// Cards: a board tile, a hub card, a grouped settings block. One step above
+    /// [`Self::surface`], always with a [`Self::border`] hairline.
+    pub surface_raised: Hsla,
     /// Dialogs, sheets, toasts, palette — the floating layer.
     pub elevated: Hsla,
-    /// Scrim painted over the base screen behind a dialog.
+    /// Scrim painted over the base screen behind a dialog, sheet or popover. Flat and dark:
+    /// gpui has no backdrop blur, so the scrim does the blur's job by darkening.
     pub overlay: Hsla,
     /// Cursor row background.
     pub row_selected: Hsla,
@@ -54,12 +61,39 @@ pub struct ColorTokens {
     pub text_inverse: Hsla,
     /// Cursor and focus. The only decorative-looking color, and it is never decorative.
     pub accent: Hsla,
+    /// Fill of a surface's one primary button. The accent hue; never a second blue.
+    pub accent_fill: Hsla,
+    /// Pointer hover on [`Self::accent_fill`].
+    pub accent_fill_hover: Hsla,
+    /// [`Self::accent_fill`] while the pointer is pressed on it.
+    pub accent_fill_active: Hsla,
+    /// Label and key chip drawn on [`Self::accent_fill`].
+    pub accent_fill_text: Hsla,
+    /// Low-alpha accent wash behind a blue chip or an informational callout.
+    pub accent_subtle: Hsla,
+    /// Secondary button and other resting control fill.
+    pub control: Hsla,
+    /// Pointer hover on a control, a ghost button or an icon button.
+    pub control_hover: Hsla,
+    /// A control, a ghost button or an icon button while the pointer is pressed on it.
+    pub control_active: Hsla,
+    /// Hairline around a resting control.
+    pub control_border: Hsla,
+    /// Key chip (`Kbd`) fill.
+    pub kbd_bg: Hsla,
+    /// Key chip (`Kbd`) outline.
+    pub kbd_border: Hsla,
     /// Healthy / done / approved.
     pub success: Hsla,
     /// Needs attention / in flight / unknown / degraded.
     pub warning: Hsla,
-    /// Broken / destructive.
+    /// Broken / destructive. Also the fill of a destructive button's strong form, with
+    /// [`Self::text_inverse`] on it.
     pub danger: Hsla,
+    /// Pointer hover on a [`Self::danger`] button fill.
+    pub danger_fill_hover: Hsla,
+    /// A [`Self::danger`] button fill while the pointer is pressed on it.
+    pub danger_fill_active: Hsla,
     /// Neutral information. Shares the accent hue; never used for state.
     pub info: Hsla,
     /// 1 px hairlines.
@@ -86,20 +120,35 @@ impl ColorTokens {
     /// The dark theme, which is the default.
     pub fn dark() -> Self {
         Self {
-            bg: c(0x0E1013),
+            bg: c(0x111317),
+            chrome: c(0x0E0F12),
             surface: c(0x16181D),
+            surface_raised: c(0x1A1C22),
             elevated: c(0x1B1E24),
-            overlay: ca(0x00000073),
+            overlay: ca(0x0506088C),
             row_selected: c(0x1E2430),
             row_hover: c(0x191C22),
             text: c(0xE6E8EB),
-            text_secondary: c(0x8A9099),
-            text_muted: c(0x5A6069),
+            text_secondary: c(0xA3A9B5),
+            text_muted: c(0x808794),
             text_inverse: c(0x0E1013),
             accent: c(0x58A6FF),
+            accent_fill: c(0x58A6FF),
+            accent_fill_hover: c(0x79B8FF),
+            accent_fill_active: c(0x4493F8),
+            accent_fill_text: c(0x0B0E14),
+            accent_subtle: ca(0x58A6FF24),
+            control: c(0x1A1D23),
+            control_hover: c(0x22262D),
+            control_active: c(0x2A2E36),
+            control_border: c(0x2C3039),
+            kbd_bg: c(0x23262D),
+            kbd_border: c(0x30343D),
             success: c(0x3FB950),
             warning: c(0xD29922),
             danger: c(0xF85149),
+            danger_fill_hover: c(0xFF6A63),
+            danger_fill_active: c(0xEA4A42),
             info: c(0x58A6FF),
             border: c(0x22262E),
             border_strong: c(0x2C313A),
@@ -117,19 +166,34 @@ impl ColorTokens {
     pub fn light() -> Self {
         Self {
             bg: c(0xFBFBFC),
+            chrome: c(0xF3F4F6),
             surface: c(0xFFFFFF),
+            surface_raised: c(0xFFFFFF),
             elevated: c(0xFFFFFF),
-            overlay: ca(0x00000040),
+            overlay: ca(0x0000004D),
             row_selected: c(0xEDF2FB),
             row_hover: c(0xF3F4F6),
             text: c(0x16181D),
-            text_secondary: c(0x6B7280),
-            text_muted: c(0x9CA3AF),
+            text_secondary: c(0x4B5563),
+            text_muted: c(0x636A77),
             text_inverse: c(0xFBFBFC),
             accent: c(0x0969DA),
+            accent_fill: c(0x0969DA),
+            accent_fill_hover: c(0x0858C0),
+            accent_fill_active: c(0x0A4A9E),
+            accent_fill_text: c(0xFFFFFF),
+            accent_subtle: ca(0x0969DA1F),
+            control: c(0xFFFFFF),
+            control_hover: c(0xF3F4F6),
+            control_active: c(0xE8EAEE),
+            control_border: c(0xD3D6DC),
+            kbd_bg: c(0xF3F4F6),
+            kbd_border: c(0xD3D6DC),
             success: c(0x1A7F37),
             warning: c(0x9A6700),
             danger: c(0xCF222E),
+            danger_fill_hover: c(0xB31D28),
+            danger_fill_active: c(0x9A1822),
             info: c(0x0969DA),
             border: c(0xE3E5E9),
             border_strong: c(0xD3D6DC),
@@ -171,10 +235,16 @@ pub struct TypeStyle {
     pub tracking: f32,
 }
 
-/// The four type roles of the app plus their two derivatives.
+/// The type roles of the app.
+///
+/// `ui` is the body role (13 / 18); there is no separate `body` field.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TypeScale {
-    /// Body UI text: 13 / 18 regular.
+    /// Screen heading: 20 / 26 semibold. One per page, above its content.
+    pub page_title: TypeStyle,
+    /// Heading of a group inside a page or a sheet: 16 / 22 semibold.
+    pub section_title: TypeStyle,
+    /// Body UI text: 13 / 18 regular. The design's `body` role.
     pub ui: TypeStyle,
     /// Emphasised UI text: 13 / 18 medium. Titles, active tabs, primary values.
     pub ui_strong: TypeStyle,
@@ -184,7 +254,13 @@ pub struct TypeScale {
     pub data: TypeStyle,
     /// Small data text: mono 11.5 / 16. Log tails, progress sub-lines.
     pub data_small: TypeStyle,
-    /// Section and pane labels: 11 / 14 uppercase.
+    /// Supporting text under a title or beside a value: 12 / 16 regular.
+    pub caption: TypeStyle,
+    /// Sentence-case small label: 11 / 14 semibold, no uppercase, no tracking. Field labels,
+    /// sidebar and card group headings. Replaces [`Self::label`] screen by screen.
+    pub sentence_label: TypeStyle,
+    /// Legacy uppercase micro-header: 11 / 14 uppercase. Being retired from every screen in
+    /// favour of [`Self::sentence_label`]; do not use it on a redesigned surface.
     pub label: TypeStyle,
     /// Key hints: mono 11 / 14.
     pub hint: TypeStyle,
@@ -193,6 +269,22 @@ pub struct TypeScale {
 impl Default for TypeScale {
     fn default() -> Self {
         Self {
+            page_title: TypeStyle {
+                size: px(20.0),
+                line_height: px(26.0),
+                weight: FontWeight::SEMIBOLD,
+                font: FontRole::Ui,
+                uppercase: false,
+                tracking: 0.0,
+            },
+            section_title: TypeStyle {
+                size: px(16.0),
+                line_height: px(22.0),
+                weight: FontWeight::SEMIBOLD,
+                font: FontRole::Ui,
+                uppercase: false,
+                tracking: 0.0,
+            },
             ui: TypeStyle {
                 size: px(13.0),
                 line_height: px(18.0),
@@ -230,6 +322,22 @@ impl Default for TypeScale {
                 line_height: px(16.0),
                 weight: FontWeight::NORMAL,
                 font: FontRole::Mono,
+                uppercase: false,
+                tracking: 0.0,
+            },
+            caption: TypeStyle {
+                size: px(12.0),
+                line_height: px(16.0),
+                weight: FontWeight::NORMAL,
+                font: FontRole::Ui,
+                uppercase: false,
+                tracking: 0.0,
+            },
+            sentence_label: TypeStyle {
+                size: px(11.0),
+                line_height: px(14.0),
+                weight: FontWeight::SEMIBOLD,
+                font: FontRole::Ui,
                 uppercase: false,
                 tracking: 0.0,
             },
@@ -301,6 +409,16 @@ pub struct Radii {
     pub lg: Pixels,
     /// Pill. Context-bar chips and status dots.
     pub full: Pixels,
+    /// 7 px. Buttons, inputs, nav rows, segmented controls.
+    pub control: Pixels,
+    /// 10 px. Cards ([`ColorTokens::surface_raised`]).
+    pub card: Pixels,
+    /// 12 px. Menus, popovers, tooltips.
+    pub popover: Pixels,
+    /// 12 px. Dialogs, sheets that float, the palette.
+    pub dialog: Pixels,
+    /// 9999 px. Chips, status pills, avatars.
+    pub pill: Pixels,
 }
 
 impl Default for Radii {
@@ -312,6 +430,11 @@ impl Default for Radii {
             md: px(6.0),
             lg: px(12.0),
             full: px(9999.0),
+            control: px(7.0),
+            card: px(10.0),
+            popover: px(12.0),
+            dialog: px(12.0),
+            pill: px(9999.0),
         }
     }
 }
@@ -329,13 +452,18 @@ pub struct ShadowToken {
     pub color: Hsla,
 }
 
-/// The four elevation levels. Level 0 and 1 are flat and carry a hairline instead of a shadow.
+/// The elevation levels. Level 0 and 1 are flat and carry a hairline instead of a shadow.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Elevation {
     /// Level 2: right-docked sheet and toasts.
     pub sheet: ShadowToken,
     /// Level 3: dialogs and the palette.
     pub dialog: ShadowToken,
+    /// Level 4: menus, popovers and tooltips, which float over everything including a dialog.
+    pub popover: ShadowToken,
+    /// The hover lift of a level-1 tile a pointer can pick up (a board card): a short, soft
+    /// shadow under a `border_strong` hairline, never a surface of its own.
+    pub lift: ShadowToken,
 }
 
 impl Elevation {
@@ -353,6 +481,18 @@ impl Elevation {
                 blur: px(48.0),
                 spread: px(0.0),
                 color: ca(0x00000073),
+            },
+            popover: ShadowToken {
+                y: px(24.0),
+                blur: px(64.0),
+                spread: px(0.0),
+                color: ca(0x0000008C),
+            },
+            lift: ShadowToken {
+                y: px(4.0),
+                blur: px(12.0),
+                spread: px(0.0),
+                color: ca(0x00000059),
             },
         }
     }
@@ -372,6 +512,18 @@ impl Elevation {
                 spread: px(0.0),
                 color: ca(0x00000029),
             },
+            popover: ShadowToken {
+                y: px(24.0),
+                blur: px(64.0),
+                spread: px(0.0),
+                color: ca(0x00000033),
+            },
+            lift: ShadowToken {
+                y: px(4.0),
+                blur: px(12.0),
+                spread: px(0.0),
+                color: ca(0x0000001F),
+            },
         }
     }
 }
@@ -380,8 +532,10 @@ impl Elevation {
 /// are dwell and delay durations, not animations.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Motion {
-    /// 400 ms: how long the prefix hint waits before appearing.
+    /// 400 ms: how long the held `^S` prefix waits before its hint (the prefix menu) appears.
     pub prefix_hint_delay: u64,
+    /// 500 ms: how long the pointer rests on a control before its tooltip appears.
+    pub tooltip_delay: u64,
     /// 1000 ms: one full turn of the spinner.
     pub spinner: u64,
     /// 150 ms: how long the jump-to-latest chip waits before appearing.
@@ -402,6 +556,7 @@ impl Default for Motion {
     fn default() -> Self {
         Self {
             prefix_hint_delay: 400,
+            tooltip_delay: 500,
             spinner: 1000,
             jump_chip_delay: 150,
             working_tick: 1000,
@@ -424,16 +579,19 @@ pub struct Metrics {
     pub terminal_tab_min_w: Pixels,
     /// Maximum terminal tab width.
     pub terminal_tab_max_w: Pixels,
-    /// New-terminal control width.
-    pub new_terminal_tab_w: Pixels,
+    /// 40 px Workspace tab strip, on the `chrome` ground under the title bar.
+    pub tab_strip_h: Pixels,
+    /// 34 px tab inside [`Self::tab_strip_h`]: the strip's remaining 6 px sit above it, so the
+    /// active tab reads as a raised card that joins the content below.
+    pub terminal_tab_h: Pixels,
+    /// 18 px close `✕` hit square on a tab.
+    pub tab_close_size: Pixels,
     /// Scroll-mode pill width.
     pub scroll_pill_w: Pixels,
     /// macOS titlebar inset.
     pub traffic_light_inset: Pixels,
     /// Toast inset from the overlay edges.
     pub toast_inset: Pixels,
-    /// Job row trailing shortcut width.
-    pub job_key_w: Pixels,
     /// Diff row height.
     pub diff_row_h: Pixels,
     /// Diff position scrollbar width.
@@ -456,22 +614,49 @@ pub struct Metrics {
     pub dot_size: Pixels,
     /// 6 px terminal activity dot.
     pub dot_size_small: Pixels,
-    /// 36 px unified titlebar / context bar.
-    pub context_bar_h: Pixels,
-    /// 26 px status bar.
+    /// 44 px title bar: context switcher, section nav, command field, status buttons. It is the
+    /// unified macOS titlebar, so it starts after [`Self::traffic_light_inset`].
+    pub title_bar_h: Pixels,
+    /// 28 px status bar.
     pub status_bar_h: Pixels,
     /// 30 px pane header.
     pub pane_header_h: Pixels,
-    /// 30 px list row.
+    /// 30 px dense list row: menus, pickers, the terminal-side lists.
     pub row_h: Pixels,
+    /// 44 px comfortable row: the hub lists (worktrees, pull requests, agents).
+    pub row_h_comfortable: Pixels,
+    /// 30 px button.
+    pub button_h: Pixels,
+    /// 26 px compact button: inside a row, a header or a toolbar.
+    pub button_h_compact: Pixels,
+    /// 24 px segment of a `SegmentedControl`. With the control's `xxs` inset and hairline on
+    /// each side the whole control is exactly `row_h`, so it sits in a settings row or a pane
+    /// header without growing it.
+    pub segment_h: Pixels,
+    /// 34 px `Switch` track width.
+    pub switch_w: Pixels,
+    /// 20 px `Switch` track height. The knob is this less an `xxs` inset on each side.
+    pub switch_h: Pixels,
+    /// 16 px `Checkbox` box.
+    pub checkbox_size: Pixels,
+    /// 34 px icon tile that leads an alert dialog's title (a confirm).
+    pub alert_tile: Pixels,
+    /// 18 px key chip.
+    pub kbd_h: Pixels,
+    /// 16 px key chip inside a compact button or a menu item.
+    pub kbd_h_small: Pixels,
     /// 62 px Git status pane: one row under its header.
     pub status_pane_h: Pixels,
     /// 92 px unfocused Git stash pane.
     pub stash_pane_h: Pixels,
     /// 34 px palette row.
     pub palette_row_h: Pixels,
+    /// 22 px icon tile that leads a palette row.
+    pub palette_tile: Pixels,
     /// 44 px two-line job row.
     pub job_row_h: Pixels,
+    /// 4 px track of a running job's progress bar.
+    pub progress_bar_h: Pixels,
     /// 20 px section header.
     pub section_header_h: Pixels,
     /// 44 px dialog header.
@@ -480,26 +665,62 @@ pub struct Metrics {
     pub dialog_footer_h: Pixels,
     /// 28 px banner.
     pub banner_h: Pixels,
+    /// 40 px banner under the title bar (§3.12 C): a sentence, its reassurance and the
+    /// compact buttons that act on it.
+    pub frame_banner_h: Pixels,
+    /// 28 px numbered badge that leads a `StepCard`.
+    pub step_badge: Pixels,
+    /// 560 px column the first-run page is set in.
+    pub first_run_w: Pixels,
     /// 22 px terminal exit strip and context-bar chip height.
     pub strip_h: Pixels,
     /// 22 px chip pill.
     pub chip_h: Pixels,
-    /// 240 px repos rail (drag range 200-320).
-    pub rail_w: Pixels,
-    /// 340 px detail panel.
+    /// 18 px state pill on a board card tile (`working 4m`, `needs you`, `blocked by FLT-5`).
+    pub tile_chip_h: Pixels,
+    /// 20 px round initials avatar (a card's assignee).
+    pub avatar_size: Pixels,
+    /// 232 px sidebar (repositories and agents): its width until the user drags its edge.
+    pub sidebar_w: Pixels,
+    /// 200 px: the narrowest a dragged sidebar goes.
+    pub sidebar_min_w: Pixels,
+    /// 320 px: the widest a dragged sidebar goes.
+    pub sidebar_max_w: Pixels,
+    /// 44 px collapsed sidebar: one column of icons (`H`).
+    pub sidebar_collapsed_w: Pixels,
+    /// 6 px grab strip on a resizable edge, inside the region it resizes.
+    pub resize_handle_w: Pixels,
+    /// 344 px detail panel.
     pub detail_w: Pixels,
+    /// 300 px Changes panel at the right of the Workspace: files and commits against the base.
+    pub changes_w: Pixels,
+    /// 736 px right-side sheet showing a full detail (a board card).
+    pub sheet_w_detail: Pixels,
+    /// 268 px property column inside the `sheet_w_detail` card sheet.
+    pub sheet_detail_props_w: Pixels,
     /// 440 px docked sheet.
     pub sheet_w: Pixels,
     /// 640 px docked sheet with a log expanded.
     pub sheet_expanded_w: Pixels,
     /// 320 px toast.
     pub toast_w: Pixels,
+    /// 240 px: the narrowest a [`crate::Menu`] draws. It grows to fit its widest item.
+    pub menu_min_w: Pixels,
     /// 640 px palette.
     pub palette_w: Pixels,
+    /// 900 px widest ⌃S command menu: five columns of commands, centred over the status bar.
+    pub prefix_menu_w: Pixels,
     /// y = 120 px: where the palette is anchored.
     pub palette_top: Pixels,
-    /// 84 px fixed-width mode word.
+    /// 84 px fixed-width mode word of the embedded Git UI's status bar. Fleet's own chrome draws
+    /// no mode word (ADR 0023).
     pub mode_word_w: Pixels,
+    /// 340 px command field centred in the title bar: the button that opens the palette.
+    pub command_field_w: Pixels,
+    /// 220 px filter field in a page header's toolbar ([`crate::FilterField`]).
+    pub filter_field_w: Pixels,
+    /// 18 px monogram tile: the letter of a context in the title bar's context switcher.
+    pub monogram_size: Pixels,
     /// 3 px scroll thumb.
     pub scroll_thumb_w: Pixels,
     /// 2 px focus ring / cursor bar.
@@ -544,6 +765,8 @@ pub struct Metrics {
     pub skeleton_opacity: f32,
     /// No-session status glyph opacity.
     pub no_session_opacity: f32,
+    /// A dragged card tile under the pointer: nearly opaque, so the board shows through it.
+    pub drag_preview_opacity: f32,
 }
 
 impl Default for Metrics {
@@ -553,11 +776,12 @@ impl Default for Metrics {
             confirm_compact_w: px(480.0),
             terminal_tab_min_w: px(84.0),
             terminal_tab_max_w: px(200.0),
-            new_terminal_tab_w: px(36.0),
+            tab_strip_h: px(40.0),
+            terminal_tab_h: px(34.0),
+            tab_close_size: px(18.0),
             scroll_pill_w: px(176.0),
             traffic_light_inset: px(84.0),
             toast_inset: px(12.0),
-            job_key_w: px(20.0),
             diff_row_h: px(18.0),
             diff_scrollbar_w: px(5.0),
             diff_thumb_min_h: px(24.0),
@@ -569,28 +793,57 @@ impl Default for Metrics {
             hairline: px(1.0),
             dot_size: px(8.0),
             dot_size_small: px(6.0),
-            context_bar_h: px(36.0),
-            status_bar_h: px(26.0),
+            title_bar_h: px(44.0),
+            status_bar_h: px(28.0),
             pane_header_h: px(30.0),
             row_h: px(30.0),
+            row_h_comfortable: px(44.0),
+            button_h: px(30.0),
+            button_h_compact: px(26.0),
+            segment_h: px(24.0),
+            switch_w: px(34.0),
+            switch_h: px(20.0),
+            checkbox_size: px(16.0),
+            alert_tile: px(34.0),
+            kbd_h: px(18.0),
+            kbd_h_small: px(16.0),
             status_pane_h: px(62.0),
             stash_pane_h: px(92.0),
             palette_row_h: px(34.0),
+            palette_tile: px(22.0),
             job_row_h: px(44.0),
+            progress_bar_h: px(4.0),
             section_header_h: px(20.0),
             dialog_header_h: px(44.0),
             dialog_footer_h: px(44.0),
             banner_h: px(28.0),
+            frame_banner_h: px(40.0),
+            step_badge: px(28.0),
+            first_run_w: px(560.0),
             strip_h: px(22.0),
             chip_h: px(22.0),
-            rail_w: px(240.0),
-            detail_w: px(340.0),
+            tile_chip_h: px(18.0),
+            avatar_size: px(20.0),
+            sidebar_w: px(232.0),
+            sidebar_min_w: px(200.0),
+            sidebar_max_w: px(320.0),
+            sidebar_collapsed_w: px(44.0),
+            resize_handle_w: px(6.0),
+            detail_w: px(344.0),
+            changes_w: px(300.0),
+            sheet_w_detail: px(736.0),
+            sheet_detail_props_w: px(268.0),
             sheet_w: px(440.0),
             sheet_expanded_w: px(640.0),
             toast_w: px(320.0),
+            menu_min_w: px(240.0),
             palette_w: px(640.0),
+            prefix_menu_w: px(900.0),
             palette_top: px(120.0),
             mode_word_w: px(84.0),
+            command_field_w: px(340.0),
+            filter_field_w: px(220.0),
+            monogram_size: px(18.0),
             scroll_thumb_w: px(3.0),
             focus_ring_w: px(2.0),
             cell_w: px(CH),
@@ -613,145 +866,10 @@ impl Default for Metrics {
             semantic_fill_opacity: 0.14,
             skeleton_opacity: 0.30,
             no_session_opacity: 0.30,
+            drag_preview_opacity: 0.95,
         }
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use std::collections::{BTreeMap, BTreeSet};
-    use std::path::PathBuf;
-
-    /// This file, read back as text: Rust has no reflection, so the field inventory the doc
-    /// must mirror is parsed out of the source that declares it.
-    const SOURCE: &str = include_str!("tokens.rs");
-    /// The half of the contract written in prose (`docs/README.md:9`).
-    const DOC: &str = include_str!("../../../../docs/DESIGN-SYSTEM.md");
-    /// The sentence §2.8 introduces the opacity ladder with.
-    const LADDER: &str = "The same token set owns the opacity ladder";
-
-    /// The lines of `SOURCE` between `start` and the first line that is exactly `}`.
-    fn block(start: &str) -> impl Iterator<Item = &'static str> {
-        SOURCE
-            .lines()
-            .skip_while(move |line| !line.starts_with(start))
-            .skip(1)
-            .take_while(|line| *line != "}" && *line != "        }")
-    }
-
-    /// `name: value,` pairs from a `Default` body, keyed by field name.
-    fn defaults(start: &str) -> BTreeMap<&'static str, &'static str> {
-        block(start)
-            .filter_map(|line| line.trim().strip_suffix(',')?.split_once(": "))
-            .collect()
-    }
-
-    /// Every backticked `name value` pair in `section`.
-    fn ladder(section: &str) -> BTreeMap<&str, &str> {
-        section
-            .split('`')
-            .skip(1)
-            .step_by(2)
-            .filter_map(|span| span.split_once(' '))
-            .collect()
-    }
-
-    /// The paragraph of §2.8 that lists the opacity ladder.
-    fn documented_ladder() -> BTreeMap<&'static str, &'static str> {
-        let start = DOC
-            .find(LADDER)
-            .unwrap_or_else(|| panic!("§2.8 still introduces the ladder with {LADDER:?}"));
-        let paragraph = &DOC[start..];
-        let end = paragraph
-            .find("\n\n")
-            .unwrap_or_else(|| panic!("the ladder paragraph is terminated by a blank line"));
-        ladder(&paragraph[..end])
-    }
-
-    /// The `| `token` | ms | what |` rows of §2.7.
-    fn documented_motion() -> BTreeMap<&'static str, &'static str> {
-        let start = DOC
-            .find("### 2.7 Motion")
-            .unwrap_or_else(|| panic!("§2.7 is still the motion section"));
-        let section = &DOC[start..];
-        let end = section
-            .find("### 2.8")
-            .unwrap_or_else(|| panic!("§2.7 is followed by §2.8"));
-        section[..end]
-            .lines()
-            .filter(|line| line.starts_with("| `"))
-            .filter_map(|line| {
-                let fields: Vec<_> = line.split('|').map(str::trim).collect();
-                Some((fields.get(1)?.trim_matches('`'), *fields.get(2)?))
-            })
-            .collect()
-    }
-
-    #[test]
-    fn the_documented_opacity_ladder_matches_the_metrics_tokens() {
-        let declared: BTreeMap<_, _> = defaults("impl Default for Metrics")
-            .into_iter()
-            .filter_map(|(name, value)| Some((name.strip_suffix("_opacity")?, value)))
-            .collect();
-        assert!(!declared.is_empty(), "Metrics still names its opacities");
-        assert_eq!(
-            declared,
-            documented_ladder(),
-            "§2.8's opacity ladder and Metrics must move together"
-        );
-    }
-
-    #[test]
-    fn the_documented_motion_table_matches_the_motion_tokens() {
-        let declared = defaults("impl Default for Motion");
-        assert!(!declared.is_empty(), "Motion still names its durations");
-        assert_eq!(
-            declared,
-            documented_motion(),
-            "§2.7's motion table and Motion must move together"
-        );
-    }
-
-    #[test]
-    fn every_motion_token_has_a_consumer() {
-        let fields: BTreeSet<_> = block("pub struct Motion")
-            .filter_map(|line| line.trim().strip_prefix("pub ")?.split_once(": "))
-            .map(|(name, _)| name)
-            .collect();
-        assert!(!fields.is_empty(), "Motion still declares fields");
-
-        let mut sources = String::new();
-        let mut stack = vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..")];
-        while let Some(dir) = stack.pop() {
-            let entries = std::fs::read_dir(&dir)
-                .unwrap_or_else(|e| panic!("reading {}: {e}", dir.display()));
-            for entry in entries {
-                let path = entry.expect("a readable directory entry").path();
-                if path.is_dir() {
-                    // The token module declares the durations; a consumer lives outside it.
-                    if path.file_name().is_some_and(|name| name != "theme") {
-                        stack.push(path);
-                    }
-                } else if path.extension().is_some_and(|ext| ext == "rs") {
-                    sources.push_str(&std::fs::read_to_string(&path).unwrap_or_default());
-                }
-            }
-        }
-
-        let unread: Vec<_> = fields
-            .iter()
-            .filter(|field| {
-                !sources
-                    .match_indices(&format!("motion.{field}"))
-                    .any(|(at, _)| {
-                        let next = sources[at + field.len() + 7..].chars().next();
-                        !next.is_some_and(|c| c.is_alphanumeric() || c == '_')
-                    })
-            })
-            .collect();
-        assert!(
-            unread.is_empty(),
-            "these motion tokens have no consumer, so wire them or delete them: {unread:?}"
-        );
-    }
-}
+mod tests;

@@ -48,6 +48,33 @@ pub(super) fn close_agent_tab(bridge: &Bridge, state: &Entity<AppState>, cx: &mu
     });
 }
 
+/// Closes an agent tab that is **not** the one on screen: the strip's `✕`, its middle-click
+/// and its menu. The active tab closes through `native_agent::CloseTab`, as its key does.
+///
+/// Same rules as the key: a child tab is detached — the child keeps running, reachable from its
+/// delegation row — and a caller tab drops the client lease while the thread keeps running.
+pub(in crate::screens::workspace) fn close_background_agent_tab(
+    thread: ThreadId,
+    bridge: &Bridge,
+    state: &Entity<AppState>,
+    cx: &mut App,
+) {
+    let child = state.read(cx).agents.caller_of(thread).is_some();
+    if !child {
+        bridge.send_agent(BridgeCommand::AgentThreadClose { thread });
+    }
+    state.update(cx, |app, cx| {
+        let changed = if child {
+            app.agents.detach(thread)
+        } else {
+            app.agents.close(thread)
+        };
+        if changed {
+            cx.notify();
+        }
+    });
+}
+
 /// Selects a thread and mirrors a top-level reopen to the daemon.
 ///
 /// Delegated children remain attached only in this window; their caller owns the durable tab.

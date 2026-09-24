@@ -85,12 +85,28 @@ impl AppState {
         self.cursors.repos = clamp_cursor(self.cursors.repos, snapshot.repos.len() + 1);
         self.cursors.worktrees = clamp_cursor(self.cursors.worktrees, snapshot.worktrees.len());
         self.forget_vanished(&snapshot);
-        self.agents.sync_snapshot(snapshot.agent_threads.clone());
+        let worktrees: HashSet<&WorktreeId> = snapshot
+            .worktrees
+            .iter()
+            .map(|worktree| &worktree.id)
+            .chain(
+                snapshot
+                    .sessions
+                    .iter()
+                    .filter_map(|session| match &session.kind {
+                        SessionKind::Worktree(worktree) => Some(worktree),
+                        SessionKind::Agent(_) => None,
+                    }),
+            )
+            .collect();
+        self.agents
+            .sync_snapshot(snapshot.agent_threads.clone(), &worktrees);
         self.notify_agent_attention(now);
         self.snapshot = Some(snapshot);
         self.snapshot_at = Some(now);
         self.bump_snapshot_revision();
         self.sync_terminal_mode();
+        self.adopt_created_threads();
     }
 
     /// Records that the snapshot mirror changed, invalidating every projection keyed on it.

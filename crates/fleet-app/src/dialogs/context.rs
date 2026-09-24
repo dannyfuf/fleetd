@@ -14,7 +14,8 @@ use crate::{
     actions::{context_dialog, dialog},
     bridge::Bridge,
     dialogs::{
-        ConfirmRequest, DialogHost, Dialogs, notify, read_host, request_confirm, root, with_host,
+        ConfirmRequest, DialogHost, Dialogs, footer, notify, read_host, request_confirm, root,
+        with_host,
     },
     state::{AppState, Overlay},
 };
@@ -283,11 +284,12 @@ pub(crate) fn render(
     cx: &mut App,
 ) -> AnyElement {
     let gap = cx.theme().space.md;
-    let (editing, owners_empty, name, owners) = {
+    let (editing, owners_empty, can_submit, name, owners) = {
         let draft = &host.read(cx).context;
         (
             draft.editing.clone(),
             draft.owner_list().is_empty(),
+            draft.can_submit(),
             host.read(cx).context_name.clone(),
             host.read(cx).context_owners.clone(),
         )
@@ -303,28 +305,31 @@ pub(crate) fn render(
         .child(name.harness_target_indexed("dialog.field", 0))
         .child(owners.harness_target_indexed("dialog.field", 1));
 
-    let mut hints = KeyHintRow::new()
-        .key("\u{21e5}", "field")
-        .key("esc", "cancel");
-    if editing.is_some() {
-        hints = hints.key("\u{2303}\u{21e7}d", "delete context");
-    }
+    let primary = footer::primary(
+        "context-submit",
+        if editing.is_some() { "Save" } else { "Create" },
+        Box::new(dialog::Confirm),
+    )
+    .disabled(!can_submit);
     let mut card = Dialog::new(if editing.is_some() {
         "Edit context"
     } else {
         "New context"
     })
+    .dismiss_action(dialog_kind.dismiss_action())
     .icon(Icon::Boxes)
     .width(dialog_kind.width(cx))
     .body(body)
-    .hint_row(hints)
-    .primary(if editing.is_some() {
-        "\u{23ce} Save"
-    } else {
-        "\u{23ce} Create"
-    });
+    .actions(vec![footer::cancel(dialog_kind), primary]);
     if let Some(open) = editing.as_ref() {
-        card = card.subtitle(format!("\u{00b7} {}", open.as_str()));
+        // §3.8.4: deleting hands off to the expanded `Y` confirm, so this is a way *to* the
+        // question rather than the answer, set apart on the left as a destructive action.
+        card = card.subtitle(open.as_str().to_owned()).footer_start(
+            Button::new("context-delete", "Delete context")
+                .style(ButtonStyle::GhostDanger)
+                .icon(Icon::Trash2)
+                .action(Box::new(context_dialog::Delete)),
+        );
     }
     if owners_empty {
         // §3.8.4: empty owners is *allowed* and the footer warns. §2.4 keeps red for failures,

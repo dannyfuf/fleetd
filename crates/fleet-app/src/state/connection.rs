@@ -172,6 +172,7 @@ impl AppState {
                 self.clear_board();
                 self.watches.reconnect();
                 self.seed_agent_activity(&snapshot, now);
+                self.agents.forget_unconfirmed();
                 self.apply_snapshot(*snapshot, now);
                 self.agents.resync_installed();
             }
@@ -254,6 +255,7 @@ impl AppState {
                 self.clear_board();
                 self.watches.reconnect();
                 self.seed_agent_activity(&snapshot, now);
+                self.agents.forget_unconfirmed();
                 self.apply_snapshot(*snapshot, now);
                 self.agents.resync_installed();
             }

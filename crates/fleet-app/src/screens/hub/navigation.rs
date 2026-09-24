@@ -210,6 +210,41 @@ impl HubCtx {
         cursors.repos = reconcile_index(&model.rail, cursors.repos, &mut selection.rail, |row| {
             row.repo.clone()
         });
+        // The palette names a PR to land on (`GoToPr`); the list is anchored by identity, so
+        // naming it as the anchor is what puts the cursor there. It waits for rows to exist.
+        let pending = self.state.read(cx).pending_pr_focus.clone();
+        let on_prs = matches!(self.state.read(cx).screen, Screen::Hub { tab: HubTab::Prs });
+        let consumed = pending.is_some() && on_prs && !model.prs.is_empty();
+        if consumed
+            && let Some(target) = pending.filter(|target| {
+                model
+                    .prs
+                    .iter()
+                    .any(|row| row.repo == target.0 && row.number == target.1)
+            })
+        {
+            match self.state.read(cx).pr_tab {
+                PrTab::Mine => selection.prs_mine = Some(target),
+                PrTab::Review => selection.prs_review = Some(target),
+            }
+        }
+        // Back from a workspace names the worktree it showed; like the PR above, it waits for
+        // rows and then becomes the anchor, so the cursor lands on the row the user just left.
+        let pending_worktree = self.state.read(cx).pending_worktree_focus.clone();
+        let on_worktrees = matches!(
+            self.state.read(cx).screen,
+            Screen::Hub {
+                tab: HubTab::Worktrees
+            }
+        );
+        let worktree_consumed =
+            pending_worktree.is_some() && on_worktrees && !model.worktrees.is_empty();
+        if worktree_consumed
+            && let Some(target) = pending_worktree
+                .filter(|target| model.worktrees.iter().any(|row| &row.id == target))
+        {
+            selection.worktree = Some(target);
+        }
         match &self.state.read(cx).screen {
             Screen::Hub {
                 tab: HubTab::Worktrees,
@@ -240,6 +275,14 @@ impl HubCtx {
                 }
             },
             _ => {}
+        }
+        if consumed {
+            self.state
+                .update(cx, |state, _| state.pending_pr_focus = None);
+        }
+        if worktree_consumed {
+            self.state
+                .update(cx, |state, _| state.pending_worktree_focus = None);
         }
         let displayed = model.displayed();
         let changed = {
@@ -396,6 +439,56 @@ impl HubCtx {
         self.hub.update(cx, |hub, _| {
             hub.selection.rail = None;
             hub.selection.worktree = None;
+        });
+    }
+
+    /// Put the cursor on worktree row `ix` and give the list the keyboard: what a click, a
+    /// right-click or the press before a row's button does (UX-SPEC §5.1).
+    pub(super) fn select_worktree(&self, ix: usize, cx: &mut App) {
+        self.state.update(cx, |state, cx| {
+            if matches!(state.screen, Screen::Hub { .. }) && state.hub_pane != HubPane::List {
+                state.hub_pane = HubPane::List;
+                cx.notify();
+            }
+        });
+        let model = self.model(cx);
+        let len = model.worktrees.len();
+        if ix >= len {
+            return;
+        }
+        let moving_down = ix >= self.state.read(cx).cursors.worktrees;
+        self.set_cursor(ix, len, moving_down, cx);
+    }
+
+    /// The worktrees page's pointer contract, bound to this Hub.
+    pub(super) fn row_handlers(&self) -> worktrees_list::RowHandlers {
+        let select = self.clone();
+        let open = self.clone();
+        let log = self.clone();
+        worktrees_list::RowHandlers {
+            select: Rc::new(move |ix, _, cx| select.select_worktree(ix, cx)),
+            open: Rc::new(move |ix, _, cx| {
+                open.select_worktree(ix, cx);
+                open.open_worktree(true, cx);
+            }),
+            view_log: Rc::new(move |ix, _, cx| {
+                log.select_worktree(ix, cx);
+                log.view_hook_log(cx);
+            }),
+        }
+    }
+
+    /// `View log`: the Jobs panel, on the failed hooks job of the selected worktree, with that
+    /// job's log already expanded.
+    pub(super) fn view_hook_log(&self, cx: &mut App) {
+        let job = self.selected_worktree(cx).and_then(|row| row.hook_job);
+        self.state.update(cx, |state, cx| {
+            state.open_overlay(Overlay::Jobs);
+            if job.is_some() {
+                state.jobs_focus = job;
+                state.jobs_open_log = true;
+            }
+            cx.notify();
         });
     }
 

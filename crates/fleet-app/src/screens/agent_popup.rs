@@ -24,7 +24,7 @@ use std::{
 
 use fleet_core::{
     config::Agent,
-    ids::{SessionId, TerminalId},
+    ids::TerminalId,
     sessions::{AgentActivity, TerminalStatus},
 };
 use fleet_proto::{
@@ -33,7 +33,7 @@ use fleet_proto::{
 };
 use fleet_ui_kit::{
     ActiveTheme, ExitStrip, HarnessTargetExt, KeyHintRow, Overlay as FloatingOverlay, OverlayLayer,
-    PrefixHint, ScrollPill, StatusDot, Text, Tone, Veil,
+    ScrollPill, StatusDot, Text, Tone, Veil,
 };
 use gpui::{
     AnyElement, App, ClipboardItem, Div, Entity, FocusHandle, KeyDownEvent, Keystroke, MouseButton,
@@ -48,6 +48,7 @@ use crate::{
         MouseCell, absolute_selection_at, cell_size, grid_size, measure, surface,
         try_selection_text, viewport_base,
     },
+    views::prefix_menu::PrefixSurface,
 };
 
 /// How much of the window the floating card covers, leaving the Workspace visible around it.
@@ -150,7 +151,7 @@ impl AgentPopup {
         let Some(model) = self.model.as_ref() else {
             return self.render_attaching(state, focus, width, height, top, cx);
         };
-        let header = self.header(model, cx);
+        let header = chrome::header(model, cx);
         let terminal = Veil::new(!model.reachable)
             .content(self.terminal_area(model, state, bridge, focus, window, cx));
         let exit = model
@@ -168,12 +169,14 @@ impl AgentPopup {
             .child(header)
             .child(terminal)
             .children(exit);
+        let card = hide_on_scrim_press(card, focus);
 
         FloatingOverlay::new()
             .top(top)
             .width(width)
             .scrim(true)
             .layer(OverlayLayer::Dialog)
+            .popover_elevation(true)
             .content(
                 self.with_keys(card, state, bridge)
                     .harness_target("agents.popup"),
@@ -191,27 +194,58 @@ impl AgentPopup {
         top: Pixels,
         cx: &App,
     ) -> AnyElement {
+        let header = state
+            .read(cx)
+            .agent_popup
+            .as_ref()
+            .map(|popup| chrome::attaching_header(popup.agent, cx));
         let card = div()
             .track_focus(focus)
             .flex()
-            .items_center()
-            .justify_center()
+            .flex_col()
             .w_full()
             .h(height)
             .min_h_0()
-            .child(attaching(cx.theme()));
+            .children(header)
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_h_0()
+                    .items_center()
+                    .justify_center()
+                    .child(attaching(cx.theme())),
+            );
+        let card = hide_on_scrim_press(card, focus);
 
         FloatingOverlay::new()
             .top(top)
             .width(width)
             .scrim(true)
             .layer(OverlayLayer::Dialog)
+            .popover_elevation(true)
             .content(
                 self.with_attaching_keys(card, state)
                     .harness_target("agents.popup"),
             )
             .into_any_element()
     }
+}
+
+/// A press outside the card lands on the scrim, and hides the popup exactly as `ctrl-q` does:
+/// it dispatches the same [`agent::Hide`], so key and pointer share one path. Hiding never stops
+/// the session (UX-SPEC §3.6.1), which is what makes a stray click safe.
+///
+/// Only while the popup holds the focus: Help and the quit confirmations may open above it, and a
+/// press inside one of those is not a press on the popup's scrim.
+fn hide_on_scrim_press(card: Div, focus: &FocusHandle) -> Div {
+    let focus = focus.clone();
+    card.on_mouse_down_out(move |event: &MouseDownEvent, window, cx| {
+        if event.button != MouseButton::Left || !focus.contains_focused(window, cx) {
+            return;
+        }
+        window.dispatch_action(Box::new(agent::Hide), cx);
+    })
 }
 
 #[derive(Default)]

@@ -1,8 +1,10 @@
 //! Visual bench for the **structure** group of `fleet-ui-kit`.
 //!
 //! Every structural component, in every state it can be in, in both themes:
-//! `AppFrame`, `SplitLayout`, `ContextBar`, `StatusBar`, `Pane`, `PaneHeader`, `Sheet`,
-//! `Dialog`, `Overlay`, `ToastStack`, `Veil`, `Banner`, `ModeWord` and `DaemonDot`.
+//! `AppFrame`, `SplitLayout`, `Sidebar` / `SidebarSection` / `NavItem`, `TitleBar`,
+//! `CommandField`, `StatusButton`, `SwitcherButton`, `StatusBar`, `Pane`, `PaneHeader`, `Sheet`,
+//! `Dialog`, `Overlay`, `ToastStack`, `StepCard`, `Veil`,
+//! `Banner`, `ModeWord` and `DaemonDot`.
 //!
 //! The floating layers are wired as **live layers of this window**, not as pictures of
 //! themselves, because their whole contract is where they sit relative to the chrome and to
@@ -75,6 +77,8 @@ struct StructureGallery {
     toasts: bool,
     veil: bool,
     focused_pane: usize,
+    /// The live demo sidebar's dragged width; `None` is `metrics.sidebar_w`.
+    sidebar_w: Option<Pixels>,
 }
 
 impl StructureGallery {
@@ -103,6 +107,7 @@ impl StructureGallery {
             toasts: false,
             veil: true,
             focused_pane: 0,
+            sidebar_w: None,
         }
     }
 
@@ -253,45 +258,47 @@ fn app_frame_section(cx: &mut App) -> AnyElement {
     let t = cx.theme().clone();
     let mini = |banner: bool| {
         let frame = AppFrame::new()
-            .context_bar(
-                ContextBar::new([ContextTab::new("buk", 1), ContextTab::new("personal", 2)])
-                    .active(0)
-                    .leading_inset(t.space.md)
-                    .chip(Chip::counter(Icon::CircleDot, 3))
-                    .daemon(if banner {
-                        DaemonState::Lost
-                    } else {
-                        DaemonState::Healthy
-                    }),
-            )
+            .title_bar(support::chrome::title_bar(
+                "frame-title",
+                support::chrome::TitleSample::Hub,
+                support::chrome::TitleStatus {
+                    daemon_down: banner.then_some(true),
+                    ..support::chrome::TitleStatus::QUIET
+                },
+            ))
             .body(filler(&t, 6))
-            .status_bar(
+            .status_bar(support::chrome::status_buttons(
                 StatusBar::new()
-                    .breadcrumb("buk › payroll › feat/payroll-fix")
-                    .mode(Mode::Normal),
-            );
+                    .daemon(
+                        if banner {
+                            DaemonState::Lost
+                        } else {
+                            DaemonState::Healthy
+                        },
+                        banner.then(|| "stopped".into()),
+                    )
+                    .breadcrumb("buk › payroll › feat/payroll-fix"),
+                "frame-status",
+                false,
+            ));
         if banner {
-            frame.banner(
-                Banner::warning("fleetd stopped")
-                    .icon(Icon::Dot)
-                    .countdown("reconnecting in 3s")
-                    .hints(
-                        KeyHintRow::new()
-                            .key("r", "reconnect")
-                            .key("esc", "dismiss"),
-                    ),
-            )
+            frame.banner(support::chrome::reconnect_banner(
+                Banner::warning("Lost connection to fleetd")
+                    .icon(Icon::Unplug)
+                    .countdown("\u{2014} reconnecting in 3s.")
+                    .detail("Your terminals and agents keep running."),
+            ))
         } else {
             frame
         }
     };
 
     LAYOUT.section(
-        "AppFrame — 36 context bar · 28 banner · flex body · 26 status bar",
+        "AppFrame — 44 title bar · 28 banner · flex body · 28 status bar",
         &t,
         vec![
             specimen(
-                "hub: context bar 36 + body + status bar 26",
+                "hub: title bar 44 + body + status bar 28",
                 &t,
                 stage(&t, px(220.0), mini(false)),
             ),
@@ -307,7 +314,7 @@ fn app_frame_section(cx: &mut App) -> AnyElement {
 fn split_section(cx: &mut App) -> AnyElement {
     let t = cx.theme().clone();
     let rail = |label: &str| {
-        Pane::fixed(t.metrics.rail_w)
+        Pane::fixed(t.metrics.sidebar_w)
             .raised(true)
             .header(PaneHeader::new(label.to_string()).total(6))
             .body(filler(&t, 4))
@@ -317,13 +324,13 @@ fn split_section(cx: &mut App) -> AnyElement {
         &t,
         vec![
             specimen(
-                "horizontal · leading fixed 240 (rail) · trailing flexes",
+                "horizontal · leading fixed 232 (sidebar) · trailing flexes",
                 &t,
                 stage(
                     &t,
                     px(160.0),
                     SplitLayout::horizontal()
-                        .leading_size(t.metrics.rail_w)
+                        .leading_size(t.metrics.sidebar_w)
                         .leading(rail("repos"))
                         .trailing(
                             Pane::new()
@@ -339,7 +346,7 @@ fn split_section(cx: &mut App) -> AnyElement {
                     &t,
                     px(160.0),
                     SplitLayout::horizontal()
-                        .leading_size(t.metrics.rail_w)
+                        .leading_size(t.metrics.sidebar_w)
                         .leading(rail("repos"))
                         .trailing(
                             SplitLayout::horizontal()
@@ -375,103 +382,312 @@ fn split_section(cx: &mut App) -> AnyElement {
     )
 }
 
-fn context_bar_section(cx: &mut App) -> AnyElement {
+/// The Hub sidebar in every state: a scope row with the cursor, a repo with an issue chip, a
+/// clone running and one failed, the hover `⋯`, the Agents section's dots and chip, the
+/// collapsed icon column, and a live draggable edge.
+fn sidebar_section(width: Option<Pixels>, cx: &mut Context<StructureGallery>) -> AnyElement {
     let t = cx.theme().clone();
-    let bar_stage = |bar: ContextBar| stage(&t, t.metrics.context_bar_h, bar);
-    let tabs = || {
-        [
-            ContextTab::new("buk", 1),
-            ContextTab::new("personal", 2),
-            ContextTab::new("oss", 3),
-        ]
+    let gallery = cx.entity().downgrade();
+    let more = |ix: usize| {
+        IconButton::new(("gallery-nav-more", ix), Icon::Ellipsis, "More actions")
+            .size(ButtonSize::Compact)
     };
-    let chips = |bar: ContextBar| {
-        bar.chip(
-            Chip::counter(Icon::LoaderCircle, 2)
-                .tone(Tone::Warning)
-                .spinning(true)
-                .id("cb-jobs"),
+    let count = |n: usize| Text::caption(n.to_string()).muted();
+    let dot = |tone: Tone| StatusDot::small(tone);
+    let repos = |collapsed: bool| {
+        let t = &t;
+        SidebarSection::new("Repositories")
+            .action(
+                IconButton::new("gallery-sidebar-clone", Icon::Plus, "Clone a repository")
+                    .size(ButtonSize::Compact),
+            )
+            .body(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(t.space.xxs)
+                    .child(
+                        NavItem::new("g-all", "All repositories")
+                            .leading(Icon::LayoutGrid.el().size(IconSize::Small))
+                            .trailing(count(4))
+                            .selected(true)
+                            .cursor(true)
+                            .collapsed(collapsed),
+                    )
+                    .child(
+                        NavItem::new("g-api", "acme/api")
+                            .leading(dot(Tone::Muted))
+                            .trailing(Chip::new().text("1 issue").tone(Tone::Warning).filled(true))
+                            .trailing(count(3))
+                            .hover_action(more(1))
+                            .collapsed(collapsed),
+                    )
+                    .child(
+                        NavItem::new("g-web", "acme/web")
+                            .leading(dot(Tone::Success))
+                            .trailing(count(1))
+                            .hover_action(more(2))
+                            .collapsed(collapsed),
+                    )
+                    .child(
+                        NavItem::new("g-nixos", "nixos")
+                            .leading(
+                                Icon::LoaderCircle
+                                    .el()
+                                    .size(IconSize::Small)
+                                    .spinning(true)
+                                    .id("g-nixos-spin"),
+                            )
+                            .tone(Tone::Muted)
+                            .trailing(Text::caption("cloning 40%").muted())
+                            .progress(Some(40))
+                            .collapsed(collapsed),
+                    )
+                    .child(
+                        NavItem::new("g-old", "old-api")
+                            .leading(Icon::CircleX.el().size(IconSize::Small).tone(Tone::Danger))
+                            .trailing(Text::caption("failed").faint())
+                            .hover_action(more(4))
+                            .collapsed(collapsed),
+                    ),
+            )
+    };
+    let agents = |collapsed: bool| {
+        SidebarSection::new("Agents").body(
+            div()
+                .flex()
+                .flex_col()
+                .child(
+                    NavItem::new("g-agent-0", "codex · apply the README fix")
+                        .leading(dot(Tone::Warning))
+                        .trailing(
+                            Chip::new()
+                                .text("needs you")
+                                .tone(Tone::Warning)
+                                .filled(true),
+                        )
+                        .collapsed(collapsed),
+                )
+                .child(
+                    NavItem::new("g-agent-1", "claude · spike")
+                        .leading(dot(Tone::Success))
+                        .collapsed(collapsed),
+                )
+                .child(
+                    NavItem::new("g-agent-2", "claude · agent window")
+                        .leading(dot(Tone::Muted))
+                        .collapsed(collapsed),
+                ),
         )
-        .chip(Chip::counter(Icon::CircleDot, 3).tone(Tone::Success))
-        .chip(Chip::counter(Icon::Moon, 5))
-        // Zero-suppressed: passed on every frame, rendered only when it has something.
-        .chip(Chip::counter(Icon::Flag, 0))
-        .chip(Chip::counter(Icon::CircleQuestionMark, 1).tone(Tone::Warning))
-        .chip(Chip::labeled(Icon::CircleArrowUp, "0.2.0"))
+    };
+    let footer = |collapsed: bool| {
+        IconButton::new(
+            ("gallery-sidebar-collapse", usize::from(collapsed)),
+            if collapsed {
+                Icon::PanelLeftOpen
+            } else {
+                Icon::PanelLeftClose
+            },
+            if collapsed {
+                "Expand the sidebar"
+            } else {
+                "Collapse the sidebar"
+            },
+        )
+        .size(ButtonSize::Compact)
     };
     LAYOUT.section(
-        "ContextBar — 84 px inset · numbered tabs · 2 px accent underline · chips · daemon dot",
+        "Sidebar — sections of nav items on the chrome ground; drag the edge, 200–320",
         &t,
         vec![
             specimen(
-                "default · tab 1 active · every §2.3 chip passed, including the zero one",
+                "expanded, focused · the edge is live: drag it",
                 &t,
-                bar_stage(chips(ContextBar::new(tabs()).active(0))),
-            ),
-            specimen(
-                "third tab active · +3 overflow for contexts past nine",
-                &t,
-                bar_stage(ContextBar::new(tabs()).active(2).overflow(3)),
-            ),
-            specimen(
-                "daemon degraded · the dot grows a labelled amber pill",
-                &t,
-                bar_stage(
-                    ContextBar::new(tabs())
-                        .active(0)
-                        .daemon(DaemonState::Degraded)
-                        .daemon_label("fleetd slow"),
+                stage(
+                    &t,
+                    px(360.0),
+                    div().flex().h_full().child(
+                        Sidebar::new("gallery-sidebar")
+                            .width(width)
+                            .focused(true)
+                            .section(repos(false))
+                            .section(agents(false))
+                            .footer(footer(false))
+                            .on_resize(move |width, _, cx| {
+                                gallery
+                                    .update(cx, |gallery, cx| {
+                                        gallery.sidebar_w = Some(width);
+                                        cx.notify();
+                                    })
+                                    .ok();
+                            }),
+                    ),
                 ),
             ),
             specimen(
-                "daemon lost · red pill, and the label is mandatory reading",
+                "collapsed: 44 px of icons, labels as tooltips",
                 &t,
-                bar_stage(
-                    ContextBar::new(tabs())
-                        .active(0)
-                        .daemon(DaemonState::Lost)
-                        .daemon_label("fleetd stopped"),
+                stage(
+                    &t,
+                    px(360.0),
+                    div().flex().h_full().child(
+                        Sidebar::new("gallery-sidebar-collapsed")
+                            .collapsed(true)
+                            .section(repos(true))
+                            .section(agents(true))
+                            .footer(footer(true)),
+                    ),
                 ),
             ),
+        ],
+    )
+}
+
+fn title_bar_section(cx: &mut App) -> AnyElement {
+    use support::chrome::{TitleSample, TitleStatus, title_bar};
+    let t = cx.theme().clone();
+    let bar_stage = |bar: AnyElement| stage(&t, t.metrics.title_bar_h, bar);
+    let busy = TitleStatus {
+        needs_you: 1,
+        running: 2,
+        sleeping: 3,
+        update: true,
+        ..TitleStatus::QUIET
+    };
+    LAYOUT.section(
+        "TitleBar — switcher · section nav · command field · status buttons · Help · Settings",
+        &t,
+        vec![
             specimen(
-                "empty · the fact, then the key that fixes it (§3.13)",
+                "hub, quiet · only Help and Settings on the right",
                 &t,
-                bar_stage(
-                    ContextBar::new([]).empty("No contexts yet.", "N  create your first context"),
-                ),
+                bar_stage(title_bar("tb-quiet", TitleSample::Hub, TitleStatus::QUIET)),
             ),
             specimen(
-                "12 px inset · the platform with no traffic lights",
+                "hub, busy · 1 needs you (amber) · 2 jobs spinning · 3 sleeping (inert) · update",
                 &t,
-                bar_stage(ContextBar::new(tabs()).active(1).leading_inset(t.space.md)),
+                bar_stage(title_bar("tb-busy", TitleSample::Hub, busy)),
+            ),
+            specimen(
+                "a failed job replaces the running count, in red",
+                &t,
+                bar_stage(title_bar(
+                    "tb-failed",
+                    TitleSample::Hub,
+                    TitleStatus {
+                        running: 2,
+                        failed: 1,
+                        ..TitleStatus::QUIET
+                    },
+                )),
+            ),
+            specimen(
+                "daemon reconnecting (amber) · daemon down (red); nothing while healthy",
+                &t,
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(t.space.sm)
+                    .child(bar_stage(title_bar(
+                        "tb-reconnecting",
+                        TitleSample::Hub,
+                        TitleStatus {
+                            daemon_down: Some(false),
+                            ..TitleStatus::QUIET
+                        },
+                    )))
+                    .child(bar_stage(title_bar(
+                        "tb-down",
+                        TitleSample::Hub,
+                        TitleStatus {
+                            daemon_down: Some(true),
+                            ..TitleStatus::QUIET
+                        },
+                    ))),
+            ),
+            specimen(
+                "workspace · the breadcrumb replaces the switcher and the nav; ⌃S s goes back",
+                &t,
+                bar_stage(title_bar(
+                    "tb-workspace",
+                    TitleSample::Workspace,
+                    TitleStatus {
+                        needs_you: 2,
+                        ..TitleStatus::QUIET
+                    },
+                )),
+            ),
+            specimen(
+                "first run · empty: there is nowhere to go yet",
+                &t,
+                bar_stage(title_bar(
+                    "tb-empty",
+                    TitleSample::Empty,
+                    TitleStatus::QUIET,
+                )),
+            ),
+            specimen(
+                "SwitcherButton · monogram · glyph · open (pressed)",
+                &t,
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(t.space.md)
+                    .child(SwitcherButton::new("sw-monogram", "Acme").monogram())
+                    .child(SwitcherButton::new("sw-icon", "agent").icon(Icon::GitBranch))
+                    .child(
+                        SwitcherButton::new("sw-open", "personal")
+                            .monogram()
+                            .selected(true),
+                    ),
+            ),
+            specimen(
+                "StatusButton · dot · glyph · spinner · secondary",
+                &t,
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(t.space.md)
+                    .child(
+                        StatusButton::new("sb-dot", "1 needs you")
+                            .mark(StatusMark::Dot)
+                            .tone(Tone::Warning),
+                    )
+                    .child(
+                        StatusButton::new("sb-icon", "1 failed")
+                            .mark(StatusMark::Icon(Icon::TriangleAlert))
+                            .tone(Tone::Danger),
+                    )
+                    .child(StatusButton::new("sb-spin", "2 jobs").mark(StatusMark::Spinner))
+                    .child(StatusButton::new("sb-plain", "Update 0.2.0")),
             ),
         ],
     )
 }
 
 fn status_bar_section(cx: &mut App) -> AnyElement {
+    use support::chrome::status_buttons;
     let t = cx.theme().clone();
     let bar_stage = |bar: StatusBar| stage(&t, t.metrics.status_bar_h, bar);
+    let hub = |id: &'static str| {
+        status_buttons(
+            StatusBar::new()
+                .daemon(DaemonState::Healthy, None)
+                .breadcrumb("buk › payroll › feat/payroll-fix"),
+            id,
+            false,
+        )
+    };
     LAYOUT.section(
-        "StatusBar — breadcrumb · mode word (84 px, fixed) · ticker · sticky error",
+        "StatusBar — daemon · breadcrumb · ticker · sticky error · Shortcuts",
         &t,
         vec![
-            specimen(
-                "hub, idle",
-                &t,
-                bar_stage(
-                    StatusBar::new()
-                        .breadcrumb("buk › payroll › feat/payroll-fix")
-                        .mode(Mode::Normal),
-                ),
-            ),
+            specimen("hub, idle", &t, bar_stage(hub("sbar-idle"))),
             specimen(
                 "with the job ticker",
                 &t,
                 bar_stage(
-                    StatusBar::new()
-                        .breadcrumb("buk › payroll › feat/payroll-fix")
-                        .mode(Mode::Normal)
+                    hub("sbar-ticker")
                         .ticker(JobTicker::new("clone", "nixos").percent(40).extra(1)),
                 ),
             ),
@@ -479,34 +695,49 @@ fn status_bar_section(cx: &mut App) -> AnyElement {
                 "with a sticky error · the error replaces the ticker, it never joins it",
                 &t,
                 bar_stage(
-                    StatusBar::new()
-                        .breadcrumb("buk › payroll › feat/payroll-fix")
-                        .mode(Mode::Normal)
+                    hub("sbar-error")
                         .ticker(JobTicker::new("clone", "nixos").percent(40))
-                        .error(StickyErrorSlot::new("prs failed: gh HTTP 502").key("!")),
+                        .error(
+                            StickyErrorSlot::new("sbar-error-slot", "prs failed: gh HTTP 502")
+                                .kbd(Kbd::parse("!").ok())
+                                .on_activate(|_, _| {})
+                                .on_dismiss(|_, _| {}),
+                        ),
                 ),
             ),
             specimen(
-                "workspace · breadcrumb is the session name, mode is TERMINAL, daemon dot trails",
+                "workspace · Fleet commands ⌃S and Shortcuts ⌃S ?",
                 &t,
-                bar_stage(
+                bar_stage(status_buttons(
                     StatusBar::new()
+                        .daemon(DaemonState::Healthy, None)
                         .breadcrumb("buk › payroll › feat/payroll-fix › nvim")
-                        .breadcrumb_ch(48)
-                        .mode(Mode::Terminal)
-                        .trailing(DaemonDot::new(DaemonState::Healthy)),
-                ),
+                        .breadcrumb_ch(48),
+                    "sbar-workspace",
+                    true,
+                )),
+            ),
+            specimen(
+                "daemon unreachable · the word joins fleetd in the daemon's tone",
+                &t,
+                bar_stage(status_buttons(
+                    StatusBar::new()
+                        .daemon(DaemonState::Lost, Some("unreachable".into()))
+                        .breadcrumb("buk › payroll"),
+                    "sbar-lost",
+                    false,
+                )),
             ),
             specimen(
                 "long breadcrumb, middle-truncated at a ch budget",
                 &t,
                 bar_stage(
                     StatusBar::new()
+                        .daemon(DaemonState::Healthy, None)
                         .breadcrumb(
                             "buk › dannyfuf/fleetd-experiments › spike/gpui-vt-mirror-grid › nvim",
                         )
-                        .breadcrumb_ch(40)
-                        .mode(Mode::Scroll),
+                        .breadcrumb_ch(40),
                 ),
             ),
         ],
@@ -672,9 +903,9 @@ fn pane_section(cx: &mut App, focused_pane: usize, filter_query: Entity<TextInpu
 
 fn mode_and_daemon_section(cx: &mut App) -> AnyElement {
     let t = cx.theme().clone();
-    let words = Mode::ALL
+    let words = ["NORMAL", "STAGING", "DIALOG", "REBASING"]
         .iter()
-        .map(|mode| {
+        .map(|word| {
             div()
                 .flex()
                 .flex_col()
@@ -688,7 +919,7 @@ fn mode_and_daemon_section(cx: &mut App) -> AnyElement {
                         .h(t.metrics.status_bar_h)
                         .rounded(t.radii.sm)
                         .bg(t.colors.surface)
-                        .child(ModeWord::new(*mode)),
+                        .child(ModeWord::word(*word)),
                 )
                 .into_any_element()
         })
@@ -727,7 +958,7 @@ fn mode_and_daemon_section(cx: &mut App) -> AnyElement {
         &t,
         vec![
             specimen(
-                "all eight modes at the fixed 84 px — only ^S is amber, because only it expires",
+                "the embedded Git UI status word at the fixed 84 px; Fleet chrome draws none",
                 &t,
                 div()
                     .flex()
@@ -752,25 +983,20 @@ fn mode_and_daemon_section(cx: &mut App) -> AnyElement {
 
 fn banner_section(cx: &mut App) -> AnyElement {
     let t = cx.theme().clone();
-    let banner_stage = |banner: Banner| stage(&t, t.metrics.banner_h, banner);
+    let banner_stage = |banner: Banner| stage(&t, t.metrics.frame_banner_h, banner);
     LAYOUT.section(
         "Banner — §3.12 case C only",
         &t,
         vec![
             specimen(
-                "daemon died while attached · the countdown lives in its own slot so the sentence never reflows",
+                "daemon died while attached · the countdown lives in its own slot so the sentence never reflows; Reconnect now, Open log and ✕ run r, l and esc",
                 &t,
-                banner_stage(
-                    Banner::warning("fleetd stopped")
-                        .icon(Icon::Dot)
-                        .countdown("reconnecting in 3s")
-                        .hints(
-                            KeyHintRow::new()
-                                .key("r", "reconnect now")
-                                .key("l", "log")
-                                .key("esc", "dismiss"),
-                        ),
-                ),
+                banner_stage(support::chrome::reconnect_banner(
+                    Banner::warning("Lost connection to fleetd")
+                        .icon(Icon::Unplug)
+                        .countdown("\u{2014} reconnecting in 3s.")
+                        .detail("Your terminals and agents keep running."),
+                )),
             ),
             specimen(
                 "on reconnect · [D-17], verbatim: the sessions did not come back",
@@ -782,22 +1008,18 @@ fn banner_section(cx: &mut App) -> AnyElement {
                 &t,
                 banner_stage(
                     Banner::danger("fleetd unreachable — the socket is gone")
-                        .hints(KeyHintRow::new().key("r", "retry").key("D", "doctor")),
+                        .button(Button::new("banner-retry", "Retry").kbd(gallery_kbd("r"))),
                 ),
             ),
             specimen(
-                "inside the Workspace every key carries its prefix (§3.6 [D-8])",
+                "stopped, mid-retry · narrow windows cut the reassurance first",
                 &t,
-                banner_stage(
+                banner_stage(support::chrome::reconnect_banner(
                     Banner::warning("fleetd stopped")
-                        .icon(Icon::Dot)
-                        .countdown("reconnecting…")
-                        .hints(
-                            KeyHintRow::new()
-                                .key("^s r", "reconnect")
-                                .key("^s l", "log"),
-                        ),
-                ),
+                        .icon(Icon::Unplug)
+                        .countdown("\u{2014} reconnecting\u{2026}")
+                        .detail("Your terminals and agents keep running."),
+                )),
             ),
         ],
     )
@@ -893,6 +1115,44 @@ fn sheet_section(cx: &mut App) -> AnyElement {
                 ),
             ),
             specimen(
+                "dismissable · ✕ in the header, click outside closes, scrim for a detail sheet",
+                &t,
+                stage(
+                    &t,
+                    px(200.0),
+                    div()
+                        .relative()
+                        .size_full()
+                        .child(
+                            Pane::new()
+                                .header(PaneHeader::new("board").total(12).range(1, 8))
+                                .body(filler(&t, 6)),
+                        )
+                        .child(
+                            Sheet::new(true)
+                                .on_dismiss(|_, _| {})
+                                .scrim(true)
+                                .header(sheet_header(&t))
+                                .body(filler(&t, 4)),
+                        ),
+                ),
+            ),
+            specimen(
+                "docked left · SheetSide::Left",
+                &t,
+                stage(
+                    &t,
+                    px(160.0),
+                    div().relative().size_full().child(filler(&t, 4)).child(
+                        Sheet::new(true)
+                            .side(SheetSide::Left)
+                            .on_dismiss(|_, _| {})
+                            .header(sheet_header(&t))
+                            .body(filler(&t, 2)),
+                    ),
+                ),
+            ),
+            specimen(
                 "closed · renders nothing at all",
                 &t,
                 stage(
@@ -907,6 +1167,11 @@ fn sheet_section(cx: &mut App) -> AnyElement {
             ),
         ],
     )
+}
+
+/// A gallery-only key chip for a key the gallery has no live keymap for.
+fn gallery_kbd(keys: &str) -> Kbd {
+    Kbd::parse(keys).unwrap_or_else(|error| panic!("{keys:?}: {error}"))
 }
 
 fn sheet_header(t: &Theme) -> AnyElement {
@@ -956,9 +1221,120 @@ fn sheet_footer(t: &Theme) -> AnyElement {
 fn dialog_section(cx: &mut App) -> AnyElement {
     let t = cx.theme().clone();
     LAYOUT.section(
-        "Dialog — scrim + card + 44 header + 44 footer, and never a button pair",
+        "Dialog — scrim + card + 44 header + 44 footer · close ✕, button footer, click outside closes",
         &t,
         vec![
+            specimen(
+                "button footer · ✕ and scrim close · header actions · footer start",
+                &t,
+                stage(
+                    &t,
+                    px(230.0),
+                    div().relative().size_full().child(filler(&t, 5)).child(
+                        Dialog::new("Settings")
+                            .icon(Icon::Settings2)
+                            .width(px(560.0))
+                            .on_dismiss(|_, _| {})
+                            .header_actions(IconButton::new("gallery-search", Icon::Search, "Search settings").kbd(gallery_kbd("/")))
+                            .body(Text::ui("Every change is saved together.").muted())
+                            .footer_start(
+                                Button::new("gallery-open-config", "Open config.json")
+                                    .style(ButtonStyle::Ghost),
+                            )
+                            .actions(vec![
+                                Button::new("gallery-dialog-cancel", "Cancel")
+                                    .kbd(gallery_kbd("escape")),
+                                Button::new("gallery-dialog-save", "Save")
+                                    .style(ButtonStyle::Primary)
+                                    .kbd(gallery_kbd("enter")),
+                            ]),
+                    ),
+                ),
+            ),
+            specimen(
+                "header fill · flush body · Help: a search in place of the title, panes edge to edge",
+                &t,
+                stage(
+                    &t,
+                    px(230.0),
+                    div().relative().size_full().child(filler(&t, 5)).child(
+                        Dialog::new("Help")
+                            .width(px(640.0))
+                            .on_dismiss(|_, _| {})
+                            .header_fill(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(t.space.sm)
+                                    .h(t.metrics.text_field_h)
+                                    .px(t.space.md)
+                                    .rounded(t.radii.sm)
+                                    .border(t.metrics.hairline)
+                                    .border_color(t.colors.focus_ring)
+                                    .child(Icon::Search.el().size(IconSize::Medium))
+                                    .child(Text::ui("What do you want to do?").muted()),
+                            )
+                            .header_actions(
+                                SegmentedControl::new(
+                                    "gallery-help-tabs",
+                                    [Segment::new("Guides"), Segment::new("All shortcuts")],
+                                )
+                                .active(Some(0)),
+                            )
+                            .flush_body(true)
+                            .body(
+                                div()
+                                    .flex()
+                                    .size_full()
+                                    .child(
+                                        div()
+                                            .w(px(180.0))
+                                            .h_full()
+                                            .p(t.space.md)
+                                            .bg(t.colors.surface)
+                                            .border_r(t.metrics.hairline)
+                                            .border_color(t.colors.border)
+                                            .child(Text::sentence_label("Here in Worktrees")),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .p(t.space.lg)
+                                            .child(Text::section_title("Start work on a task")),
+                                    ),
+                            )
+                            .footer_start(Text::caption("Fleet 0.1.0 · fleetd up 3h · protocol 8"))
+                            .actions(vec![
+                                Button::new("gallery-help-doctor", "Run doctor")
+                                    .style(ButtonStyle::Ghost)
+                                    .size(ButtonSize::Compact),
+                            ]),
+                    ),
+                ),
+            ),
+            specimen(
+                "danger primary · the strong confirm",
+                &t,
+                stage(
+                    &t,
+                    px(200.0),
+                    div().relative().size_full().child(filler(&t, 5)).child(
+                        Dialog::new("Delete worktree hotfix?")
+                            .icon(Icon::TriangleAlert)
+                            .tone(Tone::Warning)
+                            .width(px(480.0))
+                            .on_dismiss(|_, _| {})
+                            .body(Text::ui("The 2 unpushed commits exist only here and will be lost.").muted())
+                            .actions(vec![
+                                Button::new("gallery-confirm-cancel", "Cancel")
+                                    .kbd(gallery_kbd("escape")),
+                                Button::new("gallery-confirm-delete", "Delete anyway")
+                                    .style(ButtonStyle::Danger)
+                                    .kbd(gallery_kbd("shift-y")),
+                            ]),
+                    ),
+                ),
+            ),
             specimen(
                 "compact confirm, 480 px · the hint row is the affordance",
                 &t,
@@ -1127,6 +1503,88 @@ fn palette_card(t: &Theme) -> AnyElement {
         .into_any_element()
 }
 
+/// A stack wired as the app wires it: `View` shows `J`, every toast has a ✕, hover is reported.
+fn interactive_toasts(stack: ToastStack) -> ToastStack {
+    stack
+        .action_keys([None, Some(gallery_kbd("J")), None])
+        .on_activate(|_, _, _| {})
+        .on_dismiss(|_, _, _| {})
+        .on_hover(|_, _, _, _| {})
+}
+
+fn toast_section(cx: &mut App) -> AnyElement {
+    let t = cx.theme().clone();
+    let toast_stage = |stack: ToastStack| stage(&t, px(160.0), stack);
+    LAYOUT.section(
+        "ToastStack — §2.7, bottom-right",
+        &t,
+        vec![
+            specimen(
+                "a toast that points somewhere gets View and its key; every toast gets a ✕; hovering holds the dwell",
+                &t,
+                toast_stage(interactive_toasts(ToastStack::new(live_toasts()))),
+            ),
+            specimen(
+                "display only · no handlers, no buttons",
+                &t,
+                toast_stage(ToastStack::new(live_toasts())),
+            ),
+        ],
+    )
+}
+
+fn step_card_section(cx: &mut App) -> AnyElement {
+    let t = cx.theme().clone();
+    LAYOUT.section(
+        "StepCard — first run",
+        &t,
+        vec![specimen(
+            "current · pending · unavailable with its note · a dashed side path",
+            &t,
+            div()
+                .flex()
+                .flex_col()
+                .gap(t.space.sm)
+                .w(t.metrics.first_run_w)
+                .child(
+                    StepCard::new("step-1", StepMark::Number(1), "Create a context")
+                        .description("Group repositories by GitHub org or client.")
+                        .kbd(gallery_kbd("N"))
+                        .current(true)
+                        .on_click(|_, _| {}),
+                )
+                .child(
+                    StepCard::new("step-2", StepMark::Number(2), "Clone a repository")
+                        .description("Search your orgs on GitHub; it clones in the background.")
+                        .kbd(gallery_kbd("n"))
+                        .on_click(|_, _| {}),
+                )
+                .child(
+                    StepCard::new(
+                        "step-3",
+                        StepMark::Number(3),
+                        "Start a worktree and an agent",
+                    )
+                    .description("A branch copy with its own terminals and agent threads.")
+                    .unavailable("after step 2"),
+                )
+                .child(
+                    StepCard::new(
+                        "step-import",
+                        StepMark::Icon(Icon::Sailboat),
+                        "Import from ~/.swarm",
+                    )
+                    .description(
+                        "Brings over contexts, repos and worktrees. Nothing in ~/.swarm changes.",
+                    )
+                    .kbd(gallery_kbd("i"))
+                    .dashed(true)
+                    .on_click(|_, _| {}),
+                ),
+        )],
+    )
+}
+
 fn live_toasts() -> Vec<Toast> {
     let mut toasts = Vec::new();
     ToastStack::push_at(
@@ -1137,7 +1595,9 @@ fn live_toasts() -> Vec<Toast> {
     );
     ToastStack::push_at(
         &mut toasts,
-        Toast::new("Cloned buk/ledger · ⏎ opens").icon(Icon::CircleCheck),
+        Toast::new("Cloned buk/ledger")
+            .icon(Icon::CircleCheck)
+            .action("View"),
         ToastStack::MAX,
         10,
     );
@@ -1167,11 +1627,14 @@ impl Render for StructureGallery {
         let sections = vec![
             app_frame_section(cx),
             split_section(cx),
-            context_bar_section(cx),
+            sidebar_section(self.sidebar_w, cx),
+            title_bar_section(cx),
             status_bar_section(cx),
             pane_section(cx, focused_pane, filter_query),
             mode_and_daemon_section(cx),
             banner_section(cx),
+            toast_section(cx),
+            step_card_section(cx),
             veil_section(cx, veiled),
             sheet_section(cx),
             dialog_section(cx),
@@ -1179,23 +1642,17 @@ impl Render for StructureGallery {
         ];
 
         let mut frame = AppFrame::new()
-            .context_bar(
-                ContextBar::new([ContextTab::new("structure", 1)])
-                    .active(0)
-                    .chip(Chip::labeled(
+            .title_bar(
+                TitleBar::new()
+                    .leading(Text::ui_strong("structure"))
+                    .trailing(Chip::labeled(
                         if t.mode.is_dark() {
                             Icon::Moon
                         } else {
                             Icon::CircleArrowUp
                         },
                         if t.mode.is_dark() { "dark" } else { "light" },
-                    ))
-                    .daemon(if self.banner {
-                        DaemonState::Lost
-                    } else {
-                        DaemonState::Healthy
-                    })
-                    .daemon_label("fleetd stopped"),
+                    )),
             )
             .body(
                 div()
@@ -1223,15 +1680,6 @@ impl Render for StructureGallery {
             .status_bar(
                 StatusBar::new()
                     .breadcrumb("fleet-ui-kit › structure")
-                    .mode(if self.dialog {
-                        Mode::Dialog
-                    } else if self.palette {
-                        Mode::Palette
-                    } else if self.sheet {
-                        Mode::Jobs
-                    } else {
-                        Mode::Normal
-                    })
                     .ticker(
                         KeyHintRow::new()
                             .key("t", "theme")
@@ -1241,17 +1689,12 @@ impl Render for StructureGallery {
             );
 
         if self.banner {
-            frame = frame.banner(
-                Banner::warning("fleetd stopped")
-                    .icon(Icon::Dot)
-                    .countdown("reconnecting in 3s")
-                    .hints(
-                        KeyHintRow::new()
-                            .key("r", "reconnect now")
-                            .key("l", "log")
-                            .key("esc", "dismiss"),
-                    ),
-            );
+            frame = frame.banner(support::chrome::reconnect_banner(
+                Banner::warning("Lost connection to fleetd")
+                    .icon(Icon::Unplug)
+                    .countdown("\u{2014} reconnecting in 3s.")
+                    .detail("Your terminals and agents keep running."),
+            ));
         }
         if self.sheet {
             frame = frame.body_overlay(
@@ -1263,7 +1706,7 @@ impl Render for StructureGallery {
             );
         }
         if self.toasts {
-            frame = frame.body_overlay(ToastStack::new(live_toasts()));
+            frame = frame.body_overlay(interactive_toasts(ToastStack::new(live_toasts())));
         }
         if self.palette {
             frame = frame.overlay(Overlay::new().content(palette_card(&t)));

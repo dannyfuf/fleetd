@@ -33,7 +33,8 @@ use crate::{
     actions::{board_settings as board_settings_actions, dialog, settings as settings_actions},
     bridge::Bridge,
     dialogs::{
-        DialogHost, Dialogs, host::complete_request, notify, read_host, root, step, with_host,
+        DialogHost, Dialogs, footer, host::complete_request, notify, read_host, root, step,
+        with_host,
     },
     state::AppState,
 };
@@ -65,6 +66,7 @@ mod columns;
 mod draft;
 mod keys;
 mod persistence;
+mod pointer;
 mod schema;
 #[cfg(test)]
 mod tests;
@@ -78,6 +80,7 @@ pub(crate) use keys::open_on_section;
 use keys::*;
 pub(crate) use persistence::seed;
 use persistence::*;
+use pointer::*;
 pub(crate) use schema::BoardSection;
 use schema::*;
 pub(crate) use view::render;

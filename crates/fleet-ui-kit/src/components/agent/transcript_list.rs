@@ -29,6 +29,7 @@ use gpui::{
 };
 
 use crate::{
+    components::Kbd,
     icons::{Icon, IconSize},
     text::Text,
     theme::ActiveTheme,
@@ -86,6 +87,74 @@ pub enum RowAction {
     Diff,
 }
 
+impl RowAction {
+    /// The verb a control for this action reads, in sentence case.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            RowAction::Revert => "Revert",
+            RowAction::Open => "Open in editor",
+            RowAction::Copy => "Copy",
+            RowAction::Diff => "Diff",
+        }
+    }
+
+    /// The glyph an icon-only control for this action draws.
+    #[must_use]
+    pub const fn icon(self) -> Icon {
+        match self {
+            RowAction::Revert => Icon::Undo2,
+            RowAction::Open => Icon::ExternalLink,
+            RowAction::Copy => Icon::Copy,
+            RowAction::Diff => Icon::FileDiff,
+        }
+    }
+}
+
+/// Which [`RowAction`]s one row offers, decided by the owner when it projects the row.
+///
+/// A row draws a control only for an action it can honour: a drawn affordance that does nothing
+/// is worse than an absent one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RowActions {
+    /// `y` — the row has a payload to copy.
+    pub copy: bool,
+    /// `d` — the row has a diff to show.
+    pub diff: bool,
+    /// `o` — the row names a file an editor can open.
+    pub open: bool,
+    /// `u` — the row can be reverted.
+    pub revert: bool,
+}
+
+impl RowActions {
+    /// The offered actions, in the order their controls are drawn.
+    #[must_use]
+    pub fn list(self) -> Vec<RowAction> {
+        [
+            (self.copy, RowAction::Copy),
+            (self.diff, RowAction::Diff),
+            (self.open, RowAction::Open),
+            (self.revert, RowAction::Revert),
+        ]
+        .into_iter()
+        .filter_map(|(offered, action)| offered.then_some(action))
+        .collect()
+    }
+
+    /// Whether the row offers anything at all.
+    #[must_use]
+    pub const fn any(self) -> bool {
+        self.copy || self.diff || self.open || self.revert
+    }
+}
+
+/// Resolves the key chip of one row verb from the owner's live keymap.
+///
+/// The row verbs are bound only while a row holds the focus (`AgentRow`), so outside scroll mode
+/// this answers `None` and the controls show no chip — the key would not do what it says.
+pub type RowActionKbd = Rc<dyn Fn(RowAction, &Window, &App) -> Option<Kbd>>;
+
 /// Builds the owner-supplied body of one expandable row — a `DiffView`, an inline image, an
 /// MCP payload — or declines and lets the row draw its own text.
 ///
@@ -127,6 +196,8 @@ pub struct TranscriptList {
     visible: Range<usize>,
     focused_row: Option<usize>,
     row_body: Option<RowBodyRenderer>,
+    /// The owner's key-chip lookup for the row verbs' controls.
+    row_action_kbd: Option<RowActionKbd>,
     /// The working row's clock, recomputed by [`Self::sync_working_clock`] and read by `render`.
     working_label: Option<SharedString>,
     /// The working row, maintained by row mutations so the 1 Hz tick never scans the transcript.
@@ -164,6 +235,7 @@ impl TranscriptList {
             visible: 0..0,
             focused_row: None,
             row_body: None,
+            row_action_kbd: None,
             working_label: None,
             working_row: None,
             _working_tick: None,
@@ -181,6 +253,16 @@ impl TranscriptList {
         cx: &mut Context<Self>,
     ) {
         self.row_body = Some(Rc::new(render));
+        cx.notify();
+    }
+
+    /// Installs the key-chip lookup the row verbs' controls show.
+    pub fn set_row_action_kbd(
+        &mut self,
+        resolve: impl Fn(RowAction, &Window, &App) -> Option<Kbd> + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        self.row_action_kbd = Some(Rc::new(resolve));
         cx.notify();
     }
 
@@ -672,7 +754,7 @@ impl TranscriptList {
     fn render_row(
         &mut self,
         index: usize,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let Some(row) = self.rows.get(index).cloned() else {
@@ -688,14 +770,26 @@ impl TranscriptList {
             visible: self.visible.is_empty() || self.visible.contains(&index),
             working_label: self.working_label.clone(),
             body,
-            toggle: Some(Rc::new(move |key: SharedString, _window, cx| {
-                // A click can only arrive while the row is on screen, so the weak handle is
-                // live; it fails only if the transcript was dropped in the same frame.
-                this.update(cx, |_, cx| cx.emit(TranscriptEvent::Toggle(key)))
-                    .ok();
+            toggle: Some(Rc::new({
+                let this = this.clone();
+                move |key: SharedString, _window, cx| {
+                    // A click can only arrive while the row is on screen, so the weak handle is
+                    // live; it fails only if the transcript was dropped in the same frame.
+                    this.update(cx, |_, cx| cx.emit(TranscriptEvent::Toggle(key)))
+                        .ok();
+                }
             })),
+            // A row verb pressed with the pointer reports the very event its key reports, so
+            // the owner has one path for both.
+            action: Some(Rc::new(move |row: SharedString, action, _window, cx| {
+                this.update(cx, |_, cx| {
+                    cx.emit(TranscriptEvent::RowAction { row, action });
+                })
+                .ok();
+            })),
+            action_kbd: self.row_action_kbd.clone(),
         };
-        row_element(&row, ctx, cx)
+        row_element(&row, ctx, window, cx)
     }
 }
 

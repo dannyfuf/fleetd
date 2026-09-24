@@ -65,7 +65,7 @@ impl Pane {
         }
     }
 
-    /// A fixed-width pane (240 px rail, 340 px detail panel).
+    /// A fixed-width pane (240 px rail, 344 px detail panel).
     pub fn fixed(width: Pixels) -> Self {
         Self::new().width(width)
     }

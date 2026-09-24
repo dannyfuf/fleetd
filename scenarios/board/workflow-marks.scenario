@@ -24,6 +24,13 @@
 # `needs you` **mark** is pinned by `state::board`'s unit tests, which feed the reducer the
 # delegation the face is supposed to read.
 #
+# The two cards need two different children, and the provider is the *card's* to choose: In
+# Progress is a prompt column with no provider of its own, so a card that names none runs on the
+# daemon's default, Claude (`board::automation::resolve_prefs`, `DEFAULT_PROVIDER`). AGE-1 keeps
+# that default and parks; AGE-2 is given Codex with `m` before it moves, so its child reports and
+# completes once it is handed the slot. Without that gesture both children are Claude's, AGE-2's
+# parks exactly as AGE-1's did, and nothing ever reaches In review.
+#
 # `done` and `stalled` are the two marks this board cannot show, and each for a reason rather
 # than an omission. `done`: both action columns carry an `on_success`, so a run that succeeds is
 # announced by the card *moving*, not by a check beside its key
@@ -106,13 +113,14 @@ key ]
 await lists.board.selected.label == "In Progress" 20000
 assert lists["board.cards"].rows[0].badges[0] == "AGE-1"
 await lists["board.cards"].rows[0].marks[0] == "needs you" 30000
-await lists["board.summary"].rows[0].label == "1/1 working" 20000
+await lists["board.summary"].rows[0].label == "1/1 working · 1 needs you" 20000
 
 # The child asks its question and parks on it — the tile already says `needs you` because the face
 # is painted from the delegation mirror (BOARD.md §11.8); the delegation itself is read too. The
-# header counts the slot that child is holding either way, which is the reading that matters here.
+# header counts the slot that child is holding either way, and its amber count says what the
+# tile says: one card waits on a person.
 await agents.delegations[0].status == blocked 30000
-await lists["board.summary"].rows[0].label == "1/1 working" 20000
+await lists["board.summary"].rows[0].label == "1/1 working · 1 needs you" 20000
 
 # Back to Todo, which is three cards now and still says what blocks the last two of them.
 key h
@@ -123,6 +131,17 @@ assert lists.board.rows[1].badges[0] == "3" && lists.board.rows[3].badges[0] == 
 assert lists["board.cards"].rows[1].badges[0] == "AGE-3" && lists["board.cards"].rows[1].marks[0] == "blocked:1"
 assert lists["board.cards"].rows[2].badges[0] == "AGE-4" && lists["board.cards"].rows[2].marks[0] == "blocked:2"
 
+# AGE-2 is the card whose run has to finish, so it asks for Codex before it moves: the provider
+# has to be on the card before the card reaches the column that reads it.
+assert lists["board.cards"].rows[0].badges[0] == "AGE-2"
+key m
+await dialog.name == CardPicker 10000
+type codex
+assert dialog.fields[0].value == "codex"
+key enter
+await dialog absent 20000
+await idle 20000
+
 # AGE-2 the same way, while AGE-1's child still holds the board's one slot: this card is *owed* a
 # run rather than given one, and the header's numerator counts the owed run beside the live one.
 key ]
@@ -132,7 +151,8 @@ await lists.board.selected.label == "In Progress" 20000
 assert lists["board.cards"].rows[1].badges[0] == "AGE-2"
 await lists["board.cards"].rows[1].marks[0] == "pending" 40000
 await agents.delegations[0].status == blocked 30000
-await lists["board.summary"].rows[0].label == "2/1 working" 20000
+await lists["board.summary"].rows[0].label == "2/1 working · 1 needs you" 20000
+assert lists["board.summary"].rows[0].marks[0] == "waiting:1"
 assert lists.board.rows[3].badges[0] == "2" && lists.board.rows[3].marks[0] == "action"
 shot workflow-marks
 

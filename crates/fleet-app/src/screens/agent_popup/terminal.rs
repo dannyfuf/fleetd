@@ -49,7 +49,6 @@ impl AgentPopup {
         let mirror = model.terminal.and_then(|terminal| app.grids.get(&terminal));
         let selection = mirror.and_then(|grid| self.local.borrow().selection(grid));
         let focused = focus.is_focused(window);
-        let hint_visible = self.local.borrow().hint.visible();
         let grid: AnyElement = match mirror.filter(|grid| grid.primed) {
             Some(grid) => {
                 let terminal = model.terminal;
@@ -122,17 +121,7 @@ impl AgentPopup {
                     .selecting(selection.is_some())
                     .alt_screen(model.alt_screen)
             }))
-            .child(
-                PrefixHint::new(model.mode == AgentPopupMode::Prefix && hint_visible).hints(
-                    KeyHintRow::new()
-                        .key("q", "hide")
-                        .key("a/A", "switch")
-                        .key("[", "scroll")
-                        .key("]", "paste")
-                        .key("?", "help")
-                        .key("r", "restart"),
-                ),
-            );
+            .children(self.local.borrow().prefix_menu.render(state, cx));
         self.with_mouse(area, state, focus, owner, model.terminal)
             .into_any_element()
     }

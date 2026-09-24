@@ -227,10 +227,12 @@ must not assume the viewport's last row exists in `terminal.rows`. `jobs[].statu
 `cancelling`, which is a real daemon job state.
 
 The list names are `repos`, `worktrees`, `prs`, `jobs`, `tabs`, `palette`, `board`,
-`board.cards`, `board.summary`, `card.runs` and `settings.columns`. The last three are
-additive version-1 lists and each is absent unless its surface has something to say:
-`board.summary` while the board states a run count, `card.runs` while the card detail is open on
-a card that has run, `settings.columns` while Board settings is open. While the agent picker is
+`board.cards`, `board.summary`, `card.runs`, `card.properties`, `settings.columns`, `changes` and
+`changes.commits`. The last six are additive version-1 lists and each is absent unless its
+surface has something to say: `board.summary` while the board states a run count, `card.runs`
+while the card detail is open on a card that has run, `card.properties` while the card detail is
+open, `settings.columns` while Board settings is open, `changes` and `changes.commits` while the
+Workspace's Changes panel shows a completed reading. While the agent picker is
 open, `lists.palette` projects its native-thread rows:
 `id` is the thread id; `label` is the rendered picker label; `badges` are provider,
 `caller`/`child`, and worktree id; and `marks` are attention, `go`/`attach`, and
@@ -256,18 +258,26 @@ the pane draws it — ordered by the card's position, archived cards left out, a
 board filter — so `rows[R]` and `focused == board.column[C].card[R]` always name the same card;
 a `board` row's badge counts that same population. A `board` row carries `action` when its
 column starts a run on arrival, which is the `on_enter` automation alone. `board.summary` holds
-the one row the pane header states — `1/1 working · 1 needs you`, each half omitted while its
-count is zero — and the list is absent when both are. `card.runs` is one row per run of the open
+the board header's two counts as one row in their compact form — `1/1 working · 1 needs you`,
+each half omitted while its count is zero, where the header itself reads `1 of 1 run working` —
+and the list is absent when both are. Its `working` numerator counts live and owed runs alike;
+while any of them is only owed a slot, the row carries the mark `waiting:N` and the header reads
+`1 working · 1 waiting` instead. `card.runs` is one row per run of the open
 card, oldest first: `label` is the run row the detail draws, `badges` is the provider, and
-`marks` is that run's mark word. `settings.columns` is one row per column of the board the
+`marks` is that run's mark word. `card.properties` is one row per row of the open card's
+property column, top to bottom — the index `card_detail.property[N]` paints — with `label` the
+field's name (empty on a second link row), the one badge its value as drawn (`–` when unset), and
+`locked` in `marks` on a row its backend owns. `settings.columns` is one row per column of the board the
 dialog is editing, `label` its name, marked `action` on the same rule as `board` and `disabled`
 on a board that may not carry automation at all — a context board, or a board whose columns
 answer to its backend. The elapsed time inside a `card.runs` label is as of the last projection:
 nothing keys on the wall clock, so a scenario awaits a row or a mark, never a duration.
 
-`lists.jobs.rows` is the row set accepted by the Jobs panel's current filter, and
-`lists.jobs.selected` is the row at the panel cursor within that filtered set. Thus
-`jobs.row[N]` and `lists.jobs.rows[N]` address the same job.
+`lists.jobs.rows` is the row set accepted by the Jobs panel's current filter, in the order the
+panel draws it — live and failed jobs first, then the "Finished" group (succeeded and cancelled),
+each in the daemon's order — and `lists.jobs.selected` is the row at the panel cursor within that
+filtered set. Thus `jobs.row[N]` and `lists.jobs.rows[N]` address the same job.
+`lists.jobs.filter` is `""` for All, then `running`, `failed` or `done`.
 
 The snapshot is memoised behind a key naming every input its builder reads, and its revision moves
 only when the projected content actually differs — a repainted frame that changes nothing does not
@@ -290,25 +300,88 @@ The names Fleet paints today, by surface:
 
 | Surface | Names |
 | --- | --- |
-| Repositories rail | `repos.rail`, `repos.row[N]`. The rail's own `w` is the collapse oracle — 240 expanded, 44 collapsed — because `H` is its only collapse affordance and Fleet has no control to name. |
+| Sidebar | `repos.rail` (the whole sidebar), `repos.row[N]`, `repos.row[N].menu` (a repository's `⋯`, painted while the row is hovered), `repos.clone` (the `+` beside `Repositories`), `repos.collapse` (the foot button, the pointer's `H`), `repos.resize` (the draggable edge), `agents.sidebar.row[N]` (the Agents section's rows, absent while there are none). `repos.rail`'s `w` is the collapse and drag oracle — 232 expanded by default, 44 collapsed, the dragged width (200–320) after `drag repos.resize <x> <y>`. |
 | Hub lists | `worktrees.row[N]`, `prs.row[N]`, `jobs.row[N]`, `hub.tab[N]`, `prs.tab[N]` |
-| Board | `board.column[C]`, `board.column[C].card[R]`, `board.filter` |
-| Filter and palette | `filter.input`, `palette.input`, `palette.row[N]` (one flat numbering across the Go / Do / Context sections) |
-| Dialogs | `dialog.field[N]`, `dialog.row[N]` |
-| Tabs | `tabs.tab[N]` for a process tab, `agents.tabs.tab[N]` for a conversation, sharing one numbering |
-| Toasts and errors | `toasts.toast[N]` (0 is the oldest, matching the `toasts` array), `sticky_error.retry` |
-| Native agents | `agents.popup`, `agents.transcript`, `agents.composer`, `agents.decision`, `agents.approval.allow_once`, `agents.approval.allow_always`, `agents.approval.deny`, `agents.approval.deny_and_stop`, `agents.approval.edit` |
+| Worktrees page | `worktrees.new` (absent while the context has no repository), `worktrees.clone` (the primary then), `worktrees.empty.clone` (the empty page's `Clone repo` when there is no repository), `worktrees.filter`, `worktrees.row[N].open`, `worktrees.row[N].menu`, `worktrees.row[N].log` |
+| Pull requests | `prs.filter`, `prs.refresh`, `prs.retry`, `prs.more`, `prs.row[N].open`, `prs.row[N].menu` |
+| Detail panel | `detail.open`, `detail.sleep`, `detail.menu`, `detail.copy_path`, `detail.inspect` |
+| Title bar | `titlebar.context`, `titlebar.command`, `titlebar.needs_you`, `titlebar.jobs`, `titlebar.update`, `titlebar.daemon`, `titlebar.help`, `titlebar.settings`, `titlebar.back`, `workspace.back`, `workspace.switcher`, `workspace.pr` |
+| Status bar | `statusbar.shortcuts`, `statusbar.commands` |
+| Board | `board.column[C]`, `board.column[C].card[R]`, `board.filter`; the pointer controls `board.new` (New card), `board.sync` (the sync button; absent on a local board), `board.settings` (Board settings), `board.column[C].add` (a column's `+`) and `board.column[C].card[R].menu` (a card's `⋯`, painted while the card is hovered or selected). `board.filter` is the header's filter field, painted always. The card menu's entries are `menu.item[N]`. |
+| Filter and palette | `filter.input`, `filter.clear` (the query's clear ✕, only while it holds text), `filter.empty.clear` (the `Clear filter` button of a Hub list the filter left empty), `palette.input`, `palette.row[N]` (one flat numbering down the ranked list, across its sections; `palette.row[0]` is the top match) |
+| Dialogs | `dialog.field[N]`, `dialog.row[N]`, `dialog.close`, `dialog.button[N]`, `dialog.checkbox`, `dialog.segment[N]` |
+| Help | `help.search` (also `dialog.field[0]`), `help.tab[N]` (0 Guides, 1 All shortcuts), `help.here[N]` (the *Here in …* rows), `help.guide[N]` (by the guide's position in the full list, searched or not), `help.step[N].action[M]` (the shown guide's step `N`, button `M`, both from 0), `help.shortcut[N]` (the table's rows, or the actions a Guides-tab search lists), `help.place[N]` (0 All places, then the catalogue places in order), `help.run`, `help.related` |
+| Settings | `settings.search`, `settings.section[N]` (the rail, `0` General, `1` Agents, `2` Sleep, `3` Jobs & warnings, `4` Pool, `5` GitHub, `6` Status, `7` Hosts, `8` About), `settings.row[N]` (the shown section's rows, `0` first), `settings.switch`, `settings.option[N]`, `settings.dropdown`, `settings.copy[N]`, `settings.hit[N]`, `settings.config`, `settings.doctor`; its footer is `dialog.button[0]` Cancel and `dialog.button[1]` Save |
+| Sheets | `sheet.close` |
+| Card detail | `card_detail.close` (the sheet's ✕, also `sheet.close`), `card_detail.title` (a click edits the title, as `i`), `card_detail.menu` (the header's ⋯), `card_detail.property[N]` (the property column's rows, `0` Status, numbered as `card.properties`), `card_detail.comment` (the composer's *Add a comment…*, as `c`), `card_detail.edit.save` and `card_detail.edit.cancel` (an open title, description or comment edit's *Save* / *Comment* and *Cancel*, as `ctrl-enter` and `esc`, painted only while that edit is open), and on the run card `card_detail.run.attach`, `card_detail.run.rerun` and `card_detail.run.cancel`, each painted only while its action can work on the card |
+| Jobs panel | `jobs.row[N].retry`, `jobs.row[N].cancel`, `jobs.row[N].log`, `jobs.filter[N]`, `jobs.clear`, `jobs.more`, `jobs.log.back`, `jobs.log.follow`, `jobs.log.end` |
+| Tabs | `tabs.tab[N]` for a process tab, `agents.tabs.tab[N]` for a conversation, sharing one numbering; `tabs.tab[N].close` / `agents.tabs.tab[N].close` (the tab's `✕`), `tabs.new` (the `+`), `tabs.fallback`, `tabs.watch`, `tabs.zoom`, `tabs.changes` |
+| Toasts and errors | `toasts.toast[N]` (0 is the oldest, matching the `toasts` array), `toasts.toast[N].action`, `toasts.toast[N].close`, `sticky_error.retry`, `sticky_error.close` |
+| Daemon banner | `banner.button[N]` (`0` Reconnect now, `1` Open log), `banner.close` |
+| First run | `first_run.step[N]` (`0` Create a context, `1` Clone a repository, `2` Start a worktree and an agent), `first_run.import`, `first_run.help`, `first_run.settings` |
+| Menus | `menu.item[N]`: the items of the one open kit `Menu` (a ⋯, `+`, right-click or dropdown menu), numbered over the visible items in order, separators and headers skipped |
+| ⌃S command menu | `prefix_menu`, `prefix_menu.item[N]`, `prefix_menu.close` |
+| Native agents | `agents.popup`, `agents.popup.agent[N]` (the header's provider switch: 0 Claude, 1 Codex), `agents.popup.restart`, `agents.popup.hide`, `agents.transcript`, `agents.composer`, `agents.decision`, `agents.approval.allow_once`, `agents.approval.allow_always`, `agents.approval.deny`, `agents.approval.deny_and_stop`, `agents.approval.edit`, `agents.send`, `agents.tool[N]`, `agents.row[N]` |
+
+The Worktrees page's header paints `worktrees.filter` (the idle filter field; while the filter is
+being edited the same box is `filter.input`), `worktrees.clone` and `worktrees.new` (the primary
+*New worktree*). A row's hover actions, `worktrees.row[N].open` (*Open*) and
+`worktrees.row[N].menu` (the `⋯` trigger), are drawn only while that row is hovered or selected,
+so a scenario clicks the row first; `worktrees.row[N].log` is the *View log* button of a row whose
+hooks failed. Right-clicking `worktrees.row[N]` opens the same menu at the pointer. The detail
+panel's buttons are `detail.open`, `detail.sleep`, `detail.menu` (its `⋯`), `detail.copy_path` and
+`detail.inspect` (only while the worktree's safety is not known); the panel is open by default at
+the harness's 1440 px window.
+
+`hub.tab[N]` is the title bar's section nav — `0` Worktrees, `1` Pull requests, `2` Board — painted
+only on the Hub. The `titlebar.*` names are its other controls. `titlebar.context` is the context
+switcher; clicking it opens a kit menu whose `menu.item[N]` are the contexts in order, then *New*,
+*Edit* and *Delete context*. `titlebar.command` opens the palette, `titlebar.help` Help and
+`titlebar.settings` Settings. Four are conditional: `titlebar.needs_you` exists only while an
+agent thread needs you (one waiting opens that thread, two or more the agents picker),
+`titlebar.jobs` only while a job runs or has failed, `titlebar.update` only on the Hub with an
+update available, and `titlebar.daemon` only while the daemon is unhealthy. In the Workspace the
+switcher and the section nav give way to the breadcrumb: `titlebar.back` (`⌃S s`), also recorded as
+`workspace.back`; `workspace.switcher`, the worktree switcher, whose `menu.item[N]` are the
+sessions in `⌃S W` order, then *Last session* and *All sessions…*; and `workspace.pr`, the pull
+request button, painted only while the branch has one. The status bar paints
+`statusbar.shortcuts` (Help) everywhere and `statusbar.commands` (`⌃S`, entering the prefix) over
+a terminal or a Fleet-drawn pane, not over a native agent thread.
+
+The tab strip paints `tabs.tab[N].close` (or `agents.tabs.tab[N].close`) on every tab — hidden, but
+laid out, until the tab is hovered or active, so a scenario clicks it on the active tab or after a
+`move` onto the tab. `tabs.new` is the `+`; clicking it opens a kit menu whose `menu.item[N]` are
+*Terminal*, *Claude thread*, *Codex thread*, *Board*, then *Lazygit* on a worktree session and
+*Terminal fallback* on an agent tab. A right-click on a tab selects it and opens its menu:
+*Rename* and, on an exited PTY, *Restart command* for a terminal, then *Close* and, with more than
+one tab, *Close others*. `tabs.zoom` is always painted; `tabs.watch` only while the session has a
+subagent watch; `tabs.fallback` only on an agent tab; `tabs.changes` on a worktree session.
+
+The Changes panel (UX-SPEC §3.6) paints `changes.panel` (the whole column), `changes.file[N]` (the
+file row at model position `N`, a virtualized row) and `changes.lazygit` (*Open in Lazygit*) while
+it is open. A click on `changes.file[N]` opens the `ChangesDiff` dialog, a sheet whose close is the
+`sheet.close` every sheet paints. Its two lists are `changes` — one row per file, `id` and `label`
+the path, `badges` the status letter then `+n` and `−n` as drawn — and `changes.commits` — one row
+per listed commit ahead, `id` the short id and `label` the subject. Both carry the base in
+`filter` and are present only while the panel shows a completed reading.
+
+`prefix_menu` is the ⌃S command menu's panel, painted only once a held prefix has waited out
+`motion.prefix_hint_delay` — a scenario awaits it rather than assuming it. `prefix_menu.item[N]`
+counts its rows column by column, top to bottom, in the order the menu draws them; the order
+follows the action catalogue, so a scenario that clicks a row names what that row is in a
+comment and checks what it did. `prefix_menu.close` is the header's Close button.
 
 `dialog.field[N]` counts the dialog's **tab cycle**: create-worktree `0` branch / `1` base /
 `2` host (absent on a single-host daemon); new and edit context `0` name / `1` owners;
-rename-terminal `0`; clone-repo `0` search; edit-hooks `0..` prepare commands then post-create;
+rename-terminal `0`; clone-repo `0` search; help `0` search; edit-hooks `0..` prepare commands then post-create;
 new-card `0` title / `1` description; card-property `0` query. `dialog.row[N]` is a dialog's
-result list — the assign-repo contexts, the clone-repo matches, the create-worktree base refs.
+result list — the assign-repo contexts, the clone-repo matches, the create-worktree base refs, the
+card-property values (painted while on screen: the list scrolls past eight rows).
 
 Two names in the table are real but conditional, and a scenario that assumes them unconditionally
 will fail on an unknown target rather than on the thing it meant to check. `dialog.row[N]` exists
-only in the dialogs that have a result list — no preset opens one today, so no dump captured so
-far contains it. `agents.approval.edit` is painted only where the provider accepts an amended
+only in the dialogs that have a result list; `scenarios/hub/create-worktree-clicks.scenario` opens
+the create-worktree base list, whose rows are there once the refs have arrived. `agents.approval.edit` is painted only where the provider accepts an amended
 invocation (the `DecisionDock` contract in `docs/DESIGN-SYSTEM.md`); the other four approval
 controls are always there.
 
@@ -318,10 +391,102 @@ the rectangle has to be somewhere clicking does what the name says. Over the who
 centre falls in the metadata strip, where a mouse down reaches no editor and every keystroke after
 it is dropped in silence.
 
-`dialog.button[N]` is part of the vocabulary but is painted nowhere: Fleet's dialogs are confirmed
-from the keyboard and `Dialog::primary` renders text, not a control. It stays unpopulated until a
-dialog grows a real button, because naming a label "button" is a lie a scenario would then depend
-on.
+`agents.send` is the composer's Send button, which reads Steer with a draft while the agent works
+and Stop without one — one control, one name. `agents.tool[N]` is a tool call's 30 px line, `N` the
+row's index in the transcript (so it counts every row above it, not only tool rows), and it is
+painted only while that row is on screen and is a row of its own: a settled turn folds its calls
+into a group, which a scenario opens first by clicking it: `agents.row[N]` is any transcript row,
+the whole of it, at the same index — collapsed, a group, fold or delegation row is its one line. The approval names now sit on the dock's buttons, and
+the question and plan controls carry no names.
+
+`menu.item[N]` exists only while a menu is open, so a scenario opens one first (by clicking its
+trigger or right-clicking its row) and awaits the target before clicking it. Only one menu is open
+at a time — opening another closes the first — so the name needs no surface prefix. An item whose
+action the surface cannot run is left out of the menu, not greyed, so `N` counts only what is
+shown.
+
+`prs.tab[N]` is the PR screen's tab (`0` Mine, `1` Waiting for my review); a click on it switches
+tabs as `Tab` does. `prs.filter` is the page header's filter field (`/`; while the filter owns
+the keys the field is `filter.input`). `prs.refresh` is the page header's Refresh (`r`); `prs.retry` is the Retry on
+the error callout and exists only while a fetch error is shown; `prs.more` is the
+`+n more — select a repo to narrow` button, only in `All` scope past the 100-row cap.
+`prs.row[N].open` (`Open ⏎`) and `prs.row[N].menu` (the `⋯` trigger) are the row's hover actions:
+painted on every visible row but visible only while it is hovered or selected, so a scenario
+clicks the row before them. A press on either first puts the cursor on that row; the menu's
+items are `menu.item[N]`, and a right click on `prs.row[N]` opens the same menu.
+
+`toasts.toast[N].action` is the toast's `View` button, painted only on a toast that points
+somewhere (a background success, a native agent that needs you); a click on it — or on the
+toast's line — goes there as the key would and retires the toast. `toasts.toast[N].close` is its
+✕, on every toast. `sticky_error.retry` is the whole error in the status bar: a click on it runs
+`!` (the Jobs panel, on the failure); `sticky_error.close` is the ✕ beside it, which runs `X` and
+clears the slot. `banner.button[N]` and `banner.close` are the §3.12 C banner's `Reconnect now`,
+`Open log` and ✕, each dispatching the banner's `r`, `l` and `Esc`; they are painted only while
+the link is lost, never on the `reconnected` or restart banner. `first_run.step[N]` are the
+first-run page's step cards: `0` and `1` run `N` and `n`, and `2` is drawn dimmed and does
+nothing until a repository exists. `first_run.import` is the import card, painted only when
+`~/.swarm/state.json` exists (so never in a hermetic run); `first_run.help` and
+`first_run.settings` are the footer's `?` and `,`.
+
+`dialog.close` is the close ✕ in every dialog's header; clicking it runs the action `Esc` runs in
+that dialog, and so does a click on the scrim outside the card. `sheet.close` is the same ✕ on a
+dismissable sheet (the Jobs panel, the card detail). The card detail paints its ✕ under
+`card_detail.close` as well; a click on a `card_detail.property[N]` row selects it and runs what
+`⏎` runs there, so it opens the same picker, worktree or issue — a locked or read-only row takes
+no click.
+
+The Jobs panel's buttons are named by the row they act on, and each one first puts the cursor on
+that row: `jobs.row[N].retry` (a retryable failure), `jobs.row[N].log` (Show log, on a failure)
+and `jobs.row[N].cancel` (a cancellable live job; it shows only while its row is hovered or
+selected, so a scenario selects the row before clicking it). A button whose action cannot work on that job is not
+painted, so its name is absent rather than disabled. `jobs.filter[N]` is the filter's segment —
+`0` All, `1` Running, `2` Failed, `3` Done. `jobs.clear` is Clear finished (absent with nothing to
+clear), `jobs.more` the ⋯ holding Cancel all (absent with nothing cancellable). While a log is
+open the header is the log's toolbar: `jobs.log.back`, `jobs.log.follow`, `jobs.log.end`.
+
+Settings names its controls by the row they sit in. `settings.row[N]` is the whole row: a click
+puts the cursor on it and, on a text or number row, opens its editor, as `⏎` would. The control
+of the row **under the cursor** carries its own name, so a scenario clicks a row first and its
+control second: `settings.switch` is its switch, `settings.option[N]` a segment of its choice
+(`N` from `0`, left to right), and `settings.dropdown` its dropdown field when the choice has too
+many or too long options to sit side by side — the open list's options are then `menu.item[N]`.
+Only one of the three is painted, the one the row draws. `settings.copy[N]` is the copy button
+beside read-only row `N` (About's fleetd and `FLEET_HOME`). While a search is typed the pane lists
+its matches instead, `settings.hit[N]`, and a click on one opens its section with the cursor on
+it. `settings.config` and `settings.doctor` are the footer's Open config.json and Run doctor.
+
+`dialog.button[N]` is a button in a dialog's footer, `0`
+leftmost, painted by `Dialog::actions`: a dialog still on the legacy footer, whose `Dialog::primary`
+renders a label rather than a control, paints none, so a scenario may target `dialog.button[N]`
+only in a dialog that has been moved onto the button footer. Create worktree paints `0` Cancel and
+`1` Create (`Open` on a duplicate id). Every Confirm paints `0` Cancel and `1` its action — the
+primary `y` button, or the red `Y` one where `Y` is required; a click on it dispatches the same
+`Accept` / `AcceptStrong` its key does, so the escalation rule holds under the pointer. A Confirm
+is an alert with no ✕, so it paints no `dialog.close`; the prune confirm's `Show kept` toggle and
+every confirm's `Re-check` are footer and body buttons with no name of their own.
+`dialog.checkbox` is create-worktree's "Open after creating" box, and `dialog.segment[N]` its host
+choices while they sit side by side (`0` is `local`), absent on a local-only daemon or when the
+hosts draw as a dropdown, whose options are `menu.item[N]`.
+
+These dialogs paint `dialog.button[N]`, `0` leftmost; a click dispatches exactly the action its
+chip names, so it is the key under the pointer. `0` is always `Cancel`, which runs what `Esc` runs.
+
+| Dialog | `dialog.button[N]` |
+| --- | --- |
+| Clone repo | `0` Cancel · `1` Clone |
+| New / Edit context | `0` Cancel · `1` Create (Save when editing) |
+| Assign repo | `0` Cancel · `1` Move |
+| Quit | `0` Cancel · `1` Quit |
+| Quit and stop the daemon | `0` Cancel · `1` Stop and quit |
+| Rename terminal | `0` Cancel · `1` Rename |
+| Repository hooks | `0` Cancel · `1` Save |
+| New card | `0` Cancel · `1` Create & open · `2` Create |
+| Card property | `0` Cancel · `1` Apply |
+| Board settings | `0` Cancel · `1` Save |
+
+The buttons on the left of a footer — Edit context's *Delete context*, Quit's *Show jobs* and
+*Never warn again*, the Board settings Columns list's *New column*, *Delete* and *Apply preset* —
+and the rows' own controls (a hook row's ✕, a column's ↑ / ↓) carry no names of their own.
 
 ## 4. Lanes and fixtures
 
@@ -351,7 +516,14 @@ the scenario that hits them:
   attaches background and bar layers to every new output — that is not Fleet. The structured
   assertions still pass, because they never look at pixels; only the picture is wrong.
 
-  So the lane checks what it photographed. It keeps one capture of the isolated output taken in
+  So the lane asks the compositor first. Hyprland reports `LOCK` in every monitor's
+  `solitaryBlockedBy` while a session-lock surface owns the outputs, whoever drew it — a shell
+  that paints its own lock screen runs no separate lock process and leaves logind's `LockedHint`
+  unset, so neither is a usable signal. A run that starts locked warns once, and every `shot` taken
+  while the session is locked fails before anything is photographed, naming the lock. The pixel
+  check below is the second line, for whatever paints over an output without being a lock.
+
+  Then the lane checks what it photographed. It keeps one capture of the isolated output taken in
   the moment before the window is moved onto it, and every `shot` must differ from that reference
   by at least a third of the window's own area — Fleet is opaque chrome over most of the output,
   and a capture of a lock surface differs from it by nothing. A shot that does not clear the bar
@@ -548,7 +720,9 @@ A file counts as a scenario when its extension is `.scenario` or `.txt`, which i
 `.scenario`: the extension is what tells a reader which files run.
 
 Surface directories group scenarios by the part of Fleet they exercise — `hub/`, `workspace/`,
-`agents/`, `daemon/`, `board/` — and a scenario's corpus-relative path without its extension is
+`agents/`, `daemon/`, `board/` — plus `pointer/`, whose journeys cross surfaces: each completes a
+real task by pointer alone, with no `key` line, only `type` into the field a click focused
+(ADR 0023). A scenario's corpus-relative path without its extension is
 also its baseline key, so `hub/help.scenario` and `agents/help.scenario` never collide.
 The agent corpus includes a headless two-turn wheel regression and a structured Codex
 file-approval assertion; the latter reads `agents.threads[0].decision.paths` and `has_diff` to
@@ -686,10 +860,14 @@ still short of it, so no other document has to claim a capability that does not 
 - **The `virtual` lane needs an unlocked session, and one that does not paint over new
   outputs.** `grim -o` photographs the output, so a session lock surface or a shell that attaches
   background and bar layers to every created output is what lands in the file (§4). On the
-  Hyprland session this was last exercised on, both are true while the screen is locked: every
-  `shot` is refused by the empty-output guard with *"across the rectangle the window occupies,
-  only 0.0% differs … has to change at least 33.3%"*, and the structured half of the same
-  scenario passes. The guard is correct and must not be relaxed — it is what keeps a corpus of
+  Hyprland session this was last exercised on (Omarchy, whose quickshell draws the lock screen
+  itself after an idle timeout), both are true while the screen is locked: every `shot` is
+  refused — now up front by the session-lock check, *"the compositor session is locked …"*, and
+  before that check existed by the empty-output guard with *"only 0.0% differs … has to change at
+  least 33.3%"* — and the structured half of the same scenario passes. The lock check exists
+  because the pixel guard alone is not enough: when the reference is taken before the lock
+  surface reaches the freshly created output, two blank captures agree, and a photograph of the
+  lock screen then clears the bar and was filed as a passing `shot`. The guard is correct and must not be relaxed — it is what keeps a corpus of
   lock-screen photographs out of `shots/`. It compares the window's own rectangle rather than the
   whole output, because a locked session animates: an output-wide comparison answers "did
   anything move?" instead of "is Fleet here?", and let 7 of 41 lock screens through as evidence
@@ -721,9 +899,8 @@ still short of it, so no other document has to claim a capability that does not 
   query it filters and types values into — where `fields[N]` is exactly the field
   `targets["dialog.field[N]"]` paints; the command about to answer a `dump`, an `assert` or an
   `await` poll reads them across in its update path the same way it brings the target table
-  across. A dialog with a non-editor in its cycle (create-worktree's base list and host cycler,
-  Settings' switch rows) reports `[]` rather than a partial numbering that would not line up with
-  its targets. `message` is the one sentence an open Confirm asks — the consequence line §3.8.3
+  across. A dialog with a non-editor in its cycle (create-worktree's base list and host cycler)
+  reports `[]` rather than a partial numbering that would not line up with its targets. `message` is the one sentence an open Confirm asks — the consequence line §3.8.3
   has the user accept, read from the same draft the card is drawn from, including the board `X`
   and transcript `x` cards that draw their own — and stays `null` over every other dialog, whose
   body is elements rather than a sentence and would have to be invented to be named one. Board
@@ -736,7 +913,13 @@ still short of it, so no other document has to claim a capability that does not 
   `settings.columns` or `AppState` already carries. A row the cursor is merely on in the Columns
   pane owns no editor until `⏎` opens one, and a locked automation row never does, so the second
   field is absent in both cases. Board settings paints no `dialog.field[N]` target at all, so
-  neither field can put the field↔target numbering out of step. Typing into a field does not
+  neither field can put the field↔target numbering out of step. Settings follows the same rule:
+  a leading `section` field whose value is the shown section's title (`General`, `Agents`,
+  `Sleep`, …), then `row`, the row under the cursor as `<label> = <value>` with the value the
+  draft holds (`Sleep on switch = off`, `Default agent = Codex`; a switch reads `on` or `off`), so
+  a click on a control can be checked without a picture, then `search`, the header's search field, whose value is the typed query and which
+  is `focused` while the field owns the keyboard (`Dialog > SettingsSearch`). It too paints no
+  `dialog.field[N]` target; the search field is `settings.search`. Typing into a field does not
   itself notify `AppState`, so a scenario reads a field with `assert` or `dump`, which project on
   demand, and not with `await`.
 - **A headless `await` does not repaint, so `window.frame` freezes for the duration of the wait.**

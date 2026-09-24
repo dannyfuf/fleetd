@@ -155,26 +155,6 @@ pub enum Mode {
     Jobs,
 }
 
-impl Mode {
-    /// The kit's mode word for this mode.
-    #[must_use]
-    pub const fn word(self) -> ModeWord {
-        match self {
-            Self::Normal => ModeWord::Normal,
-            // A Fleet-drawn pane keeps the TERMINAL word: keys stay inside the tab, and its
-            // glyph on the strip already says the pane is not a PTY.
-            Self::Terminal | Self::Native => ModeWord::Terminal,
-            Self::Agent => ModeWord::Agent,
-            Self::Prefix => ModeWord::Prefix,
-            Self::Scroll => ModeWord::Scroll,
-            Self::Filter => ModeWord::Filter,
-            Self::Palette => ModeWord::Palette,
-            Self::Dialog => ModeWord::Dialog,
-            Self::Jobs => ModeWord::Jobs,
-        }
-    }
-}
-
 /// A most-recently-used list. The front is the most recent entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mru<T> {
@@ -387,6 +367,13 @@ impl AppState {
                 _ => overlay.context_chain(),
             };
         }
+        self.base_context_chain()
+    }
+
+    /// The chain of the surface under any overlay: what [`Self::context_chain`] would be with
+    /// nothing open on top. Help reads it to say what can be done where it was opened from.
+    #[must_use]
+    pub fn base_context_chain(&self) -> Vec<&'static str> {
         // §3.12 B replaces the whole window, so its keys outrank every base surface's.
         if matches!(self.daemon, DaemonLink::Failed { .. }) {
             return vec!["Daemon", "Down"];
@@ -455,7 +442,7 @@ impl AppState {
         chain
     }
 
-    /// The mode word for the status bar (§2.8).
+    /// The input mode (§2.8): what the harness snapshot reports as `mode`. Nothing draws it.
     #[must_use]
     pub fn mode(&self) -> Mode {
         if let Some(overlay) = &self.overlay {
@@ -478,8 +465,8 @@ impl AppState {
         }
         match self.screen {
             Screen::Hub { .. } => Mode::Normal,
-            // DESIGN-SYSTEM: the mode word is present on every screen and names the mode the
-            // keys are actually in — a frozen tail is not `AGENT`.
+            // The snapshot's `mode` names the mode the keys are actually in (TESTING-HARNESS §3),
+            // so a frozen tail is `Scroll`, not `Agent`.
             Screen::Workspace { .. } if self.active_agent_thread().is_some() => self
                 .active_agent_thread()
                 .filter(|thread| self.agents.is_scrolling(*thread))
@@ -669,7 +656,7 @@ impl AppState {
 
     /// Hands a worktree's workspace back to its terminals: the tab *and* the mode it rests in.
     ///
-    /// Deactivating alone is not enough. `terminal_mode` is what the mode word and the key
+    /// Deactivating alone is not enough. `terminal_mode` is what the snapshot's `mode` and the key
     /// contexts are derived from, and while the agent tab was active any snapshot at all left
     /// it at `Native` through [`Self::sync_terminal_mode`] — an agent tab is Fleet-drawn
     /// ([`Self::active_tab_is_fleet_drawn`]). Nothing re-derives it until the *next* snapshot,
@@ -734,6 +721,7 @@ impl AppState {
     /// Opens an overlay, replacing whatever was open.
     pub fn open_overlay(&mut self, overlay: Overlay) {
         if matches!(overlay, Overlay::Jobs) {
+            self.jobs_open_log = false;
             self.jobs_focus = self
                 .sticky_error
                 .as_ref()
@@ -780,6 +768,18 @@ impl AppState {
             return true;
         }
         self.close_overlay()
+    }
+
+    /// Clears the Hub filter in one step, whichever stage of the two-stage `Esc` it is in: the
+    /// query goes, the input is left and its overlay closes. Returns whether anything changed.
+    pub fn clear_filter(&mut self) -> bool {
+        let changed = self.filter.is_active() || self.filter.editing;
+        self.filter.query.clear();
+        self.filter.editing = false;
+        if matches!(self.overlay, Some(Overlay::Filter)) {
+            self.overlay = None;
+        }
+        changed
     }
 
     /// Moves the session MRU as a session is opened.

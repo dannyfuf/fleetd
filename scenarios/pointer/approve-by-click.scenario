@@ -1,0 +1,59 @@
+# ADR 0023 · NATIVE-AGENTS.md §6.2 · UX-SPEC §3.1 — a new user hands work to an agent and answers
+# its approval with the pointer alone; the only keyboard input is the prompt typed into the
+# composer the click focused.
+#
+# Double-click the worktree → the strip's `+` → Codex thread (menu item 2: Terminal, Claude
+# thread, Codex thread, …) → click the composer, type, Send → `← Worktrees` while the agent works
+# → the title bar's needs-you pill goes to the one waiting thread → Allow once. The `agents`
+# preset gives Codex `edit-approval.json`, whose one file change stops at a permission gate. The
+# gate is held for twenty seconds (TESTING-HARNESS §5), which is the budget from its appearance
+# to the click that answers it.
+#
+# Virtual-lane only: it takes shots.
+fixture: agents
+await idle 30000
+assert screen == Hub && overlay absent && targets["titlebar.needs_you"] absent
+
+# A double-click opens the worktree, as ⏎ does.
+click left 2 worktrees.row[0]
+await screen == Workspace 20000
+await targets["tabs.new"] exists 20000
+
+# `+` → Codex thread starts a thread in a new tab, selected, its composer taking the keyboard.
+click tabs.new
+await targets["menu.item[2]"] exists 5000
+shot new-tab-menu
+click menu.item[2]
+await agents.threads[0].provider == codex 20000
+await lists.tabs.selected.badges[0] == codex 20000
+await focused == agents.composer 20000
+await idle 30000
+click agents.composer
+type apply the README fix
+click agents.send
+await agents.threads[0].state != idle 30000
+
+# Back to the Hub while it works: the gate reaches the title bar's needs-you pill.
+click workspace.back
+await screen == Hub 10000
+await agents.threads[0].pending_gate == permission 30000
+await targets["titlebar.needs_you"] exists 10000
+assert agents.threads[0].state == needs_you
+shot needs-you
+
+# One thread waiting: the pill opens it, with its approval dock up.
+click titlebar.needs_you
+await screen == Workspace 20000
+await mode == Agent 10000
+await targets["agents.approval.allow_once"] exists 10000
+assert agents.threads[0].pending_gate == permission && overlay absent
+shot approval
+
+# Allow once, by its button: the gate closes and the turn finishes on its own.
+click agents.approval.allow_once
+await agents.threads[0].pending_gate absent 30000
+assert agents.threads[0].state != needs_you
+await agents.threads[0].state == idle 30000
+assert sticky_error absent && targets["titlebar.needs_you"] absent
+dump allowed
+quit

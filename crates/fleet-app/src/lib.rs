@@ -1,5 +1,8 @@
 //! Native GPUI Fleet application state and presentation layer, including its daemon bridge, keyboard modes and actions, screens, dialogs, and terminal renderer.
 
+/// What each action is called, what it does and where it works: the one source of user-facing
+/// labels for Help, the palette, the `^s` menu, buttons and tooltips.
+pub mod action_catalogue;
 pub(crate) mod actions;
 pub(crate) mod async_util;
 pub mod bridge;

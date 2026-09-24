@@ -1,10 +1,9 @@
-# KEYMAP.md §Dialogs and text inputs — Settings (`,`): "`Enter` saves · `Esc` discards"
+# KEYMAP.md §Dialogs and text inputs — Settings (`,`): "`Enter` saves · `Esc` discards";
+# UX-SPEC §3.8.6 — every control is clickable and keeps its key, and the save state is visible.
 #
-# Settings is a dialog like any other as far as the key table is concerned: it takes the whole
-# keyboard under `Dialog > Settings` and gives it back on `Esc`. This scenario checks the frame
-# around it rather than the switches inside it — the dialog host owns the field list, and the
-# projection reports `dialog.fields` empty rather than guessing at it
-# (`docs/TESTING-HARNESS.md` §3).
+# Settings takes the whole keyboard under `Dialog > Settings` and gives it back on `Esc`. Its
+# draft is read across as three fields (`docs/TESTING-HARNESS.md` §3): `section`, the shown
+# section, `row`, the row under the cursor with the value the draft holds, and `search`.
 fixture: one-repo
 await idle 30000
 assert screen == Hub && mode == Normal && overlay absent
@@ -14,8 +13,72 @@ await overlay == Dialog 10000
 assert mode == Dialog && dialog.name == Settings
 assert key_contexts[0] == Dialog && key_contexts[1] == Settings
 assert focused == dialog
+await targets["settings.section[8]"] exists 10000
+assert dialog.fields[0].name == section && dialog.fields[0].value == General
+assert targets["settings.search"] exists && targets["settings.config"] exists
+assert targets["dialog.button[0]"] exists && targets["dialog.button[1]"] exists
 shot settings
 dump settings
+
+# `Tab` moves to the next section, Agents: the default agent as a segmented control, then a
+# card per harness. The dialog keeps the keyboard.
+key tab
+await dialog.fields[0].value == Agents 10000
+assert mode == Dialog && dialog.name == Settings && focused == dialog
+assert dialog.fields[1].value == "Default agent = Claude"
+shot settings-agents
+
+# Save is disabled while nothing changed: a click on it leaves the dialog open.
+click dialog.button[1]
+assert overlay == Dialog && dialog.name == Settings
+
+# By pointer: the Codex segment of the row under the cursor, then Claude's default model box,
+# which opens its editor as `Enter` would.
+click settings.option[1]
+await dialog.fields[1].value == "Default agent = Codex" 5000
+click settings.row[4]
+await key_contexts[1] == SettingsEditing 5000
+type opus
+await dialog.fields[1].value == "Default model = opus" 5000
+shot settings-agents-dirty
+
+# `h` still cycles the choice under the cursor: back on the default agent, `h` picks Claude.
+key down
+assert key_contexts[1] == Settings
+click settings.row[0]
+key h
+await dialog.fields[1].value == "Default agent = Claude" 5000
+
+# The rail by pointer: Sleep. Its first row is a switch; a click on it flips the draft.
+click settings.section[2]
+await dialog.fields[0].value == Sleep 5000
+assert dialog.fields[1].value == "Sleep on switch = on"
+click settings.switch
+await dialog.fields[1].value == "Sleep on switch = off" 5000
+shot settings-sleep
+
+# `/` searches every section; `Enter` opens the selected match where it lives.
+key /
+await key_contexts[1] == SettingsSearch 5000
+type retention
+await targets["settings.hit[0]"] exists 5000
+shot settings-search
+key enter
+await dialog.fields[0].value == "Jobs & warnings" 5000
+assert key_contexts[1] == Settings && dialog.fields[1].value == "Trash retention = 10 min"
+
+# Save by pointer writes the draft and closes the dialog.
+click dialog.button[1]
+await overlay absent 10000
+assert screen == Hub && mode == Normal && dialog absent
+
+# The saved draft is what the dialog reopens with.
+key ,
+await overlay == Dialog 10000
+click settings.section[2]
+await dialog.fields[1].value == "Sleep on switch = off" 5000
+click settings.switch
+await dialog.fields[1].value == "Sleep on switch = on" 5000
 
 # `Esc` discards and restores the Hub exactly as it was.
 key escape

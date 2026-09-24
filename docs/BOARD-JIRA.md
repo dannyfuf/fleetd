@@ -357,15 +357,14 @@ App (generic, no Jira strings in `fleet-app`):
 - Read-only fields: pickers for a field in `board.sync.readonly_fields` do not open; the refusal
   reads "<field> is read-only on <backend label> boards"; detail rows render in the secondary tone
   with a lock glyph. On the **board** the refusal is a toast; inside the **card detail** it is the
-  dialog's own error line — `shell/root.rs` puts the toast stack in `body_overlay`, and a dialog's
-  scrim would make a toast there unreadable. Same sentence either way.
+  sheet's own error line, at the top of the surface the row is on. Same sentence either way.
 - Card detail key `x` (context `Dialog > CardDetail`): open the remote issue URL in the browser
   (`cx.open_url`); Board key `x` does the same for the focused card. Both in `docs/KEYMAP.md`,
   palette, help. A card with no remote link says so, with the same toast/error-line split.
 - Header shows backend label (from descriptors) instead of the raw kind. Descriptors are fetched
   once per connection on **board render** (the header needs the label too), not on dialog open; a
   dialog already seeded adopts a late schema.
-- Full sync: the palette gets "Board: Full sync" issuing `SyncBoard { full: true }`. The palette's
+- Full sync: the palette gets "Sync everything again" issuing `SyncBoard { full: true }`. The palette's
   `every_command_has_a_label_and_a_bound_key` invariant refuses a keyless command, so it is backed
   by a real action `board::FullSync` bound to `F` in `Hub > Board` (in `docs/KEYMAP.md`) rather
   than being CLI-only.

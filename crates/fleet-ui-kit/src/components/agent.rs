@@ -7,6 +7,7 @@
 //! geometry of the canvas lives in [`metrics`], the copy in [`format`] and [`group`], and
 //! everything else comes from the theme.
 
+mod composer_bar;
 mod decision;
 mod decision_dock;
 mod format;
@@ -21,6 +22,7 @@ mod transcript_list;
 #[cfg(test)]
 mod tests;
 
+pub use composer_bar::{ComposerChip, ContextMeter};
 pub use decision::{
     ApprovalRequest, Decision, DecisionAction, DecisionKind, DecisionOption, DecisionQuestion,
     MAX_QUESTION_OPTIONS, QuestionOption, QuestionSet, SOMETHING_ELSE,
@@ -37,9 +39,9 @@ pub use metadata_row::{
     MetadataFit, MetadataFitResult, MetadataRow, MetadataSegment, fit as metadata_fit,
 };
 pub use metrics::{
-    AGENT_BODY_MAX_H, AGENT_CARET_H, AGENT_CONTENT_W, AGENT_FOLLOW_REARM_PX, AGENT_LIST_OVERDRAW,
-    AGENT_PLAN_PREVIEW_H, AGENT_PREVIEW_MAX_H, AGENT_SCROLLBAR_INSET, AGENT_TOOL_KIND_W,
-    AGENT_USER_MAX_W, AGENT_WELL_MAX_H,
+    AGENT_BODY_MAX_H, AGENT_CARET_H, AGENT_CONTENT_W, AGENT_CONTEXT_METER_W, AGENT_FOLLOW_REARM_PX,
+    AGENT_LIST_OVERDRAW, AGENT_PLAN_PREVIEW_H, AGENT_PREVIEW_MAX_H, AGENT_SCROLLBAR_INSET,
+    AGENT_TOOL_KIND_W, AGENT_USER_MAX_W, AGENT_WELL_MAX_H,
 };
 pub use rows::{
     AssistantMetaRow, AssistantRow, CheckpointRow, DelegationResultCard, DelegationRow,
@@ -51,5 +53,6 @@ pub use rows::{
 pub use scroll::{FollowState, Gesture, ScrollMode, breaks_follow, is_at_end};
 pub use tool_row::{ToolGlyph, ToolRow, ToolRowElement, ToolRowState, expand_hint};
 pub use transcript_list::{
-    RowAction, RowBodyRenderer, TranscriptEvent, TranscriptList, scroll_thumb,
+    RowAction, RowActionKbd, RowActions, RowBodyRenderer, TranscriptEvent, TranscriptList,
+    scroll_thumb,
 };

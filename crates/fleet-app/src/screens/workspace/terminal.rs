@@ -26,7 +26,6 @@ impl WorkspaceScreen {
         let app = state.read(cx);
         let mirror = app.active_grid();
         let selection = mirror.and_then(|grid| self.local.borrow().selection(grid));
-        let hint_visible = self.local.borrow().hint.visible();
 
         let grid: AnyElement = match mirror.filter(|grid| grid.primed) {
             Some(grid) => {
@@ -122,11 +121,7 @@ impl WorkspaceScreen {
                 ScrollPill::new(model.scroll_offset, model.scrollback_len)
                     .selecting(selection.is_some())
                     .alt_screen(model.alt_screen)
-            }))
-            .child(
-                PrefixHint::new(model.mode == TerminalMode::Prefix && hint_visible)
-                    .hints(prefix_hints()),
-            );
+            }));
         self.with_mouse_selection(area, state, focus, model.terminal)
             .into_any_element()
     }

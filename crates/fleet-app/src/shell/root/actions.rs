@@ -46,6 +46,11 @@ impl Shell {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The palette lists the PRs the PR screen already holds; the Hub owns that cache, so
+        // the shell lends them here, the one place that holds both.
+        let prs = self.hub.palette_prs(self.state.read(cx), cx);
+        self.state
+            .update(cx, |state, _| state.palette_prs = Some(prs.into()));
         self.open(Overlay::Palette, cx);
     }
 
@@ -90,6 +95,20 @@ impl Shell {
         self.open(Overlay::Jobs, cx);
     }
 
+    /// The sticky error's ✕: the slot clears; the failures stay in the Jobs panel.
+    pub(super) fn dismiss_sticky_error(
+        &mut self,
+        _: &fleet::DismissStickyError,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |state, cx| {
+            if state.dismiss_sticky_error() {
+                cx.notify();
+            }
+        });
+    }
+
     pub(super) fn open_filter(
         &mut self,
         _: &hub::OpenFilter,
@@ -128,6 +147,27 @@ impl Shell {
             // §3.10 draws the filter editor *inside* the body, so leaving the input is a move
             // focus reconciliation cannot see: `body_focus` already contains the focused
             // element. Stage one of the two-stage `Esc` hands the keyboard back by name.
+            window.focus(&self.body_focus, cx);
+        }
+    }
+
+    pub(super) fn filter_clear(
+        &mut self,
+        _: &filter::Clear,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let was_editing = self.state.read(cx).filter.editing;
+        let changed = self.state.update(cx, |state, cx| {
+            let changed = state.clear_filter();
+            if changed {
+                cx.notify();
+            }
+            changed
+        });
+        if changed && was_editing {
+            // The same hand-back as the first `Esc`: the editor sits inside the body, so focus
+            // reconciliation cannot see that it no longer owns the keyboard.
             window.focus(&self.body_focus, cx);
         }
     }
@@ -253,6 +293,7 @@ impl Shell {
         .on_action(cx.listener(Self::open_agent_claude))
         .on_action(cx.listener(Self::open_agent_codex))
         .on_action(cx.listener(Self::focus_sticky_error))
+        .on_action(cx.listener(Self::dismiss_sticky_error))
         .on_action(cx.listener(Self::cancel))
         // First run (§3.13) — fallbacks for the three keys the card advertises
         .on_action(cx.listener(Self::first_run_import))
@@ -327,6 +368,7 @@ impl Shell {
         .on_action(cx.listener(Self::cancel_dialog))
         .on_action(cx.listener(Self::reject_confirm))
         .on_action(cx.listener(Self::filter_escape))
+        .on_action(cx.listener(Self::filter_clear))
         // Daemon
         .on_action(cx.listener(Self::daemon_retry))
         .on_action(cx.listener(Self::daemon_reconnect))
