@@ -2549,12 +2549,18 @@ is the pointer twin of its key (above).
 **Drag and drop.** A card is dragged to move it, the pointer twin of `[` / `]` that can also aim.
 Mid-drag the card's own place stays as a faded, dashed tile, the preview under the pointer is the
 tile lifted (accent hairline, popover shadow), the column under the pointer takes an accent
-hairline, and a dashed slot opens where the card would land, saying what the drop does — `Drop to
-start FLT-3 · codex will pick it up` when entering the column starts a run, `Drop to move FLT-3 to
-Todo` otherwise, `Drop to put FLT-3 here` within its own column. Dropping moves the card there
+hairline, and a 2 px accent insertion line appears at the boundary where the card would land. The
+line is painted out of flow, centred in the existing card gap (or on the last card's bottom edge),
+so aiming never changes a card's bounds, the list's scroll extent or its scroll offset; an empty
+column paints the line inside its already fixed-height body. Its non-visual accessible label says
+what the drop does — `Drop to start FLT-3 · codex will pick it up` when entering the column starts
+a run, `Drop to move FLT-3 to Todo` otherwise, `Drop to put FLT-3 here` within its own column.
+Once a boundary is chosen, a small dead band around the neighbouring card's midpoint keeps one-
+pixel pointer wobble from changing it; the target repaints only after that band is crossed.
+Dropping moves the card there
 through exactly the path `[` / `]` take: a card with a live run raises the same *Move FLT-3?*
 confirm, a board whose tracker owns the status toasts the same read-only sentence (and never draws
-a slot), and an unreachable daemon refuses the same way. Within a column a drop reorders it. A
+a marker), and an unreachable daemon refuses the same way. Within a column a drop reorders it. A
 drop back where the card stands does nothing. The keys stay: `[` / `]` and the status picker
 move a card without the mouse (`BOARD.md` §8).
 

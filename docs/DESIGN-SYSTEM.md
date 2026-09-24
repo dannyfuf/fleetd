@@ -284,7 +284,7 @@ list below is the complete inventory, in px unless marked `ch`; a unit test in
 | Rows and headers | `row_h 30` · `row_h_comfortable 44` · `pane_header_h 30` · `section_header_h 20` · `palette_row_h 34` · `palette_tile 22` · `job_row_h 44` · `progress_bar_h 4` |
 | Controls | `button_h 30` · `button_h_compact 26` · `kbd_h 18` · `kbd_h_small 16` · `chip_h 22` · `tile_chip_h 18` · `avatar_size 20` · `text_field_h 36` · `field_status_h 18` · `number_field_w 96` · `segment_h 24` · `switch_w 34` · `switch_h 20` · `checkbox_size 16` · `step_badge 28` |
 | Dialogs and floating layers | `dialog_w 560` · `confirm_compact_w 480` · `dialog_header_h 44` · `dialog_footer_h 44` · `palette_w 640` · `palette_top 120` · `prefix_menu_w 900` · `palette_input_h 44` · `overlay_help_w 640` · `toast_w 320` · `toast_inset 12` · `scroll_pill_w 176` · `menu_min_w 240` · `alert_tile 34` |
-| Lines and marks | `hairline 1` · `focus_ring_w 2` · `scroll_thumb_w 3` · `dot_size 8` · `dot_size_small 6` |
+| Lines and marks | `hairline 1` · `focus_ring_w 2` · `drop_marker_h 2` · `scroll_thumb_w 3` · `dot_size 8` · `dot_size_small 6` |
 | Terminal | `cell_w 7.5` · `cell_h 18` · `terminal_tab_min_w 84` · `terminal_tab_max_w 200` · `tab_strip_h 40` · `terminal_tab_h 34` · `tab_close_size 18` |
 | Detail and doctor columns | `fact_label_w 104` · `doctor_check_w 120` · `doctor_status_w 64` |
 | Git UI | `status_pane_h 62` · `stash_pane_h 92` · `editor_box_h 160` · `diff_row_h 18` · `diff_caret_h 14` · `diff_scrollbar_w 5` · `diff_thumb_min_h 24` · `diff_horizontal_step 4ch` |
@@ -1959,7 +1959,7 @@ something, the **automation pill** (`tile_chip_h`, `control` fill, an amber `zap
 words). Then the gapped body of tiles, virtualized through `gpui::list` when the caller supplies
 a `ListState`, ending in the **footer** slot · a faint `Caption` hint when the column is empty ·
 `Pane`'s 2 px focus ring. While a drag is over it, an `accent` hairline replaces the `border` one
-and a `DropSlot` sits in the gap the tile would take.
+and a `DropSlot` insertion line is painted over the boundary where the tile would land.
 **API.** `KanbanColumn::new(id, title).count(usize).accent(Option<Hsla>).automation(label)
 .on_automation_click(..).focused(bool).drop_target(bool).drop_slot(index, label).width(Pixels)
 .empty_hint(..).add_button(impl IntoElement).footer(impl IntoElement)` then either `.tiles(impl IntoIterator<Item = AnyElement>)
@@ -1968,8 +1968,9 @@ and a `DropSlot` sits in the gap the tile would take.
 column's own overdraw, and `list_state_with_footer()` one already holding the footer's item.
 `COLUMN_WIDTH_CH` = 34. `KanbanBoard::new(id).columns(..).scroll_handle(ScrollHandle)`.
 **States.** default · focused (the 2 px pane ring) · empty (the hint, then the footer) · with and
-without the automation pill · drop target (the accent hairline) · with a drop slot (before tile
-`index`, or after the last one when `index` is the count; an empty column's hint gives way to it).
+without the automation pill · drop target (the accent hairline) · with a drop marker (before tile
+`index`, or after the last one when `index` is the count; an empty column's hint gives way to a
+marker inside the same fixed-height body).
 **Variants.** column (vertical, `COLUMN_WIDTH_CH` wide) · board (the horizontal scroller).
 **Usage rule.** The count renders even at `0` — a column header is a ledger, and a missing
 count reads as "unknown", not as "empty". `automation(..)` takes the words, and which columns
@@ -1984,19 +1985,25 @@ elements builds and measures every one of them every frame. `gpui::list` and not
 `j` / `k` move a cursor the screen owns, exactly as they do for `ListView`. Every pointer
 affordance is a slot, so a drop target or a drag handle can join a column without the kit
 learning what a card is: the screen owns the drag and tells the column only `drop_target` and
-`drop_slot`. In the `rows(..)` form the slot is drawn inside the item it precedes, so the list
-measures it with that item and nothing is spliced while the pointer moves.
+`drop_slot`. In the `rows(..)` form each tile has a relative wrapper of exactly the same measured
+height before and during a drag. The marker is an absolute child centred in the `sm` gap before
+the target tile, or on the last tile's bottom edge; it never changes an item's height, the list's scroll
+extent, another card's bounds or the column's scroll offset.
 
 #### `DropSlot`
-**Purpose.** Where a dragged tile will land, and what landing there does.
-**Anatomy.** A full-width well at least `row_h_comfortable` tall, `lg` vertical padding,
-`radii.card`, a dashed `accent` hairline on `accent_subtle`, one centred `Caption` in the accent
-tone: `Drop to start FLT-3 · codex will pick it up`.
-**API.** `DropSlot::new(label)`.
-**States.** one; it exists only while a drag hovers the place it marks.
-**Usage rule.** The label is the drop's consequence in words, written by the app; the slot is not
-pressable and is never drawn where the drop would do nothing. Inside a column reach for
-`KanbanColumn::drop_slot`, which places it; use `DropSlot` directly only in another container.
+**Purpose.** The insertion boundary where a dragged tile will land, without participating in
+layout.
+**Anatomy.** A full-width `drop_marker_h` accent line, inset by `xs` and absolutely positioned in
+a relative wrapper. Its accessible label is the consequence in words: `Drop to start FLT-3 ·
+codex will pick it up`; the sentence is not painted, because a label-driven row would resize the
+measured item it joined.
+**API.** `DropSlot::new(label).before()` / `.after()`; bare `new` places the line just inside an
+empty relative body.
+**States.** before a tile · after the last tile · inside an empty column.
+**Usage rule.** The label is written by the app and retained for accessibility; the column's
+accent hairline gives the visual column-level meaning. The marker is not pressable and is never
+drawn where the drop would do nothing. Inside a column reach for `KanbanColumn::drop_slot`, which
+places it; use `DropSlot` directly only inside another relative container.
 
 **Gallery.** The board group's bench is `examples/gallery_board.rs` (live cursor, live editor,
 `[` / `]` moving a card, `p` cycling the priority); `kit_gallery`'s `board` section shows the

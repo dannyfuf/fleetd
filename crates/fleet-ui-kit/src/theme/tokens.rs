@@ -726,6 +726,8 @@ pub struct Metrics {
     /// 2 px focus ring / cursor bar.
     pub focus_ring_w: Pixels,
     /// 7.5 x 18 px terminal cell at the data type size.
+    /// 2 px insertion marker drawn over a board column's card gap during a drag.
+    pub drop_marker_h: Pixels,
     pub cell_w: Pixels,
     /// Terminal cell height.
     pub cell_h: Pixels,
@@ -847,6 +849,7 @@ impl Default for Metrics {
             scroll_thumb_w: px(3.0),
             focus_ring_w: px(2.0),
             cell_w: px(CH),
+            drop_marker_h: px(2.0),
             cell_h: px(18.0),
             fact_label_w: px(104.0),
             doctor_check_w: px(120.0),

@@ -4,7 +4,7 @@
 //! mouse down, motion and up gpui turns into a drag. The recording bridge keeps what the drop
 //! asked the daemon for, which is the whole contract: the card, its new status and its index.
 
-use std::time::Instant;
+use std::{collections::BTreeMap, time::Instant};
 
 use fleet_core::board::{BoardView, CardDraft, create_card, new_board};
 use fleet_proto::request::RequestBody;
@@ -131,6 +131,25 @@ fn painted(name: &str, cx: &mut VisualTestContext) -> Bounds<Pixels> {
     })
 }
 
+/// Fully visible card target bounds, keyed by the target name the harness records.
+fn visible_card_bounds(cx: &mut VisualTestContext) -> BTreeMap<String, Bounds<Pixels>> {
+    cx.update(|window, _| {
+        let viewport = window.bounds();
+        fleet_ui_kit::harness::painted(window)
+            .into_iter()
+            .filter(|target| target.name.starts_with("board.column[0].card["))
+            .filter_map(|target| {
+                let bounds = Bounds::new(
+                    point(px(target.rect.x), px(target.rect.y)),
+                    gpui::size(px(target.rect.w), px(target.rect.h)),
+                );
+                (bounds.top() >= viewport.top() && bounds.bottom() <= viewport.bottom())
+                    .then_some((target.name.to_string(), bounds))
+            })
+            .collect()
+    })
+}
+
 /// Presses at `from`, moves in steps to `to`, and releases there.
 fn drag(from: Point<Pixels>, to: Point<Pixels>, cx: &mut VisualTestContext) {
     cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
@@ -235,6 +254,116 @@ fn a_card_dragged_within_its_column_asks_for_the_new_place(cx: &mut TestAppConte
             cancel_run: false,
         }]
     );
+}
+
+/// Repainting the same sample, then wobbling one pixel to either side of a midpoint, must keep
+/// the chosen insertion boundary. Without hysteresis those samples alternated the target and
+/// rebuilt the old full-height slot on every frame.
+#[gpui::test]
+fn one_pixel_wobble_at_a_card_midpoint_keeps_the_drag_target(cx: &mut TestAppContext) {
+    fleet_ui_kit::harness::set_recording(true);
+    let (_state, _requests, harness, visual) = open(board(3, 0), cx);
+    let from = painted("board.column[0].card[0]", visual).center();
+    let target = painted("board.column[0].card[1]", visual);
+    let midpoint = target.center();
+
+    visual.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+    visual.simulate_mouse_move(
+        from + (midpoint - from) * 0.5,
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    visual.simulate_mouse_move(midpoint, MouseButton::Left, Modifiers::none());
+    visual.run_until_parked();
+    let chosen = visual.update(|_, cx| {
+        harness
+            .read(cx)
+            .screen
+            .drag
+            .borrow()
+            .target
+            .clone()
+            .unwrap_or_else(|| panic!("the midpoint did not choose a target"))
+    });
+
+    for y in [
+        midpoint.y,
+        midpoint.y - px(1.0),
+        midpoint.y + px(1.0),
+        midpoint.y,
+    ] {
+        visual.simulate_mouse_move(point(midpoint.x, y), MouseButton::Left, Modifiers::none());
+        visual.update(|window, _| window.refresh());
+        visual.run_until_parked();
+        let current = visual.update(|_, cx| harness.read(cx).screen.drag.borrow().target.clone());
+        assert_eq!(current.as_ref(), Some(&chosen));
+    }
+
+    visual.simulate_mouse_up(midpoint, MouseButton::Left, Modifiers::none());
+    visual.run_until_parked();
+    fleet_ui_kit::harness::set_recording(false);
+}
+
+/// The marker is paint-only: even at the end of a scrolled column it must not change any card
+/// rectangle or the list's scroll anchor while the drag target is visible.
+#[gpui::test]
+fn a_drag_marker_keeps_card_bounds_and_bottom_scroll_offset_stable(cx: &mut TestAppContext) {
+    fleet_ui_kit::harness::set_recording(true);
+    let (_state, _requests, harness, visual) = open(board(40, 0), cx);
+    visual.update(|window, cx| {
+        let list = harness.read(cx).screen.column_lists[0].clone();
+        list.scroll_to_end();
+        window.refresh();
+    });
+    visual.run_until_parked();
+
+    let before = visible_card_bounds(visual);
+    let mut cards: Vec<_> = before.iter().collect();
+    cards.sort_by_key(|(_, bounds)| bounds.top());
+    assert!(
+        cards.len() >= 3,
+        "a scrolled column should paint several cards"
+    );
+    let (source_name, source_bounds) = cards[cards.len() - 3];
+    let (_, target_bounds) = cards[cards.len() - 1];
+    let source_name = source_name.clone();
+    let from = source_bounds.center();
+    let to = point(target_bounds.center().x, target_bounds.top() + px(1.0));
+    let scroll_before =
+        visual.update(|_, cx| harness.read(cx).screen.column_lists[0].logical_scroll_top());
+
+    visual.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+    visual.simulate_mouse_move(
+        from + (to - from) * 0.5,
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    visual.simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+    visual.run_until_parked();
+    visual.update(|_, cx| {
+        assert!(
+            harness.read(cx).screen.drag.borrow().target.is_some(),
+            "the drag must have a target before geometry is compared"
+        );
+    });
+
+    let after = visible_card_bounds(visual);
+    let unchanged = before.iter().filter(|(name, _)| **name != source_name);
+    for (name, before) in unchanged {
+        assert_eq!(
+            after.get(name),
+            Some(before),
+            "{name} moved or left the viewport when the marker appeared"
+        );
+    }
+    let scroll_after =
+        visual.update(|_, cx| harness.read(cx).screen.column_lists[0].logical_scroll_top());
+    assert_eq!(scroll_after.item_ix, scroll_before.item_ix);
+    assert_eq!(scroll_after.offset_in_item, scroll_before.offset_in_item);
+
+    visual.simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+    visual.run_until_parked();
+    fleet_ui_kit::harness::set_recording(false);
 }
 
 /// A card put back where it was picked up asks for nothing.
