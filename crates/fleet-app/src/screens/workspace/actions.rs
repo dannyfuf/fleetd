@@ -401,6 +401,7 @@ impl WorkspaceScreen {
                             local.borrow_mut().detach(&bridge, None);
                             state.update(cx, |app, cx| {
                                 app.leave_prefix();
+                                app.pending_worktree_focus = app.active_worktree().cloned();
                                 app.screen = Screen::hub();
                                 cx.notify();
                             });

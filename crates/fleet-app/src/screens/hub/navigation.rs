@@ -228,6 +228,23 @@ impl HubCtx {
                 PrTab::Review => selection.prs_review = Some(target),
             }
         }
+        // Back from a workspace names the worktree it showed; like the PR above, it waits for
+        // rows and then becomes the anchor, so the cursor lands on the row the user just left.
+        let pending_worktree = self.state.read(cx).pending_worktree_focus.clone();
+        let on_worktrees = matches!(
+            self.state.read(cx).screen,
+            Screen::Hub {
+                tab: HubTab::Worktrees
+            }
+        );
+        let worktree_consumed =
+            pending_worktree.is_some() && on_worktrees && !model.worktrees.is_empty();
+        if worktree_consumed
+            && let Some(target) = pending_worktree
+                .filter(|target| model.worktrees.iter().any(|row| &row.id == target))
+        {
+            selection.worktree = Some(target);
+        }
         match &self.state.read(cx).screen {
             Screen::Hub {
                 tab: HubTab::Worktrees,
@@ -262,6 +279,10 @@ impl HubCtx {
         if consumed {
             self.state
                 .update(cx, |state, _| state.pending_pr_focus = None);
+        }
+        if worktree_consumed {
+            self.state
+                .update(cx, |state, _| state.pending_worktree_focus = None);
         }
         let displayed = model.displayed();
         let changed = {

@@ -65,10 +65,12 @@ click menu.item[0]
 await lists.tabs.rows[3] exists 20000
 await focused == tabs.tab[3] 20000
 
-# `← Worktrees` returns to the Hub, where the new worktree is listed and still running.
+# `← Worktrees` returns to the Hub, where the new worktree is listed and still running, and the
+# cursor is on it: back lands on the worktree just left even though the board opened it.
 click workspace.back
 await screen == Hub 10000
 assert overlay absent
 await lists.worktrees.rows[0].id == "acme/api#flt-6-wire-the-pointer-journeys" 10000
+await lists.worktrees.selected.id == "acme/api#flt-6-wire-the-pointer-journeys" 10000
 dump back-in-hub
 quit

@@ -371,7 +371,9 @@ its key.
 
 **Workspace:** the switcher and the section nav give way to the breadcrumb `← Worktrees / repo /
 ⎇ worktree ⌄` and its chips (§3.6). *Worktrees* is a button for `⌃S s` (back to the Hub; the
-session keeps running) and shows that chip; the repository is text; the worktree is the **worktree
+session keeps running) and shows that chip. Back always lands where the breadcrumb says — the
+Worktrees list — with the cursor on the worktree just left, whichever surface opened the workspace
+(the list, the Board, the palette); `⌃S S` lands the same way after the sleep; the repository is text; the worktree is the **worktree
 switcher**. The command field, the status cluster (without *sleeping* and *Update*, whose keys are
 Hub keys) and Help / Settings stay; Help and Jobs show their `⌃S` chords.
 

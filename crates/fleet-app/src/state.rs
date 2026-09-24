@@ -241,6 +241,10 @@ pub struct AppState {
     /// A pull request the palette sent the PR screen to: the Hub anchors its cursor on it the
     /// next time it reconciles that list, then clears this.
     pub pending_pr_focus: Option<(RepoId, u64)>,
+    /// The worktree a workspace was showing when the user went back to the Hub: the Worktrees
+    /// list anchors its cursor on it the next time it reconciles, then clears this. Back lands
+    /// on the row just left even when the workspace was opened from the board or the palette.
+    pub pending_worktree_focus: Option<WorktreeId>,
     /// An action a surface that just closed asked to run on the surface behind it, by name:
     /// Help's rows and step buttons. The shell dispatches it once the frame that gave the
     /// keyboard back has painted, so it reaches the same listener its key would.
@@ -343,6 +347,7 @@ impl AppState {
             palette_seed: None,
             palette_prs: None,
             pending_pr_focus: None,
+            pending_worktree_focus: None,
             pending_action: None,
             last_trash_entry: None,
             pr_badges: HashMap::new(),
