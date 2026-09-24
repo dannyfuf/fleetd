@@ -27,7 +27,7 @@ impl Repository {
     ///
     /// Every `diff` read goes through this, so widening the context with
     /// [`Repository::set_diff_context`] moves the display and the patches built from it together.
-    fn diff_args(&self) -> [OsString; 7] {
+    pub(super) fn diff_args(&self) -> [OsString; 7] {
         let [
             no_color,
             no_ext_diff,

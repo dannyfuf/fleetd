@@ -12,6 +12,7 @@ use std::{
     time::SystemTime,
 };
 
+mod changes;
 mod conflict;
 mod diff;
 mod history;

@@ -2,6 +2,7 @@
 
 use std::borrow::Cow;
 
+pub(crate) mod changes;
 pub(crate) mod commits;
 pub mod diff;
 pub(crate) mod path;

@@ -80,7 +80,7 @@ impl Repository {
         Ok(())
     }
 
-    async fn resolve_commit(&self, revision: &str) -> Result<Option<ObjectId>> {
+    pub(super) async fn resolve_commit(&self, revision: &str) -> Result<Option<ObjectId>> {
         let revision = format!("{revision}^{{commit}}");
         let output = self
             .run_optional(self.command(CommandKind::Read).args([
