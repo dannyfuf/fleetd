@@ -1,5 +1,5 @@
 {"version":1,"steps":[
-  {"type":"text","text":"I need the caller to clarify which path to inspect.","pace_ms":0},
+  {"type":"text","text":"I need the caller to clarify which path to inspect.","pace_ms":100},
   {"type":"permission","id":"gate-subagent-question","command":"printf 'Which path should I inspect?\\n'"},
   {"type":"end_turn","status":"completed"}
 ]}

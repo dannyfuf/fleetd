@@ -405,3 +405,23 @@ fn viewport_frames_do_not_mark_output() {
     );
     assert!(!registry.sessions.values().next().unwrap().terminals[0].has_unseen_output);
 }
+
+#[test]
+fn clipboard_publication_rechecks_the_decoded_byte_limit_without_truncating() {
+    let terminal = TerminalId(7);
+    let accepted = "a".repeat(fleet_proto::TERMINAL_CLIPBOARD_MAX_BYTES);
+    assert_eq!(
+        host_bridge::terminal_clipboard_event(terminal, accepted.clone()),
+        Some(Event::TerminalClipboard {
+            terminal,
+            text: accepted,
+        })
+    );
+    assert_eq!(
+        host_bridge::terminal_clipboard_event(
+            terminal,
+            "a".repeat(fleet_proto::TERMINAL_CLIPBOARD_MAX_BYTES + 1)
+        ),
+        None
+    );
+}

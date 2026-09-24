@@ -426,12 +426,27 @@ pub(super) fn prepare_host_events(
                         });
                         runtime.publish(Event::TerminalTitle { terminal, title });
                     }
-                    HostEvent::Bell | HostEvent::Cwd(_) | HostEvent::ClipboardWrite { .. } => {}
+                    HostEvent::ClipboardWrite(text) => {
+                        if let Some(event) = terminal_clipboard_event(terminal, text) {
+                            runtime.publish(event);
+                        } else {
+                            tracing::warn!(
+                                terminal = %terminal,
+                                "discarded oversized terminal clipboard write"
+                            );
+                        }
+                    }
+                    HostEvent::Bell | HostEvent::Cwd(_) => {}
                 }
             }
         })
         .map_err(|error| DaemonError::Process(format!("terminal event thread: {error}")))?;
     Ok(HostEventForwarder { start })
+}
+
+pub(super) fn terminal_clipboard_event(terminal: TerminalId, text: String) -> Option<Event> {
+    (text.len() <= fleet_proto::TERMINAL_CLIPBOARD_MAX_BYTES)
+        .then(|| Event::TerminalClipboard { terminal, text })
 }
 
 pub(super) fn record_frame_activity(

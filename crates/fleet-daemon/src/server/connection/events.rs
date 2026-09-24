@@ -29,6 +29,10 @@ pub(super) fn event_visible(
         Event::TerminalExited { terminal, .. } | Event::TerminalTitle { terminal, .. } => {
             attached.contains(terminal)
         }
+        Event::TerminalClipboard { terminal, .. } => {
+            attached.contains(terminal)
+                && client.supports(fleet_proto::TERMINAL_CLIPBOARD_CAPABILITY)
+        }
         // `Event` is adjacently tagged, so a variant this peer has no arm for does not degrade
         // to "one event lost" — it fails the decode of the whole frame. The three agent
         // stream-control events postdate the original set, so each is sent only to a connection
@@ -79,6 +83,7 @@ pub(super) fn event_kind(event: &Event) -> EventKind {
         Event::TerminalFrame(_) => EventKind::TerminalFrame,
         Event::TerminalExited { .. } => EventKind::TerminalExited,
         Event::TerminalTitle { .. } => EventKind::TerminalTitle,
+        Event::TerminalClipboard { .. } => EventKind::TerminalClipboard,
         Event::HostLinkChanged { .. } => EventKind::HostLinkChanged,
         Event::TerminalReattach { .. } => EventKind::TerminalReattach,
         Event::Toast { .. } => EventKind::Toast,
@@ -289,5 +294,32 @@ mod tests {
             &HashSet::from([terminal]),
             &HelloClient::default(),
         ));
+    }
+
+    #[test]
+    fn terminal_clipboard_needs_subscription_capability_and_attachment() {
+        let terminal = TerminalId(9);
+        let event = Event::TerminalClipboard {
+            terminal,
+            text: "a b".to_owned(),
+        };
+        let subscriptions = HashSet::from([EventKind::TerminalClipboard]);
+        let attached = HashSet::from([terminal]);
+        let capable = client_with(&[fleet_proto::TERMINAL_CLIPBOARD_CAPABILITY]);
+
+        assert!(event_visible(&event, &subscriptions, &attached, &capable));
+        assert!(!event_visible(
+            &event,
+            &subscriptions,
+            &HashSet::new(),
+            &capable
+        ));
+        assert!(!event_visible(
+            &event,
+            &subscriptions,
+            &attached,
+            &HelloClient::default()
+        ));
+        assert!(!event_visible(&event, &HashSet::new(), &attached, &capable));
     }
 }

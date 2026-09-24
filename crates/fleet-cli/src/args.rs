@@ -30,13 +30,15 @@ pub struct Cli {
     pub command: Option<Command>,
 }
 
-/// A daemon-backed Fleet operation.
+/// A Fleet operation.
 // `board card edit` carries the widest flag set in the CLI, so `Board` is several hundred bytes
 // wider than its siblings. One of these is parsed once per process and consumed immediately;
 // boxing it would buy nothing and cost every match site a dereference.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum Command {
+    /// Copy text through the terminal's OSC 52 clipboard integration.
+    Clipboard(ClipboardArgs),
     /// Manage configured remote machines.
     Host(HostArgs),
     /// Manage context and worktree boards and their cards.
@@ -193,6 +195,29 @@ pub struct DaemonArgs {
 pub enum DaemonCommand {
     /// Gracefully stop the running daemon and start the current fleetd binary.
     Restart,
+}
+
+/// Arguments accepted by `fleet clipboard`.
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct ClipboardArgs {
+    /// Clipboard operation.
+    #[command(subcommand)]
+    pub command: ClipboardCommand,
+}
+
+/// Terminal clipboard operations.
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum ClipboardCommand {
+    /// Copy a text argument, or standard input when no argument is supplied.
+    Copy(ClipboardCopyArgs),
+}
+
+/// Text source for `fleet clipboard copy`.
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct ClipboardCopyArgs {
+    /// Text to copy after `--`; omit it to read standard input.
+    #[arg(last = true, value_name = "TEXT")]
+    pub text: Option<String>,
 }
 
 /// Arguments accepted by `fleet create`.
@@ -692,6 +717,8 @@ mod tests {
     #[test]
     fn parses_every_command_and_flag() {
         let cases = [
+            vec!["fleet", "clipboard", "copy"],
+            vec!["fleet", "clipboard", "copy", "--", "a b"],
             vec![
                 "fleet",
                 "create",
@@ -900,11 +927,33 @@ mod tests {
             vec!["fleet", "-h"],
             vec!["fleet", "create", "--help"],
             vec!["fleet", "create", "-h"],
+            vec!["fleet", "clipboard", "copy", "--help"],
         ] {
             let error = Cli::try_parse_from(&arguments).unwrap_err();
             assert_eq!(error.kind(), ErrorKind::DisplayHelp);
         }
+        let help = Cli::command().render_long_help().to_string();
+        assert!(help.contains("clipboard"));
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn clipboard_copy_parses_stdin_and_argument_forms() {
+        assert_eq!(
+            parses(&["fleet", "clipboard", "copy"]),
+            Command::Clipboard(ClipboardArgs {
+                command: ClipboardCommand::Copy(ClipboardCopyArgs { text: None }),
+            })
+        );
+        assert_eq!(
+            parses(&["fleet", "clipboard", "copy", "--", " \ttext\n"]),
+            Command::Clipboard(ClipboardArgs {
+                command: ClipboardCommand::Copy(ClipboardCopyArgs {
+                    text: Some(" \ttext\n".to_owned()),
+                }),
+            })
+        );
+        assert!(Cli::try_parse_from(["fleet", "clipboard", "copy", "text"]).is_err());
     }
 
     #[test]

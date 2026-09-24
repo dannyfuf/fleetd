@@ -393,9 +393,7 @@ impl TerminalOwner {
                 EngineEvent::Title(title) => HostEvent::Title(title),
                 EngineEvent::Bell => HostEvent::Bell,
                 EngineEvent::Cwd(cwd) => HostEvent::Cwd(cwd),
-                EngineEvent::ClipboardWrite { mime, data } => {
-                    HostEvent::ClipboardWrite { mime, data }
-                }
+                EngineEvent::ClipboardWrite(text) => HostEvent::ClipboardWrite(text),
             };
             if !self.pending_events.is_empty() {
                 self.queue_pending_event(event);

@@ -686,6 +686,74 @@ fn starter(document: &str, name: &str) -> serde_json::Value {
 mod tests {
     use super::*;
 
+    fn text_pacing_ms(step: &serde_json::Value) -> u64 {
+        let pace_ms = step
+            .get("pace_ms")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let chunks = step
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .map_or(0, |text| text.split_inclusive(char::is_whitespace).count());
+        pace_ms.saturating_mul(u64::try_from(chunks).unwrap_or(u64::MAX))
+    }
+
+    #[test]
+    fn agents_starter_keeps_each_short_turn_observable() {
+        let fixture = agents();
+        let claude = fixture
+            .agents
+            .iter()
+            .find(|agent| agent.provider == Provider::Claude)
+            .unwrap_or_else(|| panic!("the agents preset must configure Claude"));
+        let steps = claude
+            .transcript
+            .get("steps")
+            .and_then(serde_json::Value::as_array)
+            .unwrap_or_else(|| panic!("Claude's embedded transcript must have a steps array"));
+        let mut turn_pacing = Vec::new();
+        let mut pacing_ms = 0_u64;
+        for step in steps {
+            if step.get("type").and_then(serde_json::Value::as_str) == Some("text") {
+                pacing_ms = pacing_ms.saturating_add(text_pacing_ms(step));
+            }
+            if step.get("type").and_then(serde_json::Value::as_str) == Some("end_turn") {
+                turn_pacing.push(pacing_ms);
+                pacing_ms = 0;
+            }
+        }
+
+        assert!(turn_pacing.len() >= 2, "the starter must keep two turns");
+        assert!(
+            turn_pacing[..2].iter().all(|pacing| *pacing >= 1_000),
+            "the two completed starter turns must stay visible long enough for the app harness: {turn_pacing:?}"
+        );
+    }
+
+    #[test]
+    fn blocked_child_keeps_working_state_observable_before_its_gate() {
+        let transcript = starter(
+            include_str!("../../transcripts/subagent-child-blocked.json"),
+            "subagent-child-blocked.json",
+        );
+        let steps = transcript
+            .get("steps")
+            .and_then(serde_json::Value::as_array)
+            .unwrap_or_else(|| panic!("the blocked child transcript must have a steps array"));
+        let pacing_ms = steps
+            .iter()
+            .take_while(|step| {
+                step.get("type").and_then(serde_json::Value::as_str) != Some("permission")
+            })
+            .map(text_pacing_ms)
+            .fold(0_u64, u64::saturating_add);
+
+        assert!(
+            pacing_ms >= 1_000,
+            "the child must stay working long enough for the app harness before it blocks: {pacing_ms} ms"
+        );
+    }
+
     #[test]
     fn agents_preset_serves_the_error_starter_as_claudes_third_turn() {
         let fixture = agents();

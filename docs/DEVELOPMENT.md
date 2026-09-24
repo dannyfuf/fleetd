@@ -128,6 +128,57 @@ survive it: each PTY lives in a detached `fleetd pty-hold` process that the next
 to (`docs/ARCHITECTURE.md`, "Detached PTY holders"), so restarting after a daemon change no longer
 kills the agents you have running. Only `ctrl-shift-q` stops them.
 
+## Copying from terminal programs
+
+Fleet accepts OSC 52 clipboard writes from the active terminal. This works when the app and daemon
+both run on macOS and when the Mac app is connected through its local daemon to a terminal owned by
+a remote Linux daemon: in both cases the text reaches the Mac clipboard.
+
+`fleet clipboard copy` is the shell-facing helper. With no text argument it reads stdin; with
+`-- "text"` it copies that argument:
+
+```sh
+printf '%s' 'text to copy' | fleet clipboard copy
+fleet clipboard copy -- "text to copy"
+```
+
+The command preserves whitespace and newlines exactly, requires valid UTF-8, and rejects input over
+1 MiB without truncating it. It base64-encodes the text as `ESC ] 52 ; c ; <base64> BEL` and writes
+directly to `/dev/tty`, not stdout, so programs such as lazygit may capture the subprocess output.
+It runs before daemon connection setup and works in any OSC 52-capable terminal, not only Fleet. A
+process without a controlling terminal fails clearly.
+
+For nvim, use a copy-only OSC 52 provider. The built-in `osc52` provider's paste waits ten seconds
+for a reply, and Fleet deliberately does not answer OSC 52 clipboard queries:
+
+```lua
+if vim.env.FLEET_TERMINAL_ID then
+  local osc52 = require("vim.ui.clipboard.osc52")
+  local cached = { { "" }, "v" }
+  local function copy(lines, regtype)
+    cached = { vim.deepcopy(lines), regtype }
+    osc52.copy("+")(lines)
+  end
+  local function paste() return vim.deepcopy(cached) end
+  vim.g.clipboard = {
+    name = "Fleet OSC52",
+    copy = { ["+"] = copy, ["*"] = copy },
+    paste = { ["+"] = paste, ["*"] = paste },
+    cache_enabled = 0,
+  }
+end
+```
+
+For lazygit, put this in `~/.config/lazygit/config.yml`:
+
+```yaml
+os: { copyToClipboardCmd: "printf '%s' {{text}} | fleet clipboard copy" }
+```
+
+lazygit shell-quotes `{{text}}` itself; do not add quotes around it. These integrations copy out of
+a terminal program. To send Mac clipboard content into a program, use Fleet's paste shortcut;
+nvim's provider intentionally returns only its in-process copy cache.
+
 ## Running tests
 
 Each crate's integration tests are one binary, `integration`, whose modules are the files in

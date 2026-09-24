@@ -413,10 +413,47 @@ fn collects_terminal_effects() {
             .iter()
             .any(|event| matches!(event, EngineEvent::Cwd(_)))
     );
-    assert!(events.iter().any(|event| matches!(
-        event,
-        EngineEvent::ClipboardWrite { data, .. } if data == "hello"
-    )));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, EngineEvent::ClipboardWrite(text) if text == "hello"))
+    );
+}
+
+#[test]
+fn clipboard_writes_accept_only_bounded_utf8_plain_text() {
+    assert_eq!(
+        clipboard_text("text/plain", "a b".as_bytes()),
+        Some("a b".to_owned())
+    );
+    assert_eq!(clipboard_text("text/html", b"<b>a b</b>"), None);
+    assert_eq!(clipboard_text("text/plain", &[0xff]), None);
+    assert_eq!(
+        clipboard_text(
+            "text/plain",
+            &vec![b'a'; fleet_proto::TERMINAL_CLIPBOARD_MAX_BYTES]
+        )
+        .as_deref()
+        .map(str::len),
+        Some(fleet_proto::TERMINAL_CLIPBOARD_MAX_BYTES)
+    );
+    assert_eq!(
+        clipboard_text(
+            "text/plain",
+            &vec![b'a'; fleet_proto::TERMINAL_CLIPBOARD_MAX_BYTES + 1]
+        ),
+        None
+    );
+}
+
+#[test]
+fn osc_52_queries_produce_no_event_or_pty_response() {
+    let mut engine = GhosttyEngine::new(8, 3, 100 * 1024)
+        .unwrap_or_else(|error| panic!("failed to create engine: {error}"));
+
+    engine.feed(b"\x1b]52;c;?\x07");
+
+    assert!(engine.take_events().is_empty());
 }
 
 #[test]

@@ -12,7 +12,7 @@ use std::{
 use async_trait::async_trait;
 use fleet_core::ids::HostId;
 use fleet_proto::{
-    PROTOCOL_VERSION, REMOTE_MACHINES_CAPABILITY,
+    PROTOCOL_VERSION, REMOTE_MACHINES_CAPABILITY, TERMINAL_CLIPBOARD_CAPABILITY,
     codec::{CodecError, FleetCodec},
     error::ProtoError,
     event::{Event, EventKind},
@@ -604,6 +604,7 @@ async fn establish_before(
                     capabilities: fleet_proto::AGENT_CAPABILITIES
                         .iter()
                         .map(|capability| (*capability).to_owned())
+                        .chain(std::iter::once(TERMINAL_CLIPBOARD_CAPABILITY.to_owned()))
                         .collect(),
                 },
             },
@@ -652,7 +653,7 @@ async fn establish_before(
         .send(serde_json::to_value(Request {
             id: 1,
             body: RequestBody::Subscribe {
-                events: all_event_kinds(),
+                events: event_kinds_for_peer(&hello.capabilities),
             },
         })?)
         .await
@@ -757,8 +758,8 @@ fn proto_error(error: ProtoError) -> DaemonError {
     crate::error::from_proto_error(error)
 }
 
-fn all_event_kinds() -> Vec<EventKind> {
-    vec![
+fn event_kinds_for_peer(capabilities: &[String]) -> Vec<EventKind> {
+    let mut events = vec![
         EventKind::Agent,
         EventKind::AgentSummary,
         EventKind::BoardChanged,
@@ -775,7 +776,14 @@ fn all_event_kinds() -> Vec<EventKind> {
         EventKind::TerminalTitle,
         EventKind::Toast,
         EventKind::DaemonShuttingDown,
-    ]
+    ];
+    if capabilities
+        .iter()
+        .any(|capability| capability == TERMINAL_CLIPBOARD_CAPABILITY)
+    {
+        events.push(EventKind::TerminalClipboard);
+    }
+    events
 }
 
 fn doubled(backoff: Duration, maximum: Duration) -> Duration {
@@ -890,6 +898,15 @@ mod tests {
         assert_eq!(
             decoded.to_string(),
             "not found: not found: context personal"
+        );
+    }
+
+    #[test]
+    fn remote_clipboard_subscription_requires_peer_capability() {
+        assert!(!event_kinds_for_peer(&[]).contains(&EventKind::TerminalClipboard));
+        assert!(
+            event_kinds_for_peer(&[TERMINAL_CLIPBOARD_CAPABILITY.to_owned()])
+                .contains(&EventKind::TerminalClipboard)
         );
     }
 

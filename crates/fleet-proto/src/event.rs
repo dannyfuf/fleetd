@@ -46,6 +46,8 @@ pub enum EventKind {
     TerminalExited,
     /// Terminal title changes.
     TerminalTitle,
+    /// Terminal-originated clipboard writes, subscribed to only after capability negotiation.
+    TerminalClipboard,
     /// A remote daemon link changed state.
     HostLinkChanged,
     /// An attached terminal should be reattached after recovery.
@@ -173,6 +175,16 @@ pub enum Event {
         terminal: TerminalId,
         /// New title.
         title: String,
+    },
+    /// A terminal program wrote UTF-8 text to the user's clipboard.
+    ///
+    /// Emitted only to peers that advertised
+    /// [`TERMINAL_CLIPBOARD_CAPABILITY`](crate::TERMINAL_CLIPBOARD_CAPABILITY).
+    TerminalClipboard {
+        /// Terminal that originated the write.
+        terminal: TerminalId,
+        /// Clipboard text, bounded by [`crate::TERMINAL_CLIPBOARD_MAX_BYTES`] encoded bytes.
+        text: String,
     },
     /// A configured machine's remote daemon link changed state.
     HostLinkChanged {
@@ -324,6 +336,11 @@ mod tests {
         });
         assert_round_trip(Event::TerminalReattach {
             terminal: TerminalId(9),
+        });
+        assert_round_trip(EventKind::TerminalClipboard);
+        assert_round_trip(Event::TerminalClipboard {
+            terminal: TerminalId(33),
+            text: "a b".to_owned(),
         });
     }
 

@@ -348,6 +348,12 @@ row is discarded, history shrinks, or a column change reflows it, without treati
 movement as eviction. Off-screen
 copy caches only visible rows covered by an active selection and caps them at 5,000.
 
+Selection and search share one cell-to-text normalization. An empty non-spacer cell contributes
+one ASCII space for each column it occupies inside the selected column overlap; a wide grapheme is
+emitted once, and its spacer cells emit nothing. Selection preserves spaces at the end of a wrapped
+row and trims only the ending of a non-wrapped row. `MirrorGrid::row_text` uses the same
+normalization without trimming, so terminal search sees the complete row.
+
 Terminal history uses `terminal.scrollbackBytes` (Rust `terminal.scrollback_bytes`), a
 **byte budget passed directly to `TerminalOptions.max_scrollback`**, defaulting to
 1,073,741,824 bytes (1 GiB) per terminal, allocated as history grows. Config validates a
@@ -412,6 +418,22 @@ At the bottom, output follows live. While scrolled up, Ghostty preserves the his
 Real keys, raw input and paste atomically return to bottom on the host before writing to the
 PTY. Wheel input and copy-mode navigation preserve the viewport; copy-mode exit retains its
 explicit return-to-bottom behavior.
+
+Terminal programs write the user's clipboard through OSC 52. `fleet-term` accepts writes only as
+`text/plain`, valid UTF-8, and at most `TERMINAL_CLIPBOARD_MAX_BYTES` (1 MiB) after base64 decoding;
+an over-limit write is rejected atomically rather than truncated. OSC 52 reads and queries receive
+no event and no reply. An accepted write becomes
+`Event::TerminalClipboard { terminal: TerminalId, text: String }`, whose event kind is
+`EventKind::TerminalClipboard` and whose wire form is
+`{"type":"terminal_clipboard","data":{"terminal":33,"text":"a b"}}`.
+
+`fleet-proto` re-exports `TERMINAL_CLIPBOARD_CAPABILITY: &str = "terminal.clipboard"` and
+`TERMINAL_CLIPBOARD_MAX_BYTES: usize = 1024 * 1024` at its crate root. The daemon advertises the
+capability in Hello, and a client subscribes to `TerminalClipboard` only after the peer daemon
+advertises it, so an older daemon never receives an unknown subscription kind. Publication
+rechecks the decoded UTF-8 limit. A connection sees the event only when it subscribed to that kind,
+advertised the capability itself, and is attached to the named terminal. Clipboard writes are
+transient: they are not persisted, included in snapshots, or replayed after reconnect.
 
 ### Detached PTY holders
 
@@ -560,6 +582,10 @@ bodies are cut to their head and named in `TranscriptWindow.elided` for the clie
 subscription are unchanged, and `Event` itself decodes an unknown family to `Event::Unknown`
 instead of dropping the frame. A client must never send a window field to a daemon that did not
 advertise the capability, and capabilities reset on disconnect.
+
+Terminal clipboard writes are likewise an additive, capability-gated event with no protocol-version
+bump. Both sides advertise `terminal.clipboard`; only negotiated, attached subscribers receive
+`TerminalClipboard`, and no request, snapshot, or replay representation exists.
 
 The original board request names introduced by version 6 remain unchanged. Worktree-scoped boards
 add `EnsureWorktreeBoard` and `CreateWorktreeBoard` under the `board.worktree` capability without
