@@ -1,30 +1,24 @@
-//! What the sidebar's pointer does (UX-SPEC §3.2, §5.1), and the Agents rows it shows.
+//! What the repository sidebar's pointer does (UX-SPEC §3.2, §5.1).
 //!
-//! Every handler ends in code a key already runs: a repository click is `⏎` on that row, an
-//! agent click is the palette's `go`, and the edge only stores a width.
+//! Every handler ends in code a key already runs: a repository click is `⏎` on that row, and the
+//! edge only stores a width.
 
-use fleet_core::config::Agent;
 use fleet_ui_kit::ListPointer;
 
 use super::*;
-use crate::{actions::fleet, views::repos_rail::AgentTarget};
 
 impl HubCtx {
     /// The sidebar's pointer contract for this frame.
-    pub(super) fn sidebar_handlers(&self, bridge: &Bridge) -> repos_rail::SidebarHandlers {
+    pub(super) fn sidebar_handlers(&self) -> repos_rail::SidebarHandlers {
         let (select, open) = (self.clone(), self.clone());
         let repos = ListPointer::new()
             .on_select(move |ix, _, cx| select.click_rail(ix, cx))
             .on_open(move |_, _, cx| open.open_repo(cx))
             // The right-click has already selected; the item's `ContextMenu` opens the menu.
             .on_menu(|_, _, _, _| {});
-        let (go, bridge) = (self.clone(), bridge.clone());
-        let agents = ListPointer::new()
-            .on_select(move |ix, window, cx| go.go_to_agent(ix, &bridge, window, cx));
         let resize = self.state.clone();
         repos_rail::SidebarHandlers {
             repos,
-            agents,
             resize: Rc::new(move |width, _, cx| {
                 resize.update(cx, |state, cx| {
                     if state.sidebar_w != Some(width) {
@@ -79,52 +73,5 @@ impl HubCtx {
         });
         self.hub.update(cx, |hub, _| hub.selection.worktree = None);
         self.schedule_inspection(cx);
-    }
-
-    /// A click on agent row `ix`: open its thread the way the palette's `go` does, or show its
-    /// agent window the way `a` / `A` does — never hiding one already on screen, which the key
-    /// would.
-    fn go_to_agent(&self, ix: usize, bridge: &Bridge, window: &mut Window, cx: &mut App) {
-        let Some(target) = self.hub.read(cx).agents.get(ix).map(|row| row.target) else {
-            return;
-        };
-        match target {
-            AgentTarget::Thread(thread) => {
-                dialogs::open_agent_thread(thread, &self.state, bridge, cx)
-            }
-            AgentTarget::Window(agent) => {
-                let showing = self
-                    .state
-                    .read(cx)
-                    .agent_popup
-                    .as_ref()
-                    .is_some_and(|popup| popup.agent == agent && popup.worktree.is_none());
-                if showing {
-                    return;
-                }
-                match agent {
-                    Agent::Claude => window.dispatch_action(Box::new(fleet::OpenAgentClaude), cx),
-                    Agent::Codex => window.dispatch_action(Box::new(fleet::OpenAgentCodex), cx),
-                    Agent::Opencode => {}
-                }
-            }
-        }
-    }
-
-    /// Rebuilds the Agents rows from the agent mirror and the snapshot, and keeps the previous
-    /// ones when nothing changed. Returns whether the rows changed.
-    pub(super) fn refresh_agents(&self, cx: &mut App) -> bool {
-        let rows = {
-            let state = self.state.read(cx);
-            let context = effective_context(state).map(|context| &context.id);
-            repos_rail::agent_rows(state, context)
-        };
-        self.hub.update(cx, |hub, _| {
-            if *hub.agents == *rows {
-                return false;
-            }
-            hub.agents = rows.into();
-            true
-        })
     }
 }

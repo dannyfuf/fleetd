@@ -383,8 +383,8 @@ fn split_section(cx: &mut App) -> AnyElement {
 }
 
 /// The Hub sidebar in every state: a scope row with the cursor, a repo with an issue chip, a
-/// clone running and one failed, the hover `⋯`, the Agents section's dots and chip, the
-/// collapsed icon column, and a live draggable edge.
+/// clone running and one failed, the hover `⋯`, the collapsed icon column, and a live draggable
+/// edge.
 fn sidebar_section(width: Option<Pixels>, cx: &mut Context<StructureGallery>) -> AnyElement {
     let t = cx.theme().clone();
     let gallery = cx.entity().downgrade();
@@ -452,34 +452,6 @@ fn sidebar_section(width: Option<Pixels>, cx: &mut Context<StructureGallery>) ->
                     ),
             )
     };
-    let agents = |collapsed: bool| {
-        SidebarSection::new("Agents").body(
-            div()
-                .flex()
-                .flex_col()
-                .child(
-                    NavItem::new("g-agent-0", "codex · apply the README fix")
-                        .leading(dot(Tone::Warning))
-                        .trailing(
-                            Chip::new()
-                                .text("needs you")
-                                .tone(Tone::Warning)
-                                .filled(true),
-                        )
-                        .collapsed(collapsed),
-                )
-                .child(
-                    NavItem::new("g-agent-1", "claude · spike")
-                        .leading(dot(Tone::Success))
-                        .collapsed(collapsed),
-                )
-                .child(
-                    NavItem::new("g-agent-2", "claude · agent window")
-                        .leading(dot(Tone::Muted))
-                        .collapsed(collapsed),
-                ),
-        )
-    };
     let footer = |collapsed: bool| {
         IconButton::new(
             ("gallery-sidebar-collapse", usize::from(collapsed)),
@@ -511,7 +483,6 @@ fn sidebar_section(width: Option<Pixels>, cx: &mut Context<StructureGallery>) ->
                             .width(width)
                             .focused(true)
                             .section(repos(false))
-                            .section(agents(false))
                             .footer(footer(false))
                             .on_resize(move |width, _, cx| {
                                 gallery
@@ -534,7 +505,6 @@ fn sidebar_section(width: Option<Pixels>, cx: &mut Context<StructureGallery>) ->
                         Sidebar::new("gallery-sidebar-collapsed")
                             .collapsed(true)
                             .section(repos(true))
-                            .section(agents(true))
                             .footer(footer(true)),
                     ),
                 ),
