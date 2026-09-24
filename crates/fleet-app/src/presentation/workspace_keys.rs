@@ -60,8 +60,6 @@ pub(crate) struct WorkspaceKeys {
     pub(crate) watch: Option<Kbd>,
     /// `⌃S g`: the Changes panel.
     pub(crate) changes: Option<Kbd>,
-    /// `⌃S z`: zoom.
-    pub(crate) zoom: Option<Kbd>,
     /// `⌃S !`: the sticky error, opened in the Jobs panel.
     pub(crate) sticky_error: Option<Kbd>,
 }
@@ -123,7 +121,6 @@ pub(crate) fn workspace_keys() -> &'static WorkspaceKeys {
             restart: prefixed(&prefix::RestartCommand),
             watch: prefixed(&prefix::ToggleWatchPane),
             changes: prefixed(&prefix::ToggleChanges),
-            zoom: prefixed(&prefix::ToggleZoom),
             sticky_error: prefixed(&fleet::FocusStickyError),
         }
     })
@@ -167,7 +164,6 @@ mod tests {
         assert_eq!(spelled(&keys.restart), "ctrl-s r");
         assert_eq!(spelled(&keys.watch), "ctrl-s v");
         assert_eq!(spelled(&keys.changes), "ctrl-s g");
-        assert_eq!(spelled(&keys.zoom), "ctrl-s z");
         assert_eq!(spelled(&keys.sticky_error), "ctrl-s !");
         assert_eq!(spelled(&hub_sticky_error_key()), "!");
         assert_eq!(spelled(&hub_jobs_key()), "shift-j");

@@ -105,11 +105,6 @@ impl WorkspaceScreen {
                     .harness_target("tabs.watch"),
             );
         }
-        strip = strip.trailing(
-            strip_button("tabs-zoom", "Zoom", keys.zoom.clone())
-                .action(Box::new(prefix::ToggleZoom))
-                .harness_target("tabs.zoom"),
-        );
         // Changes exists for a worktree session: it reads what that worktree changed.
         if model.worktree.is_some() {
             strip = strip.trailing(
