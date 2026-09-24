@@ -403,6 +403,96 @@ fn an_empty_reviews_board_says_so_and_offers_the_schedule(cx: &mut gpui::TestApp
     finish(recorded, cx);
 }
 
+#[gpui::test]
+fn reentering_review_retries_one_failed_schedule_load(cx: &mut gpui::TestAppContext) {
+    let (ctx, recorded) = live_hub_ctx(schedules_state(), cx);
+    let view = reviews_view(&[]);
+    let board = view.board.id.clone();
+
+    cx.update(|cx| ctx.synchronize(cx));
+    assert!(matches!(
+        recorded.respond_next(Ok(ResponseBody::BoardBackends(Vec::new()))),
+        RequestBody::ListBoardBackends {}
+    ));
+    cx.run_until_parked();
+    assert!(matches!(
+        recorded.respond_next(Ok(ResponseBody::Board(view.clone()))),
+        RequestBody::EnsureReviewsBoard { .. }
+    ));
+    cx.run_until_parked();
+    cx.update(|cx| ctx.synchronize(cx));
+    loop {
+        let request = recorded.respond_next_with(|body| match body {
+            RequestBody::ListPullRequests { tab, .. } => pr_response(*tab),
+            RequestBody::ListSchedules { .. } => Err(ProtoError {
+                kind: ErrorKind::Unknown,
+                message: "schedules.json is unreadable".to_owned(),
+            }),
+            _ => Err(ProtoError {
+                kind: ErrorKind::Unknown,
+                message: "unrelated request is outside this test".to_owned(),
+            }),
+        });
+        cx.run_until_parked();
+        if matches!(
+            request,
+            RequestBody::ListSchedules { board_id: Some(ref id) } if id == &board
+        ) {
+            break;
+        }
+    }
+    for _ in 0..3 {
+        cx.update(|cx| ctx.synchronize(cx));
+    }
+    assert!(
+        recorded
+            .take()
+            .into_iter()
+            .all(|body| !matches!(body, RequestBody::ListSchedules { .. })),
+        "a failed answer is not retried during the same activation"
+    );
+
+    cx.update(|cx| ctx.cycle_tab(cx));
+    cx.update(|cx| ctx.synchronize(cx));
+    recorded.take();
+    cx.run_until_parked();
+    cx.update(|cx| ctx.cycle_tab(cx));
+    cx.update(|cx| ctx.synchronize(cx));
+    recorded.take();
+    cx.run_until_parked();
+    ctx.state.update(cx, |state, cx| {
+        state.board.loading = false;
+        state.apply_board_view(view);
+        cx.notify();
+    });
+    cx.update(|cx| ctx.synchronize(cx));
+    assert!(matches!(
+        recorded.respond_next(Ok(ResponseBody::Schedules(Vec::new()))),
+        RequestBody::ListSchedules { board_id: Some(id) } if id == board
+    ));
+    cx.run_until_parked();
+    cx.update(|cx| ctx.synchronize(cx));
+    cx.read(|cx| {
+        assert_eq!(ctx.hub.read(cx).prs.review_board.empty, Some(true));
+    });
+    assert!(
+        cx.update(|cx| ctx.add_review_schedule(cx)),
+        "the empty-state CTA and Enter action are enabled"
+    );
+
+    for _ in 0..3 {
+        cx.update(|cx| ctx.synchronize(cx));
+    }
+    assert!(
+        recorded
+            .take()
+            .into_iter()
+            .all(|body| !matches!(body, RequestBody::ListSchedules { .. })),
+        "a successful answer is not loaded again without another activation"
+    );
+    finish(recorded, cx);
+}
+
 /// An empty Reviews board with its schedules answered (none), on a daemon with `schedules`.
 fn empty_board_offering_the_schedule(
     ctx: &HubCtx,

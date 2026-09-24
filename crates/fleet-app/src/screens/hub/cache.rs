@@ -412,6 +412,9 @@ impl HubCtx {
                 state.supports_review_boards(),
             )
         };
+        self.hub.update(cx, |hub, _| {
+            hub.observe_review_schedule_activation(shown, context.as_ref());
+        });
         if shown {
             self.state.update(cx, |state, cx| {
                 if state.hub_pane != HubPane::List {
@@ -463,8 +466,8 @@ impl HubCtx {
         });
     }
 
-    /// Asks for the shown Reviews board's schedules once, so `No reviews yet.` can say whether
-    /// the GitHub review schedule is still to be added.
+    /// Asks for the shown Reviews board's schedules once per activation, so `No reviews yet.`
+    /// can say whether the GitHub review schedule is still to be added.
     fn load_review_schedules(&self, cx: &mut App) {
         let board = {
             let state = self.state.read(cx);
@@ -474,14 +477,23 @@ impl HubCtx {
             let Some(view) = held_reviews_board(state) else {
                 return;
             };
-            if state.schedules.entry(&view.board.id).is_some() {
-                return;
-            }
             view.board.id.clone()
         };
         let Some(bridge) = self.bridge.live() else {
             return;
         };
+        let activated = self
+            .hub
+            .update(cx, |hub, _| hub.take_review_schedule_activation());
+        let wanted = self
+            .state
+            .read(cx)
+            .schedules
+            .entry(&board)
+            .is_none_or(|entry| activated && entry.error.is_some() && !entry.loading);
+        if !wanted {
+            return;
+        }
         // The dialog's loader: one request in flight per board, and an answer the entry is
         // still stale after (a `SchedulesChanged` landed while it was in flight) reads again.
         crate::dialogs::load_schedules(board, &self.state, bridge, cx);

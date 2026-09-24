@@ -179,6 +179,13 @@ pub struct HubState {
     projection: RefCell<projection::ProjectionCache>,
     prepared: Rc<HubModel>,
     selection: SelectionAnchors,
+    /// Whether the Review tab is active, for detecting one schedules retry opportunity per
+    /// activation without coupling request initiation to rendering.
+    review_schedule_active: bool,
+    /// The context whose Review tab activation is being tracked.
+    review_schedule_context: Option<ContextId>,
+    /// Kept until the Reviews board arrives, since changing scopes clears the board mirror.
+    review_schedule_retry_pending: bool,
     /// Pull requests whose worktree is being created, so their glyph spins in place (§3.5).
     pub creating: Vec<(RepoId, u64)>,
     creation_intents: HashMap<PrIdentity, PrCreateIntent>,
@@ -188,6 +195,22 @@ pub struct HubState {
 }
 
 impl HubState {
+    fn observe_review_schedule_activation(&mut self, shown: bool, context: Option<&ContextId>) {
+        let activated = shown
+            && (!self.review_schedule_active || self.review_schedule_context.as_ref() != context);
+        self.review_schedule_active = shown;
+        self.review_schedule_context = shown.then(|| context.cloned()).flatten();
+        if activated {
+            self.review_schedule_retry_pending = true;
+        } else if !shown {
+            self.review_schedule_retry_pending = false;
+        }
+    }
+
+    fn take_review_schedule_activation(&mut self) -> bool {
+        std::mem::take(&mut self.review_schedule_retry_pending)
+    }
+
     /// Marks the client-owned caches as changed, so the next projection is rebuilt.
     fn invalidate(&mut self) {
         self.presentation_revision = self.presentation_revision.wrapping_add(1);
