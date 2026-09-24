@@ -143,6 +143,10 @@ impl HeadlessRunner {
 
         let overrides = BTreeMap::from([
             ("FLEET_BOARD".to_owned(), schedule.board_id.to_string()),
+            (
+                "FLEET_HOME".to_owned(),
+                self.home.root().to_string_lossy().into_owned(),
+            ),
             ("FLEET_SCHEDULE".to_owned(), schedule.id.to_string()),
         ]);
         let mut environment = process::filter_environment(

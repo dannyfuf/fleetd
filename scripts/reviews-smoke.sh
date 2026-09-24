@@ -27,8 +27,8 @@
 #     - `gh`, which answers `gh pr view <n>` for the fixture repository. CI has no `gh` and no
 #       network, and the daemon asks `gh` for a pull request's head branch before it creates the
 #       worktree.
-#     - `fleet`, which bakes this run's `FLEET_HOME` in, so a child never reaches the user's
-#       daemon.
+#     - `fleet`, which pins this run's daemon binary. The schedule runner supplies its private
+#       `FLEET_HOME`, so a child never reaches the user's daemon.
 #     `config.json` names both agent shims under `agentBinaries`, so the daemon never consults
 #     `PATH` for them.
 #   * The "GitHub" repository is a local bare origin built by `git init --bare` and cloned over
@@ -181,11 +181,11 @@ cat >"$review_transcript" <<'TRANSCRIPT'
 ]}
 TRANSCRIPT
 
-# The private `fleet`: the daemon puts the `fleet` beside `fleetd` on a child's PATH, but a
-# child's environment comes from a login shell, which may not carry this run's FLEET_HOME.
+# The private `fleet`: the schedule runner supplies this run's FLEET_HOME, while the wrapper pins
+# the private daemon binary rather than allowing the CLI to start the sibling build implicitly.
 cat >"$workspace/bin/fleet" <<SHIM
 #!/bin/sh
-FLEET_HOME='$workspace/home' FLEET_DAEMON='$FLEETD' exec '$FLEET' "\$@"
+FLEET_DAEMON='$FLEETD' exec '$FLEET' "\$@"
 SHIM
 chmod +x "$workspace/bin/fleet"
 

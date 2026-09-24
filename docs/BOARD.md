@@ -2459,8 +2459,8 @@ The program is the configured `agent_binaries` entry for the provider, else bare
 
 The run's working directory is the schedule's `work/`, created on demand. Its environment is the
 login environment of that directory, with the directory of the `fleet` binary prepended to `PATH`,
-`FLEET_BOARD=<board id>` and `FLEET_SCHEDULE=<schedule id>` set, and the variables the Claude and
-Codex adapters strip removed. The footer's `{fleet}` is `ScheduleRunner::fleet_program`, the very
+`FLEET_HOME=<daemon home>`, `FLEET_BOARD=<board id>` and `FLEET_SCHEDULE=<schedule id>` set, and the
+variables the Claude and Codex adapters strip removed. The footer's `{fleet}` is `ScheduleRunner::fleet_program`, the very
 binary whose directory leads that `PATH`. The timeout is `timeout_minutes`; a timeout, a cancel and a
 daemon shutdown that drops the run all kill the child's whole process group, and so does the
 agent's own exit (`ShellCommand::kill_group_on_exit`), so the MCP servers and tool shells an agent

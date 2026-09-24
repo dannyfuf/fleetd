@@ -581,6 +581,10 @@ async fn the_environment_puts_fleet_first_and_names_the_board_and_schedule() {
         Some("reviews-home")
     );
     assert_eq!(
+        command.env.get("FLEET_HOME").map(String::as_str),
+        Some(fixture.home.root().to_string_lossy().as_ref())
+    );
+    assert_eq!(
         command.env.get("FLEET_SCHEDULE").map(String::as_str),
         Some("sch-0123abcd")
     );
