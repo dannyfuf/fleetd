@@ -49,13 +49,17 @@ impl Router {
                 .into_iter()
                 .map(|(host, ids)| {
                     let request = match body {
-                        RequestBody::InspectWorktrees { repo, fetch, .. } => {
-                            RequestBody::InspectWorktrees {
-                                ids,
-                                repo: repo.clone(),
-                                fetch: *fetch,
-                            }
-                        }
+                        RequestBody::InspectWorktrees {
+                            repo,
+                            fetch,
+                            background,
+                            ..
+                        } => RequestBody::InspectWorktrees {
+                            ids,
+                            repo: repo.clone(),
+                            fetch: *fetch,
+                            background: *background,
+                        },
                         RequestBody::PruneWorktrees {
                             dry_run,
                             fetch,
@@ -349,6 +353,7 @@ mod tests {
                 ids: Vec::new(),
                 repo: Some(repo()),
                 fetch: true,
+                background: false,
             })
             .expect("remote fanout");
 

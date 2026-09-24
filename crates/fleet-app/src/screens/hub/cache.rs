@@ -271,6 +271,235 @@ pub(super) fn replace_pr_badges(
 }
 
 impl HubCtx {
+    fn inspection_sweep_ids(&self, cx: &App) -> Vec<WorktreeId> {
+        let state = self.state.read(cx);
+        if !state.daemon.is_connected() {
+            return Vec::new();
+        }
+        let Some(snapshot) = state.snapshot.as_ref() else {
+            return Vec::new();
+        };
+        let context = effective_context(state).map(|context| &context.id);
+        snapshot
+            .worktrees
+            .iter()
+            .filter(|worktree| worktree.host.is_none())
+            .filter(|worktree| {
+                context.is_none_or(|context| {
+                    snapshot
+                        .repos
+                        .iter()
+                        .any(|repo| repo.id == worktree.repo_id && &repo.context_id == context)
+                })
+            })
+            .filter(|worktree| match &state.scope {
+                RepoScope::All => true,
+                RepoScope::Repo(repo) => &worktree.repo_id == repo,
+            })
+            .filter(|worktree| {
+                !snapshot.jobs.iter().any(|job| {
+                    matches!(
+                        job.status,
+                        JobStatus::Queued | JobStatus::Running | JobStatus::Cancelling
+                    ) && matches!(job.kind, JobKind::CreateWorktree | JobKind::DeleteWorktree)
+                        && worktrees_list::job_targets_worktree(job, &worktree.id)
+                })
+            })
+            .map(|worktree| worktree.id.clone())
+            .collect()
+    }
+
+    fn request_inspection_sweep(&self, cx: &mut App) {
+        let ids = self.inspection_sweep_ids(cx);
+        if ids.is_empty() {
+            return;
+        }
+        let Some(request) = self.hub.update(cx, |hub, _| hub.begin_inspection_sweep()) else {
+            return;
+        };
+        self.ask(
+            RequestBody::InspectWorktrees {
+                ids,
+                repo: None,
+                fetch: false,
+                background: true,
+            },
+            cx,
+            move |result, ctx, cx| {
+                let changed = ctx.hub.update(cx, |hub, _| {
+                    hub.apply_inspection_sweep(request, result, Instant::now())
+                });
+                if changed {
+                    ctx.state.update(cx, |_, cx| cx.notify());
+                }
+                let pending = ctx.hub.read_with(cx, |hub, _| hub.inspection_sweep_pending);
+                if pending {
+                    cx.update(|cx| ctx.request_inspection_sweep(cx));
+                }
+                cx.update(|cx| ctx.schedule_inspection_sweep(cx));
+            },
+        );
+    }
+
+    fn tick_inspection_sweep(&self, reconciled_snapshot: bool, cx: &mut App) {
+        let (connected, hub_visible, entered, reconnected, scope_changed, timer_needs_update) =
+            self.hub.update(cx, |hub, cx| {
+                let state = self.state.read(cx);
+                let connected = state.daemon.is_connected();
+                let hub_visible = matches!(state.screen, Screen::Hub { .. });
+                let worktrees_visible = matches!(
+                    state.screen,
+                    Screen::Hub {
+                        tab: HubTab::Worktrees
+                    }
+                );
+                let context = effective_context(state).map(|context| &context.id);
+                let scope_changed = hub.inspection_sweep_scope.as_ref().is_none_or(|scope| {
+                    scope.context.as_ref() != context || scope.repo != state.scope
+                });
+                if scope_changed {
+                    hub.inspection_sweep_scope = Some(InspectionSweepScope {
+                        context: effective_context(state).map(|context| context.id.clone()),
+                        repo: state.scope.clone(),
+                    });
+                }
+                let entered = worktrees_visible && !hub.inspection_sweep_worktrees_visible;
+                let reconnected = connected && !hub.inspection_sweep_connected;
+                hub.inspection_sweep_worktrees_visible = worktrees_visible;
+                hub.inspection_sweep_connected = connected;
+                let timer_needs_update = if connected {
+                    hub.inspection_sweep_task.is_none()
+                        || hub.inspection_sweep_timer_hub_visible != Some(hub_visible)
+                } else {
+                    hub.inspection_sweep_task.is_some()
+                        || hub.inspection_sweep_timer_hub_visible.is_some()
+                };
+                (
+                    connected,
+                    hub_visible,
+                    entered,
+                    reconnected,
+                    scope_changed,
+                    timer_needs_update,
+                )
+            });
+        if timer_needs_update {
+            self.schedule_inspection_sweep_for(connected, hub_visible, cx);
+        }
+        if !connected || !(reconciled_snapshot || entered || reconnected || scope_changed) {
+            return;
+        }
+
+        let ids = self.inspection_sweep_ids(cx);
+        let now = Instant::now();
+        let should_request = self.hub.update(cx, |hub, _| {
+            let mut gained_missing = false;
+            if reconciled_snapshot || scope_changed {
+                let missing = ids
+                    .iter()
+                    .filter(|id| !hub.inspections.contains_key(*id))
+                    .cloned()
+                    .collect::<HashSet<_>>();
+                gained_missing = missing
+                    .iter()
+                    .any(|id| !hub.inspection_sweep_missing.contains(id));
+                hub.inspection_sweep_missing = missing;
+            }
+            let recent = hub.inspection_sweep_finished_at.is_some_and(|finished| {
+                now.saturating_duration_since(finished) < INSPECTION_SWEEP_ENTRY_FRESHNESS
+            });
+            let coalescing_trigger = scope_changed || gained_missing;
+            let entry_trigger = (entered || reconnected) && !recent;
+            if connected && !ids.is_empty() && (coalescing_trigger || entry_trigger) {
+                if hub.inspection_sweep_request.is_some() {
+                    if coalescing_trigger {
+                        hub.inspection_sweep_pending = true;
+                    }
+                    false
+                } else {
+                    true
+                }
+            } else {
+                false
+            }
+        });
+        if should_request {
+            self.request_inspection_sweep(cx);
+        }
+    }
+
+    fn schedule_inspection_sweep(&self, cx: &mut App) {
+        let (connected, hub_visible) = {
+            let state = self.state.read(cx);
+            (
+                state.daemon.is_connected(),
+                matches!(state.screen, Screen::Hub { .. }),
+            )
+        };
+        self.schedule_inspection_sweep_for(connected, hub_visible, cx);
+    }
+
+    fn schedule_inspection_sweep_for(&self, connected: bool, hub_visible: bool, cx: &mut App) {
+        let generation = self.hub.update(cx, |hub, _| {
+            if !connected {
+                hub.inspection_sweep_task = None;
+                hub.inspection_sweep_timer_hub_visible = None;
+                hub.inspection_sweep_generation = hub.inspection_sweep_generation.wrapping_add(1);
+                return None;
+            }
+            if hub.inspection_sweep_task.is_some()
+                && hub.inspection_sweep_timer_hub_visible == Some(hub_visible)
+            {
+                return None;
+            }
+            hub.inspection_sweep_task = None;
+            hub.inspection_sweep_timer_hub_visible = Some(hub_visible);
+            hub.inspection_sweep_generation = hub.inspection_sweep_generation.wrapping_add(1);
+            Some(hub.inspection_sweep_generation)
+        });
+        let Some(generation) = generation else {
+            return;
+        };
+        let interval = if hub_visible {
+            INSPECTION_SWEEP_VISIBLE_INTERVAL
+        } else {
+            INSPECTION_SWEEP_HIDDEN_INTERVAL
+        };
+        let state = self.state.downgrade();
+        let hub = self.hub.downgrade();
+        let bridge = self.bridge.clone();
+        let rail_scroll = self.rail_scroll.clone();
+        let list_scroll = self.list_scroll.clone();
+        let pr_scroll = self.pr_scroll.clone();
+        let task = cx.spawn(async move |cx| {
+            cx.background_executor().timer(interval).await;
+            cx.update(|cx| {
+                let (Some(state), Some(hub)) = (state.upgrade(), hub.upgrade()) else {
+                    return;
+                };
+                if hub.read(cx).inspection_sweep_generation != generation {
+                    return;
+                }
+                let ctx = HubCtx {
+                    state,
+                    hub,
+                    bridge,
+                    rail_scroll,
+                    list_scroll,
+                    pr_scroll,
+                };
+                ctx.hub.update(cx, |hub, _| {
+                    hub.inspection_sweep_task = None;
+                    hub.inspection_sweep_timer_hub_visible = None;
+                });
+                ctx.request_inspection_sweep(cx);
+                ctx.schedule_inspection_sweep(cx);
+            });
+        });
+        self.hub
+            .update(cx, |hub, _| hub.inspection_sweep_task = Some(task));
+    }
+
     /// `I` inspects with a fetch; the debounce inspects without one (§2.6 D-4).
     pub(super) fn inspect(&self, id: WorktreeId, fetch: bool, cx: &mut App) {
         if self.state.read(cx).daemon.is_lost() {
@@ -288,6 +517,7 @@ impl HubCtx {
                 ids: vec![id.clone()],
                 repo: None,
                 fetch,
+                background: false,
             },
             cx,
             move |result, ctx, cx| {
@@ -493,6 +723,20 @@ impl HubCtx {
     }
 
     pub(super) fn synchronize(&self, cx: &mut App) {
+        let reconciled_snapshot = self.hub.update(cx, |hub, cx| {
+            let state = self.state.read(cx);
+            if hub.last_reconciled_revision == state.snapshot_revision {
+                return false;
+            }
+            let worktrees = state
+                .snapshot
+                .as_ref()
+                .map_or(&[][..], |snapshot| snapshot.worktrees.as_slice());
+            hub.reconcile_inspection_identities(worktrees);
+            hub.last_reconciled_revision = state.snapshot_revision;
+            true
+        });
+        self.tick_inspection_sweep(reconciled_snapshot, cx);
         let visible = matches!(self.state.read(cx).screen, Screen::Hub { .. });
         if !visible {
             self.hub.update(cx, |hub, _| {
@@ -502,18 +746,6 @@ impl HubCtx {
             });
             return;
         }
-        self.hub.update(cx, |hub, cx| {
-            let state = self.state.read(cx);
-            if hub.last_reconciled_revision == state.snapshot_revision {
-                return;
-            }
-            let worktrees = state
-                .snapshot
-                .as_ref()
-                .map_or(&[][..], |snapshot| snapshot.worktrees.as_slice());
-            hub.reconcile_inspection_identities(worktrees);
-            hub.last_reconciled_revision = state.snapshot_revision;
-        });
         let model = self.model(cx);
         self.reconcile_selection(&model, cx);
         let changed = self.hub.update(cx, |hub, _| {
@@ -678,6 +910,32 @@ mod regression_tests {
         assert!(
             hub.upgrade().is_none(),
             "the pending PR refresh must not own the Hub it is stored on"
+        );
+    }
+
+    #[gpui::test]
+    fn a_pending_inspection_sweep_does_not_keep_the_hub_alive(cx: &mut gpui::TestAppContext) {
+        let now = Instant::now();
+        let mut state = AppState::new("/tmp/fleet-inspection-sweep", now);
+        state.daemon = crate::state::DaemonLink::Connected;
+        state.screen = Screen::Hub { tab: HubTab::Prs };
+        let state = cx.new(|_| state);
+        let (ctx, _harness) = crate::screens::hub::tests::test_hub_ctx_for(state.clone(), cx);
+
+        cx.update(|cx| ctx.schedule_inspection_sweep(cx));
+        assert!(
+            ctx.hub
+                .read_with(cx, |hub, _| hub.inspection_sweep_task.is_some())
+        );
+
+        let hub = ctx.hub.downgrade();
+        drop(ctx);
+        drop(state);
+        cx.update(|_| {});
+
+        assert!(
+            hub.upgrade().is_none(),
+            "the pending inspection sweep must not own the Hub it is stored on"
         );
     }
 

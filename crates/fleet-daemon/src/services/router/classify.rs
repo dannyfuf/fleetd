@@ -200,13 +200,17 @@ fn fanout_worktrees(
             .map(|(host, ids)| {
                 let part = match body {
                     RequestBody::DeleteWorktrees { .. } => RequestBody::DeleteWorktrees { ids },
-                    RequestBody::InspectWorktrees { repo, fetch, .. } => {
-                        RequestBody::InspectWorktrees {
-                            ids,
-                            repo: repo.clone(),
-                            fetch: *fetch,
-                        }
-                    }
+                    RequestBody::InspectWorktrees {
+                        repo,
+                        fetch,
+                        background,
+                        ..
+                    } => RequestBody::InspectWorktrees {
+                        ids,
+                        repo: repo.clone(),
+                        fetch: *fetch,
+                        background: *background,
+                    },
                     RequestBody::PruneWorktrees {
                         dry_run,
                         fetch,
@@ -269,7 +273,12 @@ pub(crate) fn local_fanout_part(
         RequestBody::DeleteWorktrees { ids } => {
             nonempty_worktree_part(ids, resolver).map(|ids| RequestBody::DeleteWorktrees { ids })
         }
-        RequestBody::InspectWorktrees { ids, repo, fetch } => {
+        RequestBody::InspectWorktrees {
+            ids,
+            repo,
+            fetch,
+            background,
+        } => {
             if ids.is_empty() {
                 Some(body.clone())
             } else {
@@ -277,6 +286,7 @@ pub(crate) fn local_fanout_part(
                     ids,
                     repo: repo.clone(),
                     fetch: *fetch,
+                    background: *background,
                 })
             }
         }

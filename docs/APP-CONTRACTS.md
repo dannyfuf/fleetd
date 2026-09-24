@@ -479,12 +479,25 @@ local or other-host results:
 | Request | Response | Per-item contract |
 | --- | --- | --- |
 | `DeleteWorktrees { ids }` | `WorktreesDeleted(Vec<WorktreeDeleteResult>)` | `{ worktree_id, ok, reason?, trash_entry? }` for every requested worktree |
-| `InspectWorktrees { ids, repo, fetch }` | `Inspections(Vec<WorktreeInspection>)` | one inspection per selected worktree, with its own warnings/error |
+| `InspectWorktrees { ids, repo, fetch, background }` | `Inspections(Vec<WorktreeInspection>)` | one inspection per selected worktree, with its own warnings/error; the defaulted `background` marker is reserved for silent app sweeps |
 | `PruneWorktrees { dry_run, fetch, kill_sessions, repo, ids }` | `Pruned(PruneResult)` | `deleted`/would-delete ids plus `skipped` entries carrying each reason and safety facts |
 
 Mixed-host dismiss, sleep, and kill routing follows the same rule: the router partitions by owner,
 runs host parts independently, and preserves an outcome for each requested item instead of failing
 the whole request on the first unreachable host.
+
+The Hub owns two inspection paths. Cursor selection keeps the 400 ms single-worktree request and
+`I` keeps its fetched request. The background path sends one `fetch: false` request with explicit,
+non-empty IDs for all eligible local worktrees in the current Hub scope; it never relies on empty
+IDs' daemon-wide meaning. Its periodic task survives outside the Hub, holds `AppState` and
+`HubState` weakly, and runs at 60 s in the Hub / 5 min elsewhere. Sweep application is silent and
+batch-invalidated: no pre-answer state or notify, no `Inspected.loading` / `Inspected.error`, and a
+per-worktree explicit inspection sequence newer than the sweep wins. `JobKind::Inspect` is omitted
+from global job chrome, the Jobs sheet, sticky failures, quit warnings, and palette cancellation
+rows only when its target carries the daemon's background-sweep marker. Selected-row, palette,
+and CLI inspections remain ordinary visible jobs. The frozen harness `running_jobs` field still
+counts every active daemon job, including sweeps; periodic sweep timers are tasks, not armed
+debounces.
 
 The version-6 board and native-agent families remain valid in v8, and both `Snapshot.boards` and
 `Snapshot.agent_threads` stay `#[serde(default)]`. `PruneWorktrees.ids` also remains defaulted and

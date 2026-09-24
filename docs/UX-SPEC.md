@@ -231,12 +231,24 @@ Every fact that comes from a **job** (`inspect`, `prune --dry-run`, PR fetch) ra
 | errored | mark is not drawn at all; the detail panel shows `error: <message>` and `I retry` |
 | whole pane frozen (daemon lost) | the list header gains one amber `Stale · <age>` chip and the Worktrees rows dim to 55 %; every session glyph forced to `circle-help` |
 
-**[D-4] Auto-inspect cadence.** The daemon
-re-inspects (a) the **selected** worktree with `--no-fetch`, debounced **400 ms** after the cursor
-settles; (b) all **visible** rows with `--no-fetch` on a **30 s idle** timer (never on scroll,
-never while a modal is open); (c) the affected worktree after any `create` / `delete` / `open` /
-`sleep`. `I` runs a full inspect **with** fetch as an explicit job. Nothing safety-adjacent is
-ever rendered from a fact older than the ladder above allows without its stamp.
+**[D-4] Auto-inspect cadence.** The selected worktree keeps its `--no-fetch` inspection, debounced
+**400 ms** after the cursor settles. Separately, the app sends one silent, non-empty batched
+`InspectWorktrees` request for every local worktree in the active context and repository scope,
+excluding worktrees being created or deleted. It runs on first snapshot / daemon reconnect, when
+the Worktrees tab becomes visible (unless another sweep is running or one finished less than
+**30 s** ago), when the scope changes, and when a reconciled snapshot introduces a worktree with
+no cached inspection. A weakly-held periodic task repeats it every **60 s** while any Hub tab is
+visible and every **5 min** on another screen; leaving the Hub does not cancel prefetch, scrolling
+does not trigger it, and an open modal does not pause it.
+
+The sweep never marks a row loading, dims facts, shows a spinner or global Inspect job, writes a
+row error, or toasts. Its daemon job carries a background marker and alone is hidden from app
+chrome; selected-row, palette, CLI, and `I` inspections remain ordinary visible jobs. A failed
+sweep is logged and does not establish freshness; a failed per-worktree result keeps last-good
+facts when available. One batch answer replaces eligible cached facts with one invalidation, and
+a selected-row / `I` request started after the batch was sent wins per worktree. `I` remains a
+full inspect **with** fetch and uses the row/detail loading and error states. Nothing
+safety-adjacent is ever rendered from a fact older than the ladder above allows without its stamp.
 
 ### 2.7 Toast law
 
@@ -2146,7 +2158,7 @@ all applied there; cite `docs/KEYMAP.md` rather than restating a binding here.
 | D-1 | Header dropped `unknown/offline` | §2.3: five zero-suppressed chips including an amber unknown/offline count |
 | D-2 | "Update available" as a sticky toast | §2.3 chip + Settings › About row; never a toast |
 | D-3 | `none` rendered as a blank cell | §2.5: dim `dot` at 30 %; blank means "column not applicable" |
-| D-4 | No rule for null inspection facts, no auto-inspect cadence | §1.3 + §2.6: `—` plus the verbatim warning; 400 ms debounced selected-row re-inspect, 30 s idle visible-row re-inspect |
+| D-4 | No rule for null inspection facts, no auto-inspect cadence | §1.3 + §2.6: `—` plus the verbatim warning; 400 ms debounced selected-row re-inspect plus a silent scoped batch on entry/change and every 60 s visible / 5 min hidden |
 | D-5 | px-only port lost the two-step author breakpoint | §2.9: ch-first ladders, px derived |
 | D-6 | PR detail panel never enumerated | §3.5: full detail table incl. `WILL CREATE` destination, pull ref and fork note |
 | D-7 | `All`-scope PR explosion undecided | §3.5: cap 100/tab, sort `updatedAt` desc, `+n more` row |

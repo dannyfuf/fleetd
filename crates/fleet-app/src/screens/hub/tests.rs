@@ -1,5 +1,5 @@
 use fleet_core::{
-    github::{PrChecks, PrReviewDecision},
+    github::{InspectionPrState, InspectionPullRequest, PrChecks, PrReviewDecision},
     ids::RepoId,
     inspection::WorktreeInspection,
     model::{Context, Repo, RepoHooks},
@@ -89,10 +89,14 @@ pub(crate) fn test_hub_ctx_for(
 }
 
 fn inspection(dirty: bool, unique: Option<u64>, merged: bool) -> WorktreeInspection {
+    inspection_for("buk/payroll#a", dirty, unique, merged)
+}
+
+fn inspection_for(id: &str, dirty: bool, unique: Option<u64>, merged: bool) -> WorktreeInspection {
+    let worktree_id = WorktreeId::try_from(id).unwrap_or_else(|error| panic!("{error}"));
     WorktreeInspection {
-        worktree_id: WorktreeId::try_from("buk/payroll#a")
-            .unwrap_or_else(|error| panic!("{error}")),
-        repo_id: RepoId::try_from("buk/payroll").unwrap_or_else(|error| panic!("{error}")),
+        repo_id: RepoId::try_from(worktree_id.repo()).unwrap_or_else(|error| panic!("{error}")),
+        worktree_id,
         host: "local".to_owned(),
         path: "/tmp/wt".to_owned(),
         branch: "feat/x".to_owned(),
@@ -115,6 +119,16 @@ fn inspection(dirty: bool, unique: Option<u64>, merged: bool) -> WorktreeInspect
         inspected_at: "2026-09-04T11:59:00Z".to_owned(),
         warnings: Vec::new(),
         error: None,
+    }
+}
+
+fn merged_pr(number: u64) -> InspectionPullRequest {
+    InspectionPullRequest {
+        number,
+        state: InspectionPrState::Merged,
+        url: format!("https://github.com/acme/api/pull/{number}"),
+        base_ref_name: "main".to_owned(),
+        head_ref_oid: "abc".to_owned(),
     }
 }
 
@@ -704,6 +718,33 @@ fn empty_inspection_reply_finishes_current_request() {
 }
 
 #[test]
+fn a_sweep_cannot_overwrite_a_newer_completed_explicit_inspection() {
+    let id: WorktreeId = "buk/payroll#a".parse().expect("worktree");
+    let mut hub = HubState::default();
+    let sweep = hub.begin_inspection_sweep().expect("sweep request");
+    let explicit = hub.begin_inspection(id.clone());
+    let mut selected = inspection(false, Some(7), false);
+    selected.inspected_at = "2026-09-24T12:01:00Z".to_owned();
+    assert!(hub.apply_inspection(
+        &id,
+        explicit,
+        Ok(ResponseBody::Inspections(vec![selected.clone()])),
+    ));
+
+    let mut stale = inspection(false, Some(0), true);
+    stale.inspected_at = "2026-09-24T12:00:00Z".to_owned();
+    assert!(!hub.apply_inspection_sweep(
+        sweep,
+        Ok(ResponseBody::Inspections(vec![stale])),
+        Instant::now(),
+    ));
+    assert_eq!(
+        hub.inspections.get(&id).and_then(|slot| slot.data.as_ref()),
+        Some(&selected)
+    );
+}
+
+#[test]
 fn failed_refresh_preserves_inspection_data() {
     let id: WorktreeId = "buk/payroll#a".parse().expect("worktree");
     let mut hub = HubState::default();
@@ -778,6 +819,297 @@ fn synchronization_reconciles_identities_once_per_snapshot_revision(cx: &mut gpu
             .read_with(cx, |hub, _| hub.inspection_reconciliations),
         2
     );
+}
+
+#[gpui::test]
+fn entering_worktrees_sweeps_the_scope_and_updates_a_non_selected_pr_chip(
+    cx: &mut gpui::TestAppContext,
+) {
+    let now = Instant::now();
+    let mut state = AppState::new("/tmp/fleet-hub-sweep", now);
+    let mut source = snapshot(4);
+    source.worktrees[2].host = Some("devbox".parse().expect("host id"));
+    source.jobs.push(fleet_proto::job::JobRecord {
+        id: "job-delete".parse().expect("job id"),
+        kind: fleet_proto::job::JobKind::DeleteWorktree,
+        target: "acme/api#branch-3".to_owned(),
+        title: "Delete acme/api#branch-3".to_owned(),
+        status: fleet_proto::job::JobStatus::Running,
+        progress: None,
+        log_path: "/tmp/delete.log".to_owned(),
+        started_at: "2026-09-24T12:00:00Z".to_owned(),
+        finished_at: None,
+        cancellable: true,
+        retryable: false,
+    });
+    state.apply_snapshot(source, now);
+    state.daemon = crate::state::DaemonLink::Connected;
+    state.screen = Screen::Hub {
+        tab: HubTab::Worktrees,
+    };
+    state.hub_pane = HubPane::Repos;
+    let (ctx, harness) = test_hub_ctx(state, cx);
+
+    cx.update(|cx| ctx.synchronize(cx));
+    assert_eq!(harness.len(), 1);
+    let mut selected = inspection_for("acme/api#branch-0", false, Some(0), false);
+    selected.inspected_at = "2026-09-24T12:00:00Z".to_owned();
+    let mut non_selected = inspection_for("acme/api#branch-1", false, Some(0), true);
+    non_selected.pr = Some(merged_pr(42));
+    non_selected.inspected_at = "2026-09-24T12:00:00Z".to_owned();
+    let request = harness.respond_next(Ok(ResponseBody::Inspections(vec![selected, non_selected])));
+    assert!(matches!(
+        request,
+        RequestBody::InspectWorktrees {
+            ids,
+            repo: None,
+            fetch: false,
+            background: true,
+        } if ids == [
+            WorktreeId::try_from("acme/api#branch-0").expect("worktree id"),
+            WorktreeId::try_from("acme/api#branch-1").expect("worktree id"),
+        ]
+    ));
+    cx.run_until_parked();
+    cx.update(|cx| ctx.synchronize(cx));
+
+    cx.read(|cx| {
+        let model = ctx.model(cx);
+        let row = model
+            .worktrees
+            .iter()
+            .find(|row| row.id.as_str() == "acme/api#branch-1")
+            .unwrap_or_else(|| panic!("non-selected row"));
+        assert_eq!(row.pr, Some((42, PrBadgeState::Merged)));
+        assert_eq!(ctx.state.read(cx).cursors.worktrees, 0);
+    });
+}
+
+#[gpui::test]
+fn a_failed_inspection_sweep_never_sets_loading_or_slot_error(cx: &mut gpui::TestAppContext) {
+    let now = Instant::now();
+    let mut state = AppState::new("/tmp/fleet-hub-sweep-failure", now);
+    state.apply_snapshot(snapshot(1), now);
+    state.daemon = crate::state::DaemonLink::Connected;
+    state.screen = Screen::Hub {
+        tab: HubTab::Worktrees,
+    };
+    state.hub_pane = HubPane::Repos;
+    let (ctx, harness) = test_hub_ctx(state, cx);
+
+    cx.update(|cx| ctx.synchronize(cx));
+    let id: WorktreeId = "acme/api#branch-0".parse().expect("worktree id");
+    assert!(
+        ctx.hub
+            .read_with(cx, |hub, _| !hub.inspections.contains_key(&id))
+    );
+    harness.respond_next(Err(client_error("offline")));
+    cx.run_until_parked();
+
+    cx.read(|cx| {
+        assert!(!ctx.hub.read(cx).inspections.contains_key(&id));
+        assert!(ctx.state.read(cx).sticky_error.is_none());
+    });
+}
+
+#[gpui::test]
+fn a_failed_inspection_sweep_does_not_suppress_the_reconnect_sweep(cx: &mut gpui::TestAppContext) {
+    let now = Instant::now();
+    let mut state = AppState::new("/tmp/fleet-hub-sweep-reconnect", now);
+    state.apply_snapshot(snapshot(1), now);
+    state.daemon = crate::state::DaemonLink::Connected;
+    state.screen = Screen::Hub {
+        tab: HubTab::Worktrees,
+    };
+    let (ctx, harness) = test_hub_ctx(state, cx);
+
+    cx.update(|cx| ctx.synchronize(cx));
+    harness.respond_next(Err(client_error("connection closed")));
+    cx.run_until_parked();
+    assert!(
+        ctx.hub
+            .read_with(cx, |hub, _| hub.inspection_sweep_finished_at.is_none())
+    );
+
+    ctx.state.update(cx, |state, _| {
+        state.daemon = crate::state::DaemonLink::Starting;
+    });
+    cx.update(|cx| ctx.synchronize(cx));
+    ctx.state.update(cx, |state, _| {
+        state.daemon = crate::state::DaemonLink::Connected;
+    });
+    cx.update(|cx| ctx.synchronize(cx));
+
+    assert!(matches!(
+        harness.close_next(),
+        RequestBody::InspectWorktrees {
+            fetch: false,
+            background: true,
+            ..
+        }
+    ));
+}
+
+#[gpui::test]
+fn a_sweep_result_cannot_overwrite_a_newer_selected_inspection(cx: &mut gpui::TestAppContext) {
+    let now = Instant::now();
+    let mut state = AppState::new("/tmp/fleet-hub-sweep-order", now);
+    state.apply_snapshot(snapshot(1), now);
+    state.daemon = crate::state::DaemonLink::Connected;
+    state.screen = Screen::Hub {
+        tab: HubTab::Worktrees,
+    };
+    state.hub_pane = HubPane::Repos;
+    let (ctx, harness) = test_hub_ctx(state, cx);
+    let id: WorktreeId = "acme/api#branch-0".parse().expect("worktree id");
+    let mut previous = inspection_for(id.as_str(), false, Some(3), false);
+    previous.inspected_at = "2026-09-24T11:00:00Z".to_owned();
+
+    cx.update(|cx| ctx.synchronize(cx));
+    ctx.hub.update(cx, |hub, _| {
+        hub.inspections
+            .insert(id.clone(), Inspected::ready(previous.clone()));
+    });
+    cx.update(|cx| ctx.inspect(id.clone(), false, cx));
+    assert_eq!(harness.len(), 2);
+    let mut stale = inspection_for(id.as_str(), false, Some(0), true);
+    stale.pr = Some(merged_pr(9));
+    harness.respond_next(Ok(ResponseBody::Inspections(vec![stale])));
+    cx.run_until_parked();
+
+    cx.read(|cx| {
+        let slot = ctx
+            .hub
+            .read(cx)
+            .inspections
+            .get(&id)
+            .expect("inspection slot");
+        assert_eq!(slot.data.as_ref(), Some(&previous));
+        assert!(
+            slot.loading,
+            "the newer selected inspection is still in flight"
+        );
+        assert!(slot.error.is_none());
+    });
+
+    let mut selected = inspection_for(id.as_str(), true, Some(7), false);
+    selected.inspected_at = "2026-09-24T12:01:00Z".to_owned();
+    harness.respond_next(Ok(ResponseBody::Inspections(vec![selected.clone()])));
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let slot = ctx
+            .hub
+            .read(cx)
+            .inspections
+            .get(&id)
+            .expect("inspection slot");
+        assert_eq!(slot.data.as_ref(), Some(&selected));
+        assert!(!slot.loading);
+    });
+}
+
+#[gpui::test]
+fn visible_inspection_sweep_repeats_at_its_configured_cadence(cx: &mut gpui::TestAppContext) {
+    let now = Instant::now();
+    let mut state = AppState::new("/tmp/fleet-hub-sweep-cadence", now);
+    state.apply_snapshot(snapshot(1), now);
+    state.daemon = crate::state::DaemonLink::Connected;
+    state.screen = Screen::Hub {
+        tab: HubTab::Worktrees,
+    };
+    state.hub_pane = HubPane::Repos;
+    let (ctx, harness) = test_hub_ctx(state, cx);
+
+    cx.update(|cx| ctx.synchronize(cx));
+    harness.respond_next(Ok(ResponseBody::Inspections(vec![inspection_for(
+        "acme/api#branch-0",
+        false,
+        Some(0),
+        false,
+    )])));
+    cx.run_until_parked();
+    assert_eq!(harness.len(), 0);
+
+    cx.executor()
+        .advance_clock(INSPECTION_SWEEP_VISIBLE_INTERVAL - Duration::from_millis(1));
+    cx.run_until_parked();
+    assert_eq!(harness.len(), 0);
+    cx.executor().advance_clock(Duration::from_millis(1));
+    cx.run_until_parked();
+    assert!(matches!(
+        harness.close_next(),
+        RequestBody::InspectWorktrees {
+            ids,
+            repo: None,
+            fetch: false,
+            background: true,
+        } if ids == [WorktreeId::try_from("acme/api#branch-0").expect("worktree id")]
+    ));
+}
+
+#[gpui::test]
+fn hidden_inspection_prefetch_survives_synchronize_and_uses_the_five_minute_cadence(
+    cx: &mut gpui::TestAppContext,
+) {
+    let now = Instant::now();
+    let mut state = AppState::new("/tmp/fleet-hub-hidden-sweep", now);
+    state.apply_snapshot(snapshot(1), now);
+    state.daemon = crate::state::DaemonLink::Connected;
+    state.screen = Screen::Workspace {
+        session: "acme/api#branch-0".parse().expect("session id"),
+    };
+    let (ctx, harness) = test_hub_ctx(state, cx);
+
+    cx.update(|cx| ctx.synchronize(cx));
+    harness.respond_next(Ok(ResponseBody::Inspections(vec![inspection_for(
+        "acme/api#branch-0",
+        false,
+        Some(0),
+        false,
+    )])));
+    cx.run_until_parked();
+    assert_eq!(harness.len(), 0);
+
+    cx.executor()
+        .advance_clock(INSPECTION_SWEEP_HIDDEN_INTERVAL.saturating_sub(Duration::from_millis(1)));
+    cx.run_until_parked();
+    assert_eq!(harness.len(), 0);
+    cx.executor().advance_clock(Duration::from_millis(1));
+    cx.run_until_parked();
+    assert!(matches!(
+        harness.close_next(),
+        RequestBody::InspectWorktrees { fetch: false, .. }
+    ));
+}
+
+#[gpui::test]
+fn entering_worktrees_during_a_prefetch_does_not_queue_a_duplicate(cx: &mut gpui::TestAppContext) {
+    let now = Instant::now();
+    let mut state = AppState::new("/tmp/fleet-hub-sweep-entry", now);
+    state.apply_snapshot(snapshot(1), now);
+    state.daemon = crate::state::DaemonLink::Connected;
+    state.screen = Screen::Workspace {
+        session: "acme/api#branch-0".parse().expect("session id"),
+    };
+    let (ctx, harness) = test_hub_ctx(state, cx);
+
+    cx.update(|cx| ctx.synchronize(cx));
+    assert_eq!(harness.len(), 1);
+    ctx.state.update(cx, |state, _| {
+        state.screen = Screen::Hub {
+            tab: HubTab::Worktrees,
+        };
+    });
+    cx.update(|cx| ctx.synchronize(cx));
+    harness.respond_next(Ok(ResponseBody::Inspections(vec![inspection_for(
+        "acme/api#branch-0",
+        false,
+        Some(0),
+        false,
+    )])));
+    cx.run_until_parked();
+
+    assert_eq!(harness.len(), 0);
 }
 
 #[test]

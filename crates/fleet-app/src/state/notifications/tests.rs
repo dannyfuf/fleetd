@@ -3,6 +3,7 @@ use crate::state::test_support::*;
 use fleet_core::agents::{
     AgentKind, AgentThreadSummary, Attention, AttentionKind, Seq, ThreadId, ThreadProjection,
 };
+use fleet_proto::job::JobKind;
 use std::sync::atomic::Ordering;
 
 #[test]
@@ -294,6 +295,8 @@ fn a_child_attention_edge_notifies_on_the_caller() {
 
 #[test]
 fn the_newest_failure_owns_the_sticky_slot() {
+    let mut inspect = job("j-inspect", JobStatus::Running, None);
+    inspect.kind = JobKind::Inspect;
     let jobs = vec![
         job(
             "j-1",
@@ -310,10 +313,15 @@ fn the_newest_failure_owns_the_sticky_slot() {
             },
             Some("2026-09-04T12:05:00Z"),
         ),
+        inspect,
     ];
     let failed = latest_failed_job(&jobs).unwrap_or_else(|| panic!("expected a failure"));
     assert_eq!(failed.id.as_str(), "j-3");
-    assert_eq!(running_jobs(&jobs).len(), 1);
+    assert_eq!(
+        running_jobs(&jobs).len(),
+        2,
+        "harness idle counts every daemon job"
+    );
 }
 
 /// `advance` moves a stored dwell into the past. On a machine whose uptime is shorter than the

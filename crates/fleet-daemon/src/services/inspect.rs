@@ -16,7 +16,7 @@ use fleet_core::{
     model::{Repo, Worktree},
     sessions::{AgentActivity, SessionState, WorktreeStatus},
 };
-use fleet_proto::job::JobKind;
+use fleet_proto::job::{BACKGROUND_INSPECTION_TARGET_PREFIX, JobKind};
 use futures_util::{StreamExt, stream};
 
 use crate::{
@@ -69,6 +69,7 @@ impl Inspect {
         ids: Vec<WorktreeId>,
         repo: Option<RepoId>,
         fetch: bool,
+        background: bool,
     ) -> DaemonResult<Vec<WorktreeInspection>> {
         let repos = if let Some(repo) = &repo {
             vec![repo.clone()]
@@ -82,7 +83,15 @@ impl Inspect {
         };
         let service = self.clone();
         let (delivery, awaited) = JobDelivery::job_gets_copy(copy_error);
-        let target = format!("inspect-{}", uuid::Uuid::new_v4());
+        let target = format!(
+            "{}{}",
+            if background {
+                BACKGROUND_INSPECTION_TARGET_PREFIX
+            } else {
+                "inspect-"
+            },
+            uuid::Uuid::new_v4()
+        );
         if repos.is_empty() {
             self.jobs.submit_for_all_repos(
                 JobKind::Inspect,

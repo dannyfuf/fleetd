@@ -1,10 +1,20 @@
 use super::parse_timestamp;
-use fleet_proto::job::{JobKind, JobRecord, JobStatus};
+use fleet_proto::job::{BACKGROUND_INSPECTION_TARGET_PREFIX, JobKind, JobRecord, JobStatus};
 use fleet_ui_kit::{JobStatus as RowStatus, format_age};
 use gpui::SharedString;
 
 const UUID_LEN: usize = 36;
 const ELAPSED_AFTER_SECONDS: i64 = 30;
+
+/// Whether a daemon job belongs in Fleet's global job chrome.
+///
+/// Only app-originated background sweeps are silent. Selected-row, palette, and CLI inspections
+/// remain ordinary user-visible jobs, including their failures.
+#[must_use]
+pub fn is_user_visible_job(job: &JobRecord) -> bool {
+    !matches!(job.kind, JobKind::Inspect)
+        || !job.target.starts_with(BACKGROUND_INSPECTION_TARGET_PREFIX)
+}
 
 pub fn job_kind_label(kind: &JobKind) -> &str {
     match kind {
@@ -301,7 +311,7 @@ impl JobDisplay {
 /// Most-recent active job and total count, without a temporary collection.
 pub fn active_job_summary(jobs: &[JobRecord]) -> Option<(&JobRecord, usize)> {
     jobs.iter()
-        .filter(|job| is_active(&job.status))
+        .filter(|job| is_user_visible_job(job) && is_active(&job.status))
         .fold(None, |summary, job| {
             let Some((newest, count)) = summary else {
                 return Some((job, 1));
@@ -323,7 +333,11 @@ pub fn latest_unseen_failure(
     mut seen: impl FnMut(&fleet_core::ids::JobId) -> bool,
 ) -> Option<&JobRecord> {
     jobs.iter()
-        .filter(|job| matches!(job.status, JobStatus::Failed { .. }) && !seen(&job.id))
+        .filter(|job| {
+            is_user_visible_job(job)
+                && matches!(job.status, JobStatus::Failed { .. })
+                && !seen(&job.id)
+        })
         .max_by(|left, right| left.finished_at.cmp(&right.finished_at))
 }
 
@@ -500,5 +514,35 @@ mod tests {
             latest_unseen_failure(&failed, |id| id.as_str() == "new").expect("unseen failure");
         assert_eq!(unseen.id.as_str(), "old");
         assert!(job_outcome_toast(&failed[0], false).is_none());
+    }
+
+    #[test]
+    fn only_background_inspection_sweeps_are_hidden_from_global_job_chrome() {
+        let mut background = job("inspect-background", JobStatus::Running);
+        background.kind = JobKind::Inspect;
+        background.target = format!("{BACKGROUND_INSPECTION_TARGET_PREFIX}request");
+        let mut explicit = job("inspect-explicit", JobStatus::Running);
+        explicit.kind = JobKind::Inspect;
+        explicit.target = "inspect-request".to_owned();
+        let mut background_failure = job(
+            "inspect-failed",
+            JobStatus::Failed {
+                error: "offline".to_owned(),
+            },
+        );
+        background_failure.kind = JobKind::Inspect;
+        background_failure.target = format!("{BACKGROUND_INSPECTION_TARGET_PREFIX}failed");
+
+        assert!(active_job_summary(std::slice::from_ref(&background)).is_none());
+        assert!(
+            latest_unseen_failure(std::slice::from_ref(&background_failure), |_| false).is_none()
+        );
+        assert!(!is_user_visible_job(&background));
+        assert!(is_user_visible_job(&explicit));
+        assert_eq!(
+            active_job_summary(std::slice::from_ref(&explicit))
+                .map(|(job, count)| (job.id.as_str(), count)),
+            Some(("inspect-explicit", 1))
+        );
     }
 }

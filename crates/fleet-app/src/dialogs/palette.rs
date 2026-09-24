@@ -29,7 +29,7 @@ use crate::{
         open_agent_thread, open_worktree, request_confirm, step, with_host,
     },
     keymap,
-    presentation::{FuzzyQuery, SnapshotIndex, selected_worktree_id},
+    presentation::{FuzzyQuery, SnapshotIndex, is_user_visible_job, selected_worktree_id},
     screens::agent_thread::presentation::tab_title,
     screens::workspace::status_kind,
     state::{
@@ -893,6 +893,7 @@ fn run_command<T: SessionTransport>(
                     ids: vec![id],
                     repo: None,
                     fetch: true,
+                    background: false,
                 });
             }
         }

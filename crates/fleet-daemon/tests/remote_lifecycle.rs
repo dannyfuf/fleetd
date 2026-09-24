@@ -76,6 +76,7 @@ async fn inspect_fanout_turns_a_down_host_into_an_item_error() {
         ids: vec![fixture.ready_id.clone(), fixture.down_id.clone()],
         repo: None,
         fetch: false,
+        background: false,
     };
 
     let ResponseBody::Inspections(results) = fixture.execute(body).await else {
@@ -128,6 +129,7 @@ async fn real_remote_inspection_reports_the_forwarding_host() {
                 ids: vec![worktree.clone()],
                 repo: None,
                 fetch: false,
+                background: false,
             },
         )
         .await

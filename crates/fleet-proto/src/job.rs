@@ -4,6 +4,12 @@ use serde::{Deserialize, Serialize};
 
 use fleet_core::ids::JobId;
 
+/// Target prefix reserved for silent app-originated inspection sweeps.
+///
+/// The daemon still records these as jobs for scheduling, cancellation, and harness accounting;
+/// app chrome uses the prefix to distinguish them from user-visible inspection jobs.
+pub const BACKGROUND_INSPECTION_TARGET_PREFIX: &str = "background-inspect-";
+
 /// Kind of durable daemon background work.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

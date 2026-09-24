@@ -600,6 +600,13 @@ The separate swarm-compatible CLI JSON envelope remains version 1.
 - **Render discipline**: a screen prepares in `synchronize` — attachment, requests, focus and
   resource reconciliation — and `render_prepared` only composes what is already prepared. Render
   performs no filesystem access and starts no request. See `docs/APP-CONTRACTS.md`.
+- **Inspection prefetch**: Hub synchronization coalesces scope and snapshot changes into one
+  explicit-ID, local-worktree inspection batch. A weak GPUI timer refreshes it every 60 s in the
+  Hub and every 5 min elsewhere without keeping the Hub entity alive; batch results are applied on
+  the foreground executor only when no newer per-row inspection supersedes them. The request's
+  defaulted `background` marker gives its daemon job a reserved target prefix, so app chrome hides
+  only sweep jobs; selected-row, palette, and CLI Inspect jobs remain visible. Harness idle still
+  counts the underlying daemon job.
 - **Design system**: `fleet-ui-kit` — see `docs/DESIGN-SYSTEM.md`. Views compose only kit
   components; no ad-hoc styling in `fleet-app`.
 

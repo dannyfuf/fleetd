@@ -88,6 +88,9 @@ impl JobCounts {
 pub fn job_counts(jobs: &[JobRecord]) -> JobCounts {
     let mut counts = JobCounts::default();
     for job in jobs {
+        if !crate::presentation::is_user_visible_job(job) {
+            continue;
+        }
         match &job.status {
             JobStatus::Queued | JobStatus::Running | JobStatus::Cancelling => counts.running += 1,
             JobStatus::Failed { .. } => counts.failed += 1,
@@ -623,6 +626,28 @@ mod tests {
         );
         assert!(!counts.is_empty());
         assert!(job_counts(&[]).is_empty());
+    }
+
+    #[test]
+    fn only_background_inspection_sweeps_are_hidden_from_the_jobs_sheet() {
+        let mut background = job("job-background-inspect", JobStatus::Running);
+        background.kind = fleet_proto::job::JobKind::Inspect;
+        background.target = format!(
+            "{}request",
+            fleet_proto::job::BACKGROUND_INSPECTION_TARGET_PREFIX
+        );
+        let mut explicit = job("job-explicit-inspect", JobStatus::Running);
+        explicit.kind = fleet_proto::job::JobKind::Inspect;
+        explicit.target = "inspect-request".to_owned();
+
+        assert!(
+            JobFilter::All
+                .visible(std::slice::from_ref(&background))
+                .next()
+                .is_none()
+        );
+        assert!(job_counts(std::slice::from_ref(&background)).is_empty());
+        assert!(JobFilter::All.visible(&[explicit]).next().is_some());
     }
 
     #[test]

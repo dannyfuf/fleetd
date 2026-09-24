@@ -2,7 +2,7 @@
 
 use std::{
     cell::RefCell,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     rc::Rc,
     time::{Duration, Instant},
 };
@@ -16,6 +16,7 @@ use fleet_core::{
 };
 use fleet_proto::{
     error::{ErrorKind, ProtoError},
+    job::{JobKind, JobStatus},
     request::RequestBody,
     response::{PrSlice, ResponseBody},
 };
@@ -80,6 +81,12 @@ fn client_error(message: impl Into<String>) -> ProtoError {
 
 /// How long the cursor must sit still before the selected worktree is re-inspected (§2.6 D-4).
 pub const AUTO_INSPECT_DEBOUNCE: Duration = Duration::from_millis(400);
+/// How often the Hub refreshes every eligible worktree while the Hub is visible (§2.6 D-4).
+pub const INSPECTION_SWEEP_VISIBLE_INTERVAL: Duration = Duration::from_secs(60);
+/// How often the Hub prefetches inspection facts while another screen is visible (§2.6 D-4).
+pub const INSPECTION_SWEEP_HIDDEN_INTERVAL: Duration = Duration::from_secs(5 * 60);
+/// Minimum age of the last completed sweep before re-entering Worktrees starts another one.
+pub const INSPECTION_SWEEP_ENTRY_FRESHNESS: Duration = Duration::from_secs(30);
 /// How long a pull-request slice stays fresh, mirroring `github.prTtlSeconds`.
 pub const PR_TTL: Duration = Duration::from_secs(90);
 /// Below this window width the detail panel docks instead of insetting (§3.4).
@@ -147,11 +154,22 @@ pub struct HubState {
     /// Bumped on every cursor move; an older debounce wakes up and does nothing.
     pub inspect_generation: u64,
     inspect_task: Option<Task<()>>,
+    inspection_sweep_task: Option<Task<()>>,
+    inspection_sweep_generation: u64,
+    inspection_sweep_request: Option<u64>,
+    inspection_sweep_pending: bool,
+    inspection_sweep_finished_at: Option<Instant>,
+    inspection_sweep_scope: Option<InspectionSweepScope>,
+    inspection_sweep_missing: HashSet<WorktreeId>,
+    inspection_sweep_timer_hub_visible: Option<bool>,
+    inspection_sweep_worktrees_visible: bool,
+    inspection_sweep_connected: bool,
     pr_refresh_task: Option<Task<()>>,
     /// Bumped on every reschedule; an older PR refresh timer wakes up and does nothing.
     pr_refresh_generation: u64,
     inspect_target: Option<WorktreeId>,
     inspection_sequence: u64,
+    /// Newest explicit per-row request, retained after completion to fence older sweep replies.
     inspection_requests: HashMap<WorktreeId, u64>,
     inspection_identities: HashMap<WorktreeId, WorktreeIdentity>,
     last_reconciled_revision: u64,
@@ -185,6 +203,82 @@ impl HubState {
         request
     }
 
+    fn begin_inspection_sweep(&mut self) -> Option<u64> {
+        if self.inspection_sweep_request.is_some() {
+            return None;
+        }
+        self.inspection_sequence = self.inspection_sequence.wrapping_add(1);
+        let request = self.inspection_sequence;
+        self.inspection_sweep_request = Some(request);
+        self.inspection_sweep_pending = false;
+        Some(request)
+    }
+
+    fn apply_inspection_sweep(
+        &mut self,
+        request: u64,
+        result: Result<ResponseBody, ProtoError>,
+        now: Instant,
+    ) -> bool {
+        if self.inspection_sweep_request != Some(request) {
+            return false;
+        }
+        self.inspection_sweep_request = None;
+        let inspections = match result {
+            Ok(ResponseBody::Inspections(inspections)) => {
+                self.inspection_sweep_finished_at = Some(now);
+                inspections
+            }
+            Ok(response) => {
+                self.inspection_sweep_finished_at = None;
+                tracing::warn!(
+                    ?response,
+                    "inspection sweep returned an unexpected response"
+                );
+                return false;
+            }
+            Err(error) => {
+                self.inspection_sweep_finished_at = None;
+                tracing::debug!(error = %error.message, "inspection sweep failed");
+                return false;
+            }
+        };
+        let mut changed = false;
+        for inspection in inspections {
+            let id = inspection.worktree_id.clone();
+            if self
+                .inspection_requests
+                .get(&id)
+                .is_some_and(|newer| *newer > request)
+            {
+                tracing::debug!(worktree = %id, "discarded stale inspection sweep result");
+                continue;
+            }
+            let slot = self.inspections.entry(id.clone()).or_default();
+            if inspection.error.is_some()
+                && slot
+                    .data
+                    .as_ref()
+                    .is_some_and(|current| current.error.is_none())
+            {
+                tracing::debug!(worktree = %id, "inspection sweep kept newer good facts");
+                continue;
+            }
+            let loading = slot.loading;
+            if slot.data.as_ref() != Some(&inspection) || slot.error.is_some() {
+                slot.data = Some(inspection);
+                slot.error = None;
+                slot.loading = loading;
+                changed = true;
+            }
+            self.inspection_sweep_missing.remove(&id);
+        }
+        if changed {
+            self.invalidate();
+        }
+        changed
+    }
+
     fn apply_inspection(
         &mut self,
         id: &WorktreeId,
@@ -194,7 +288,6 @@ impl HubState {
         if self.inspection_requests.get(id) != Some(&request) {
             return false;
         }
-        self.inspection_requests.remove(id);
         let slot = self.inspections.entry(id.clone()).or_default();
         match result {
             Ok(ResponseBody::Inspections(inspections)) => {
@@ -271,6 +364,12 @@ impl HubState {
         self.invalidate();
         intent
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InspectionSweepScope {
+    context: Option<ContextId>,
+    repo: RepoScope,
 }
 
 #[derive(Clone)]
