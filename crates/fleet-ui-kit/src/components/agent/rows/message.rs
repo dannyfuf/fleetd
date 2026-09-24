@@ -3,13 +3,13 @@
 
 use gpui::{AnyElement, App, SharedString, div, prelude::*};
 
-use super::render::{RowContext, body_region, chevron, header, separator, show_hint};
+use super::render::{RowContext, body_region, chevron, disclosure, header, separator};
 use super::{super::metrics, UserRowState};
 use super::{
     AssistantMetaRow, AssistantRow, GateOutcome, GateRow, PlanRow, TranscriptRowId, UserRow,
 };
 use crate::{
-    components::{KeyHint, markdown},
+    components::markdown,
     icons::{Icon, IconSize},
     text::Text,
     theme::ActiveTheme,
@@ -79,7 +79,7 @@ pub(super) fn user(row: &UserRow, id: &TranscriptRowId, ctx: &RowContext, cx: &A
                         el.cursor_pointer()
                             .on_click(move |_, window, cx| toggle(window, cx))
                     })
-                    .child(show_hint(row.expanded, true, "full message")),
+                    .child(disclosure(row.expanded, true, "full message")),
             )
         })
         .when(row.state == UserRowState::Failed, |el| {
@@ -88,8 +88,7 @@ pub(super) fn user(row: &UserRow, id: &TranscriptRowId, ctx: &RowContext, cx: &A
                     .flex()
                     .items_center()
                     .gap(theme.space.sm)
-                    .child(Text::hint(SharedString::new_static("not sent")).faint())
-                    .child(KeyHint::labeled("r", "retry")),
+                    .child(Text::hint(SharedString::new_static("not sent")).faint()),
             )
         });
 
@@ -137,7 +136,7 @@ pub(super) fn assistant(row: &AssistantRow, index: usize, cx: &App) -> AnyElemen
         .into_any_element()
 }
 
-/// The footer of a *terminal* assistant message: the copy key and when it last changed.
+/// The footer of a *terminal* assistant message: when it last changed. `y` copies it.
 ///
 /// Only the last assistant message of a turn is terminal, and only a terminal message gets a
 /// footer — a commentary message has nothing to copy yet.
@@ -149,7 +148,6 @@ pub(super) fn assistant_meta(row: &AssistantMetaRow, cx: &App) -> AnyElement {
         .items_center()
         .gap(theme.space.sm)
         .px(theme.space.xs)
-        .child(KeyHint::labeled("y", "copy"))
         .child(Text::hint(row.updated_at.clone()).faint())
         .into_any_element()
 }
@@ -209,7 +207,7 @@ pub(super) fn plan(row: &PlanRow, id: &TranscriptRowId, ctx: &RowContext, cx: &A
                         el.cursor_pointer()
                             .on_click(move |_, window, cx| toggle(window, cx))
                     })
-                    .child(show_hint(row.expanded, true, "full plan")),
+                    .child(disclosure(row.expanded, true, "full plan")),
             )
         })
         .into_any_element()

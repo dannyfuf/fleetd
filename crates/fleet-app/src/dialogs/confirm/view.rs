@@ -18,8 +18,7 @@ pub(crate) fn render(
                     .dismiss_action(crate::dialogs::Dialogs::Confirm.dismiss_action())
                     .icon(Icon::CircleQuestionMark)
                     .width(crate::dialogs::Dialogs::Confirm.width(cx))
-                    .body(Text::ui("This confirm was opened without a target.").muted())
-                    .hint_row(KeyHintRow::new().key("esc", "cancel")),
+                    .body(Text::ui("This confirm was opened without a target.").muted()),
             )
             .into_any_element();
     };

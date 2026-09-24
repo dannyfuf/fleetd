@@ -18,12 +18,7 @@ pub enum EngineEvent {
     /// The terminal reported its current working directory through OSC 7.
     Cwd(String),
     /// The terminal requested a clipboard write through OSC 52.
-    ClipboardWrite {
-        /// MIME type of the preferred clipboard representation.
-        mime: String,
-        /// Decoded clipboard contents.
-        data: String,
-    },
+    ClipboardWrite(String),
 }
 
 /// Failure while constructing or reconfiguring a virtual-terminal engine.

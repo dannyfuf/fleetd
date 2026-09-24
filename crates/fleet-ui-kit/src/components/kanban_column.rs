@@ -16,7 +16,7 @@
 //! Dragging a tile is the screen's too: it owns the drag, and tells the column two facts —
 //! [`KanbanColumn::drop_target`], that the drag is over it (an accent hairline), and
 //! [`KanbanColumn::drop_slot`], where the tile would land and what landing there does (a
-//! [`super::DropSlot`] drawn in the gap before that tile).
+//! [`super::DropSlot`] painted over the gap at that boundary without changing layout).
 
 use std::sync::Arc;
 
@@ -160,9 +160,10 @@ impl KanbanColumn {
         self
     }
 
-    /// Draw a [`DropSlot`] saying `label` before the tile at `index`; `index` equal to the tile
-    /// count puts it after the last tile, above the footer. The empty column's hint gives way
-    /// to it.
+    /// Draw a [`DropSlot`] saying `label` at the boundary before the tile at `index`; `index`
+    /// equal to the tile count puts it after the last tile, above the footer. The marker is an
+    /// absolute child of a relative tile wrapper, so it never changes a tile's measured height
+    /// or the body's scroll extent. An empty column draws it inside its fixed-height body.
     pub fn drop_slot(mut self, index: usize, label: impl Into<SharedString>) -> Self {
         self.drop_slot = Some((index, label.into()));
         self
@@ -318,8 +319,8 @@ impl RenderOnce for KanbanColumn {
             // The gap lives on each row, not on the body: a virtualized list lays its items out
             // itself, so a container gap would apply to nothing. The footer is the item after
             // the last tile, so it follows the cards instead of sinking to the column's floor.
-            // The slot rides inside the item it precedes, so the list measures it with that
-            // item and no row is spliced in or out while the pointer moves.
+            // The marker is absolute inside a relative card wrapper, so moving it neither
+            // remeasures a row nor splices an item into the list.
             Some((list, count, mut render_row)) if count > 0 => body.child(
                 gpui::list(list, move |index, window, cx| {
                     let item = if index < count {
@@ -327,37 +328,72 @@ impl RenderOnce for KanbanColumn {
                     } else {
                         footer.take().unwrap_or_else(|| div().into_any_element())
                     };
-                    let slot = slot
+                    let before = slot
                         .as_ref()
-                        .filter(|(at, _)| *at == index)
-                        .map(|(_, label)| DropSlot::new(label.clone()));
+                        .filter(|(at, _)| *at < count && *at == index)
+                        .map(|(_, label)| {
+                            let marker = DropSlot::new(label.clone());
+                            if index == 0 {
+                                marker.top()
+                            } else {
+                                marker.before()
+                            }
+                        });
+                    let after = slot
+                        .as_ref()
+                        .filter(|(at, _)| index + 1 == count && *at == count)
+                        .map(|(_, label)| DropSlot::new(label.clone()).after());
+                    let tile = div()
+                        .relative()
+                        .w_full()
+                        .child(item)
+                        .children(before)
+                        .children(after);
                     div()
                         .flex()
                         .flex_col()
                         .w_full()
-                        .gap(gap)
                         .pb(gap)
-                        .children(slot)
-                        .child(item)
+                        .child(tile)
                         .into_any_element()
                 })
                 .size_full(),
             ),
             Some(_) => body
+                .relative()
                 .gap(gap)
                 .children(hint)
                 .children(slot.map(|(_, label)| DropSlot::new(label)))
                 .children(footer),
             None => {
-                let mut tiles = self.tiles;
-                if let Some((at, label)) = slot {
-                    tiles.insert(at.min(tiles.len()), DropSlot::new(label).into_any_element());
-                }
+                let count = self.tiles.len();
+                let tiles = self.tiles.into_iter().enumerate().map(|(index, tile)| {
+                    let before = slot
+                        .as_ref()
+                        .filter(|(at, _)| *at < count && *at == index)
+                        .map(|(_, label)| DropSlot::new(label.clone()).before());
+                    let after = slot
+                        .as_ref()
+                        .filter(|(at, _)| index + 1 == count && *at == count)
+                        .map(|(_, label)| DropSlot::new(label.clone()).after());
+                    div()
+                        .relative()
+                        .flex()
+                        .flex_col()
+                        .w_full()
+                        .child(tile)
+                        .children(before)
+                        .children(after)
+                });
                 body.gap(gap)
                     .overflow_y_scroll()
                     .when_some(self.scroll, |el, scroll| el.track_scroll(&scroll))
+                    .when(empty, |el| el.relative())
                     .when(empty, |el| el.children(hint))
                     .children(tiles)
+                    .when(empty, |el| {
+                        el.children(slot.map(|(_, label)| DropSlot::new(label)))
+                    })
                     .children(footer)
             }
         };

@@ -229,6 +229,13 @@ fn cache_row(text: &str, wrapped: bool) -> CachedGridRow {
     cached_grid_row(&grid, 0).unwrap_or_else(|| panic!("fixture row must exist"))
 }
 
+fn cache_cells(cells: Vec<ProtoCell>, wrapped: bool) -> CachedGridRow {
+    let mut grid = MirrorGrid::new(cells.len() as u16, 1);
+    grid.lines[0] = cells;
+    grid.wrapped[0] = wrapped;
+    cached_grid_row(&grid, 0).unwrap_or_else(|| panic!("fixture row must exist"))
+}
+
 #[test]
 fn grid_size_subtracts_the_padding_on_both_axes() {
     let cell = gpui::size(px(10.0), px(20.0));
@@ -555,16 +562,61 @@ fn grid_selection_text_orders_rows_and_trims_each_one() {
 }
 
 #[test]
+fn grid_selection_text_preserves_empty_cell_gaps_and_leading_indentation() {
+    let mut grid = MirrorGrid::new(10, 1);
+    grid.lines[0] = vec![
+        cell(""),
+        cell(""),
+        cell("o"),
+        cell("n"),
+        cell("e"),
+        cell(""),
+        cell(""),
+        cell("t"),
+        cell("w"),
+        cell("o"),
+    ];
+
+    assert_eq!(
+        grid_selection_text(&grid, GridSelection::new(0, 0, 0, 10)),
+        "  one  two"
+    );
+}
+
+#[test]
+fn mouse_column_selection_can_start_and_end_inside_empty_cell_gaps() {
+    let mut grid = MirrorGrid::new(9, 1);
+    grid.lines[0] = vec![
+        cell("a"),
+        cell(""),
+        cell(""),
+        cell(""),
+        cell("b"),
+        cell(""),
+        cell(""),
+        cell(""),
+        cell("c"),
+    ];
+    grid.wrapped[0] = true;
+    let selection = cell_selection(CellPoint::new(0, 2), CellPoint::new(0, 6));
+
+    assert_eq!(grid_selection_text(&grid, selection), "  b  ");
+}
+
+#[test]
 fn grid_selection_text_joins_three_soft_wrapped_rows_as_one_line() {
     let mut grid = MirrorGrid::new(4, 3);
-    grid.lines = ["abc ", "def ", "ghi "]
-        .map(|row| row.chars().map(|c| cell(&c.to_string())).collect())
-        .to_vec();
+    grid.lines = vec![
+        vec![cell("a"), cell("b"), cell("c"), cell("")],
+        vec![cell("d"), cell("e"), cell("f"), cell("")],
+        vec![cell("g"), cell("h"), cell("i"), cell("")],
+    ];
     grid.wrapped = vec![true, true, false];
 
     assert_eq!(
         grid_selection_text(&grid, GridSelection::new(0, 0, 2, 4)),
-        "abc def ghi"
+        "abc def ghi",
+        "empty cells before soft wraps survive, but a non-wrapped row's trailing gap is trimmed"
     );
 }
 
@@ -587,6 +639,40 @@ fn grid_selection_text_emits_a_wide_cell_once() {
         grid_selection_text(&grid, GridSelection::new(0, 2, 0, 3)),
         "漢",
         "selecting the second half of a wide cell still emits one grapheme"
+    );
+}
+
+#[test]
+fn wide_cells_at_both_selection_boundaries_emit_once() {
+    let mut grid = MirrorGrid::new(5, 1);
+    grid.lines[0] = vec![
+        wide_cell("漢"),
+        spacer(),
+        cell("x"),
+        wide_cell("界"),
+        spacer(),
+    ];
+
+    assert_eq!(
+        grid_selection_text(&grid, GridSelection::new(0, 1, 0, 4)),
+        "漢x界"
+    );
+}
+
+#[test]
+fn a_wide_empty_cell_contributes_only_its_selected_columns() {
+    let mut grid = MirrorGrid::new(4, 1);
+    grid.lines[0] = vec![cell("a"), wide_cell(""), spacer(), cell("b")];
+    grid.wrapped[0] = true;
+
+    assert_eq!(
+        grid_selection_text(&grid, GridSelection::new(0, 1, 0, 3)),
+        "  "
+    );
+    assert_eq!(
+        grid_selection_text(&grid, GridSelection::new(0, 2, 0, 3)),
+        " ",
+        "selecting inside a wide blank emits one space, not the cell's full width"
     );
 }
 
@@ -687,8 +773,20 @@ fn yanked_text_spans_every_line_the_selection_covers() {
 #[test]
 fn keyboard_copy_rejects_gaps_and_joins_wrapped_lines() {
     let history = BTreeMap::from([
-        (10, cache_row("soft ", true)),
-        (11, cache_row("wrap", false)),
+        (
+            10,
+            cache_cells(
+                vec![cell("s"), cell("o"), cell("f"), cell("t"), cell("")],
+                true,
+            ),
+        ),
+        (
+            11,
+            cache_cells(
+                vec![cell("w"), cell("r"), cell("a"), cell("p"), cell("")],
+                false,
+            ),
+        ),
         (12, cache_row("next", false)),
     ]);
     assert_eq!(

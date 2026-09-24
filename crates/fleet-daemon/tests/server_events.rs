@@ -22,7 +22,7 @@ use fleet_proto::{
     PROTOCOL_VERSION,
     codec::FleetCodec,
     event::{Event, EventKind},
-    request::{Request, RequestBody},
+    request::{HelloClient, Request, RequestBody},
     response::{Response, ResponseBody},
 };
 use futures_util::{SinkExt, StreamExt};
@@ -513,6 +513,135 @@ async fn a_second_subscribe_adds_to_the_kinds_a_connection_already_receives() {
         .expect("listener shutdown");
 }
 
+#[tokio::test]
+async fn osc_52_reaches_a_capable_attached_subscriber() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let home = temp.path().join("fleet");
+    let release = home.join("clipboard-release");
+    let command = format!(
+        "while [ ! -e '{}' ]; do :; done; printf '\\033]52;c;YSBi\\007'; sleep 30",
+        release.display()
+    );
+    let events = BroadcastBus::default();
+    let (services, session_id, terminal) =
+        services_with_terminal_command(&home, events.clone(), command).await;
+    let shutdown = CancellationToken::new();
+    let listener = Listener::bind(&home, services.clone(), events, shutdown.clone())
+        .await
+        .expect("bind");
+    let socket = listener.socket_path().to_path_buf();
+    let task = tokio::spawn(listener.run());
+
+    let mut capable_attached = clipboard_client(&socket, terminal).await;
+
+    std::fs::write(&release, b"go").expect("release terminal command");
+
+    let received = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let value = capable_attached
+                .next()
+                .await
+                .expect("capable client remains connected")
+                .expect("decode capable client frame");
+            if value.get("id").is_none() {
+                let event: Event = serde_json::from_value(value).expect("clipboard event");
+                if matches!(
+                    event,
+                    Event::TerminalClipboard {
+                        terminal: event_terminal,
+                        ref text,
+                    } if event_terminal == terminal && text == "a b"
+                ) {
+                    break event;
+                }
+            }
+        }
+    })
+    .await
+    .expect("clipboard event deadline");
+    assert_eq!(
+        received,
+        Event::TerminalClipboard {
+            terminal,
+            text: "a b".to_owned(),
+        }
+    );
+
+    services
+        .sessions
+        .kill(session_id)
+        .await
+        .expect("stop session");
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("listener deadline")
+        .expect("listener task")
+        .expect("listener shutdown");
+}
+
+type TestClient = Framed<tokio::net::UnixStream, FleetCodec<Request, serde_json::Value>>;
+
+async fn clipboard_client(socket: &std::path::Path, terminal: TerminalId) -> TestClient {
+    let stream = tokio::net::UnixStream::connect(socket)
+        .await
+        .expect("connect clipboard client");
+    let mut client = Framed::new(stream, FleetCodec::new());
+    for (id, body) in [
+        (
+            1,
+            RequestBody::Hello {
+                protocol: PROTOCOL_VERSION,
+                client: HelloClient {
+                    capabilities: vec![fleet_proto::TERMINAL_CLIPBOARD_CAPABILITY.to_owned()],
+                    ..HelloClient::default()
+                },
+            },
+        ),
+        (
+            2,
+            RequestBody::Subscribe {
+                events: vec![EventKind::TerminalClipboard],
+            },
+        ),
+    ] {
+        client
+            .send(Request { id, body })
+            .await
+            .expect("send clipboard setup request");
+        expect_response(&mut client, id).await;
+    }
+    client
+        .send(Request {
+            id: 3,
+            body: RequestBody::AttachTerminal {
+                terminal,
+                cols: 80,
+                rows: 24,
+            },
+        })
+        .await
+        .expect("attach clipboard client");
+    expect_response(&mut client, 3).await;
+    client
+}
+
+async fn expect_response(client: &mut TestClient, id: u64) {
+    loop {
+        let value = client
+            .next()
+            .await
+            .expect("response frame")
+            .expect("decode response frame");
+        if value.get("id").is_some() {
+            let response: Response = serde_json::from_value(value).expect("response envelope");
+            assert_eq!(response.id, id);
+            assert!(response.result.is_ok());
+            return;
+        }
+    }
+}
+
 /// A `SessionChanged` with every terminal title cleared, so a test can compare transitions
 /// without the PTY's asynchronous title updates counting as state changes of their own.
 fn untitled(event: Event) -> Event {
@@ -541,6 +670,14 @@ async fn services_with_session(
     home: &std::path::Path,
     events: BroadcastBus,
 ) -> (Arc<Services>, SessionId, TerminalId) {
+    services_with_terminal_command(home, events, "/bin/sh -c 'sleep 30'".to_owned()).await
+}
+
+async fn services_with_terminal_command(
+    home: &std::path::Path,
+    events: BroadcastBus,
+    command: String,
+) -> (Arc<Services>, SessionId, TerminalId) {
     let (config, state, jobs, adapters) = service_parts(home);
     let worktree_path = home.join("worktrees/repo/feature");
     std::fs::create_dir_all(&worktree_path).unwrap_or_else(|error| panic!("{error}"));
@@ -550,7 +687,7 @@ async fn services_with_session(
         .unwrap_or_else(|error| panic!("{error}"));
     effective.windows = vec![WindowConfig {
         name: "agent".to_owned(),
-        command: "/bin/sh -c 'sleep 30'".to_owned(),
+        command,
     }];
     config
         .save(effective)

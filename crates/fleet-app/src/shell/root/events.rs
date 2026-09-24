@@ -1,4 +1,5 @@
 use super::Shell;
+use super::clipboard;
 use crate::{
     bridge::{Bridge, BridgeEvent},
     presentation::EventDamage,
@@ -162,8 +163,27 @@ fn apply_batch(
     let mut damage = BatchDamage::default();
     // One instant for the whole burst: every event in it was produced before this dispatch.
     let now = Instant::now();
+    let mut pending = Vec::new();
+    for event in events {
+        match event {
+            BridgeEvent::Daemon(event) => match *event {
+                fleet_proto::event::Event::TerminalClipboard { terminal, text } => {
+                    if !pending.is_empty() {
+                        state.update(cx, |state, _| {
+                            for event in pending.drain(..) {
+                                damage.apply(state, event, now);
+                            }
+                        });
+                    }
+                    clipboard::handle(state, terminal, text, cx);
+                }
+                event => pending.push(BridgeEvent::Daemon(Box::new(event))),
+            },
+            event => pending.push(event),
+        }
+    }
     state.update(cx, |state, cx| {
-        for event in events {
+        for event in pending {
             damage.apply(state, event, now);
         }
         if damage.state {

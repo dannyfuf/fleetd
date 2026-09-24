@@ -434,7 +434,7 @@ fn marks_section(cx: &mut App) -> AnyElement {
             LAYOUT.labeled(
                 "degraded (outranks keep-alive)",
                 &t,
-                DegradedChip::hooks_failed().hint("J", "for log"),
+                DegradedChip::hooks_failed(),
             ),
             LAYOUT.labeled(
                 "spinners",

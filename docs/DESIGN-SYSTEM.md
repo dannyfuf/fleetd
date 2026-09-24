@@ -279,19 +279,19 @@ list below is the complete inventory, in px unless marked `ch`; a unit test in
 
 | Group | Tokens |
 | --- | --- |
-| Window chrome | `title_bar_h 44` · `status_bar_h 28` · `traffic_light_inset 84` · `command_field_w 340` · `filter_field_w 220` · `monogram_size 18` · `mode_word_w 84` · `banner_h 28` · `frame_banner_h 40` · `strip_h 22` |
+| Window chrome | `title_bar_h 44` · `status_bar_h 28` · `traffic_light_inset 84` · `command_field_w 240` · `filter_field_w 220` · `monogram_size 18` · `mode_word_w 84` · `banner_h 28` · `frame_banner_h 40` · `strip_h 22` |
 | Layout columns | `sidebar_w 232` · `sidebar_min_w 200` · `sidebar_max_w 320` · `sidebar_collapsed_w 44` · `resize_handle_w 6` · `detail_w 344` · `changes_w 300` · `detail_overlay_w 320` · `sheet_w 440` · `sheet_expanded_w 640` · `sheet_w_detail 736` · `sheet_detail_props_w 268` · `first_run_w 560` |
 | Rows and headers | `row_h 30` · `row_h_comfortable 44` · `pane_header_h 30` · `section_header_h 20` · `palette_row_h 34` · `palette_tile 22` · `job_row_h 44` · `progress_bar_h 4` |
 | Controls | `button_h 30` · `button_h_compact 26` · `kbd_h 18` · `kbd_h_small 16` · `chip_h 22` · `tile_chip_h 18` · `avatar_size 20` · `text_field_h 36` · `field_status_h 18` · `number_field_w 96` · `segment_h 24` · `switch_w 34` · `switch_h 20` · `checkbox_size 16` · `step_badge 28` |
 | Dialogs and floating layers | `dialog_w 560` · `confirm_compact_w 480` · `dialog_header_h 44` · `dialog_footer_h 44` · `palette_w 640` · `palette_top 120` · `prefix_menu_w 900` · `palette_input_h 44` · `overlay_help_w 640` · `toast_w 320` · `toast_inset 12` · `scroll_pill_w 176` · `menu_min_w 240` · `alert_tile 34` |
-| Lines and marks | `hairline 1` · `focus_ring_w 2` · `scroll_thumb_w 3` · `dot_size 8` · `dot_size_small 6` |
+| Lines and marks | `hairline 1` · `focus_ring_w 2` · `drop_marker_h 2` · `scroll_thumb_w 3` · `dot_size 8` · `dot_size_small 6` |
 | Terminal | `cell_w 7.5` · `cell_h 18` · `terminal_tab_min_w 84` · `terminal_tab_max_w 200` · `tab_strip_h 40` · `terminal_tab_h 34` · `tab_close_size 18` |
 | Detail and doctor columns | `fact_label_w 104` · `doctor_check_w 120` · `doctor_status_w 64` |
 | Git UI | `status_pane_h 62` · `stash_pane_h 92` · `editor_box_h 160` · `diff_row_h 18` · `diff_caret_h 14` · `diff_scrollbar_w 5` · `diff_thumb_min_h 24` · `diff_horizontal_step 4ch` |
 
 `row_h` (30) is the dense row, for menus, pickers and terminal-side lists; `row_h_comfortable`
 (44) is the hub-list row. `title_bar_h` is the one top row of every window; `command_field_w` is
-the palette field centred in it and `monogram_size` the context switcher's letter tile. `filter_field_w` is the `FilterField` in a page header's toolbar.
+the palette field at its right, before the status cluster, and `monogram_size` the context switcher's letter tile. `filter_field_w` is the `FilterField` in a page header's toolbar.
 `mode_word_w` is the embedded Git UI's status word only — Fleet's own chrome draws no mode word.
 `sidebar_w` is the Hub sidebar's width until its edge is dragged, within `sidebar_min_w`–`sidebar_max_w`; `sidebar_collapsed_w` is its icon column (`H`) and `resize_handle_w` the grab strip on a draggable edge. `kbd_h_small` is the
 key chip inside a compact button or a menu item. `segment_h` plus a `SegmentedControl`'s `xxs`
@@ -350,12 +350,25 @@ panel mirrors it.
 
 ## 4. Keyboard hint conventions
 
-- **A hint lives inside the control that performs the action**: in the button, at the right of
-  the menu item, in the tooltip of an icon-only button, on the palette or Help row. It is a `Kbd`
-  chip resolved from the live keymap for the focused context and never a typed string; an
-  action with no binding there shows no chip. Modifier glyphs follow the platform.
+- **A control carries its key in its tooltip, not on its face.** A button, an icon button, a
+  segment, a status button, a filter field: the pointer resting on it shows the label and a `Kbd`
+  chip resolved from the live keymap, never a typed string; an action with no binding there shows
+  none. A chip on every face is noise, and a face chip resolved from the focused element comes and
+  goes as an overlay takes the focus, resizing the control under it. Modifier glyphs follow the
+  platform.
+- **A key chip on a face is reserved for surfaces whose point is keys**, and only these:
+  the title bar's `CommandField` (the palette reaches everything else); the status bar's
+  `Fleet commands ⌃S` and `Shortcuts ?` (the two keys every other key hangs off); the ⌃S command
+  menu; Help, its shortcut list and its guides' buttons; the palette's key column and `Run` key;
+  the right-hand chips of a `Menu` item; a `ConfirmDialog`'s confirm and `Cancel` (whether `y` or
+  only `⇧Y` confirms is the dialog's point); the `DecisionDock`'s options and buttons; and the
+  `ExitStrip`. A button opts in with `Button::show_kbd`.
+- **A face chip holds still.** It is read from the key table (`keymap::keystrokes_in`) or from the
+  handle of a surface that keeps the focus while it shows (a dialog, a menu's origin), never from
+  whatever element is focused, so opening the palette, a popover or a dialog never moves anything.
 - **No footer legends.** A `KeyHintRow` is allowed only on a surface that has no controls to
-  carry its keys: the terminal `ExitStrip` and the `ScrollPill`.
+  carry its keys: the terminal `ExitStrip`, the `DecisionDock`'s key row, an empty agent thread's
+  triggers, and the embedded Git UI, which keeps lazygit's own vocabulary.
 - **Lowercase = safe, uppercase = stronger variant.** `FactList::confirm_key()` returns
   `ConfirmKey::Lower` (`y`, and `Enter` is accepted), drawn as the primary button, or
   `ConfirmKey::Upper` (`Y`, and `Enter` is **not** accepted), drawn as a `danger` button. Never
@@ -629,19 +642,22 @@ row with columns is a `Row`, not a `NavItem`.
 #### `TitleBar`
 **Purpose.** The one 44 px row at the top of every window: where you are, a way to search or run
 anything, and what needs you. It is the unified macOS titlebar.
-**Anatomy.** `[traffic-light inset][leading …][CommandField, centred in the window][… trailing]`.
+**Anatomy.** `[traffic-light inset][leading …][CommandField][trailing]`, weighted to the left: the
+leading region takes every pixel the other two leave, and the field sits right-aligned against the
+trailing cluster, `lg` after the leading region and `sm` before the cluster.
 In the Hub, leading is the context switcher (a `SwitcherButton` with a monogram, opening a
 `PopoverMenu`) and the section nav (a `SegmentedControl` with counts); in the Workspace it is the
-breadcrumb `← Worktrees / repo / worktree`. Trailing is the status cluster — `StatusButton`s for
+breadcrumb `‹ repo / worktree ⌄` and the facts about the worktree (UX-SPEC §3.6). Trailing is the
+status cluster — `StatusButton`s for
 what needs you, jobs, an update and an unhealthy daemon, each only while non-zero — then Help and
 Settings as `IconButton`s.
-**API.** `TitleBar::new().leading_inset(Pixels).leading(..).center(..).trailing(..)`; `leading`
+**API.** `TitleBar::new().leading_inset(Pixels).leading(..).command(..).trailing(..)`; `leading`
 and `trailing` append, left to right.
 **States.** Hub · Workspace · first run (empty: there is nowhere to go yet) · busy (status buttons
 present) · daemon unhealthy (amber `Reconnecting…` / red `fleetd down` pill).
-**Usage rule.** Once per window, through `AppFrame::title_bar`; the frame owns the height. The two
-side regions split the width either side of the field equally and clip, so a narrow window loses
-the ends of its labels, never the field. A floating window of its own (the agent popup) draws a
+**Usage rule.** Once per window, through `AppFrame::title_bar`; the frame owns the height. Only the
+leading region yields width, and it clips, so a narrow window loses the end of where-you-are, never
+the field, a count or Help. A floating window of its own (the agent popup) draws a
 header, not a second title bar. The default inset is the `md` gutter; pass
 `metrics.traffic_light_inset` on macOS.
 
@@ -650,8 +666,9 @@ header, not a second title bar. The default inset is the `md` gutter; pass
 that opens the palette.
 **API.** `CommandField::new(id, placeholder).action(Box<dyn Action>).kbd(Kbd)`.
 **Usage rule.** It is not an input: the click dispatches the palette's open action and the typing
-happens in the palette. `command_field_w` wide, `button_h` tall. The chip resolves from the live
-keymap like every `Button`'s.
+happens in the palette. `command_field_w` wide, `button_h` tall, whatever its chip. Its chip is one
+of the few a face keeps (§4); `fleet-app` passes it with `.kbd` from the key table
+(`presentation::palette_key`), so the palette taking the focus never takes the chip with it.
 
 #### `StatusBar`
 **Purpose.** Where you are and what is running: daemon · breadcrumb · job ticker or sticky error ·
@@ -700,16 +717,17 @@ holds the page's own controls — a `FilterField`, secondary `Button`s, at most 
 `SectionHeader` (a block inside a panel).
 
 #### `FilterField`
-**Purpose.** A page or board header's filter box: magnifier, the query or a placeholder, and the
-key that opens it; while editing, the live editor and `shown/total`. The one filter box of the
+**Purpose.** A page or board header's filter box: magnifier, and the query or a placeholder; while
+editing, the live editor and `shown/total`. The one filter box of the
 redesigned surfaces — use it for the Worktrees page and the board header alike.
 **API.** `FilterField::new(id, placeholder)` then `.query(text)` (the retained value, shown idle)
 `.editor(Entity<TextInput>)` (the surface is editing: draw the editor) `.counts(shown, total)`
-`.action(Box<dyn Action>)` (a click dispatches it, and its live key is the chip) `.on_click(handler)`
-(a click runs it; for a filter that is not an action) `.kbd(Kbd)` (chip override)
+`.action(Box<dyn Action>)` (a click dispatches it, and its live key is in the tooltip)
+`.on_click(handler)` (a click runs it; for a filter that is not an action) `.kbd(Kbd)` (key
+override)
 `.on_clear(handler)` (a `✕` while a query is set, idle or editing) `.width(Pixels)` (default
 `filter_field_w`); `.is_editing()`, `.count_tone()`.
-**States.** idle (placeholder, key chip) · retained (the query in body text) · clearable (`✕`) ·
+**States.** idle (placeholder; the key in the tooltip) · retained (the query in body text) · clearable (`✕`) ·
 editing (the embedded editor, a `focus_ring` border, `shown/total`) · no match (the count turns
 amber).
 **Usage rule.** One box, two faces, so opening the filter moves nothing. The field takes no focus
@@ -742,7 +760,7 @@ segmented control) and the close ✕ at the right; body = padded, or edge to edg
 `flush_body(true)` for a dialog that lays out its own panes (Help's sidebar and content);
 footer = `footer_start` (a link-like control such as "Open config.json", after any legacy
 hints) on the left, the `actions` buttons right-aligned —
-secondary first, the one primary last, each with its key chip.
+secondary first, the one primary last, each naming its key in its tooltip.
 **Alert form.** `.alert()` draws the header as an alert (a confirm): the icon in an `alert_tile`
 square filled with the `tone`'s fill, the title beside it and the subtitle on its own line under
 the title, with no rule and no ✕ — the footer's `Cancel` and a click outside close it — and the
@@ -941,8 +959,8 @@ word that must survive on a selected row.
 **Usage rule.** `DegradedChip` **outranks** this in the same row slot.
 
 #### `DegradedChip`
-**Purpose.** `⚠ hooks failed` with the key that opens the log.
-**API.** `DegradedChip::{hooks_failed, new(text)}().hint(key, label)`.
+**Purpose.** `⚠ hooks failed`.
+**API.** `DegradedChip::{hooks_failed, new(text)}()`.
 **Usage rule.** A worktree that looks ready but whose post-create hooks failed is a trap; this
 chip persists until the hooks job succeeds or the fact is dismissed from the detail panel.
 
@@ -1038,9 +1056,8 @@ stay usable. Copy is swarm's, verbatim.
 renders from `state.json` immediately; a skeleton where cached truth exists is a lie.
 
 #### `KeyHint` / `KeyHintRow`
-**Purpose.** A key and its label as text, for the two surfaces with no control to carry a key
-(§4). Everywhere else a control shows a `Kbd` (§6.8); existing hint rows move over as their
-surfaces are rebuilt.
+**Purpose.** A key and its label as text, for the few surfaces with no control to carry a key
+(§4). Everywhere else a control names its key in its tooltip (§6.8).
 **API.** `KeyHint::{new(keys), labeled(keys, label)}().label(..).tone(Tone).key_tone(Tone)`;
 `KeyHintRow::new().hint(KeyHint).key(keys, label).merge(other)`.
 **Usage rule.** See §4 — prefix every Workspace hint.
@@ -1190,7 +1207,7 @@ domain's fields. Where a surface keeps a cap, the footer says `9 of 63`.
 **API.** `FilterBar::new(input: Entity<TextInput>, shown, total)`; `.query_slot()`,
 `.is_empty_result()`, `.count_tone()`. The owner builds the editor **embedded**
 (`set_embedded(true, cx)`) so it fits the 30 px header row, and sets its placeholder.
-**States.** typing (caret, `esc` hint) · with a query, a compact clear ✕ at the end of the field
+**States.** typing (caret) · with a query, a compact clear ✕ at the end of the field
 (painted `filter.clear`) that empties the editor — the same edit `ctrl-u` makes, so the owner hears
 an ordinary change and the input keeps the keyboard · empty (no ✕: nothing to clear) · no match
 (`shown/total` turns amber). "Exited but
@@ -1303,8 +1320,9 @@ confirm).
 .action_label(..).strong_label(..).width(Pixels).body(..).footer_start(..).error(..)
 .force_confirm_key(ConfirmKey).dismiss_action(..).on_dismiss(..)`; `.is_compact()`,
 `.confirm_key()`, `.button_label()`, `.resolved_width(&Theme)`. Every button dispatches the
-action its key does and shows that key from the live keymap: `Cancel` the dismiss action, the
-action button `lower` or `strong` as the key rule asks, `Re-check` the recheck action. Without
+action its key does and names that key from the live keymap: `Cancel` the dismiss action, the
+action button `lower` or `strong` as the key rule asks, `Re-check` the recheck action. `Cancel`
+and the action button keep the chip on the face (§4); `Re-check` names it in its tooltip. Without
 `accept_actions` the footer states the key as a bold label only.
 **States.** compact · expanded (primary) · expanded with an unknown fact (danger) · facts loading
 (`checking…`, the action button disabled) · error line · multi-target body (prune: `Delete` and
@@ -1384,8 +1402,8 @@ present.
 **Purpose.** Red, addressable with `!`, persists until dismissed.
 **API.** `StickyErrorSlot::new(id, text).kbd(Option<Kbd>).count(usize).action(Box<dyn Action>)
 .on_activate(Fn(..)).dismiss_action(Box<dyn Action>).on_dismiss(Fn(..))`.
-**Anatomy.** `⚠ text xN <key>` as one control, then a sibling ✕ (`sticky_error.close`). A click on
-the error runs its action — the same one its key chip names — and the ✕ its dismiss.
+**Anatomy.** `⚠ text xN` as one control, then a sibling ✕ (`sticky_error.close`). A click on
+the error runs its action — the same one the key in its tooltip runs — and the ✕ its dismiss.
 **States.** clickable (with an action) · display only · repeated (`xN`) · dismissable.
 **Usage rule.** Errors go here, **never** into a toast. It owns the last failed job and holds
 the red jobs chip until the Jobs panel has been opened.
@@ -1500,7 +1518,7 @@ agent. **Harness.** `tabs.tab[N]` / `agents.tabs.tab[N]`, their `.close`, and `t
 
 #### `ScrollPill`
 **Purpose.** `SCROLL <offset>/<len>` while in scroll mode.
-**API.** `ScrollPill::new(offset, len).selecting(bool).alt_screen(bool)`; `.is_visible()`.
+**API.** `ScrollPill::new(offset, len).alt_screen(bool)`; `.is_visible()`.
 **Usage rule.** **Suppressed in alt-screen** — when an alt-screen app is running, `ctrl-s [`
 shows the 1.6 s toast `no scrollback in alt-screen` instead. Top-right inside the terminal area,
 because during scroll the eyes are on content and the top right never covers the prompt.
@@ -1562,15 +1580,15 @@ surface exists to prevent.
 
 #### `StepCard`
 **Purpose.** One clickable step of the first-run page: a number, a title, one muted line, and its
-key.
+key in the tooltip.
 **API.** `StepCard::new(id, StepMark::{Number(n), Icon(icon)}, title).description(..)
 .action(Box<dyn Action>).kbd(Kbd).on_click(Fn(..)).current(bool).unavailable(note).dashed(bool)`.
 **Anatomy.** A `radii.card` box with `lg`/`md` padding: a `step_badge` round number (accent fill
-when current, `control` otherwise) or a glyph, the title in `UiStrong` over a muted `caption`, and
-the action's live key chip at the end — or, when unavailable, the note that says when it becomes
-available.
+when current, `control` otherwise) or a glyph, the title in `UiStrong` over a muted `caption`, and,
+when unavailable, the note that says when it becomes available. The action's live key is in the
+tooltip.
 **States.** current (accent badge, accent-tinted hairline and fill) · pending · unavailable
-(dimmed, no click, a note instead of a key) · dashed (an optional side path, no fill) · hover.
+(dimmed, no click, a note at the end) · dashed (an optional side path, no fill) · hover.
 **Usage rule.** Only for the two-to-four steps of a first-time screen; the whole card is the
 control, so do not put a `Button` inside it.
 
@@ -1736,7 +1754,8 @@ occupant's amber glyph (`lock`, `message-square-warning`, `list-checks`), the ti
 counter — then the body, then a row of `Button`s: the first verb `Primary`, the rest `Secondary`,
 and `Deny and stop` a `GhostDanger` set apart at the far right. An approval's body is the payload
 well, a one-line caution, and the diff under a file header (`README.md  +1 −1`); a question's is
-its header, prompt and one clickable option row per option, each led by its digit's `Kbd` and, on
+its header, prompt and one clickable option row per option, each led by its digit's `Kbd` in a
+chip-wide slot and, on
 a multi-select question, a `square` / `square-check` box; a plan's is its title and body.
 **API.** `DecisionDock::new(Decision).diff(..).diff_header(..).payload_focus(FocusHandle)
 .on_action(Fn(DecisionAction, ..)).kbd_for(Fn(&DecisionAction, &Window, &App) -> Option<Kbd>)`.
@@ -1963,7 +1982,7 @@ something, the **automation pill** (`tile_chip_h`, `control` fill, an amber `zap
 words). Then the gapped body of tiles, virtualized through `gpui::list` when the caller supplies
 a `ListState`, ending in the **footer** slot · a faint `Caption` hint when the column is empty ·
 `Pane`'s 2 px focus ring. While a drag is over it, an `accent` hairline replaces the `border` one
-and a `DropSlot` sits in the gap the tile would take.
+and a `DropSlot` insertion line is painted over the boundary where the tile would land.
 **API.** `KanbanColumn::new(id, title).count(usize).accent(Option<Hsla>).automation(label)
 .on_automation_click(..).focused(bool).drop_target(bool).drop_slot(index, label).width(Pixels)
 .empty_hint(..).add_button(impl IntoElement).footer(impl IntoElement)` then either `.tiles(impl IntoIterator<Item = AnyElement>)
@@ -1972,8 +1991,9 @@ and a `DropSlot` sits in the gap the tile would take.
 column's own overdraw, and `list_state_with_footer()` one already holding the footer's item.
 `COLUMN_WIDTH_CH` = 34. `KanbanBoard::new(id).columns(..).scroll_handle(ScrollHandle)`.
 **States.** default · focused (the 2 px pane ring) · empty (the hint, then the footer) · with and
-without the automation pill · drop target (the accent hairline) · with a drop slot (before tile
-`index`, or after the last one when `index` is the count; an empty column's hint gives way to it).
+without the automation pill · drop target (the accent hairline) · with a drop marker (before tile
+`index`, or after the last one when `index` is the count; an empty column's hint gives way to a
+marker inside the same fixed-height body).
 **Variants.** column (vertical, `COLUMN_WIDTH_CH` wide) · board (the horizontal scroller).
 **Usage rule.** The count renders even at `0` — a column header is a ledger, and a missing
 count reads as "unknown", not as "empty". `automation(..)` takes the words, and which columns
@@ -1988,19 +2008,25 @@ elements builds and measures every one of them every frame. `gpui::list` and not
 `j` / `k` move a cursor the screen owns, exactly as they do for `ListView`. Every pointer
 affordance is a slot, so a drop target or a drag handle can join a column without the kit
 learning what a card is: the screen owns the drag and tells the column only `drop_target` and
-`drop_slot`. In the `rows(..)` form the slot is drawn inside the item it precedes, so the list
-measures it with that item and nothing is spliced while the pointer moves.
+`drop_slot`. In the `rows(..)` form each tile has a relative wrapper of exactly the same measured
+height before and during a drag. The marker is an absolute child centred in the `sm` gap before
+the target tile, or on the last tile's bottom edge; it never changes an item's height, the list's scroll
+extent, another card's bounds or the column's scroll offset.
 
 #### `DropSlot`
-**Purpose.** Where a dragged tile will land, and what landing there does.
-**Anatomy.** A full-width well at least `row_h_comfortable` tall, `lg` vertical padding,
-`radii.card`, a dashed `accent` hairline on `accent_subtle`, one centred `Caption` in the accent
-tone: `Drop to start FLT-3 · codex will pick it up`.
-**API.** `DropSlot::new(label)`.
-**States.** one; it exists only while a drag hovers the place it marks.
-**Usage rule.** The label is the drop's consequence in words, written by the app; the slot is not
-pressable and is never drawn where the drop would do nothing. Inside a column reach for
-`KanbanColumn::drop_slot`, which places it; use `DropSlot` directly only in another container.
+**Purpose.** The insertion boundary where a dragged tile will land, without participating in
+layout.
+**Anatomy.** A full-width `drop_marker_h` accent line, inset by `xs` and absolutely positioned in
+a relative wrapper. Its accessible label is the consequence in words: `Drop to start FLT-3 ·
+codex will pick it up`; the sentence is not painted, because a label-driven row would resize the
+measured item it joined.
+**API.** `DropSlot::new(label).before()` / `.after()`; bare `new` places the line just inside an
+empty relative body.
+**States.** before a tile · after the last tile · inside an empty column.
+**Usage rule.** The label is written by the app and retained for accessibility; the column's
+accent hairline gives the visual column-level meaning. The marker is not pressable and is never
+drawn where the drop would do nothing. Inside a column reach for `KanbanColumn::drop_slot`, which
+places it; use `DropSlot` directly only inside another relative container.
 
 **Gallery.** The board group's bench is `examples/gallery_board.rs` (live cursor, live editor,
 `[` / `]` moving a card, `p` cycling the priority); `kit_gallery`'s `board` section shows the
@@ -2009,10 +2035,10 @@ same components as a static overview in both themes.
 ### 6.8 Controls
 
 The primitives every redesigned surface is built from (ADR 0023): a key chip that always says
-what the keymap says, a button that shows one, an icon-only button, a tooltip, and the menus a
-button or a right-click opens. No button, trigger or tooltip is focusable; a menu takes the focus
-only while it is open. The keyboard path to a control is the key on its chip, so a click and a key
-press are one dispatch, and `Tab`, `j`/`k` and pane focus keep their meaning.
+what the keymap says, a button that names one in its tooltip, an icon-only button, a tooltip, and
+the menus a button or a right-click opens. No button, trigger or tooltip is focusable; a menu takes
+the focus only while it is open. The keyboard path to a control is the key its tooltip names, so a
+click and a key press are one dispatch, and `Tab`, `j`/`k` and pane focus keep their meaning.
 
 **How the app passes a key in.** The kit takes no domain type, but a gpui `Action` is not one: it
 is the same currency the keymap binds. A view hands the kit the action (`Button::action(Box<dyn
@@ -2068,14 +2094,15 @@ spelling) lives beside it only until the palette and the prefix toast are rebuil
 longer uses it); `fleet_app::presentation::pretty_keys` re-exports it.
 
 #### `Button`
-**Purpose.** A verb the pointer can press, showing the key that does the same thing.
-**Anatomy.** `[icon] label [Kbd]`, `sm` apart, `md` side padding (`sm` compact), `button_h` (or
+**Purpose.** A verb the pointer can press, naming in its tooltip the key that does the same thing.
+**Anatomy.** `[icon] label`, `sm` apart, `md` side padding (`sm` compact), `button_h` (or
 `button_h_compact`) tall, `radii.control`, a hairline. Label in `UiStrong`; icon 14 px (12
-compact); the chip `kbd_h` (`kbd_h_small` compact) and toned for the fill.
+compact). With `.show_kbd()`, `[icon] label [Kbd]`: the chip `kbd_h` (`kbd_h_small` compact) and
+toned for the fill.
 **API.** `Button::new(id, label)` then `.style(ButtonStyle::{Primary, Secondary, Ghost, Danger, GhostDanger})
 .size(ButtonSize::{Default, Compact}) .icon(Icon) .dot(Hsla) .kbd(Kbd) .action(Box<dyn Action>) .prefer_key(keys) .key_of(Box<dyn Action>)
 .on_click(Fn(&ClickEvent, &mut Window, &mut App)) .disabled(bool) .selected(bool) .full_width()
-.tooltip(text)`. `.dot(color)` leads the label with a `dot_size_small` dot of a token colour —
+.tooltip(text) .show_kbd()`. `.dot(color)` leads the label with a `dot_size_small` dot of a token colour —
 a value that has a colour of its own, such as the card detail's status button.
 **Styles.** `Primary`: `accent_fill` / `accent_fill_hover` / `accent_fill_active`, label and chip
 in `accent_fill_text` — a surface's one primary action. `Secondary` (default): `control` /
@@ -2089,16 +2116,19 @@ approval's "Deny and stop", §6.6).
 toggled — only for a toggle, and only on `Secondary` / `Ghost`) · disabled (40 %, no hover, no
 click). Never focused.
 **Usage rule.** Wire it with `.action(..)`: the click dispatches that action to the focused element
-with `window.dispatch_action`, and the chip is `Kbd::for_action` of the same action unless `.kbd`
-overrides it — so the button and its key cannot disagree. `.key_of(other)` shows `other`'s live
+with `window.dispatch_action`, and the key is `Kbd::for_action` of the same action unless `.kbd`
+overrides it — so the button and its key cannot disagree. The key rides in the tooltip, after
+`.tooltip(text)` or, without one, after the label; a button with no key and no text has no
+tooltip. `.show_kbd()` draws it on the face instead, only on the surfaces §4 lists, and with a
+`.kbd` read from the key table so the chip holds still while focus moves. `.key_of(other)` shows `other`'s live
 key instead, for a button that does in one click what that key does from where the keyboard is:
 the empty filter's `Clear filter` runs `filter::Clear` and shows the `esc` (`fleet::Cancel`) that
 clears once the input has been left, and no chip while the input still owns the keyboard, where
 `esc` only leaves it. `.on_click` is for a control that is not
 an action, and runs before the action when both are set. An action invalid on the surface is
 **not rendered**; `.disabled(true)` is only for an action that will become valid on this surface
-(§4). The accessible name is the label; a single-stroke chip is also announced as the shortcut
-(`aria-keyshortcuts`, which cannot express a sequence).
+(§4). The accessible name is the label; a single-stroke key is also announced as the shortcut
+(`aria-keyshortcuts`, which cannot express a sequence), on the face or not.
 
 #### `StatusButton`
 **Purpose.** A live count that opens what it counts: `1 needs you`, `2 jobs`, `1 failed`,
@@ -2145,9 +2175,9 @@ on any element with an id (a blanket trait over gpui's `StatefulInteractiveEleme
 gpui's tooltip builder and show delay. `Tooltip` is also an `IntoElement`, for the gallery.
 **States.** hidden · shown. Pointer only: a tooltip never holds anything the keyboard user
 lacks, so it names an icon-only control and repeats its key.
-**Usage rule.** `IconButton` always has one; a `Button` takes one only to explain itself further
-(`.tooltip(text)`), since its key is already on it. Never put the only statement of a fact in a
-tooltip.
+**Usage rule.** `IconButton` always has one; a `Button` has one whenever it has a key or a
+`.tooltip(text)`. Never put the only statement of a fact in a tooltip: a key in a tooltip is also
+in Help and the palette.
 
 #### `Menu` / `MenuItem`
 **Purpose.** A floating list of verbs: a row's ⋯ menu, its right-click menu, the `+` new-tab
@@ -2235,7 +2265,7 @@ popup's provider, and (through `Cycler`) every short settings choice.
 **Anatomy.** A `chrome` trough in a `border` hairline, `radii.control`, `xxs` inset and gap. Each
 segment is `segment_h` tall, `md` side padding, `radii.md`: optional 14 px icon · label in `Ui` at
 the `UiStrong` weight, sentence case as given · optional count in `Caption` (`…` while loading, in
-`warning`) · optional small `Kbd`. The raised segment is the `control` fill in a `control_border`
+`warning`). The raised segment is the `control` fill in a `control_border`
 hairline with `text`; the others are clear with `text_secondary` and keep a clear hairline, so
 raising one never shifts its neighbours. `row_hover` on a clickable, unraised segment.
 **API.** `SegmentedControl::new(id, [Segment::new(label).icon(Icon).count(Option<usize>)
@@ -2243,11 +2273,11 @@ raising one never shifts its neighbours. `row_hover` on a clickable, unraised se
 .on_select(Fn(ix, window, app)).harness_segments(part)`; `Segment::count_text()`,
 `SegmentedControl::{len, is_empty}`.
 **States.** raised · none raised (`active(None)`) · hover · with icons · with counts and a
-loading count · with a key chip · one segment unavailable (dimmed, takes no click) · disabled ·
+loading count · with a key in the tooltip · one segment unavailable (dimmed, takes no click) · disabled ·
 full width.
 **Usage rule.** No keyboard of its own and not focusable (ADR 0023): the surface binds the keys,
-and `on_select` dispatches the action those keys dispatch. A key chip shows only on a segment a
-click would switch to. Past four options, or labels that no longer fit, use a `Dropdown`.
+and `on_select` dispatches the action those keys dispatch. A segment's key is in its tooltip, and
+only on a segment a click would switch to. Past four options, or labels that no longer fit, use a `Dropdown`.
 
 #### `Switch`
 **Purpose.** A boolean at a glance: a pill track with a knob.

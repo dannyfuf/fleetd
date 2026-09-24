@@ -359,6 +359,7 @@ impl AppState {
             }
             Event::TerminalExited { terminal, code } => self.apply_terminal_exit(terminal, code),
             Event::TerminalTitle { terminal, title } => self.apply_terminal_title(terminal, title),
+            Event::TerminalClipboard { .. } => {}
             Event::HostLinkChanged {
                 host,
                 link,

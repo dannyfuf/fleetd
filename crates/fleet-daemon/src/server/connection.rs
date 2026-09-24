@@ -15,6 +15,7 @@ use std::{
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use fleet_proto::{
+    TERMINAL_CLIPBOARD_CAPABILITY,
     codec::FleetCodec,
     event::{Event, EventKind},
     request::{HelloClient, Request, RequestBody, agent_request_is_serialized},
@@ -980,6 +981,7 @@ async fn write_response(
                 .chain(std::iter::once(
                     fleet_proto::REMOTE_MACHINES_CAPABILITY.to_owned(),
                 ))
+                .chain(std::iter::once(TERMINAL_CLIPBOARD_CAPABILITY.to_owned()))
                 .chain(
                     fleet_proto::AGENT_CAPABILITIES
                         .iter()
@@ -1088,6 +1090,7 @@ mod tests {
                 .chain(std::iter::once(
                     fleet_proto::REMOTE_MACHINES_CAPABILITY.to_owned(),
                 ))
+                .chain(std::iter::once(TERMINAL_CLIPBOARD_CAPABILITY.to_owned()))
                 .chain(
                     fleet_proto::AGENT_CAPABILITIES
                         .iter()
@@ -1110,6 +1113,7 @@ mod tests {
                 "board.reviews",
                 "schedules",
                 "remote-machines",
+                "terminal.clipboard",
                 "agent.window",
                 "agent.sync_marker",
                 "agent.resync",

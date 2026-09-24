@@ -392,6 +392,15 @@ first valid frame, each app surface retains an ordered prefix of at most
 1,024 key/paste events and 1 MiB; it rejects the newest input after either bound and flushes the
 retained prefix only to the same live terminal.
 
+`TerminalClipboard { terminal, text }` is a shell-owned GPUI effect, not an `AppState` reducer
+mutation. The shell rechecks the 1 MiB decoded UTF-8 cap and accepts the write only when `terminal`
+is the terminal of the current active terminal surface. An open agent/terminal popup takes
+precedence; otherwise that surface is the Workspace's selected/focused terminal. There is no
+window-active or dialog exclusion: a copy that arrives asynchronously after the user switches apps
+still completes. A write for any other terminal is discarded immediately and is never deferred.
+On acceptance the shell calls `cx.write_to_clipboard` and raises the existing short copied toast
+with `Icon::ClipboardCheck`.
+
 **Never block the foreground thread on the daemon.** Everything above is non-blocking by
 construction; there is no synchronous path and there must not be one.
 

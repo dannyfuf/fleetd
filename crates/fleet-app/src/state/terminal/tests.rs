@@ -1,5 +1,37 @@
 use super::*;
 use crate::state::test_support::*;
+use fleet_proto::terminal::{CellAttrs, Color};
+
+fn terminal_cell(text: &str, width: CellWidth) -> Cell {
+    Cell {
+        text: text.into(),
+        fg: Color::Default,
+        bg: Color::Default,
+        underline_color: None,
+        attrs: CellAttrs::empty(),
+        width,
+    }
+}
+
+#[test]
+fn row_text_preserves_empty_columns_without_changing_harness_rows() {
+    let mut grid = MirrorGrid::new(7, 1);
+    grid.lines[0] = vec![
+        terminal_cell("", CellWidth::Narrow),
+        terminal_cell("a", CellWidth::Narrow),
+        terminal_cell("", CellWidth::Wide),
+        terminal_cell("", CellWidth::Spacer),
+        terminal_cell("b", CellWidth::Narrow),
+        terminal_cell("", CellWidth::Narrow),
+    ];
+
+    assert_eq!(grid.row_text(0), " a  b ", "search text stays untrimmed");
+    assert_eq!(
+        grid.harness_row(0),
+        " a b",
+        "the harness keeps its existing one-space-per-cell projection and trailing trim"
+    );
+}
 
 #[test]
 fn forward_sequence_gap_requires_full_recovery() {

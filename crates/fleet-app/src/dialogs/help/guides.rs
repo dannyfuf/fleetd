@@ -347,7 +347,8 @@ pub(crate) const GUIDES: &[Guide] = &[
                 "Copy",
                 "Drag to select, double-click for a word, triple-click for a line: the text is \
                  copied when you let go. With nothing selected, the copy key goes to the \
-                 program.",
+                 program. Programs can also copy to the Mac clipboard through Fleet, whether \
+                 their terminal is local or on a remote machine.",
                 &[act("Copy", &["workspace::CopySelection"])],
             ),
             step(

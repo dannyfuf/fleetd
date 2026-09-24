@@ -15,7 +15,7 @@ use std::{
 
 use fleet_core::{ids::TerminalId, paths::FleetHome};
 use fleet_proto::{
-    PROTOCOL_VERSION,
+    PROTOCOL_VERSION, TERMINAL_CLIPBOARD_CAPABILITY,
     codec::FleetCodec,
     error::{ErrorKind, ProtoError},
     event::{Event, EventKind, ToastLevel},
@@ -863,13 +863,15 @@ async fn establish(
 
     reconcile_daemon_identity(state, read_daemon_identity(home));
 
+    let subscriptions = negotiated_subscriptions(&state.subscriptions, &state.capabilities);
+
     exchange(
         &mut transport,
         &mut buffered_events,
         Request {
             id: 1,
             body: RequestBody::Subscribe {
-                events: negotiated_subscriptions(&state.subscriptions, &state.capabilities),
+                events: subscriptions,
             },
         },
         expect_ack,
@@ -925,6 +927,7 @@ fn hello_client(client_id: &str) -> fleet_proto::request::HelloClient {
             .chain(std::iter::once(
                 fleet_proto::response::BOARD_REVIEWS_CAPABILITY.to_owned(),
             ))
+            .chain(std::iter::once(TERMINAL_CLIPBOARD_CAPABILITY.to_owned()))
             .collect(),
         ..fleet_proto::request::HelloClient::default()
     }
@@ -1149,6 +1152,7 @@ fn all_event_kinds() -> Vec<EventKind> {
         EventKind::TerminalFrame,
         EventKind::TerminalExited,
         EventKind::TerminalTitle,
+        EventKind::TerminalClipboard,
         EventKind::HostLinkChanged,
         EventKind::TerminalReattach,
         EventKind::Toast,
@@ -1172,6 +1176,7 @@ fn negotiated_subscriptions(
         .copied()
         .filter(|kind| match kind {
             EventKind::SchedulesChanged => capabilities.contains(SCHEDULES_CAPABILITY),
+            EventKind::TerminalClipboard => capabilities.contains(TERMINAL_CLIPBOARD_CAPABILITY),
             _ => true,
         })
         .collect()
@@ -1392,6 +1397,30 @@ mod tests {
                 "the agent capabilities are still all named: {capability}"
             );
         }
+        assert!(
+            hello
+                .capabilities
+                .iter()
+                .any(|capability| capability == TERMINAL_CLIPBOARD_CAPABILITY),
+            "the daemon must know this client can decode clipboard events"
+        );
+    }
+
+    #[test]
+    fn terminal_clipboard_is_subscribed_only_after_capability_negotiation() {
+        let requested = all_event_kinds();
+        assert!(requested.contains(&EventKind::TerminalClipboard));
+        assert!(
+            !negotiated_subscriptions(&requested, &HashSet::new())
+                .contains(&EventKind::TerminalClipboard)
+        );
+        assert!(
+            negotiated_subscriptions(
+                &requested,
+                &HashSet::from([TERMINAL_CLIPBOARD_CAPABILITY.to_owned()])
+            )
+            .contains(&EventKind::TerminalClipboard)
+        );
     }
 
     #[test]
@@ -1665,7 +1694,8 @@ mod tests {
     #[test]
     fn schedules_changed_is_only_named_to_a_daemon_that_advertises_schedules() {
         let wanted = all_event_kinds();
-        let old = negotiated_subscriptions(&wanted, &HashSet::new());
+        let clipboard = HashSet::from([TERMINAL_CLIPBOARD_CAPABILITY.to_owned()]);
+        let old = negotiated_subscriptions(&wanted, &clipboard);
         assert!(!old.contains(&EventKind::SchedulesChanged));
         assert_eq!(
             old.len(),
@@ -1673,8 +1703,13 @@ mod tests {
             "only the gated kind is dropped"
         );
 
-        let current =
-            negotiated_subscriptions(&wanted, &HashSet::from([SCHEDULES_CAPABILITY.to_owned()]));
+        let current = negotiated_subscriptions(
+            &wanted,
+            &HashSet::from([
+                SCHEDULES_CAPABILITY.to_owned(),
+                TERMINAL_CLIPBOARD_CAPABILITY.to_owned(),
+            ]),
+        );
         assert_eq!(current, wanted);
     }
 

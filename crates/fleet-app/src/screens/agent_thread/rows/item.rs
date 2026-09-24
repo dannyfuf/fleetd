@@ -165,9 +165,6 @@ pub(crate) fn rows_for(
                     } else {
                         message.as_str()
                     }),
-                    // Retryability is the daemon's judgement and nothing on the wire carries it
-                    // per item yet, so `[r] retry` is not drawn on an item-level error.
-                    retryable: false,
                 }),
             ),
             None,

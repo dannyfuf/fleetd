@@ -1,12 +1,18 @@
-//! `Button` and `IconButton` — the pointer's way to run an action, each showing its key.
+//! `Button` and `IconButton` — the pointer's way to run an action, each naming its key.
 //!
 //! The default wiring is [`Button::action`]: the click dispatches the action to the focused
-//! element, exactly as its key would, and the button shows the key the live keymap gives that
-//! action as a [`Kbd`] chip. Behaviour and chip therefore cannot drift apart (DESIGN-SYSTEM §4).
-//! [`Button::on_click`] is for the rare control that is not an action.
+//! element, exactly as its key would, and the button's tooltip shows the key the live keymap
+//! gives that action as a [`Kbd`] chip. Behaviour and key therefore cannot drift apart
+//! (DESIGN-SYSTEM §4). [`Button::on_click`] is for the rare control that is not an action.
+//!
+//! The key rides in the tooltip, not on the face: a chip on every button is noise, and a chip
+//! resolved from the focused element would come and go as focus moves, resizing the button.
+//! [`Button::show_kbd`] puts it back on the face for the few buttons whose job is to teach a key
+//! (DESIGN-SYSTEM §4 lists them); such a button takes its key from [`Button::kbd`], read from the
+//! key table, so it does not change with focus.
 //!
 //! Buttons are **not focusable** (ADR 0023): no tab stop, no focus ring. The keyboard path is the
-//! key the chip shows, and `Tab`, `j`/`k` and pane focus keep their meaning. An action invalid
+//! key the tooltip names, and `Tab`, `j`/`k` and pane focus keep their meaning. An action invalid
 //! on a surface is hidden, not disabled; [`Button::disabled`] is for "valid soon on this same
 //! surface", such as Save before anything changed.
 //!
@@ -269,7 +275,8 @@ macro_rules! button_builders {
             self
         }
 
-        /// Dispatch `action` to the focused element on click, and show its live key binding.
+        /// Dispatch `action` to the focused element on click, and name its live key binding in
+        /// the tooltip.
         pub fn action(mut self, action: Box<dyn Action>) -> Self {
             self.base.action = Some(action);
             self
@@ -300,7 +307,8 @@ macro_rules! button_builders {
     };
 }
 
-/// A labelled button, optionally with a leading icon and a trailing key chip.
+/// A labelled button, optionally with a leading icon; its key is in its tooltip, or on its face
+/// with [`Button::show_kbd`].
 #[derive(IntoElement)]
 pub struct Button {
     base: ButtonBase,
@@ -308,6 +316,7 @@ pub struct Button {
     icon: Option<Icon>,
     dot: Option<Hsla>,
     full_width: bool,
+    show_kbd: bool,
     tooltip: Option<SharedString>,
 }
 
@@ -320,11 +329,20 @@ impl Button {
             icon: None,
             dot: None,
             full_width: false,
+            show_kbd: false,
             tooltip: None,
         }
     }
 
     button_builders!();
+
+    /// Draw the key as a chip after the label instead of in the tooltip. Only for a button whose
+    /// job is to teach a key (DESIGN-SYSTEM §4 lists them); pass that key with [`Self::kbd`] from
+    /// the key table so the chip stays put while focus moves.
+    pub fn show_kbd(mut self) -> Self {
+        self.show_kbd = true;
+        self
+    }
 
     /// Lead the label with a glyph.
     pub fn icon(mut self, icon: Icon) -> Self {
@@ -345,8 +363,8 @@ impl Button {
         self
     }
 
-    /// Explain the button when the pointer rests on it. The key is already on the button, so
-    /// the tooltip carries only `text`.
+    /// Explain the button when the pointer rests on it; the key follows `text`. Without it the
+    /// tooltip is the label and the key, and a button with no key has none.
     pub fn tooltip(mut self, text: impl Into<SharedString>) -> Self {
         self.tooltip = Some(text.into());
         self
@@ -362,7 +380,11 @@ impl RenderOnce for Button {
             ButtonSize::Default => (KbdSize::Default, IconSize::Medium, theme.space.md),
             ButtonSize::Compact => (KbdSize::Small, IconSize::Small, theme.space.sm),
         };
-        let chip = kbd.clone().map(|kbd| kbd.tone(paint.kbd).size(kbd_size));
+        let show_kbd = self.show_kbd;
+        let chip = kbd
+            .clone()
+            .filter(|_| show_kbd)
+            .map(|kbd| kbd.tone(paint.kbd).size(kbd_size));
         let icon = self
             .icon
             .map(|icon| icon.el().size(icon_size).color(paint.fg));
@@ -374,7 +396,7 @@ impl RenderOnce for Button {
                 .bg(color)
         });
         let label = Text::ui_strong(self.label.clone()).color(paint.fg);
-        let tooltip = self.tooltip.map(Tooltip::new);
+        let tooltip = button_tooltip(&self.label, self.tooltip, kbd.clone(), show_kbd);
         let full_width = self.full_width;
         self.base
             .frame(self.label, kbd.as_ref(), &paint, theme)
@@ -391,6 +413,22 @@ impl RenderOnce for Button {
             .child(label)
             .children(chip)
             .when_some(tooltip, |el, tooltip| el.with_tooltip(tooltip, cx))
+    }
+}
+
+/// What a [`Button`]'s tooltip says: `text` (else the label), then the key unless the face
+/// already shows it. `None` when that leaves nothing the face does not already say.
+fn button_tooltip(
+    label: &SharedString,
+    text: Option<SharedString>,
+    kbd: Option<Kbd>,
+    kbd_on_face: bool,
+) -> Option<Tooltip> {
+    let kbd = kbd.filter(|_| !kbd_on_face);
+    match (text, kbd) {
+        (Some(text), kbd) => Some(Tooltip::new(text).kbd(kbd)),
+        (None, Some(kbd)) => Some(Tooltip::new(label.clone()).kbd(kbd)),
+        (None, None) => None,
     }
 }
 
@@ -771,5 +809,27 @@ mod tests {
             dead, None,
             "a borrowed key that does nothing here shows no chip, whatever the click runs"
         );
+    }
+
+    #[test]
+    fn a_buttons_key_rides_in_its_tooltip_unless_the_face_shows_it() {
+        let label = SharedString::new_static("Save");
+        let kbd = || Kbd::parse("ctrl-s a").ok();
+
+        assert_eq!(
+            button_tooltip(&label, None, kbd(), false),
+            Some(Tooltip::new("Save").kbd(kbd())),
+            "with no text of its own the tooltip is the label and the key"
+        );
+        assert_eq!(
+            button_tooltip(&label, Some("Write it".into()), kbd(), false),
+            Some(Tooltip::new("Write it").kbd(kbd())),
+        );
+        assert_eq!(
+            button_tooltip(&label, None, kbd(), true),
+            None,
+            "a key already on the face is not repeated, and the label alone says nothing new"
+        );
+        assert_eq!(button_tooltip(&label, None, None, false), None);
     }
 }

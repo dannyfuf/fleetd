@@ -10,7 +10,7 @@ await screen == Workspace 20000
 await lists.tabs.rows[2] exists 20000
 await lists.tabs.selected.id == 1 20000
 assert targets["workspace.back"] exists && targets["workspace.switcher"] exists
-assert targets["tabs.new"] exists && targets["tabs.zoom"] exists
+assert targets["tabs.new"] exists && targets["tabs.changes"] exists
 shot workspace-strip
 
 # The worktree switcher lists the sessions as `^s W` does, this one checked.

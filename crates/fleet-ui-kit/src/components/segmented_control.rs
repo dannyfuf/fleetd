@@ -7,14 +7,17 @@
 //!
 //! The control carries no keyboard of its own: the surface that owns it binds the keys (`h`/`l`,
 //! `Tab`, a prefix key), and a click goes through [`SegmentedControl::on_select`], which a
-//! surface points at the same action its key dispatches. A segment may show that key as a
-//! [`Kbd`] chip.
+//! surface points at the same action its key dispatches. A segment may name that key in its
+//! tooltip.
 
 use std::rc::Rc;
 
 use gpui::{App, ElementId, MouseButton, SharedString, Toggled, Window, div, prelude::*};
 
-use super::kbd::{Kbd, KbdSize};
+use super::{
+    kbd::Kbd,
+    tooltip::{Tooltip, WithTooltip},
+};
 use crate::{
     harness::HarnessTargetExt as _,
     icons::{Icon, IconSize},
@@ -73,8 +76,8 @@ impl Segment {
         self
     }
 
-    /// The key that selects this segment, as a chip after the label. Resolve it from the live
-    /// keymap ([`Kbd::for_action`]); never spell it by hand.
+    /// The key that selects this segment, shown in its tooltip beside the label. Resolve it from
+    /// the live keymap ([`Kbd::for_action`]); never spell it by hand.
     pub fn kbd(mut self, kbd: Option<Kbd>) -> Self {
         self.kbd = kbd;
         self
@@ -208,6 +211,9 @@ impl RenderOnce for SegmentedControl {
                     .filter(|_| clickable && !segment.disabled);
                 let segment_disabled = segment.disabled;
                 let name = segment.label.clone();
+                let tooltip = segment
+                    .kbd
+                    .map(|kbd| Tooltip::new(segment.label.clone()).kbd(kbd));
                 div()
                     .id(("segment", ix))
                     .flex()
@@ -260,7 +266,7 @@ impl RenderOnce for SegmentedControl {
                             .ellipsize(),
                     )
                     .children(count.map(|count| Text::caption(count).tone(count_tone)))
-                    .children(segment.kbd.map(|kbd| kbd.size(KbdSize::Small)))
+                    .when_some(tooltip, |el, tooltip| el.with_tooltip(tooltip, cx))
                     .harness_target_optional(harness.map(|part| (part, ix)))
             }))
     }

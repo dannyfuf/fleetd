@@ -148,14 +148,18 @@ impl MirrorGrid {
     /// The plain text of one row, used by selection, search and tests.
     #[must_use]
     pub fn row_text(&self, row: u16) -> String {
-        self.lines
-            .get(row as usize)
-            .map_or_else(String::new, |line| {
-                line.iter()
-                    .filter(|cell| cell.width != CellWidth::Spacer)
-                    .map(|cell| cell.text.as_str())
-                    .collect()
-            })
+        let mut text = String::new();
+        if let Some(line) = self.lines.get(row as usize) {
+            for cell in line {
+                let columns = match cell.width {
+                    CellWidth::Narrow => 1,
+                    CellWidth::Wide => 2,
+                    CellWidth::Spacer => 0,
+                };
+                crate::terminal::append_normalized_cell_text(&mut text, cell, columns);
+            }
+        }
+        text
     }
 
     /// One row as the harness reports it (`docs/TESTING-HARNESS.md` §3).

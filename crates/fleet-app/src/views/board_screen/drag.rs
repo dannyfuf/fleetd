@@ -2,7 +2,7 @@
 //!
 //! The drag is gpui's: a tile carries a [`CardDrag`] from `on_drag`, every column listens with
 //! `on_drag_move` and `on_drop`. What the frame draws of it — the faded place the card left,
-//! the accent column, the [`fleet_ui_kit::DropSlot`] saying what the drop will do — is the
+//! the accent column, the [`fleet_ui_kit::DropSlot`] marking the insertion boundary — is the
 //! [`DragState`] those listeners keep. A drop decides nothing here: it is a
 //! [`super::BoardClick::Drop`], and the screen sends it down the path `[` / `]` take.
 
@@ -10,9 +10,13 @@ use std::{cell::RefCell, rc::Rc};
 
 use fleet_core::ids::CardId;
 use fleet_ui_kit::{ActiveTheme, COLUMN_WIDTH_CH, theme::ch};
-use gpui::{App, Context, Pixels, SharedString, Window, div, prelude::*};
+use gpui::{App, Context, Pixels, SharedString, Window, div, prelude::*, px};
 
 use super::CardRow;
+
+/// Distance past a card midpoint required to reverse an already chosen insertion boundary.
+/// This dead band keeps sub-pixel sampling and ±1 px pointer wobble from flipping the target.
+const DROP_TARGET_HYSTERESIS: Pixels = px(4.0);
 
 /// What a dragged tile carries: the column's prepared rows, and where the card was drawn when
 /// the drag began.
@@ -106,14 +110,25 @@ pub(crate) fn aim(
 }
 
 /// The slot a pointer at `y` over a tile spanning `top..bottom` at `row` points to: before the
-/// tile in its upper half, after it in its lower half.
+/// tile in its upper half, after it in its lower half. Once either adjacent boundary is chosen,
+/// the pointer must cross the midpoint by [`DROP_TARGET_HYSTERESIS`] to choose the other one.
 ///
-/// Measured against the tile, not its list item: an item that holds the open slot is taller by
-/// the slot, and measuring against it would move the slot out from under a pointer that has not
-/// moved. Over the gaps, the slot and the footer no tile answers, so the slot stays where it is.
+/// Measured against the tile, not its list item. Over the gaps and the footer no tile answers,
+/// so the slot stays where it is.
 #[must_use]
-pub(crate) fn slot_over(row: usize, top: Pixels, bottom: Pixels, y: Pixels) -> usize {
-    if y < top + (bottom - top) / 2.0 {
+pub(crate) fn slot_over(
+    row: usize,
+    top: Pixels,
+    bottom: Pixels,
+    y: Pixels,
+    current: Option<usize>,
+) -> usize {
+    let midpoint = top + (bottom - top) / 2.0;
+    if current == Some(row) && y <= midpoint + DROP_TARGET_HYSTERESIS {
+        row
+    } else if current == Some(row + 1) && y >= midpoint - DROP_TARGET_HYSTERESIS {
+        row + 1
+    } else if y < midpoint {
         row
     } else {
         row + 1
@@ -254,5 +269,35 @@ mod tests {
             ..column(2, None)
         };
         assert_eq!(slot_label(&drag(), &readonly, 0), None);
+    }
+
+    #[test]
+    fn a_chosen_boundary_has_a_dead_band_around_the_card_midpoint() {
+        let (top, bottom, midpoint) = (px(20.0), px(80.0), px(50.0));
+        assert_eq!(slot_over(3, top, bottom, midpoint, None), 4);
+        assert_eq!(slot_over(3, top, bottom, midpoint - px(1.0), Some(4)), 4);
+        assert_eq!(slot_over(3, top, bottom, midpoint + px(1.0), Some(4)), 4);
+        assert_eq!(slot_over(3, top, bottom, midpoint - px(1.0), Some(3)), 3);
+        assert_eq!(slot_over(3, top, bottom, midpoint + px(1.0), Some(3)), 3);
+        assert_eq!(
+            slot_over(
+                3,
+                top,
+                bottom,
+                midpoint - DROP_TARGET_HYSTERESIS - px(1.0),
+                Some(4),
+            ),
+            3
+        );
+        assert_eq!(
+            slot_over(
+                3,
+                top,
+                bottom,
+                midpoint + DROP_TARGET_HYSTERESIS + px(1.0),
+                Some(3),
+            ),
+            4
+        );
     }
 }

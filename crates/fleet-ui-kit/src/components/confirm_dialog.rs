@@ -276,17 +276,20 @@ impl RenderOnce for ConfirmDialog {
                     .map(|line| Text::ui(line).tone(Tone::Secondary)),
             );
 
+        // A confirmation is the one dialog whose footer keeps its keys on the face
+        // (DESIGN-SYSTEM §4): whether `y` or only `⇧Y` confirms is the point of the dialog, and
+        // the dialog holds the focus for as long as it is open, so the chips never come and go.
         let cancel = self
             .dismiss
             .as_ref()
-            .map(|dismiss| dismiss.cancel_button("confirm-cancel"));
+            .map(|dismiss| dismiss.cancel_button("confirm-cancel").show_kbd());
         let accept = self.accept.map(|(lower, strong)| {
             let button = Button::new("confirm-accept", button_label.clone());
             let button = match key {
                 ConfirmKey::Lower => button.style(ButtonStyle::Primary).action(lower),
                 ConfirmKey::Upper => button.style(ButtonStyle::Danger).action(strong),
             };
-            button.disabled(self.accept_disabled)
+            button.show_kbd().disabled(self.accept_disabled)
         });
 
         let mut dialog = Dialog::new(self.title)

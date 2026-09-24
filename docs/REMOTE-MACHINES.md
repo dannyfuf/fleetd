@@ -82,13 +82,14 @@ Version 8 is a lockstep boundary for native-agent default controls. Version 7 re
 daemon can resolve per-harness defaults and adds Claude's `auto` and `dont_ask`. The exact Hello
 check rejects either mixed-version direction before an incompatible request is routed.
 
-Capabilities advertised by this build are `prune.reviewed_ids`, `remote-machines`, and the six of
+Capabilities advertised by this build are `prune.reviewed_ids`, `snapshot.revision`,
+`board.worktree`, `board.automation`, `remote-machines`, `terminal.clipboard`, and the ten of
 `fleet_proto::AGENT_CAPABILITIES` — `agent.window`, `agent.sync_marker`, `agent.resync`,
-`agent.item_body`, `agent.checkpoints`, `agent.codex`. A peer infers behaviour from those strings
-and never from a version number, so an unimplemented one is never advertised. The negotiation is
-symmetric: because `Event` is adjacently tagged and a variant a peer cannot name fails its whole
-frame, the three agent stream-control events are sent only to a connection whose `HelloClient`
-named the capability defining them.
+`agent.item_body`, `agent.checkpoints`, `agent.codex`, `agent.seen`, `agent.closed`, `agent.account`,
+`agent.delegation`. A peer infers behaviour from those strings and never from a version number, so
+an unimplemented one is never advertised. The negotiation is symmetric: because `Event` is
+adjacently tagged and a variant a peer cannot name fails its whole frame, capability-gated events
+are sent only to a connection whose `HelloClient` named the capability defining them.
 
 `HostStatus` keeps `id`, `reachable`, `error`, and `checked_at`, and defaultably adds `provider`,
 `version`, `link: Connecting | Ready | Down | Legacy`, `address`, and `agent_binaries: Option<
@@ -98,8 +99,10 @@ adds defaultable `host`; `DoctorHost { host }` provides scoped diagnostics. `Res
 Pruned` preserve per-item outcomes. Mixed-host dismiss/sleep/kill extensions must likewise return
 one outcome per requested item rather than failing the whole request.
 
-Events add `HostLinkChanged { host, link, version, error }` and `TerminalReattach { terminal }`.
-All prior request, response, and event variants remain valid.
+Events add `HostLinkChanged { host, link, version, error }`, `TerminalReattach { terminal }`, and
+the additive `TerminalClipboard { terminal, text }`. A clipboard event is transient: it is absent
+from snapshots and persistence and is never replayed after reconnect. All prior request, response,
+and event variants remain valid.
 
 ## 4. Machines module
 
@@ -230,6 +233,12 @@ Board ownership is only ever added — by a snapshot, a forwarded answer or a pa
 only a Down transition removes it, with the mirror fragment answering `host_of_board` in between; card-to-board is a stable fact and survives the transition, so a card
 request resolves again as soon as its board has an owner.
 
+Federation advertises `terminal.clipboard` in the proxy Hello and subscribes to
+`TerminalClipboard` only when the remote Hello advertises it. The router translates the event's
+remote terminal id through the same terminal-id map before local publication. The local client must
+still have advertised the capability, subscribed to the event kind, and be attached to that mapped
+terminal; no clipboard event is retained while the link or app is away.
+
 A host's `Event::BoardChanged` is republished locally only for a board this router attributes to
 that host, registering the attribution when the snapshot had not yet supplied it; a host's
 context-board events are dropped, because a context board of another daemon is not addressable from
@@ -280,6 +289,11 @@ host (`docs/ARCHITECTURE.md`, "Detached PTY holders"). Restarting or bootstrappi
 therefore keeps that host's terminals: the new daemon reattaches to them and the local daemon's
 `TerminalReattach` tells clients to attach again. A Down transition still triggers terminal-ended
 behaviour locally, because the link — not the terminal — is what ended.
+
+Clipboard ownership stays with the GUI machine. An OSC 52 write from a program on a remote host
+travels through that host's daemon and the federating local daemon, then the Mac app writes the Mac
+clipboard. A terminal hosted by the local macOS daemon follows the same event path without the
+federation hop.
 
 ## 8. Proxied degradation
 

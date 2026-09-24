@@ -519,6 +519,13 @@ fn event_wire_goldens() {
         r#"{"type":"terminal_exited","data":{"terminal":7,"code":null}}"#,
     );
     assert_frame(
+        Event::TerminalClipboard {
+            terminal: TerminalId(33),
+            text: "a b".to_owned(),
+        },
+        r#"{"type":"terminal_clipboard","data":{"terminal":33,"text":"a b"}}"#,
+    );
+    assert_frame(
         Event::BoardChanged {
             board_id: "work".parse().unwrap(),
             reason: BoardChangeReason::CardChanged,
@@ -529,6 +536,15 @@ fn event_wire_goldens() {
         Event::DaemonShuttingDown,
         r#"{"type":"daemon_shutting_down"}"#,
     );
+}
+
+#[test]
+fn terminal_clipboard_contract_constants_are_fixed() {
+    assert_eq!(
+        fleet_proto::TERMINAL_CLIPBOARD_CAPABILITY,
+        "terminal.clipboard"
+    );
+    assert_eq!(fleet_proto::TERMINAL_CLIPBOARD_MAX_BYTES, 1024 * 1024);
 }
 
 #[test]

@@ -1,13 +1,15 @@
 //! The 28 px status bar (UX-SPEC §2.2): the daemon, the breadcrumb, the job ticker or the sticky
 //! error, and the buttons that teach the two keys everything else hangs off.
 
-use fleet_ui_kit::{Button, ButtonSize, ButtonStyle, DaemonState, HarnessTargetExt, StatusBar};
-use gpui::{AnyElement, App, IntoElement, SharedString};
+use fleet_ui_kit::{
+    Button, ButtonSize, ButtonStyle, DaemonState, HarnessTargetExt, Kbd, StatusBar,
+};
+use gpui::{AnyElement, App, IntoElement, SharedString, prelude::FluentBuilder};
 
 use crate::{
     actions::{fleet, workspace},
     dialogs::Dialogs,
-    presentation::{hub_sticky_error_key, terminal_label, workspace_keys},
+    presentation::{hub_help_key, hub_sticky_error_key, terminal_label, workspace_keys},
     screens::hub::effective_context,
     shell::daemon::{dot_label, dot_state},
     state::{AppState, HubTab, Mode, Overlay, RepoScope, Screen, StickyError, breadcrumb},
@@ -87,31 +89,35 @@ pub(super) fn render(model: &StatusModel, _cx: &App) -> AnyElement {
         }
         job_ticker::StatusSlot::Idle => {}
     }
+    // The two buttons that teach the keys everything else hangs off keep their chips on the
+    // face (DESIGN-SYSTEM §4), spelled from the key table so they never change with focus.
     let keys = workspace_keys();
-    let shortcuts = Button::new("statusbar-shortcuts", "Shortcuts")
-        .style(ButtonStyle::Ghost)
-        .size(ButtonSize::Compact)
-        .action(Box::new(fleet::OpenHelp));
+    let shortcuts = |kbd: Option<Kbd>| {
+        Button::new("statusbar-shortcuts", "Shortcuts")
+            .style(ButtonStyle::Ghost)
+            .size(ButtonSize::Compact)
+            .action(Box::new(fleet::OpenHelp))
+            .when_some(kbd, |button, kbd| button.kbd(kbd).show_kbd())
+            .harness_target("statusbar.shortcuts")
+    };
     match model.place {
         Place::Hub => {
-            bar = bar.trailing(shortcuts.harness_target("statusbar.shortcuts"));
+            bar = bar.trailing(shortcuts(hub_help_key()));
         }
         Place::Terminal | Place::AgentThread => {
             if model.place == Place::Terminal {
-                let mut commands = Button::new("statusbar-commands", "Fleet commands")
-                    .style(ButtonStyle::Ghost)
-                    .size(ButtonSize::Compact)
-                    .action(Box::new(workspace::EnterPrefix));
-                if let Some(kbd) = keys.prefix.clone() {
-                    commands = commands.kbd(kbd);
-                }
-                bar = bar.trailing(commands.harness_target("statusbar.commands"));
+                bar = bar.trailing(
+                    Button::new("statusbar-commands", "Fleet commands")
+                        .style(ButtonStyle::Ghost)
+                        .size(ButtonSize::Compact)
+                        .action(Box::new(workspace::EnterPrefix))
+                        .when_some(keys.prefix.clone(), |button, kbd| {
+                            button.kbd(kbd).show_kbd()
+                        })
+                        .harness_target("statusbar.commands"),
+                );
             }
-            let shortcuts = match keys.help.clone() {
-                Some(kbd) => shortcuts.kbd(kbd),
-                None => shortcuts,
-            };
-            bar = bar.trailing(shortcuts.harness_target("statusbar.shortcuts"));
+            bar = bar.trailing(shortcuts(keys.help.clone()));
         }
     }
     bar.into_any_element()

@@ -12,7 +12,7 @@ use super::{
 };
 use super::{WorkingPhase, WorkingRow};
 use crate::{
-    components::{Button, ButtonSize, ButtonStyle, KeyHint, KeyHintRow, Spinner},
+    components::{Button, ButtonSize, ButtonStyle, KeyHintRow, Spinner},
     icons::{Icon, IconSize},
     text::Text,
     theme::ActiveTheme,
@@ -139,8 +139,7 @@ pub(super) fn notice(row: &NoticeRow, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-/// The severe tier of failure: a card with a 2 px danger bar and, when the daemon says the turn
-/// is retryable, the key that retries it.
+/// The severe tier of failure: a card with a 2 px danger bar.
 ///
 /// A nonzero command exit never reaches here — that is the routine tier, carried by the failing
 /// work row as a dimmed icon and an `exit N` field.
@@ -190,8 +189,7 @@ pub(super) fn error(row: &ErrorRow, index: usize, cx: &App) -> AnyElement {
                         .flex()
                         .flex_col()
                         .gap(theme.space.xs)
-                        .child(Text::ui(row.message.clone()))
-                        .children(row.retryable.then(|| KeyHint::labeled("r", "retry"))),
+                        .child(Text::ui(row.message.clone())),
                 ),
         )
         .into_any_element()
@@ -259,7 +257,6 @@ pub(super) fn working(
                 .clone()
                 .map(|detail| Text::hint(detail).faint().flex_none()),
         )
-        .children(parked.then(|| KeyHint::labeled("⏎", "details")))
         .into_any_element()
 }
 

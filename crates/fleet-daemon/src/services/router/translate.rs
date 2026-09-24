@@ -357,6 +357,12 @@ pub fn event_to_local(mut event: Event, host: &HostId, ids: &RemoteIds) -> Optio
         Event::TerminalTitle { terminal, .. } | Event::TerminalReattach { terminal } => {
             *terminal = existing_local_terminal(host, *terminal, ids)?;
         }
+        Event::TerminalClipboard { terminal, text } => {
+            if text.len() > fleet_proto::TERMINAL_CLIPBOARD_MAX_BYTES {
+                return None;
+            }
+            *terminal = existing_local_terminal(host, *terminal, ids)?;
+        }
         Event::HostLinkChanged {
             host: event_host, ..
         } => *event_host = host.clone(),
@@ -933,10 +939,44 @@ fn unexpected_fanout_response(expected: &str, actual: &ResponseBody) -> DaemonEr
 mod tests {
     use fleet_core::{
         board::{Board, BoardSettings, BoardSummary, BoardView, Card, Priority, SyncState},
-        ids::{BoardId, CardId, ContextId, StatusId, WorktreeId},
+        ids::{BoardId, CardId, ContextId, StatusId, TerminalId, WorktreeId},
     };
 
     use super::*;
+
+    #[test]
+    fn terminal_clipboard_events_translate_ids_and_reject_oversize_text() {
+        let owner = host("dev-box");
+        let ids = RemoteIds::default();
+        let remote = TerminalId(7);
+        let local = ids.local_terminal(&owner, remote);
+
+        assert_eq!(
+            event_to_local(
+                Event::TerminalClipboard {
+                    terminal: remote,
+                    text: "a b".to_owned(),
+                },
+                &owner,
+                &ids,
+            ),
+            Some(Event::TerminalClipboard {
+                terminal: local,
+                text: "a b".to_owned(),
+            })
+        );
+        assert_eq!(
+            event_to_local(
+                Event::TerminalClipboard {
+                    terminal: remote,
+                    text: "a".repeat(fleet_proto::TERMINAL_CLIPBOARD_MAX_BYTES + 1),
+                },
+                &owner,
+                &ids,
+            ),
+            None
+        );
+    }
 
     #[test]
     fn a_card_worktree_placement_is_cleared_only_for_the_board_owner() {

@@ -715,7 +715,8 @@ pub struct Metrics {
     /// 84 px fixed-width mode word of the embedded Git UI's status bar. Fleet's own chrome draws
     /// no mode word (ADR 0023).
     pub mode_word_w: Pixels,
-    /// 340 px command field centred in the title bar: the button that opens the palette.
+    /// 240 px command field at the right of the title bar, before the status cluster: the button
+    /// that opens the palette.
     pub command_field_w: Pixels,
     /// 220 px filter field in a page header's toolbar ([`crate::FilterField`]).
     pub filter_field_w: Pixels,
@@ -725,6 +726,8 @@ pub struct Metrics {
     pub scroll_thumb_w: Pixels,
     /// 2 px focus ring / cursor bar.
     pub focus_ring_w: Pixels,
+    /// 2 px insertion marker drawn over a board column's card gap during a drag.
+    pub drop_marker_h: Pixels,
     /// 7.5 x 18 px terminal cell at the data type size.
     pub cell_w: Pixels,
     /// Terminal cell height.
@@ -841,11 +844,12 @@ impl Default for Metrics {
             prefix_menu_w: px(900.0),
             palette_top: px(120.0),
             mode_word_w: px(84.0),
-            command_field_w: px(340.0),
+            command_field_w: px(240.0),
             filter_field_w: px(220.0),
             monogram_size: px(18.0),
             scroll_thumb_w: px(3.0),
             focus_ring_w: px(2.0),
+            drop_marker_h: px(2.0),
             cell_w: px(CH),
             cell_h: px(18.0),
             fact_label_w: px(104.0),

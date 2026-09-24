@@ -133,7 +133,7 @@ chrome — it is the pane's content, like a list header — and it stays.
 | Title bar | Top, full width; the unified macOS titlebar, so it starts at x = 84 after the traffic lights (12 px on other platforms) | 44 px, `chrome` ground, hairline below | One row does what three did: where you are, a way to search or run anything, and what needs you. |
 | Context switcher | Title bar, left: a monogram tile, the context name and a chevron | compact ghost button | Contexts are the outermost coordinate. It opens a menu of every context with its `1`–`9` key (a context past nine has none), then *New context* `N`, *Edit context* `E`, *Delete context* `D` (red). The keys keep working without it, and `gt` / `gT` still cycle. |
 | Section nav | Title bar, after the switcher | a segmented control | *Worktrees · Pull requests · Board*, each with its count (worktrees in the context, reviews waiting on you, open board cards; zero-suppressed). The review count is the Reviews board's non-archived cards that either want you — `attention(card, now)`: the newest run ended needing a person and nobody has moved the card since, or a run owed for 60 s on a card that is not queued (BOARD.md §11.5) — or stand in a `Started` column with no live or owed run, each card once. A run parked on a question is a live run, so it is counted by the status cluster's `needs you`, not here. While the Review tab shows the board the app folds this rule from the cards it holds, in the card-marks update and never in render; anywhere else it reads the same rule from the board's summary, `attention_count + idle_started`, so the count is the same on and off the tab. On a daemon without `board.reviews` it is still the number of PRs waiting for your review. The same actions as `g w` / `p` / `g b`; the segments are the harness's `hub.tab[N]`. Hub only. |
-| Command field | Title bar, centred in the window | 340 × 30 | Looks like a search input — magnifier, *Search or run a command*, the palette key — and is a button: a click opens the palette. Nobody has to know a key to find a command. |
+| Command field | Title bar, right, just before the status cluster | 240 × 30 | Looks like a search input — magnifier, *Search or run a command*, the palette key — and is a button: a click opens the palette. Nobody has to know a key to find a command. Right-aligned so where-you-are, on the left, gets every pixel the field and the cluster leave. The palette key is one of the few chips a control keeps on its face, and it holds still while the palette or a dialog has the focus. |
 | Status cluster (§2.3) | Title bar, right | compact ghost buttons | What needs you and what is running, each shown only while non-zero, each opening what it counts. Top-right is the OS status corner, far from the cursor. |
 | Help, Settings | Title bar, far right | 26 px icon buttons | `?` and `,` as controls; the tooltip names the key. |
 | Sidebar | Left, **232 px** on the `chrome` ground; its edge drags between 200 and 320 px, and the dragged width is kept while Fleet runs (not across restarts); `H` or its foot button collapses it to 44 px of icons | full height | Second coordinate. Narrow and left because it is a *filter*, not content — and the agents one click away from anywhere in the Hub (§3.2). |
@@ -146,7 +146,7 @@ chrome — it is the pane's content, like a list header — and it stays.
 healthy, and `fleetd <word>` in the daemon's tone otherwise (`fleetd connection lost`, `fleetd
 starting`) · the breadcrumb `context › repo › row` (flex, truncates) · the job ticker `⟳ <kind>
 <target> <pct>` with `+n` when more run (`fg.muted`) · the **sticky error slot** (red, `⚠ <text>`
-and its `!` chip, then a ✕; a click on it does what `!` does, the ✕ or `X` clears it; it replaces
+with its `!` in the tooltip, then a ✕; a click on it does what `!` does, the ✕ or `X` clears it; it replaces
 the ticker when present) · the buttons: `Shortcuts ?` in
 the Hub; `Fleet commands ⌃S` and `Shortcuts ⌃S ?` in the Workspace. Over a native agent thread only
 `Shortcuts ⌃S ?` shows: the thread takes `⌃S` as a chord, so there is no prefix mode for a button to
@@ -353,14 +353,14 @@ none, so the screen says it once.
 **Purpose:** *Which slice of the world am I in, where can I go, and is anything waiting for me?*
 
 ```
- ●●●  [A] Acme ⌄  [Worktrees 4 │ Pull requests 3 │ Board 5]   [⌕ Search or run a command  :]   ● 1 needs you  ⟳ 2 jobs  3 sleeping  ?  ⚙
+ ●●●  [A] Acme ⌄  [Worktrees 4 │ Pull requests 3 │ Board 5]          [⌕ Search or run…  ⌘K]  ● 1 needs you  ⟳ 2 jobs  3 sleeping  ?  ⚙
 ```
 
 | Element | Content | Position | Why here |
 | --- | --- | --- | --- |
 | Context switcher | monogram tile, `Context.name`, chevron; opens a menu of every context (`✓` on the active one, `1`–`9` chips), then *New*, *Edit* and *Delete context* (`N`, `E`, `D`; Delete in red) | left, after the traffic lights | The first place a reader lands. The digits are on the menu rows, so the keys are taught where the choice is made. |
 | Section nav | *Worktrees · Pull requests · Board* with counts; the raised segment is the one shown | after the switcher | The Hub's three sections as one control, the same actions as their keys. |
-| Command field | *Search or run a command* and the palette key | centred | §2.2. |
+| Command field | *Search or run a command* and the palette key | right, before the status cluster | §2.2. |
 | Status cluster | §2.3 | right | One saccade answers "is anything happening without me". |
 | Help, Settings | icon buttons | far right | `?` and `,`, with their keys in the tooltip. |
 
@@ -382,13 +382,13 @@ context · `E` edit · `D` delete · `g w` / `p` / `g b` sections · `:` palette
 · `?` help · `,` settings. The controls are not focusable (ADR 0023): the keyboard path to each is
 its key.
 
-**Workspace:** the switcher and the section nav give way to the breadcrumb `← Worktrees / repo /
-⎇ worktree ⌄` and its chips (§3.6). *Worktrees* is a button for `⌃S s` (back to the Hub; the
-session keeps running) and shows that chip. Back always lands where the breadcrumb says — the
+**Workspace:** the switcher and the section nav give way to the breadcrumb `‹ repo / ⎇ worktree ⌄`
+and the facts after it (§3.6). `‹` is an icon button for `⌃S s` (back to the Hub; the session keeps
+running), its tooltip *Back to Worktrees* and that key. Back always lands where the breadcrumb says — the
 Worktrees list — with the cursor on the worktree just left, whichever surface opened the workspace
 (the list, the Board, the palette); `⌃S S` lands the same way after the sleep; the repository is text; the worktree is the **worktree
 switcher**. The command field, the status cluster (without *sleeping* and *Update*, whose keys are
-Hub keys) and Help / Settings stay; Help and Jobs show their `⌃S` chords.
+Hub keys) and Help / Settings stay; the tooltips of Help and Jobs name their `⌃S` chords.
 
 **Harness:** `titlebar.context`, `titlebar.command`, `titlebar.needs_you`, `titlebar.jobs`,
 `titlebar.update`, `titlebar.daemon`, `titlebar.help`, `titlebar.settings`, `titlebar.back` (also
@@ -791,10 +791,10 @@ what is running elsewhere.*
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│ ← Worktrees / buk/payroll / ⎇ feat-payroll-fix ⌄  ↑2 ↓0  3 files changed  ◷ #412 CI fail   [⌕ Search…]  ? ⚙ │ 44  title bar
+│ ‹ buk/payroll / ⎇ feat-payroll-fix ⌄   ◷ #412 CI fail  ↑2 ↓0  3 files changed              [⌕ Search…]  ? ⚙ │ 44  title bar
 ├─────────────────────────────────────────────────────────────────────────────┤
 │ ╭──────────╮                                                                │
-│ │>_ nvim  ✕│ >_ cc ● │ ⎇ lg │ >_ test exited 1 │ ✦ fix README needs you │ + Watch Zoom Changes │ 40  tab strip
+│ │>_ nvim  ✕│ >_ cc ● │ ⎇ lg │ >_ test exited 1 │ ✦ fix README needs you │ + Watch Changes      │ 40  tab strip
 ├─╯          ╰────────────────────────────────────────────────────────────────┤
 │ ❯ claude                                                                    │
 │ ⏺ Reading src/payroll/rounding.rb…                       ┌────────────────┐ │
@@ -815,11 +815,11 @@ what is running elsewhere.*
 
 | Element | Content | Position | Why here | Why needed |
 | --- | --- | --- | --- | --- |
-| Breadcrumb | `← Worktrees` (`⌃S s`) / `repoId` / the worktree switcher `⎇ <worktree> ⌄` | title bar, left (§3.1) | one line answering "am I in the right worktree?" — the #1 terminal error — in the row that is always there | `Session.kind = Worktree(id)` |
+| Breadcrumb | `‹` (`⌃S s`, *Back to Worktrees*) · `repoId` / the worktree switcher `⎇ <worktree> ⌄` | title bar, left (§3.1), taking all the width the command field and the status cluster leave | one line answering "am I in the right worktree?" — the #1 terminal error — in the row that is always there. As the window narrows the facts after it clip first, then the repository ellipsizes; the worktree holds longest | `Session.kind = Worktree(id)` |
 | Worktree switcher | a menu of every session, most recently used first, each with the palette's GO state word (`session attached`, `sleeping`, …) and a `✓` on this one; then *Last session* `⌃S w` and *All sessions…* `⌃S W` | the breadcrumb's last segment | the same rows as `⌃S W`, one click away; choosing one opens it exactly as the palette row does | `session_mru`, the palette's GO rows |
-| Git chips | `↑a ↓b` while either is non-zero · `n files changed` while dirty | after the switcher | whether the work here is committed and pushed, without opening Lazygit. From an inspection (no fetch) when the Workspace shows the worktree and every 30 s while it stays; a failed inspection keeps the last chips | `InspectWorktrees` |
-| Host chip | `cloud <host>`, `cloud-off` amber while the link is down | after the git chips, remote worktrees only | a remote shell must not pass for a local one | `Worktree.host`, `HostStatus` |
-| PR button | `#412 CI fail` in the §3.5 badge's glyph and tone | after the chips | a click opens the pull request on GitHub | the shared PR badge cache |
+| PR button | `#412 CI fail` in the §3.5 badge's glyph and tone | first after the switcher, a wider gap from the path | a click opens the pull request on GitHub; it leads the facts so it is the last of them a narrow window clips | the shared PR badge cache |
+| Host chip | `cloud <host>`, `cloud-off` amber while the link is down | after the PR button, remote worktrees only | a remote shell must not pass for a local one | `Worktree.host`, `HostStatus` |
+| Git chips | `↑a ↓b` while either is non-zero · `n files changed` while dirty | after the host chip | whether the work here is committed and pushed, without opening Lazygit. From an inspection (no fetch) when the Workspace shows the worktree and every 30 s while it stays; a failed inspection keeps the last chips | `InspectWorktrees` |
 | Tab strip | 40 px, `chrome` ground: per tab a kind glyph and the name, min 84 / max 200 px; the index is in the tooltip (`Tab 2 ⌃S 2`) | under the title bar | the strip says what each tab is; its keys are in its tooltips and menus | `Session.terminals`, the worktree's agent threads |
 | Kind glyph | `terminal` (PTY) · `git-branch` (a Fleet-drawn tab: `lg`) · `square-kanban` (the board tab) · `bot` / `sparkles` (a Claude / Codex thread) | before the name | a tab that is not a shell says so before you type into it | `Terminal.kind`, `command`, `AgentThreadSummary.provider` |
 | Active tab | the content ground, a hairline on three sides and none underneath, `ui_strong` name | — | the active tab joins the content it shows | — |
@@ -828,11 +828,11 @@ what is running elsewhere.*
 | Close `✕` | on the active tab and on a hovered one; a middle-click does the same | tab, right end | the pointer twin of `^s x`, with its confirm when a keep-alive process runs | — |
 | Tab menu | right-click: *Rename* `⌃S ,` · *Restart command* `⌃S r` (an exited PTY) · *Close* `⌃S x` · *Close others* (a tab running a keep-alive process stays open, and a toast says how many); the right-click selects the tab first | at the pointer | every tab verb in one place, each showing its key | — |
 | `+` | a menu: *Terminal* `⌃S c` · *Claude thread* `⌃S a` · *Codex thread* `⌃S A` · *Board* `⌃S b`; then *Lazygit* (selects the git tab, or opens one) and, on an agent tab, *Terminal fallback* `⌃S F` | after the last tab | what can be opened here, with its key | — |
-| Strip toggles | *Open as terminal* `⌃S F` on an agent tab · *Watch* `⌃S v`, pressed while the watch split shows, only while the session has a subagent watch · *Zoom* `⌃S z` · *Changes* `⌃S g`, pressed while the Changes panel shows, on a worktree session | strip, right | the pointer twins of the Workspace's panel keys | — |
+| Strip toggles | *Open as terminal* on an agent tab · *Watch*, pressed while the watch split shows, only while the session has a subagent watch · *Changes*, pressed while the Changes panel shows, on a worktree session; each names its key in its tooltip (`⌃S F`, `⌃S v`, `⌃S g`). Zoom has no button: `⌃S z` hides the strip it would sit on | strip, right | the pointer twins of the Workspace's panel keys | — |
 | Native child tab | `↳ <provider> — <title>` | in the same numbered strip, immediately after its caller and older attached siblings | the arrow is the sole child-specific tab chrome; no provider or `child` badge is added | `AgentThreadSummary.parent`, the window-local attached set |
 | Terminal area | painted cell grid, 8 px padding, no border | fills | maximum rows; chrome is the 40 px strip | — |
 | Native pane | the Fleet-drawn view for this tab, filling the terminal area exactly | replaces the grid | the tab is a tab: same strip, same bars, same pixel positions | `Terminal.kind = Native`, `Worktree.path` |
-| Scroll pill | `SCROLL <offset>/<scrollback_len>`, + a second line `v select · y yank · Esc exit` while selecting; 176 × 22 px, `bg.raised`, amber left bar | overlay, top-right **inside** the terminal area, 12 px inset | during scroll the eyes are on content; top-right never covers the prompt and never shifts the grid | `viewport{scrollback_len, offset}` |
+| Scroll pill | `SCROLL <offset>/<scrollback_len>`; 176 × 22 px, `bg.raised`, amber left bar | overlay, top-right **inside** the terminal area, 12 px inset | during scroll the eyes are on content; top-right never covers the prompt and never shifts the grid | `viewport{scrollback_len, offset}` |
 | ⌃S command menu | *Fleet commands*: the held prefix as an amber chip, "Press a key or click", "⌃S again sends it to the terminal" (only where a program is behind it), a Close `esc` button; then every command the prefix reaches here, in the catalogue's groups (Tabs, Session, Terminal, Agents, Panels), each a clickable row of second-key chip + short label | floating, bottom-centre just above the status bar, at most 900 px wide; **delayed 400 ms** after `ctrl-s` | the expert types the second key in < 200 ms and never sees it; the returning user gets the whole table exactly when they hesitate, and can click instead of reading — 0 px and 0 frames of permanent cost. A click runs the row as its key would; the menu never takes focus. The agent popup and a native agent tab show it too, with their own rows | KEYMAP one-shot Prefix mode; the action catalogue |
 | Exit strip | `⚠ process exited (<code>) · ^s r restart · ^s x close · ^s c new` | bottom, 22 px, only when the tab's command exited | tmux's `remain-on-exit` made this recoverable; Fleet must not silently swallow a crashed dev server | §4 `remain-on-exit on` |
 | Status bar | over a PTY: `<tab> · <cols>×<rows> · kept alive by fleetd` in the breadcrumb slot; then `Fleet commands ⌃S` (enters the prefix, as `ctrl-s` does) · `Shortcuts ⌃S ?` (Help) | status bar | which process the keys reach and that closing the window does not end it; the two keys every other Workspace key hangs off, taught where the eye rests; there is no mode word (§2.8) | `MirrorGrid`, KEYMAP one-shot Prefix mode |
@@ -976,7 +976,7 @@ this section is what the screen shows.
 │        │ ┌───────────────────────────────────────────────────────┐ │        │
 │        │ │ fix the rounding in the payroll totals                │ │        │  user block
 │        │ └───────────────────────────────────────────────────────┘ │        │
-│        │ thinking · 6s  [⏎] show                                   │        │  thinking line
+│        │ thinking · 6s  show                                       │        │  thinking line
 │        │ I'll start from the totals helper.                        │        │  assistant prose
 │        │ ◉ Read   src/payroll/rounding.rb             0.2s   ›     │        │  30  tool row
 │        │ ◉ Edit   src/payroll/rounding.rb   (+14 −3)  ⧉ ◫ ↗ ›     │        │  30  hovered row
@@ -1017,11 +1017,11 @@ toast; the URL is also a `Notice` row, so it stays reachable when the browser do
 | Title-bar `needs you` | `<n> needs you`, including the current tab; a click opens the waiting thread | §2.3 | a blocked thread on another worktree is invisible otherwise | `AgentCounts` |
 | User turn | the message on `bg.panel`, radius 6, attachments as pills below | transcript | the **only** block with a background: it is the one thing the user wrote | `ItemKind::UserMessage` |
 | Assistant prose | Markdown on the ground — no bubble, no avatar, no header | transcript | the answer is the content; chrome around it is noise | `AssistantText` |
-| Thinking | one collapsed muted line, `thought 6s` + `[⏎] show`; while it streams it **is** the live row | transcript | reasoning is available, never dominant | `ItemKind::Reasoning` |
+| Thinking | one collapsed muted line, `thought 6s` + a faint `show` (`⏎` does the same); while it streams it **is** the live row | transcript | reasoning is available, never dominant | `ItemKind::Reasoning` |
 | Tool row | 30 px pointer-first row: state glyph · 60 px verb column (`Read`, `Edit`, `Run`) · one-line summary · result chip (`+1 −1`, `exit 1` in danger, `waiting for you` in amber) · duration · chevron; a click toggles it as `⏎` does; under the pointer **Copy** (`y`), **Diff** (`d`) and **Open in editor** (`o`) icon buttons, and the same verbs on a right-click menu; `agents.tool[N]` | transcript | one shape for every tool means the eye scans a column, not sentences; the verbs are reachable without scroll mode | `ItemKind::Tool` |
 | Nested rows | children indented 16 px behind a 1 px divider | under an `Agent` row | a subagent's work belongs to the row that started it | `Item.children` |
 | Inline diff | `DiffView` under an `edit` / `write` row, red/green 14 % washes | expanded row | the review happens where the edit is announced | `ToolDiff` |
-| `worked …` fold | `worked 12s · 3 tool calls` + `[⏎] show` | end of a settled turn | finished successful work is history; a **failed** row stays exposed | `TurnRecord.ended` |
+| `worked …` fold | `worked 12s · 3 tool calls` + a faint `show` | end of a settled turn | finished successful work is history; a **failed** row stays exposed | `TurnRecord.ended` |
 | Turn footer | `48s · 12.4k tokens · 2 files +36 −3` + **Diff** (opens every file change of the turn) and **Revert turn** (only where a checkpoint exists) as compact ghost buttons reporting `d` and `u`, right-aligned | after the fold | one line of accounting per turn, withheld until the turn completes so it never moves under the reader | `TurnEnd` |
 | Checkpoint line | `context compacted · 84k → 12k tokens` · `session resumed · 2h ago` | transcript | the two moments that silently change what the agent remembers | `Checkpoint` |
 | Error card | the failure, or `rate limited · retrying in 12s` with a spinner while a backoff counts down | transcript | a backoff is progress, a failure is not; they must not look alike | `RuntimeError`, `Retrying` |
@@ -1032,7 +1032,7 @@ toast; the URL is also a `Notice` row, so it stays reachable when the browser do
 | Live activity row | one row, one id, present tense: `working 1m 12s` → `thought 6s` → `running cargo` | pinned in the running turn | thinking → tool A running → tool A done → tool B running is one row changing its label, not four mounts | `RowId::LiveActivity` |
 | Steered message | an ordinary user bubble with a leading `↳` | transcript, inside the running turn | a message sent while a turn runs is a steer, dispatched immediately — there is no queue and no queued row | `UserRow.steered` |
 | Delegation row | `↳` + provider glyph + title + `starting` / `working` / `blocked` / `done` / `incomplete` / `failed` / `cancelled`; one gray spinner, amber dot, `circle-check` or `circle-x`; optional headline on line two; elapsed time and `⏎ attach` trail; the line is a click target that attaches the child, as `⏎` does | at the caller item that launched the child | the durable row keeps a hidden child reachable and changes in place as `DelegationChanged` arrives, without rewriting the caller projection | `ItemKind::Delegation` joined to `Delegation` |
-| Delegation result card | `↳ <provider> finished · <word> · <elapsed> · <n> files` above the delivered Markdown; collapsed to eight lines with the ordinary `⏎ show` / `⏎ hide` fold affordance | the caller's delivered user-message origin | the answer reads as a result of the child rather than as text typed by the user; `Enter` expands the body without attaching the still-hidden child | `UserMessage.origin = Delegation { id }` |
+| Delegation result card | `↳ <provider> finished · <word> · <elapsed> · <n> files` above the delivered Markdown; collapsed to eight lines with the ordinary `show` / `hide` fold word | the caller's delivered user-message origin | the answer reads as a result of the child rather than as text typed by the user; `Enter` expands the body without attaching the still-hidden child | `UserMessage.origin = Delegation { id }` |
 | Composer | one framed panel: the editor (placeholder `Message claude… @ files · $ skills · / commands`, grows one line at a time to eight; `⏎` sends, `⇧⏎` inserts a newline; `agents.composer`) over a settings strip | docked, bottom | what the next send carries is visible and clickable, not hidden behind `^s m` and `^s t` | `MultilineInput` |
 | Settings strip | left: the model chip `claude-opus-5 · high ⌄` (its menu lists the harness's models, then its efforts — `^s m`, `^s e`), the access chip `asks before edits ⌄` (the declared ladder — `^s t`), a **Build \| Plan** control (`⇧⇥`); right: the context meter `34%`, `$0.42 · 48m · dev@example.com`, and **Send** (`⏎`; **Steer** with a draft while the agent works, **Stop** `esc` without one; `agents.send`); **nothing the harness does not report is shown** | the composer's last line | each control calls what its key calls; a chip's tooltip names its key | `ThreadProjection`, `ComposerChip`, `SegmentedControl`, `ContextMeter` |
 | Child caller segment | pinned first segment of the link line `for [<n>] <provider> — <title>`; `[<n>]` is `·` while the caller is hidden; link tone and focus ring, target = caller thread | the muted link line above the composer, unmounted under an approval | activating it or `^s u` attaches the caller when needed, selects it and focuses its composer | `AgentThreadSummary.parent`, `MetadataSegment.target` |
@@ -1108,7 +1108,7 @@ A `title_bar_h` (44 px) window header reads, left to right:
 
 - **Provider switch.** `Claude | Codex` as two segments, marked `bot` and `sparkles` as the tab strip marks them (§3.6); the showing provider is the selected
   one and has no action (its key would hide the popup). The other segment switches to it and
-  carries `^s a` / `^s A` as its chip. A config still naming OpenCode labels the second segment
+  names `^s a` / `^s A` in its tooltip. A config still naming OpenCode labels the second segment
   `OpenCode`.
 - **Session line.** A status dot driven by the shared agent-activity source (amber while
   working, green while idle or otherwise live, red when exited or unreachable), the fixed session
@@ -1253,14 +1253,16 @@ icon + title, then a close ✕ at the right. **Footer 44 px**: left = contextual
 scrim outside the card both dispatch the action `Esc` runs in that dialog (`dialog::Cancel`, or the
 dialog's own `Reject` / `Close`), so a dialog whose `Esc` steps back in stages steps the same way
 under the pointer (ADR 0023). The kit frame also draws a right-aligned button footer — `Cancel`,
-then the one primary, each with its key chip — and each dialog moves its footer onto it when that
+then the one primary, each naming its key in its tooltip — and each dialog moves its footer onto it when that
 dialog is rebuilt; until then its footer is the hint row and label described here. Create worktree
 and every Confirm are on the button footer. A Confirm draws the kit's **alert** header instead of
 the 44 px bar: its icon in a tinted tile, the title question beside it and the target under the
 title, with no ✕ — `Cancel` and a click outside close it. Clone repo, New / Edit context, Assign
 repo, both Quit dialogs, Rename terminal, Repository hooks, and the board's New card, Card property
 and Board settings are on the button footer too: no legend, `Cancel` running what `Esc` runs, the
-primary running what its key runs, and every other verb a button of its own with its key chip.
+primary running what its key runs, and every other verb a button of its own naming its key in its
+tooltip. A confirmation keeps `Cancel`'s and the action's keys on their faces, because whether `y`
+or only `⇧Y` confirms is what it is for.
 Their lists and controls answer a click as the keys would.
 
 | Dialog | Width × height | Icon |
@@ -1737,7 +1739,10 @@ editors, and opening another worktree sleeps the one left unless it is opened ke
 **Terminal clipboard**, as the *Terminals* guide states it: drag selects, double-click selects a
 word, triple-click a line, and the text is copied **when the button is released**; the copy key
 copies a selection and, with none, goes to the program; the paste key pastes, bracketed when the
-program asks. `ctrl-c` and `ctrl-v` stay the program's.
+program asks. A program in the active terminal may also write the Mac clipboard through OSC 52,
+whether that terminal is local or owned by a remote daemon. Clipboard queries receive no reply;
+Mac clipboard content enters the program through Fleet's paste action. `ctrl-c` and `ctrl-v` stay
+the program's.
 
 **All shortcuts tab.**
 
@@ -1955,8 +1960,8 @@ The filter **replaces the pane header in place** — 30 px, same row, no overlay
 retired (KEYMAP A13).
 
 **States:** no match → the list area shows `Nothing matches "<filter>".` over a `Clear filter`
-button that clears the query in one click from either stage (the input closes too); its chip is
-the `esc` that clears once the input has been left, and it shows none while the input still owns
+button that clears the query in one click from either stage (the input closes too); its tooltip
+names the `esc` that clears once the input has been left, and no key while the input still owns
 the keyboard, where `esc` only leaves it. `Enter` is inert; the header keeps `0/12`. A filter survives a refresh; it does **not** survive a
 repo change or a screen change.
 
@@ -2338,7 +2343,7 @@ leaving the watch pane, including its header, visible.
 The pane header shows the child label, prefixed with the quiet `◦ ` marker when the
 daemon discovered the process, a status dot and `running`, `exited <code>`,
 or `interrupted` for signal-only completion; elapsed time as `mm:ss`, frozen after
-exit; the `^s v` hint; and a right-aligned clickable `×`. Multiple watches add a
+exit; and a right-aligned clickable `×`. Multiple watches add a
 compact tab strip with each label and status dot; discovered tab labels use the same
 marker. Clicking a tab selects it.
 
@@ -2609,12 +2614,18 @@ is the pointer twin of its key (above).
 **Drag and drop.** A card is dragged to move it, the pointer twin of `[` / `]` that can also aim.
 Mid-drag the card's own place stays as a faded, dashed tile, the preview under the pointer is the
 tile lifted (accent hairline, popover shadow), the column under the pointer takes an accent
-hairline, and a dashed slot opens where the card would land, saying what the drop does — `Drop to
-start FLT-3 · codex will pick it up` when entering the column starts a run, `Drop to move FLT-3 to
-Todo` otherwise, `Drop to put FLT-3 here` within its own column. Dropping moves the card there
+hairline, and a 2 px accent insertion line appears at the boundary where the card would land. The
+line is painted out of flow, centred in the existing card gap (or on the last card's bottom edge),
+so aiming never changes a card's bounds, the list's scroll extent or its scroll offset; an empty
+column paints the line inside its already fixed-height body. Its non-visual accessible label says
+what the drop does — `Drop to start FLT-3 · codex will pick it up` when entering the column starts
+a run, `Drop to move FLT-3 to Todo` otherwise, `Drop to put FLT-3 here` within its own column.
+Once a boundary is chosen, a small dead band around the neighbouring card's midpoint keeps one-
+pixel pointer wobble from changing it; the target repaints only after that band is crossed.
+Dropping moves the card there
 through exactly the path `[` / `]` take: a card with a live run raises the same *Move FLT-3?*
 confirm, a board whose tracker owns the status toasts the same read-only sentence (and never draws
-a slot), and an unreachable daemon refuses the same way. Within a column a drop reorders it. A
+a marker), and an unreachable daemon refuses the same way. Within a column a drop reorders it. A
 drop back where the card stands does nothing. The keys stay: `[` / `]` and the status picker
 move a card without the mouse (`BOARD.md` §8).
 

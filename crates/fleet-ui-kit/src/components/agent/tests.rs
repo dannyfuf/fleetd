@@ -196,7 +196,6 @@ fn every_row_kind() -> Vec<TranscriptRow> {
         }),
         TranscriptRowKind::Error(ErrorRow {
             message: "API error 529".into(),
-            retryable: true,
         }),
         TranscriptRowKind::Empty(EmptyRow {
             message: "new claude thread".into(),

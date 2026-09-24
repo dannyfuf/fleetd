@@ -11,7 +11,7 @@ use super::super::{
     format::format_thought,
     tool_row::{ToolRow, ToolRowElement},
 };
-use super::render::{RowContext, body_region, chevron, header, separator, show_hint};
+use super::render::{RowContext, body_region, chevron, disclosure, header, separator};
 use super::{DiffRow, ReasoningRow, SubagentRow, TranscriptRowId, WorkGroupRow, WorkLiveRow};
 use crate::{
     icons::{Icon, IconSize},
@@ -52,7 +52,7 @@ pub(super) fn reasoning(
         streaming && ctx.visible,
         theme,
     )))
-    .child(show_hint(row.expanded, expandable, "show"));
+    .child(disclosure(row.expanded, expandable, "show"));
 
     div()
         .w_full()
@@ -190,7 +190,7 @@ pub(super) fn subagent(
                 .clone()
                 .map(|tokens| Text::hint(tokens).faint().flex_none()),
         )
-        .child(show_hint(row.expanded, true, "agents"));
+        .child(disclosure(row.expanded, true, "agents"));
 
     // The child region is the panel: Fleet does not build a separate agents pane, so nesting
     // in the transcript is where a running fleet is read.

@@ -51,7 +51,7 @@ pub use rows::{
     WorkLiveRow, WorkingPhase, WorkingRow, diff_rows,
 };
 pub use scroll::{FollowState, Gesture, ScrollMode, breaks_follow, is_at_end};
-pub use tool_row::{ToolGlyph, ToolRow, ToolRowElement, ToolRowState, expand_hint};
+pub use tool_row::{ToolGlyph, ToolRow, ToolRowElement, ToolRowState};
 pub use transcript_list::{
     RowAction, RowActionKbd, RowActions, RowBodyRenderer, TranscriptEvent, TranscriptList,
     scroll_thumb,

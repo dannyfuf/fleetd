@@ -293,7 +293,6 @@ fn emit_close(
                             .clone()
                             .unwrap_or_else(|| "the turn failed".to_owned()),
                     ),
-                    retryable: false,
                 }),
             ),
             None,

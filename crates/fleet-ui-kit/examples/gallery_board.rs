@@ -70,7 +70,7 @@ const BOARD_H: f32 = 420.0;
 /// The width one static card panel is measured at; a real column is `COLUMN_WIDTH_CH` wide.
 const TILE_W: f32 = 260.0;
 
-/// The column a drop target is shown in: a header, a pill, one tile and the slot.
+/// The column a drop target is shown in: a header, a pill, one tile and the insertion marker.
 const DROP_COLUMN_H: f32 = 300.0;
 
 /// The width a static text-area panel is measured at.
@@ -982,10 +982,15 @@ fn card_tile_section(cx: &mut App) -> AnyElement {
             );
             row_of(&t, vec![lifted, left_behind])
         }),
-        LAYOUT.labeled("drop slot", &t, {
+        LAYOUT.labeled("drop insertion marker", &t, {
             let slot = panel(
                 TILE_W,
-                DropSlot::new("Drop to start FLT-3 \u{b7} codex will pick it up"),
+                div()
+                    .relative()
+                    .h(t.metrics.row_h_comfortable)
+                    .child(DropSlot::new(
+                        "Drop to start FLT-3 \u{b7} codex will pick it up",
+                    )),
             );
             let column = stage(
                 &t,
@@ -1002,7 +1007,25 @@ fn card_tile_section(cx: &mut App) -> AnyElement {
                     ])
                     .drop_slot(1, "Drop to start FLT-3 \u{b7} codex will pick it up"),
             );
-            row_of(&t, vec![slot, panel(TILE_W + 40.0, column)])
+            let empty = stage(
+                &t,
+                px(DROP_COLUMN_H),
+                KanbanColumn::new("empty-drop-column", "Todo")
+                    .count(0)
+                    .accent(Some(t.colors.text_secondary))
+                    .drop_target(true)
+                    .empty_hint("No cards")
+                    .tiles(Vec::new())
+                    .drop_slot(0, "Drop to move FLT-3 to Todo"),
+            );
+            row_of(
+                &t,
+                vec![
+                    slot,
+                    panel(TILE_W + 40.0, column),
+                    panel(TILE_W + 40.0, empty),
+                ],
+            )
         }),
     ];
     LAYOUT.section("card tile", &t, children)

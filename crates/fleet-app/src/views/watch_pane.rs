@@ -6,7 +6,7 @@ use fleet_core::{
     watches::{WatchId, WatchSource, WatchStatus},
 };
 use fleet_proto::{error::ErrorKind, request::RequestBody, response::ResponseBody};
-use fleet_ui_kit::{ActiveTheme, Icon, KeyHint, LogView, StatusDot, Text, Tone, Truncate};
+use fleet_ui_kit::{ActiveTheme, Icon, LogView, StatusDot, Text, Tone, Truncate};
 use gpui::{
     AnyElement, App, Div, Entity, SharedString, Stateful, UniformListScrollHandle, div, prelude::*,
 };
@@ -52,7 +52,7 @@ fn display_label(source: WatchSource, label: &str) -> String {
     }
 }
 
-/// The identity line: label, live status, elapsed time, and the two ways to dismiss it.
+/// The identity line: label, live status, elapsed time, and the ✕ that dismisses it.
 fn header(mirror: &WatchMirror, state: &Entity<AppState>, bridge: &Bridge, cx: &App) -> Div {
     let theme = cx.theme();
     let (label, tone) = status(&mirror.watch.status);
@@ -73,7 +73,6 @@ fn header(mirror: &WatchMirror, state: &Entity<AppState>, bridge: &Bridge, cx: &
         .child(StatusDot::new(tone))
         .child(Text::data_small(label).tone(tone))
         .child(Text::data_small(elapsed(mirror)).tone(Tone::Secondary))
-        .child(KeyHint::new("^s v"))
         .child(
             div()
                 .id("watch-close")
