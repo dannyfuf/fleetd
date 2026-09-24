@@ -21,6 +21,7 @@ pub fn upsert_pull_request_card(
             "a pull request card needs a pull request",
         ));
     };
+    pull_request.validate()?;
     let requested_at = requested_at.map(parse_requested_at).transpose()?;
     let existing = cards.iter().position(|card| {
         card.board_id == board.id

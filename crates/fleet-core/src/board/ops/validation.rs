@@ -262,6 +262,9 @@ pub fn validate_card(board: &Board, card: &Card) -> Result<(), BoardError> {
     if card.title.trim().is_empty() {
         return Err(invalid("title", "must not be empty"));
     }
+    if let Some(pull_request) = &card.pull_request {
+        pull_request.validate()?;
+    }
     if !board.statuses.iter().any(|s| s.id == card.status_id) {
         return Err(BoardError::UnknownStatus(card.status_id.to_string()));
     }

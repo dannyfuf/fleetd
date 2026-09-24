@@ -203,6 +203,50 @@ fn upserting_a_draft_without_a_pull_request_is_refused() {
     );
 }
 
+#[test]
+fn upserting_a_pull_request_with_a_mismatched_url_is_refused() {
+    let mut board = board();
+    let mut cards = Vec::new();
+    let mut draft = draft(7);
+    draft.pull_request.as_mut().unwrap().url = "https://github.com/acme/api/pull/8".into();
+
+    let refusal = upsert_pull_request_card(
+        &mut board,
+        &mut cards,
+        "a".parse().unwrap(),
+        draft,
+        None,
+        NOW,
+    );
+
+    assert!(matches!(
+        refusal,
+        Err(BoardError::Invalid { field, .. }) if field == "pull_request"
+    ));
+    assert!(cards.is_empty());
+}
+
+#[test]
+fn upserting_pull_request_number_zero_is_refused() {
+    let mut board = board();
+    let mut cards = Vec::new();
+
+    let refusal = upsert_pull_request_card(
+        &mut board,
+        &mut cards,
+        "a".parse().unwrap(),
+        draft(0),
+        None,
+        NOW,
+    );
+
+    assert!(matches!(
+        refusal,
+        Err(BoardError::Invalid { field, .. }) if field == "pull_request"
+    ));
+    assert!(cards.is_empty());
+}
+
 /// GitHub names are case-insensitive: a link spelt `Acme/API` finds the card `acme/api` holds,
 /// and a board never holds both.
 #[test]

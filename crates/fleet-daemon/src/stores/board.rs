@@ -367,6 +367,36 @@ mod tests {
         assert!(store.save(&invalid).is_err());
     }
     #[test]
+    fn persisted_pull_request_with_a_mismatched_url_is_invalid() {
+        let (_temp, home, store, mut doc) = fixture();
+        let mut card: fleet_core::board::Card = serde_json::from_value(serde_json::json!({
+            "id": "card-1",
+            "boardId": doc.board.id,
+            "number": 1,
+            "title": "Review acme/api#7",
+            "statusId": "todo",
+            "pullRequest": {
+                "repo": "acme/api",
+                "number": 7,
+                "url": "https://github.com/acme/api/pull/8"
+            },
+            "createdAt": "now",
+            "updatedAt": "now"
+        }))
+        .unwrap();
+        card.board_id = doc.board.id.clone();
+        doc.cards.push(card);
+        std::fs::create_dir_all(home.boards_dir()).unwrap();
+        std::fs::write(
+            home.board_path(&doc.board.id),
+            serde_json::to_string(&doc).unwrap(),
+        )
+        .unwrap();
+
+        assert!(store.peek(&doc.board.id).is_err());
+        assert!(store.save(&doc).is_err());
+    }
+    #[test]
     fn peek_reports_a_damaged_document_without_moving_it() {
         let (_temp, home, store, doc) = fixture();
         store.save(&doc).unwrap();

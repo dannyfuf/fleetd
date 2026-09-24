@@ -32,11 +32,26 @@ impl PullRequestRef {
             .filter(|number| *number > 0)
             .ok_or_else(refusal)?;
         let repo = RepoId::try_from(format!("{owner}/{name}")).map_err(|_| refusal())?;
-        Ok(PullRequestRef {
+        let pull_request = PullRequestRef {
             url: format!("https://github.com/{repo}/pull/{number}"),
             repo,
             number,
-        })
+        };
+        pull_request.validate()?;
+        Ok(pull_request)
+    }
+
+    /// Checks the invariants shared by parsed and structured pull request references.
+    pub(crate) fn validate(&self) -> Result<(), BoardError> {
+        if self.number == 0 {
+            return Err(refusal());
+        }
+        RepoId::try_from(self.repo.as_str()).map_err(|_| refusal())?;
+        let expected = format!("https://github.com/{}/pull/{}", self.repo, self.number);
+        if self.url != expected {
+            return Err(refusal());
+        }
+        Ok(())
     }
 }
 
