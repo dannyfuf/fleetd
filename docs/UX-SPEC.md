@@ -1628,7 +1628,9 @@ clears the search, and `Esc` clears the search and gives the keys back to the ro
 matching says so.
 
 **Footer.** Left: *Open config.json* (`E`) and *Run doctor* (`D`), each a button showing its key.
-Right: *Unsaved changes* in amber while the draft differs from what was loaded, then *Cancel*
+Right: *Unsaved* in amber, with an amber dot, while the draft differs from what was loaded (one
+word, so it keeps the footer's gap from Cancel at the dialog's width, and ellipsised on a narrower
+one), then *Cancel*
 (`Esc`) and the primary *Save* (`⏎`), disabled until there is something to save; while the
 configuration failed to load, the primary reads *Retry* and is enabled, because `⏎` retries.
 
@@ -1641,7 +1643,7 @@ mechanism that makes KEYMAP's `ctrl-q` clause implementable at all (§3.8.9).
 
 **States:** saving is synchronous and silent (never a toast, §2.7); a failed write shows a red
 footer line with the exact error and keeps the dialog open. While the draft is dirty the footer
-says *Unsaved changes*, Save is enabled, and the amber strip above the buttons says *Esc or Cancel
+says *Unsaved*, Save is enabled, and the amber strip above the buttons says *Esc or Cancel
 discards the unsaved changes* — `Esc` discards, as it always has, and the strip says so before it
 happens. An error takes that strip's place.
 

@@ -12,6 +12,9 @@ use gpui::{MouseButton, SharedString};
 use super::*;
 use crate::dialogs::{Dialogs, SETTINGS_SEARCH_W};
 
+/// The footer's dirty status: one word beside the amber strip that spells out what it means.
+const UNSAVED: &str = "Unsaved";
+
 /// What a row's controls call back into: the draft and the dialog's own focus handle.
 #[derive(Clone)]
 struct Handlers {
@@ -104,6 +107,11 @@ pub(crate) fn render(
         .flex()
         .flex_1()
         .min_w_0()
+        // The footer's own `md` gap keeps this group off Cancel only while nothing in it paints
+        // past its box: the status is one word so it fits beside two keyed buttons at the
+        // dialog's width, and on a narrower one it gives way (ellipsised) instead of running
+        // into Cancel. The amber strip above says the rest.
+        .overflow_hidden()
         .items_center()
         .gap(theme.space.sm)
         .child(config_button.harness_target("settings.config"))
@@ -112,11 +120,12 @@ pub(crate) fn render(
         .children(dirty.then(|| {
             div()
                 .flex()
-                .flex_none()
+                .min_w_0()
+                .overflow_hidden()
                 .items_center()
                 .gap(theme.space.xs)
                 .child(Icon::Dot.el().size(IconSize::Small).tone(Tone::Warning))
-                .child(Text::ui("Unsaved changes").tone(Tone::Warning))
+                .child(Text::ui(UNSAVED).tone(Tone::Warning).ellipsize())
         }));
 
     let cancel = Button::new("settings-cancel", "Cancel")
