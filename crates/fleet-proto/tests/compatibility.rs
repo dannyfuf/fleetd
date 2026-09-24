@@ -113,11 +113,35 @@ fn request_wire_goldens() {
     assert_frame(
         Request {
             id: 7,
+            body: RequestBody::InspectWorktrees {
+                ids: vec![WorktreeId::try_from("acme/api#feature").unwrap()],
+                repo: None,
+                fetch: false,
+                background: false,
+            },
+        },
+        r#"{"id":7,"body":{"type":"inspect_worktrees","ids":["acme/api#feature"],"repo":null,"fetch":false}}"#,
+    );
+    assert_frame(
+        Request {
+            id: 8,
+            body: RequestBody::InspectWorktrees {
+                ids: vec![WorktreeId::try_from("acme/api#feature").unwrap()],
+                repo: None,
+                fetch: false,
+                background: true,
+            },
+        },
+        r#"{"id":8,"body":{"type":"inspect_worktrees","ids":["acme/api#feature"],"repo":null,"fetch":false,"background":true}}"#,
+    );
+    assert_frame(
+        Request {
+            id: 9,
             body: RequestBody::EnsureBoard {
                 context_id: "work".parse().unwrap(),
             },
         },
-        r#"{"id":7,"body":{"type":"ensure_board","context_id":"work"}}"#,
+        r#"{"id":9,"body":{"type":"ensure_board","context_id":"work"}}"#,
     );
     assert_frame(
         Request {

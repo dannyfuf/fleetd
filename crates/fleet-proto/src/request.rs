@@ -752,6 +752,9 @@ pub enum RequestBody {
         repo: Option<RepoId>,
         /// Fetch remotes before inspecting.
         fetch: bool,
+        /// Whether this is an app-originated silent background sweep.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        background: bool,
     },
     /// Safely prune merged worktrees.
     PruneWorktrees {

@@ -481,7 +481,7 @@ pub(super) fn do_rows(state: &AppState, snapshot: &Snapshot, card: CardContext) 
         .map(command_entry)
         .collect();
     for job in running_jobs(&snapshot.jobs) {
-        if !job.cancellable {
+        if !is_user_visible_job(job) || !job.cancellable {
             continue;
         }
         rows.push(Entry {

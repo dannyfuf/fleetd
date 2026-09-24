@@ -488,8 +488,13 @@ impl Services {
             RequestBody::DeleteWorktrees { ids } => Ok(ResponseBody::WorktreesDeleted(
                 self.worktrees.delete(ids).await?,
             )),
-            RequestBody::InspectWorktrees { ids, repo, fetch } => Ok(ResponseBody::Inspections(
-                self.inspect.worktrees(ids, repo, fetch).await?,
+            RequestBody::InspectWorktrees {
+                ids,
+                repo,
+                fetch,
+                background,
+            } => Ok(ResponseBody::Inspections(
+                self.inspect.worktrees(ids, repo, fetch, background).await?,
             )),
             RequestBody::PruneWorktrees {
                 dry_run,

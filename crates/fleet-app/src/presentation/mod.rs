@@ -16,8 +16,8 @@ pub use formatting::{
     age_label, age_secs, bare_version, home_dir, now_unix, parse_timestamp, tilde,
 };
 pub use jobs::{
-    JobDisplay, active_job_summary, is_active, is_dismissable, job_kind_label, job_outcome_toast,
-    job_sentence, job_target, latest_unseen_failure, parse_percent, sub_line,
+    JobDisplay, active_job_summary, is_active, is_dismissable, is_user_visible_job, job_kind_label,
+    job_outcome_toast, job_sentence, job_target, latest_unseen_failure, parse_percent, sub_line,
 };
 pub use keys::{FuzzyMatch, FuzzyQuery, contains_folded, humanize, pretty_keys};
 pub use navigation::enter_session;

@@ -2,7 +2,7 @@
 
 use fleet_proto::job::{JobRecord, JobStatus};
 
-use crate::presentation::is_active;
+use crate::presentation::{is_active, is_user_visible_job};
 
 /// The four positions of the Jobs panel's filter (§3.7: all → running → failed → done), picked
 /// on its segmented control or cycled with `f`.
@@ -70,6 +70,9 @@ impl JobFilter {
     /// Whether a job passes this filter.
     #[must_use]
     pub fn matches(self, job: &JobRecord) -> bool {
+        if !is_user_visible_job(job) {
+            return false;
+        }
         match self {
             Self::All => true,
             Self::Running => is_active(&job.status),

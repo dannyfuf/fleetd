@@ -29,11 +29,11 @@ mod model;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use model::owns_row;
 pub use model::{
     DetailPr, GitFacts, KnownGit, KnownPr, NameIcon, RowInputs, SessionWords, WorktreeDetail,
     WorktreeRow, build_rows, matches, sort_rows, summary,
 };
+pub(crate) use model::{job_targets_worktree, owns_row};
 
 /// Character budget of the `owner/name` column (§2.9 column 2).
 const REPO_BUDGET: usize = 12;

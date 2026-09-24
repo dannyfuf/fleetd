@@ -8,6 +8,7 @@ use gpui::{AnyElement, App, Entity, FocusHandle, Window, div};
 use crate::{
     actions::{fleet as fleet_actions, quit_daemon_dialog, quit_dialog},
     dialogs::{Dialogs, footer, root},
+    presentation::is_user_visible_job,
     state::{AppState, running_jobs},
 };
 
@@ -45,6 +46,7 @@ pub(super) fn kind_word(job: &JobRecord) -> String {
 fn job_lines(jobs: &[JobRecord]) -> Vec<JobLine> {
     running_jobs(jobs)
         .into_iter()
+        .filter(|job| is_user_visible_job(job))
         .map(|job| {
             let can_cancel = job.cancellable && !matches!(job.status, JobStatus::Cancelling);
             let survives_shutdown = matches!(job.kind, fleet_proto::job::JobKind::PostCreateHooks)

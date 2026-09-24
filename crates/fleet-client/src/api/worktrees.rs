@@ -55,7 +55,12 @@ impl Client {
         fetch: bool,
     ) -> Result<Vec<WorktreeInspection>> {
         match self
-            .request(RequestBody::InspectWorktrees { ids, repo, fetch })
+            .request(RequestBody::InspectWorktrees {
+                ids,
+                repo,
+                fetch,
+                background: false,
+            })
             .await?
         {
             ResponseBody::Inspections(inspections) => Ok(inspections),

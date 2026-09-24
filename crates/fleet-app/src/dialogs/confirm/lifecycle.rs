@@ -61,6 +61,7 @@ pub(super) fn inspect(
         ids: vec![id],
         repo: None,
         fetch,
+        background: false,
     });
     let weak_state = state.downgrade();
     let task = cx.spawn(async move |cx| {

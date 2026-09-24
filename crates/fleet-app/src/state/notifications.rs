@@ -156,7 +156,10 @@ pub fn latest_failed_job(jobs: &[JobRecord]) -> Option<&JobRecord> {
     crate::presentation::latest_unseen_failure(jobs, |_| false)
 }
 
-/// Every job that is queued, running or cancelling — the work the quit dialogs enumerate.
+/// Every daemon job that is queued, running or cancelling.
+///
+/// This is also the frozen harness-idle accounting surface. UI callers apply their own chrome
+/// visibility filter after reading it.
 #[must_use]
 pub fn running_jobs(jobs: &[JobRecord]) -> Vec<&JobRecord> {
     jobs.iter()

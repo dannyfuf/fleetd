@@ -313,6 +313,7 @@ impl WorkspaceScreen {
             ids: vec![worktree.clone()],
             repo: None,
             fetch: false,
+            background: false,
         });
         let state = state.downgrade();
         let local = Rc::clone(&self.local);

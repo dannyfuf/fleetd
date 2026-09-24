@@ -24,6 +24,7 @@ use fleet_daemon::{
     stores::{config::ConfigStore, state::StateStore},
     testing::fakes::{FakeFiles, FakeFilesCall, FakeGit, FakeGithub, FakeShell, FixedClock},
 };
+use fleet_proto::job::BACKGROUND_INSPECTION_TARGET_PREFIX;
 
 struct NoopDeleter;
 
@@ -48,7 +49,7 @@ async fn inspect_reports_dirty_file_count_and_conservative_merge() {
 
     let inspections = fixture
         .inspect
-        .worktrees(Vec::new(), None, true)
+        .worktrees(Vec::new(), None, true, false)
         .await
         .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(inspections.len(), 1);
@@ -72,7 +73,7 @@ async fn inspection_uses_live_branch() {
 
     let inspection = fixture
         .inspect
-        .worktrees(Vec::new(), None, false)
+        .worktrees(Vec::new(), None, false, false)
         .await
         .unwrap_or_else(|error| panic!("{error}"))
         .pop()
@@ -94,7 +95,7 @@ async fn unpushed_head_is_not_false_unknown() {
 
     let inspection = fixture
         .inspect
-        .worktrees(Vec::new(), None, false)
+        .worktrees(Vec::new(), None, false, false)
         .await
         .unwrap_or_else(|error| panic!("{error}"))
         .pop()
@@ -117,7 +118,7 @@ async fn selected_missing_worktree_is_reported_as_an_item_error() {
 
     let inspections = fixture
         .inspect
-        .worktrees(vec![missing.clone()], None, false)
+        .worktrees(vec![missing.clone()], None, false, false)
         .await
         .unwrap_or_else(|error| panic!("{error}"));
 
@@ -137,7 +138,7 @@ async fn inspect_and_prune_preserve_typed_failures() {
     let (inspect, jobs, files, state, _) = failing_inspect(temp.path().join("inspect"));
     fail_state_read(&files, &state);
     let inspect_error = inspect
-        .worktrees(Vec::new(), None, false)
+        .worktrees(Vec::new(), None, false, false)
         .await
         .unwrap_err();
     assert!(matches!(inspect_error, DaemonError::Filesystem { .. }));
@@ -152,6 +153,27 @@ async fn inspect_and_prune_preserve_typed_failures() {
         .unwrap_err();
     assert!(matches!(prune_error, DaemonError::Filesystem { .. }));
     assert_job_kept_filesystem_error(&jobs).await;
+}
+
+#[tokio::test]
+async fn background_inspection_jobs_carry_the_silent_target_marker() {
+    let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+    let (inspect, jobs, files, state, _) = failing_inspect(temp.path().join("background"));
+    fail_state_read(&files, &state);
+
+    let _error = inspect
+        .worktrees(Vec::new(), None, false, true)
+        .await
+        .expect_err("the fixture's state read fails");
+    let records = jobs.list();
+    let record = records
+        .last()
+        .unwrap_or_else(|| panic!("background inspect job should be retained"));
+    assert!(
+        record
+            .target
+            .starts_with(BACKGROUND_INSPECTION_TARGET_PREFIX)
+    );
 }
 
 struct InspectionFixture {
