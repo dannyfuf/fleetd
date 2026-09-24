@@ -153,6 +153,10 @@ impl Boards {
                 number,
                 pr_key,
             } => {
+                let _links = self.pull_request_links.lock().await;
+                if self.linked_to_another_card(board, card, &worktree.id)? {
+                    return Err(worktree_owned_by_another_card(&worktree.id));
+                }
                 self.follow_pull_request(&worktree, number, &pr_key).await?;
                 return Ok(false);
             }
@@ -166,22 +170,18 @@ impl Boards {
         // Fetching the pull request and running the hooks must not hold the board, or every
         // other request for it times out behind a clone.
         let (created, worktree) = create(repo_id.clone(), number).await?;
+        let _links = self.pull_request_links.lock().await;
+        if self.linked_to_another_card(board, card, &worktree.id)? {
+            return Err(worktree_owned_by_another_card(&worktree.id));
+        }
         // An adopted worktree — one the old Review tab or `fleet create` already made for this
         // branch — holds whatever it was left at: the same head rule as a linked one applies.
-        // Another board's card is refused first, so its worktree is never moved on this card's
-        // behalf; the check is repeated under `pull_request_links` below.
+        // Another card is refused first, so its worktree is never moved on this card's behalf.
         if !created && follow {
-            if self.linked_on_another_board(board, &worktree.id) {
-                return Err(worktree_owned_by_another_card(&worktree.id));
-            }
             self.follow_pull_request(&worktree, number, &pr_key).await?;
         }
         // Across boards: the same pull request can sit on two contexts' Reviews boards, and
         // `create_from_pr` answers both with one worktree.
-        let _links = self.pull_request_links.lock().await;
-        if self.linked_on_another_board(board, &worktree.id) {
-            return Err(worktree_owned_by_another_card(&worktree.id));
-        }
         let _guard = self.gate(board).await;
         let mut doc = self.load(board)?;
         // The same two ways the card can move while the gate was dropped, refused in the words
@@ -321,26 +321,40 @@ impl Boards {
         }
     }
 
-    /// Whether a card on any other board already links this worktree.
+    /// Whether any other card already links this worktree, on this board or another one.
     ///
     /// Read without those boards' gates: the link this guards is taken under
     /// `pull_request_links`, the only writer of a pull-request link, so a racing claim cannot
     /// land between this read and the caller's save.
-    fn linked_on_another_board(&self, board: &BoardId, worktree: &WorktreeId) -> bool {
-        let ids = match self.store.list() {
-            Ok(ids) => ids,
-            Err(error) => {
-                tracing::warn!(%error, "the board store could not be listed for a worktree's owner");
-                return false;
+    fn linked_to_another_card(
+        &self,
+        board: &BoardId,
+        card: &CardId,
+        worktree: &WorktreeId,
+    ) -> DaemonResult<bool> {
+        let ids = self.store.list().map_err(|error| {
+            DaemonError::Conflict(format!(
+                "cannot verify ownership of worktree {worktree}: board store could not be listed: {error}"
+            ))
+        })?;
+        for id in &ids {
+            let doc = self.store.peek(id).map_err(|error| {
+                DaemonError::Conflict(format!(
+                    "cannot verify ownership of worktree {worktree}: board {id} could not be read: {error}"
+                ))
+            })?;
+            let Some(doc) = doc else {
+                return Err(DaemonError::Conflict(format!(
+                    "cannot verify ownership of worktree {worktree}: board {id} could not be read"
+                )));
+            };
+            if doc.cards.iter().any(|other| {
+                (id != board || other.id != *card) && other.worktree_id.as_ref() == Some(worktree)
+            }) {
+                return Ok(true);
             }
-        };
-        ids.iter().filter(|id| *id != board).any(|id| {
-            self.scan_load(id).is_some_and(|doc| {
-                doc.cards
-                    .iter()
-                    .any(|card| card.worktree_id.as_ref() == Some(worktree))
-            })
-        })
+        }
+        Ok(false)
     }
 
     /// Creates and links a card worktree through a placement-aware creation callback.

@@ -52,6 +52,10 @@ struct World {
 
 impl World {
     async fn new() -> Self {
+        Self::with_pull_heads(["review-7", "review-8"]).await
+    }
+
+    async fn with_pull_heads(heads: [&str; 2]) -> Self {
         let root = tempfile::tempdir().expect("a temporary directory");
         let home = root.path().join("fleet");
         let repo_path = create_repository(root.path(), &home);
@@ -101,7 +105,7 @@ impl World {
             config,
             state,
             Arc::new(JobManager::new(&home)),
-            adapters(files),
+            adapters(files, heads.map(str::to_owned)),
             BroadcastBus::default(),
         );
         Self {
@@ -176,19 +180,18 @@ impl World {
 }
 
 /// Real Git, filesystem and shell, with `gh pr view <n>` answered for pull requests 7 and 8.
-fn adapters(files: Arc<RealFiles>) -> Adapters {
+fn adapters(files: Arc<RealFiles>, heads: [String; 2]) -> Adapters {
     let gh = Arc::new(FakeShell::new());
-    for number in [FIRST_PULL, SECOND_PULL] {
+    for (number, head) in [FIRST_PULL, SECOND_PULL].into_iter().zip(heads) {
+        let expected_number = number.to_string();
         gh.when(
-            move |command| {
-                command.program == "gh" && command.args.get(2) == Some(&number.to_string())
-            },
+            move |command| command.program == "gh" && command.args.get(2) == Some(&expected_number),
             ShellResult {
                 status: 0,
                 stdout: serde_json::json!({
                     "number": number, "title": format!("Change {number}"),
                     "url": format!("https://github.com/acme/api/pull/{number}"),
-                    "author": {"login": "octocat"}, "headRefName": format!("review-{number}"),
+                    "author": {"login": "octocat"}, "headRefName": head,
                     "baseRefName": "main", "isDraft": false, "isCrossRepository": false,
                     "headRepository": {"name": "api", "nameWithOwner": "acme/api"},
                     "headRepositoryOwner": {"login": "acme"}, "reviewDecision": null,
@@ -564,6 +567,108 @@ async fn two_cards_run_at_once_in_two_worktrees() {
     );
 }
 
+#[tokio::test]
+async fn colliding_pull_request_slugs_cannot_move_another_cards_checkout() {
+    let world = World::with_pull_heads(["foo/bar", "foo-bar"]).await;
+    let id = board_id(&world).await;
+    world
+        .board(
+            Some(2),
+            vec![
+                card(&id, 1, reviewing("acme/api", FIRST_PULL)),
+                card(&id, 2, reviewing("acme/api", SECOND_PULL)),
+            ],
+        )
+        .await;
+    world
+        .services
+        .boards
+        .start_run(&card_id(1))
+        .await
+        .expect("the first start is recorded");
+    let worktree = world
+        .worktrees()
+        .await
+        .into_iter()
+        .find(|worktree| worktree.slug == "foo-bar")
+        .expect("the first card owns the colliding slug");
+    let path = std::path::PathBuf::from(&worktree.path);
+    let head_before = head_of(&path);
+    let marker = format!("refs/fleet/pulls/{FIRST_PULL}/placed");
+    let marker_before = revision_of(&path, &marker);
+    push_to_pull(&world, SECOND_PULL, "second-pull.txt");
+
+    let refused = world
+        .services
+        .boards
+        .start_run(&card_id(2))
+        .await
+        .expect("the second card records its refusal");
+
+    assert!(refused.runs[0].failed_to_start());
+    assert!(
+        refused.runs[0].detail.as_deref().is_some_and(
+            |detail| detail.contains("worktree acme/api#foo-bar belongs to branch foo/bar")
+        ),
+        "{:?}",
+        refused.runs[0].detail
+    );
+    assert!(refused.worktree_id.is_none());
+    assert_eq!(head_of(&path), head_before);
+    assert_eq!(revision_of(&path, &marker), marker_before);
+}
+
+#[tokio::test]
+async fn a_same_board_owner_is_checked_before_following_an_adopted_worktree() {
+    let world = World::new().await;
+    let id = board_id(&world).await;
+    let board = world
+        .board(
+            Some(2),
+            vec![
+                card(&id, 1, reviewing("acme/api", FIRST_PULL)),
+                card(&id, 2, reviewing("acme/api", SECOND_PULL)),
+            ],
+        )
+        .await;
+    world
+        .services
+        .boards
+        .start_run(&card_id(1))
+        .await
+        .expect("the first start is recorded");
+    let worktree = world
+        .worktrees()
+        .await
+        .into_iter()
+        .find(|worktree| worktree.id == pull_worktree(FIRST_PULL))
+        .expect("the first card owns its worktree");
+    let path = std::path::PathBuf::from(&worktree.path);
+    let head_before = head_of(&path);
+    let marker = format!("refs/fleet/pulls/{FIRST_PULL}/placed");
+    let marker_before = revision_of(&path, &marker);
+    push_to_pull(&world, SECOND_PULL, "second-pull.txt");
+
+    let refused = world
+        .services
+        .boards
+        .ensure_pull_request_worktree_with(&board.id, &card_id(2), move |repo, number| async move {
+            assert_eq!((repo, number), (repo_id(), SECOND_PULL));
+            Ok((false, worktree))
+        })
+        .await
+        .expect_err("another card's adopted worktree is refused before follow");
+
+    assert!(
+        refused
+            .to_string()
+            .contains("already belongs to another card"),
+        "{refused}"
+    );
+    assert_eq!(head_of(&path), head_before);
+    assert_eq!(revision_of(&path, &marker), marker_before);
+}
+
 /// A board that runs every card in its own worktree records that one on each run, and never
 /// creates a worktree for a card.
 #[tokio::test]
@@ -626,11 +731,20 @@ fn push_to_pull(world: &World, number: u64, file: &str) -> String {
 }
 
 fn head_of(path: &Path) -> String {
+    revision_of(path, "HEAD")
+}
+
+fn revision_of(path: &Path, revision: &str) -> String {
     let output = Command::new("git")
-        .args(["rev-parse", "HEAD"])
+        .args(["rev-parse", revision])
         .current_dir(path)
         .output()
         .expect("git runs");
+    assert!(
+        output.status.success(),
+        "git rev-parse {revision}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
@@ -1212,4 +1326,40 @@ async fn a_pull_request_worktree_is_linked_to_one_card_across_boards() {
         )
     );
     assert!(refused.worktree_id.is_none());
+}
+
+#[tokio::test]
+async fn an_unreadable_board_refuses_a_pull_request_worktree_link() {
+    let world = World::new().await;
+    let id = board_id(&world).await;
+    let board = world
+        .board(None, vec![card(&id, 1, reviewing("acme/api", FIRST_PULL))])
+        .await;
+    let mut unreadable = board.clone();
+    unreadable.id = "unreadable".parse().expect("a static board id");
+    world.write(&unreadable, Vec::new());
+    std::fs::write(
+        world
+            ._root
+            .path()
+            .join("fleet/boards")
+            .join("unreadable.json"),
+        "not json",
+    )
+    .expect("the board document is corrupted");
+
+    let refused = world
+        .services
+        .boards
+        .ensure_pull_request_worktree(&board.id, &card_id(1))
+        .await
+        .expect_err("an unreadable candidate owner refuses the link");
+
+    assert!(
+        refused
+            .to_string()
+            .contains("board unreadable could not be read"),
+        "{refused}"
+    );
+    assert!(world.document(&board).cards[0].worktree_id.is_none());
 }

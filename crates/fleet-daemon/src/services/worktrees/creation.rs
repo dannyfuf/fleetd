@@ -93,7 +93,10 @@ impl Worktrees {
             .filter(|pull| !pull.is_cross_repository)
             .map(|pull| pull.head_ref_name)
             .unwrap_or_else(|| format!("pr/{number}"));
-        if let Some(existing) = self.existing_create_result(&repo, &slug, None).await? {
+        if let Some(existing) = self
+            .existing_pr_create_result(&repo, &slug, &branch, number)
+            .await?
+        {
             return Ok((false, existing, None));
         }
         let service = self.clone();
@@ -248,7 +251,10 @@ impl Worktrees {
     ) -> DaemonResult<(bool, Worktree, Option<JobRecord>)> {
         let id = worktree_id(&repo_id, &slug)?;
         let _lifecycle = self.sessions.claim_worktree_lifecycle(id).await;
-        if let Some(existing) = self.existing_create_result(&repo_id, &slug, None).await? {
+        if let Some(existing) = self
+            .existing_pr_create_result(&repo_id, &slug, &branch, number)
+            .await?
+        {
             return Ok((false, existing, None));
         }
         let (repo, config) = self.repo_and_config(&repo_id).await?;
@@ -441,6 +447,30 @@ impl Worktrees {
             )));
         }
         Ok(Some(existing))
+    }
+
+    /// Adopts a slug-matched worktree only when its branch is this pull request's head.
+    ///
+    /// Two heads can share a slug (`foo/bar` and `foo-bar`), so the slug alone does not name a
+    /// pull request. The placed ref is no evidence either: `refs/fleet/pulls/<n>/placed` lives
+    /// in the repository's shared refs, and any worktree of the repository would carry it.
+    async fn existing_pr_create_result(
+        &self,
+        repo: &RepoId,
+        slug: &str,
+        branch: &str,
+        number: u64,
+    ) -> DaemonResult<Option<Worktree>> {
+        let Some(existing) = self.existing_create_result(repo, slug, None).await? else {
+            return Ok(None);
+        };
+        if existing.branch == branch {
+            return Ok(Some(existing));
+        }
+        Err(DaemonError::Conflict(format!(
+            "worktree {} belongs to branch {}, not pull request {repo}#{number}",
+            existing.id, existing.branch
+        )))
     }
 
     async fn assert_create_conflicts(
