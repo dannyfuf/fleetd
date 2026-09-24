@@ -85,7 +85,7 @@ impl Schedules {
             started_at,
             dropped_logs,
         } = started;
-        remove_logs(dropped_logs).await;
+        remove_logs(&self.home, id, dropped_logs).await;
         #[cfg(test)]
         self.pause_before_submit().await;
         let title = format!("Scheduled: {}", schedule.name);
@@ -277,7 +277,7 @@ impl Schedules {
                 Ok((dropped, stamp))
             })
             .await?;
-        remove_logs(dropped).await;
+        remove_logs(&self.home, id, dropped).await;
         self.published(board);
         Ok(started_at)
     }
@@ -307,7 +307,7 @@ impl Schedules {
                 Ok((schedule.board_id.clone(), dropped, stamp))
             })
             .await?;
-        remove_logs(dropped).await;
+        remove_logs(&self.home, id, dropped).await;
         self.published(&board);
         Ok(started_at)
     }

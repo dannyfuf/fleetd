@@ -2436,8 +2436,9 @@ directory, and `logs/<YYYYMMDDTHHMMSSZ>.log` holds one run's whole output, named
 `started_at`. A run's `started_at` is its key — its job, its outcome and its log are matched by it
 — so it is unique within the schedule: a fire in the same second as a run already recorded is
 stamped one second later. The log of a run `push_run` drops past the cap is deleted with it; the
-cap drops the oldest *finished* runs and never a live one, whose child is still writing its log.
-Deleting a schedule deletes its directory.
+cap drops the oldest *finished* runs and never a live one, whose child is still writing its log. Retention unlinks a stored `log_path` only when its absolute, parent-dir-free path has a
+canonical parent inside that schedule's `logs/` directory; malformed or escaped paths are removed
+from history but left on disk. Deleting a schedule deletes its directory.
 
 ### 12.3 How a schedule runs
 

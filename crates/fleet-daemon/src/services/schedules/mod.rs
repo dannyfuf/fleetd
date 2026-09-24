@@ -3,7 +3,7 @@
 
 use std::{
     collections::BTreeMap,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::Arc,
 };
 
@@ -400,13 +400,59 @@ async fn remove_dir(path: &Path) {
 }
 
 /// Removes the log files of runs `push_run` dropped; one that is already gone is not an error.
-async fn remove_logs(paths: Vec<String>) {
-    for path in paths {
-        match tokio::fs::remove_file(&path).await {
+async fn remove_logs(home: &FleetHome, schedule: &ScheduleId, paths: Vec<String>) {
+    if paths.is_empty() {
+        return;
+    }
+    let canonical_home = match tokio::fs::canonicalize(home.root()).await {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::warn!(%schedule, path = %home.root().display(), %error, "could not verify the Fleet home; skipping retention deletes");
+            return;
+        }
+    };
+    let logs_dir = home.schedule_logs_dir(schedule);
+    let canonical_logs_dir = match tokio::fs::canonicalize(&logs_dir).await {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::warn!(%schedule, path = %logs_dir.display(), %error, "could not verify the schedule logs directory; skipping retention deletes");
+            return;
+        }
+    };
+    if !canonical_logs_dir.starts_with(&canonical_home) {
+        tracing::warn!(%schedule, path = %logs_dir.display(), "the schedule logs directory escapes the Fleet home; skipping retention deletes");
+        return;
+    }
+    for stored_path in paths {
+        let path = Path::new(&stored_path);
+        if !path.is_absolute()
+            || path
+                .components()
+                .any(|component| component == Component::ParentDir)
+        {
+            tracing::warn!(%schedule, path = %path.display(), "refusing to delete a dropped schedule run log outside its logs directory");
+            continue;
+        }
+        let Some(parent) = path.parent() else {
+            tracing::warn!(%schedule, path = %path.display(), "refusing to delete a dropped schedule run log without a parent directory");
+            continue;
+        };
+        let canonical_parent = match tokio::fs::canonicalize(parent).await {
+            Ok(path) => path,
+            Err(error) => {
+                tracing::warn!(%schedule, path = %path.display(), %error, "could not verify a dropped schedule run log's parent; skipping deletion");
+                continue;
+            }
+        };
+        if !canonical_parent.starts_with(&canonical_logs_dir) {
+            tracing::warn!(%schedule, path = %path.display(), "refusing to delete a dropped schedule run log outside its logs directory");
+            continue;
+        }
+        match tokio::fs::remove_file(path).await {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
-                tracing::warn!(%error, %path, "failed to remove a dropped schedule run log");
+                tracing::warn!(%schedule, %error, path = %path.display(), "failed to remove a dropped schedule run log");
             }
         }
     }

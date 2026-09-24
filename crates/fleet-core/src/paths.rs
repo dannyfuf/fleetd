@@ -171,6 +171,11 @@ impl FleetHome {
     pub fn schedule_work_dir(&self, id: &ScheduleId) -> PathBuf {
         self.schedule_dir(id).join("work")
     }
+    /// Returns the directory holding one schedule's run logs, `schedules/<id>/logs`.
+    #[must_use]
+    pub fn schedule_logs_dir(&self, id: &ScheduleId) -> PathBuf {
+        self.schedule_dir(id).join("logs")
+    }
     /// Returns one run's log, `schedules/<id>/logs/<YYYYMMDDTHHMMSSZ>.log`.
     ///
     /// `started_at` is the run's RFC 3339 start; an unparsable one keeps only its ASCII
@@ -190,9 +195,7 @@ impl FleetHome {
                     .to_string()
             },
         );
-        self.schedule_dir(id)
-            .join("logs")
-            .join(format!("{compact}.log"))
+        self.schedule_logs_dir(id).join(format!("{compact}.log"))
     }
 }
 

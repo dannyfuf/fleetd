@@ -12,7 +12,9 @@ use fleet_core::{
     ids::{BoardId, ScheduleId},
     model::Context,
     paths::FleetHome,
-    schedule::{Cadence, ScheduleDraft, ScheduleOutcome, SchedulePatch, ScheduleRun},
+    schedule::{
+        Cadence, MAX_RUNS_PER_SCHEDULE, ScheduleDraft, ScheduleOutcome, SchedulePatch, ScheduleRun,
+    },
     state::default_state,
 };
 use fleet_proto::event::Event;
@@ -493,6 +495,75 @@ async fn a_deduplicated_never_started_run_clears_its_job_and_log() {
         .wait(&old_job)
         .await
         .expect("old job stops");
+}
+
+#[tokio::test(start_paused = true)]
+async fn retention_deletes_only_logs_inside_the_schedule_logs_directory() {
+    let fixture = fixture(FakeRunner::new()).await;
+    let created = fixture
+        .schedules
+        .create(draft(&fixture.board, every(15)))
+        .await
+        .expect("create");
+    let outside = fixture.home.root().join("outside.log");
+    let inside = fixture
+        .home
+        .schedule_logs_dir(&created.id)
+        .join("inside.log");
+    std::fs::create_dir_all(inside.parent().expect("inside log parent"))
+        .expect("create logs directory");
+    std::fs::write(&outside, "outside").expect("write outside file");
+    std::fs::write(&inside, "inside").expect("write inside log");
+
+    let target = created.id.clone();
+    let outside_log = outside.to_string_lossy().into_owned();
+    let inside_log = inside.to_string_lossy().into_owned();
+    fixture
+        .schedules
+        .store
+        .transaction(move |document| {
+            let schedule = super::find_mut(document, &target)?;
+            schedule.runs = (0..=MAX_RUNS_PER_SCHEDULE)
+                .map(|index| {
+                    let started_at = format!("2026-09-23T{index:02}:00:00Z");
+                    ScheduleRun {
+                        job_id: None,
+                        started_at: started_at.clone(),
+                        ended_at: Some(started_at),
+                        outcome: Some(ScheduleOutcome::Succeeded),
+                        summary: None,
+                        cost_usd: None,
+                        log_path: match index {
+                            0 => Some(outside_log.clone()),
+                            1 => Some(inside_log.clone()),
+                            _ => None,
+                        },
+                    }
+                })
+                .collect();
+            Ok(())
+        })
+        .await
+        .expect("seed retained runs");
+
+    fixture
+        .schedules
+        .run_now(&created.id)
+        .await
+        .expect("run triggers retention");
+
+    assert!(
+        outside.exists(),
+        "retention must not unlink a stored path outside the schedule logs directory"
+    );
+    assert!(
+        !inside.exists(),
+        "the retained log inside the directory is deleted"
+    );
+    until("the retained run to finish", || {
+        finished(&fixture.schedules, &created.id, MAX_RUNS_PER_SCHEDULE)
+    })
+    .await;
 }
 
 #[tokio::test(start_paused = true)]
