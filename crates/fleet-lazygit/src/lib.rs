@@ -16,6 +16,7 @@ use gpui::{App, AppContext, Bounds, TitlebarOptions, WindowBounds, WindowOptions
 
 mod actions;
 mod bridge;
+pub mod changes;
 pub mod diff_view;
 pub mod drive;
 pub mod keymap;

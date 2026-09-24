@@ -25,7 +25,7 @@ gpui.workspace = true
 gpui_platform.workspace = true
 similar.workspace = true
 syntect.workspace = true
-tokio = { workspace = true, features = ["macros", "rt", "sync"] }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 two-face.workspace = true
