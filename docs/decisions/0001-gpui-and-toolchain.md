@@ -23,8 +23,14 @@ before `run`, then key bindings, application menus (`cmd-q` is unreliable withou
 `open_window`, `cx.activate(true)`, and `on_window_closed` quitting when no window remains.
 `svg()` renders nothing without an `AssetSource`, and only one may be installed per application.
 
-**Build profiles.** `[profile.dev] opt-level = 1` with `[profile.dev.package."*"] opt-level = 3`:
-GPUI's layout, shaping and SVG dependencies are unusable at `opt-level = 0`.
+**Build profiles.** Zed's shape: `[profile.dev] opt-level = 1, debug = "limited"` for workspace
+crates, `[profile.dev.package."*"] opt-level = 0` for dependencies, and a named list at
+`opt-level = 3` for the ones GPUI spends its frames in — layout (`taffy`), shaping and font parsing,
+SVG, image decoding, the `wgpu` renderer, `syntect`, `serde_json` and the proc-macros. Those are
+unusable at `opt-level = 0`; the rest of the ~800 are not hot. Optimizing every dependency (the
+original setting) measured 14.5 min for a cold build on a 12-core, 16 GB Linux machine, swapping
+to 12 GB, against 6 min without swap for this profile. A dependency that turns out hot in a
+profile joins the list in `Cargo.toml`; `[profile.dev.package."*"]` does not go back to 3.
 
 **Reading stale snippets.** `ViewContext`, `WindowContext`, `cx.new_view`, a one-argument
 `render`, `View<T>`/`Model<T>`, `Corner::`, `overlay()`, or `.child(some_entity)` mark a snippet

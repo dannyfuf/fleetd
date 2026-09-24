@@ -96,11 +96,67 @@ unicode-segmentation = "1"
 unicode-width = "0.2"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 
+# Zed's shape (docs/decisions/0001-gpui-and-toolchain.md): dependencies build unoptimized and
+# only the ones GPUI spends its frames in are optimized. Optimizing all ~800 of them cost more
+# than twice the cold build time and pushed a 16 GB machine into swap. "limited" debuginfo
+# keeps backtraces and breakpoints on functions but drops per-variable info, which shrinks the
+# app's incremental rebuild and every test binary.
 [profile.dev]
 opt-level = 1
+debug = "limited"
+split-debuginfo = "unpacked"
 
-# Dependencies are optimized, so their debuginfo is rarely useful and it dominates
-# target/ size. Workspace crates keep full debuginfo.
-[profile.dev.package."*"]
-opt-level = 3
+# Build scripts and proc-macros get the same settings as ordinary dependencies, so a crate that
+# is both (serde, syn, libc…) compiles once rather than once per profile.
+[profile.dev.build-override]
+opt-level = 0
 debug = false
+
+[profile.dev.package."*"]
+opt-level = 0
+debug = false
+
+# Bundled SQLite is C compiled by the build script at this opt-level; -O1 halves its compile
+# time against -O3 and the daemon's queries are not hot.
+[profile.dev.package.libsqlite3-sys]
+opt-level = 1
+
+# The hot dependencies, optimized even in dev. Unoptimized they make the app sluggish:
+# layout (taffy), text shaping and font parsing, SVG icons, image decoding, the renderer,
+# syntax highlighting, JSON on the wire, and the proc-macros every build runs.
+[profile.dev.package]
+taffy = { opt-level = 3 }
+cosmic-text = { opt-level = 3 }
+swash = { opt-level = 3 }
+rustybuzz = { opt-level = 3 }
+harfrust = { opt-level = 3 }
+ttf-parser = { opt-level = 3 }
+skrifa = { opt-level = 3 }
+read-fonts = { opt-level = 3 }
+zeno = { opt-level = 3 }
+etagere = { opt-level = 3 }
+resvg = { opt-level = 3 }
+usvg = { opt-level = 3 }
+tiny-skia = { opt-level = 3 }
+lyon_tessellation = { opt-level = 3 }
+image = { opt-level = 3 }
+png = { opt-level = 3 }
+zune-jpeg = { opt-level = 3 }
+fdeflate = { opt-level = 3 }
+miniz_oxide = { opt-level = 3 }
+wgpu-core = { opt-level = 3 }
+wgpu-hal = { opt-level = 3 }
+naga = { opt-level = 3 }
+syntect = { opt-level = 3 }
+fancy-regex = { opt-level = 3 }
+regex-automata = { opt-level = 3 }
+regex-syntax = { opt-level = 3 }
+memchr = { opt-level = 3 }
+hashbrown = { opt-level = 3 }
+serde_json = { opt-level = 3 }
+sha2 = { opt-level = 3 }
+proc-macro2 = { opt-level = 3 }
+quote = { opt-level = 3 }
+syn = { opt-level = 3 }
+serde_derive = { opt-level = 3 }
+gpui_macros = { opt-level = 3 }

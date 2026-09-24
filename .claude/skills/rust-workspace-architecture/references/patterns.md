@@ -891,9 +891,9 @@ Use `make clippy`, never bare `cargo clippy` — the Makefile carries the flags.
 `rust-toolchain.toml` pins `1.97.1`, `profile = "minimal"`, components `rustfmt` +
 `clippy` (Zed also installs `rust-analyzer` + `rust-src` so editors agree with CI — worth
 copying). `rustfmt.toml` is `edition`/`style_edition` only, exactly like Zed's.
-`[profile.dev] opt-level = 1` with `[profile.dev.package."*"] opt-level = 3, debug = false`
-— the documented reason is that dependency debuginfo dominated a ~19 GB `target/`
-(`docs/DEVELOPMENT.md:29-40`).
+`[profile.dev] opt-level = 1, debug = "limited"` with `[profile.dev.package."*"] opt-level = 0,
+debug = false` and a named `opt-level = 3` hot list — Zed's shape; ADR 0001 records why and the
+measured cost of optimizing every dependency.
 
 **Missing in this worktree, in rough order of value:** no `.github/` at all (`make ci`
 exists but nothing runs it); no unused-dependency check (`cargo shear --locked
