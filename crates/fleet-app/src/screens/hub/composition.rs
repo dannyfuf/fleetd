@@ -226,6 +226,8 @@ impl HubScreen {
                         filter,
                         stale,
                         loading: state.snapshot.is_none(),
+                        // The rail's rows count its pinned `All` row too.
+                        has_repos: model.repo_total > 1,
                         undo_available: state.last_trash_entry.is_some(),
                         handlers: handlers.clone(),
                     },

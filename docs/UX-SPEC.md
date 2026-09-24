@@ -478,7 +478,9 @@ scope holds only one), then `· <k> needs attention` when a row has failed hooks
 or an inspection error (zero-suppressed). A frozen snapshot appends an amber `Stale · <age>` chip
 and draws the rows at 55 % (`stale_opacity`); they stay navigable.
 The toolbar on the right: the **filter field** (`/`; a click opens the same filter mode, §3.10),
-`Clone repo` (`repos::Clone`) and the primary `New worktree  n` (`worktrees::Create`).
+`Clone repo` (`repos::Clone`) and the primary `New worktree  n` (`worktrees::Create`). While the
+context holds no repository there is nothing to branch from, so `New worktree` is not offered and
+`Clone repo` is the primary instead (step 2 of §3.13's first run).
 
 **Column heads** (`ListHeader`, sentence case): Name, Repository, Session, Pull request, Age; the
 §2.9 ladder drops them with the pane exactly as it drops the cells.
@@ -524,6 +526,7 @@ it changes a decision.
 | State | Rendering |
 | --- | --- |
 | Empty | `No worktrees yet` / `No worktrees for <repo> yet` over a primary `New worktree  n` button |
+| No repositories | `No repositories yet — clone one to start a worktree` over a primary `Clone repo` button; the header offers no `New worktree` |
 | Filter-empty | `Nothing matches "<filter>".` over a `Clear filter  esc` button (§3.10) |
 | Loading (cold) | `Loading…` until the first snapshot; rows then render from `state.json` immediately — **never blank** |
 | Job running on a row | name icon → spinning `loader-circle` (amber), session + age → phase text; the row stays selectable and `Enter` opens it as soon as the session exists |
@@ -2039,6 +2042,10 @@ user started with controls, each showing its key (ADR 0023):
 
 Clicking a step card does the step — the same action as its key (`N` opens New context, `n` Clone
 a repository). Step 3 needs a repository, so it stays dimmed with `after step 2` in place of a key.
+The page lasts until the first context exists; from then on the Hub carries the remaining steps.
+With a context and no repository the Worktrees page leads with a primary `Clone repo` (header and
+empty body, §3.3) and offers no `New worktree`, so step 2 is still the one way forward; once a
+repository exists the page takes its usual shape and `New worktree` is step 3.
 **[D-18]** For this user the empty state is also a **migration**, so the dashed import card is
 shown only when `~/.swarm/state.json` exists (zero-suppression); `i` or a click runs `fleet import
 --from-swarm` as a **job** and lands the user in a populated Hub. **No** onboarding carousel, tour

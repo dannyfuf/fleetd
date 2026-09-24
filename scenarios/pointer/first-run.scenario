@@ -1,7 +1,8 @@
 # UX-SPEC §3.13 · ADR 0023 — a Fleet that has never been run is set up by pointer: the first-run
 # page's step 1 card opens New context, the name is typed, and the footer's Create makes it.
-# With a context and no repository the page gives way to the Hub, whose Worktrees header offers
-# Clone repo; that opens the Clone dialog, which the hermetic `empty` home cannot finish (it has no
+# With a context and no repository the page gives way to the Hub, which carries step 2: the
+# Worktrees page leads with a primary Clone repo (header and body) and offers no New worktree,
+# since there is nothing to branch from yet. Clone repo opens the Clone dialog, which the hermetic `empty` home cannot finish (it has no
 # GitHub repositories to list), so its ✕ closes it. The title bar's context switcher then names
 # the new context.
 #
@@ -20,9 +21,10 @@ await overlay absent 10000
 await idle 10000
 await screen == Hub 10000
 assert key_contexts[0] != "FirstRun" && targets["worktrees.clone"] exists
+assert targets["worktrees.empty.clone"] exists && targets["worktrees.new"] absent
 shot context-created
 
-click worktrees.clone
+click worktrees.empty.clone
 await dialog.name == Clone 5000
 await idle 10000
 assert targets["dialog.button[1]"] exists

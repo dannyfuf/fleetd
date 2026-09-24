@@ -51,6 +51,7 @@ pub(crate) enum EmptySurface {
     Repos,
     Worktrees,
     WorktreesRepo,
+    WorktreesNoRepos,
     Filter,
     PrsMine,
     PrsReview,
@@ -62,6 +63,10 @@ impl EmptySurface {
             Self::Repos => ("No repos in {}.", "n  clone one"),
             Self::Worktrees => ("No worktrees yet", "n  create one"),
             Self::WorktreesRepo => ("No worktrees for {} yet", "n  create one"),
+            Self::WorktreesNoRepos => (
+                "No repositories yet \u{2014} clone one to start a worktree",
+                "",
+            ),
             Self::Filter => ("Nothing matches \"{}\".", "Clear filter"),
             Self::PrsMine => ("No open PRs authored by you in {}.", "r  refresh"),
             Self::PrsReview => ("No PRs waiting for your review in {}.", "r  refresh"),
@@ -83,6 +88,20 @@ impl EmptySurface {
             // key, not a key line (ADR 0023).
             Self::Worktrees | Self::WorktreesRepo => EmptyState::new(fact)
                 .button(crate::views::worktrees_list::new_worktree_button())
+                .into_any_element(),
+            // Step 2 of §3.13 once the first-run page has given way: nothing to branch from
+            // yet, so the page's one way forward is the clone, as the primary.
+            Self::WorktreesNoRepos => EmptyState::new(fact)
+                .button(
+                    Button::new(
+                        "worktrees-empty-clone",
+                        crate::views::worktrees_list::label(&repos::Clone),
+                    )
+                    .icon(Icon::Plus)
+                    .style(ButtonStyle::Primary)
+                    .action(Box::new(repos::Clone))
+                    .harness_target("worktrees.empty.clone"),
+                )
                 .into_any_element(),
             // The sidebar says the same thing with a control: the button runs the key the old
             // line named, and shows it. (The PR screen draws its own Refresh button.)

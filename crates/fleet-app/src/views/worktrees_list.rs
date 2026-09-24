@@ -112,6 +112,9 @@ pub struct ListProps<Rows> {
     pub stale: Option<SharedString>,
     /// Whether the daemon has not sent a snapshot yet (§3.13 cold load).
     pub loading: bool,
+    /// Whether the context holds a repository. Without one there is nothing to branch from, so
+    /// the page leads with `Clone repo` and offers no `New worktree` (§3.13 step 2).
+    pub has_repos: bool,
     /// Whether `u` has a delete to undo, so the menus offer it.
     pub undo_available: bool,
     /// The pointer contract.
@@ -139,6 +142,7 @@ pub fn render(
         filter,
         stale,
         loading,
+        has_repos,
         undo_available,
         handlers,
     } = props;
@@ -151,7 +155,7 @@ pub fn render(
     // While fleetd is gone the rows are true but frozen: they stay navigable, drawn at the stale
     // opacity under the header's one `Stale · <age>` chip (§3.12 C).
     let frozen = stale.is_some();
-    let header = page_header(summary, filter, stale);
+    let header = page_header(summary, filter, stale, has_repos);
     let columns = columns(pane_ch, scope_repo.is_none());
     let heads = columns.iter().fold(ListHeader::new(), |header, column| {
         header.column(column, column_head(column.key.as_ref()))
@@ -161,6 +165,8 @@ pub fn render(
         EmptyState::new("Loading\u{2026}").into_any_element()
     } else if let Some(query) = &query {
         EmptySurface::Filter.render(Some(query))
+    } else if !has_repos {
+        EmptySurface::WorktreesNoRepos.render(None)
     } else {
         match &scope_repo {
             None => EmptySurface::Worktrees.render(None),
@@ -246,11 +252,12 @@ pub fn render(
 }
 
 /// The page header: `Worktrees`, the summary, the filter field, `Clone repo` and the primary
-/// `New worktree`.
+/// `New worktree` — or, while the context holds no repository, a primary `Clone repo` alone.
 fn page_header(
     summary: SharedString,
     filter: FilterSlot,
     stale: Option<SharedString>,
+    has_repos: bool,
 ) -> PageHeader {
     let field = match filter {
         FilterSlot::Idle(query) => {
@@ -273,21 +280,27 @@ fn page_header(
             .harness_target("filter.input")
             .into_any_element(),
     };
-    let mut header = PageHeader::new(TITLE)
-        .subtitle(summary)
-        .action(field)
-        .action(
-            Button::new("worktrees-clone", label(&repos::Clone))
-                .action(Box::new(repos::Clone))
-                .harness_target("worktrees.clone"),
-        )
-        .action(
-            Button::new("worktrees-new", label(&worktrees::Create))
+    let clone = Button::new("worktrees-clone", label(&repos::Clone)).action(Box::new(repos::Clone));
+    let mut header = PageHeader::new(TITLE).subtitle(summary).action(field);
+    header = if has_repos {
+        header
+            .action(clone.harness_target("worktrees.clone"))
+            .action(
+                Button::new("worktrees-new", label(&worktrees::Create))
+                    .icon(Icon::Plus)
+                    .style(ButtonStyle::Primary)
+                    .action(Box::new(worktrees::Create))
+                    .harness_target("worktrees.new"),
+            )
+    } else {
+        // Step 2 of §3.13: a worktree needs a repository, so the one way forward is the clone.
+        header.action(
+            clone
                 .icon(Icon::Plus)
                 .style(ButtonStyle::Primary)
-                .action(Box::new(worktrees::Create))
-                .harness_target("worktrees.new"),
-        );
+                .harness_target("worktrees.clone"),
+        )
+    };
     if let Some(age) = stale {
         header = header.stale(age);
     }
