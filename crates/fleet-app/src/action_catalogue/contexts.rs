@@ -13,6 +13,7 @@ const CONTEXTS: &[(&str, Place, &str)] = &[
     ("Hub > Worktrees", Place::Worktrees, "Worktrees"),
     ("Hub > Prs", Place::PullRequests, "Pull requests"),
     ("Hub > Board", Place::Board, "Board"),
+    ("Hub > Prs > Board", Place::Board, "Review board"),
     ("Filter", Place::Hub, "Filter"),
     ("FirstRun", Place::Hub, "First run"),
     ("Workspace > Native > Board", Place::Board, "Board tab"),

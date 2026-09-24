@@ -1,6 +1,6 @@
 ---
 name: fleet-board-planning
-description: How an agent plans and tracks work with `fleet board` — picking the right board (context or worktree), reading it before writing, creating cards that are actionable, moving them through statuses as the work really progresses, recording decisions as comments, starting a worktree from a card, syncing a remote-backed board, and reading the JSON envelopes from a script. Load it when asked to plan, break down, track, or report on tasks, when running inside a Fleet terminal or native-agent thread and about to touch a board, when orchestrating subagents whose work should be visible, or whenever a command starts with `fleet board`.
+description: How an agent plans and tracks work with `fleet board` — picking the right board (context or worktree), reading it before writing, creating cards that are actionable, moving them through statuses as the work really progresses, recording decisions as comments, starting a worktree from a card, syncing a remote-backed board, and reading the JSON envelopes from a script, recording pull requests on a Reviews board, and scheduling a recurring agent task that feeds a board. Load it when asked to plan, break down, track, or report on tasks, when running inside a Fleet terminal or native-agent thread and about to touch a board, when orchestrating subagents whose work should be visible, when a pull request should be reviewed through a board, or whenever a command starts with `fleet board` or `fleet schedule`.
 ---
 
 # Planning work on a Fleet board
@@ -12,7 +12,8 @@ ends. The board is the durable plan; the transcript is not.
 
 Authoritative docs: `docs/BOARD.md` (model, engine, CLI contract §6) and `docs/BOARD-JIRA.md`
 (what a Jira-backed board can and cannot do). Command source: `crates/fleet-cli/src/args.rs`
-(`BoardArgs`, `BoardCommand`, `BoardCardCommand`) and `crates/fleet-cli/src/commands/board.rs`.
+(`BoardArgs`, `BoardCommand`, `BoardCardCommand`, `ScheduleArgs`) and
+`crates/fleet-cli/src/commands/{board,schedules}.rs`.
 Full flag and output reference: `references/commands.md`. Pre-flight lists:
 `references/checklist.md`.
 
@@ -63,6 +64,8 @@ Full flag and output reference: `references/commands.md`. Pre-flight lists:
      is required when an id is passed.
    - `--board`, `--worktree`, and `--context` are mutually exclusive, and are global flags: they
      may sit before or after the subcommand.
+   - `--reviews` selects the **Reviews board** of `--context <id>`, or of the active context, and
+     creates it on first use. It conflicts with `--board` and `--worktree`. See "Review boards".
 
 2. **Read before you write.** Run `fleet board show` (human output) once at the start of a
    planning pass. It prints one line per card: key, priority, title, labels, assignee. That is
@@ -193,11 +196,12 @@ b=$($B card new "Give the column an action" --provider codex --blocked-by "$a" |
 c=$($B card new "Review the throttle"        --provider codex --blocked-by "$a" | head -1 | awk '{print $1}')
 d=$($B card new "Ship the workflow" --provider codex --blocked-by "$b" --blocked-by "$c" | head -1 | awk '{print $1}')
 
-# 2. Move the dependants into Ready, where `when-unblocked` will collect them.
+# 2. Move the dependants into Ready, where `when-unblocked` will collect them. Their blockers
+#    are still in Todo, so they stay put in Ready until the last blocker of each is done.
 $B card move "$b" ready; $B card move "$c" ready; $B card move "$d" ready
 
-# 3. Start the head by hand. Nothing else can.
-$B card move "$a" in-progress
+# 3. Move the head into Ready last. Nothing blocks it, so it starts at once.
+$B card move "$a" ready
 ```
 
 The rules behind that order, each of which costs a debugging hour when broken:
@@ -205,9 +209,10 @@ The rules behind that order, each of which costs a debugging hour when broken:
 1. **Write every link while the card is still in Todo.** A card that reaches an action column
    before its blockers are recorded starts at once, and a run you did not want is a run you have
    to cancel and a worktree you have to clean.
-2. **The head of a chain is moved by a person.** The engine advances the *dependants* of a card
-   it has just visited, so a card nothing blocks is released by nothing: put it in the action
-   column yourself, or start it with `card run`. Leaving it in Ready waits forever.
+2. **Ready starts whatever nothing blocks.** A card moved into Ready with nothing blocking it
+   starts at once, or waits in Ready for a free slot. That is why the head goes in last: move it
+   earlier and its run starts before the dependants are in place. A card waiting in Ready for a
+   slot is *queued*, not stuck; it raises no attention, and the next freed slot moves it on.
 3. **One card per verifiable outcome still applies.** A chain does not make a bad card good; it
    makes a bad card run.
 4. **Watch, do not poll hard.** `board show` at phase boundaries; `card runs <key>` for one
@@ -225,6 +230,87 @@ The rules behind that order, each of which costs a debugging hour when broken:
 `make smoke-workflow` runs exactly this chain end to end against a private daemon with scripted
 agents; `scripts/board-workflow-smoke.sh` is the worked example, and it is the first thing to run
 when a chain of your own does not move.
+
+## Review boards
+
+Every context can have one **Reviews board**: a board whose cards are pull requests to review,
+each run in its own worktree checked out at the pull request's head. Reach it with `--reviews`:
+
+```sh
+R="fleet board --reviews"                       # the active context's; add --context <id> for another
+$R card new "Fix the login redirect" --pr acme/api#42          # or the pull request's URL
+$R card new "Fix the login redirect" --pr https://github.com/acme/api/pull/42 \
+  --requested-at 2026-09-22T10:00:00Z --label github
+```
+
+`card new --pr` is idempotent. It prints `Created <KEY>`, `Existing <KEY>` or `Reopened <KEY>`
+first, then the card. A pull request already on the board is never duplicated. A card in Review
+published, or archived, is reopened (`Review re-requested`) only when `--requested-at` is later
+than its last completion; otherwise it is `Existing`.
+`--requested-at` without `--pr` is refused: `--requested-at needs --pr`.
+
+The five columns, and what each does on its own:
+
+| Column | Id | What happens |
+| --- | --- | --- |
+| Pending review | `pending` | Where a new card lands. With nothing blocking it, it moves on to Reviewing at once, or waits here for a free slot (two reviews run at a time). |
+| Reviewing | `reviewing` | Creates the card's worktree from the pull request on first run, then reviews it there. The report is the review: a verdict, a summary, numbered findings with `file:line`. Nothing is posted. On success the card moves to Reviewed. |
+| Reviewed | `reviewed` | Waits for you. Read the report on the card, and add a comment for every finding to drop or change; the publish run applies those notes. |
+| Review published | `published` | **Moving a card here posts the review to GitHub** with `gh`, as one review with inline comments. Move it only when the review should be public. |
+| Dismissed | `dismissed` | Drop a pull request you will not review. Nothing runs. |
+
+A run on a Reviews board happens in the card's own worktree, never the board's, so reviews of
+different pull requests never share a checkout. The repository must be a Fleet repository in
+the context; clone it first, or the run is refused with `{owner/name} is not a Fleet repository;
+clone it into this context first`.
+
+`make smoke-reviews` runs this flow end to end against a private daemon with scripted agents;
+`scripts/reviews-smoke.sh` is the worked example.
+
+## Scheduling
+
+A **schedule** is a prompt that belongs to one board. The daemon runs it with a coding agent every
+N minutes, or once at a set time, headless (`claude -p` or `codex exec`) in a scratch directory of
+its own and with your normal configuration: every MCP server, skill and CLI tool you have
+installed is available to it.
+
+Use a schedule for **recurring intake from a source Fleet cannot see**: review requests arriving
+in a chat channel, an inbox, or GitHub. Do not use one for work Fleet already drives. A chain
+runs cards by itself, and a card's column runs its agent.
+
+```sh
+S="fleet schedule --reviews"                    # same selectors as fleet board, plus --json
+$S new --name "GitHub reviews" --starter github-reviews --every 15
+$S new --name "Chat reviews" --prompt-file ~/prompts/chat-reviews.md --every 30 --timeout 10
+$S list                                          # id, name, cadence, next, last outcome, last summary
+$S run sch-1a2b3c4d --wait                       # fire now, whatever the cadence
+$S runs sch-1a2b3c4d                             # every recorded run, with its log path
+$S edit sch-1a2b3c4d --every 60                  # or --disable / --enable
+$S rm sch-1a2b3c4d
+```
+
+What to know before writing one:
+
+1. **The footer is the contract.** The daemon appends a fixed footer to your prompt. It tells the
+   agent to record every pull request with
+   `fleet board --board <id> card new "<title>" --pr <url> --requested-at <time> --label <source>`,
+   to change nothing else, and to end with one line:
+   `SUMMARY: <n> created, <n> existing, <n> reopened, <anything the user must know>`. Your prompt
+   says only *where to look*. It does not repeat the footer. `--starter github-reviews` is a
+   complete example of such a prompt.
+2. **Placeholders** in your prompt are filled at fire time: `{board}`, `{now}`, and
+   `{last_run_at}` (`never` before the first run). Use `{last_run_at}` to skip old messages.
+3. **Every N minutes means at least 5** (`--every` takes 5 to 1440). A run that would overlap a
+   live one is recorded `skipped`. After downtime the schedule fires once, never once per missed
+   interval.
+4. **Runs are jobs.** Each run is a daemon job of kind `scheduled_task`, visible and cancellable
+   in the jobs panel. It has a log file under
+   `<FLEET_HOME>/schedules/<id>/logs/`, a cost when the provider reports one, and a one-line
+   summary taken from the `SUMMARY:` line. The last 20 runs are kept. Read `schedule runs` before
+   you guess why a run failed.
+5. **Headless means full access by default.** No one can answer a permission prompt, so `--mode`
+   defaults to `full-access`. A narrower mode is your decision about what the prompt may do.
+   `--timeout` (1 to 120 minutes, default 20) bounds each run.
 
 ## Reading the output
 
@@ -275,4 +361,5 @@ the card and leave it in progress or move it back to `todo`.
 ## Related skills
 
 - `fleet-subagent-cli` — delegating the work a card describes.
+- `docs/BOARD.md` §12 — the schedule model, how a run executes, and the CLI contract.
 - `rust-ipc-protocol` — if you are changing the board wire family rather than using it.

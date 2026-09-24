@@ -23,6 +23,10 @@ pub struct Fixture {
     pub repositories: Vec<Repository>,
     /// The board seeded through the daemon's board API, when the preset has one.
     pub board: Option<Board>,
+    /// Pull request cards seeded onto the context's Reviews board, which the preset asks for
+    /// with `EnsureReviewsBoard` only when this list is not empty.
+    #[serde(default)]
+    pub reviews: Vec<ReviewCard>,
     /// Native-agent providers pointed at a scripted transcript.
     pub agents: Vec<Agent>,
     /// Transcript files written for [`Fixture::agents`], filled in once they exist on disk.
@@ -36,7 +40,10 @@ impl Fixture {
     /// Fleet that has never been run.
     #[must_use]
     pub fn is_seeded(&self) -> bool {
-        !self.repositories.is_empty() || self.board.is_some() || !self.agents.is_empty()
+        !self.repositories.is_empty()
+            || self.board.is_some()
+            || !self.reviews.is_empty()
+            || !self.agents.is_empty()
     }
 
     /// The repository a job injection and the acceptance scenarios drive work against.
@@ -260,6 +267,21 @@ impl Card {
     }
 }
 
+/// One pull request card on the context's Reviews board.
+///
+/// The board itself is `EnsureReviewsBoard`'s, so its id, `REV` prefix and five review columns
+/// are the daemon's own; the card goes in through `UpsertPullRequestCard`, the request a review
+/// schedule's run sends, so it carries its pull request the way a real one does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewCard {
+    /// Title.
+    pub title: String,
+    /// The pull request, `owner/name#number`.
+    pub pull_request: String,
+    /// Index into the Reviews board's columns, clamped to the last one.
+    pub column: usize,
+}
+
 /// A native-agent provider wired to a scripted transcript.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Agent {
@@ -328,6 +350,7 @@ pub fn describe(preset: Preset) -> Fixture {
             "subagent-caller-other-worktree.json",
         ),
         Preset::BoardWorkflow => board_workflow(),
+        Preset::Reviews => reviews(),
     }
 }
 
@@ -338,6 +361,7 @@ fn base(preset: Preset) -> Fixture {
         owners: vec!["acme".to_owned()],
         repositories: Vec::new(),
         board: None,
+        reviews: Vec::new(),
         agents: Vec::new(),
         transcripts: Vec::new(),
     }
@@ -348,6 +372,11 @@ fn empty() -> Fixture {
 }
 
 fn one_repo() -> Fixture {
+    one_repo_with(Preset::OneRepo)
+}
+
+/// One clean repository and worktree, labelled as `preset`.
+fn one_repo_with(preset: Preset) -> Fixture {
     Fixture {
         repositories: vec![Repository {
             owner: "acme".to_owned(),
@@ -356,7 +385,7 @@ fn one_repo() -> Fixture {
             worktrees: vec![Worktree::clean("feature")],
             pull_requests: Vec::new(),
         }],
-        ..base(Preset::OneRepo)
+        ..base(preset)
     }
 }
 
@@ -601,6 +630,26 @@ fn board_workflow() -> Fixture {
         }],
         agents,
         ..base(Preset::BoardWorkflow)
+    }
+}
+
+/// The reviews preset: one-repo's world, plus the context's Reviews board with one card.
+///
+/// The card sits in Reviewed, the one column of the review pipeline that neither routes nor
+/// runs: Pending review advances a card it can start into Reviewing, whose action is a run, and
+/// a run the *seeding* daemon started would be gone by the time the scenario's own daemon reads
+/// the home. `acme/api#1` names the fixture's own repository, so the tile's reference and the
+/// detail's `Pull request` row read a pull request the context owns.
+fn reviews() -> Fixture {
+    /// Index of `Reviewed` in `fleet_core::board::reviews_preset`.
+    const REVIEWED_COLUMN: usize = 2;
+    Fixture {
+        reviews: vec![ReviewCard {
+            title: "Review the retry budget".to_owned(),
+            pull_request: "acme/api#1".to_owned(),
+            column: REVIEWED_COLUMN,
+        }],
+        ..one_repo_with(Preset::Reviews)
     }
 }
 

@@ -17,6 +17,10 @@ pub(super) const NO_REMOTE: &str = "No remote issue on this card";
 /// reader with nowhere to go — the fix is a board setting, so the sentence names it.
 pub(super) const NO_REMOTE_URL: &str =
     "This board has no address for its backend \u{2014} set its site in board settings";
+/// What `B` and `y` answer on a card that reviews no pull request.
+pub(crate) const NO_PULL_REQUEST: &str = "No pull request on this card";
+/// The acknowledgement `y` gives, the PR screen's own words for the same copy (UX-SPEC §1.6).
+pub(crate) const PULL_REQUEST_COPIED: &str = "PR URL copied";
 /// What `d` answers on a card the backend owns: the sync would bring it straight back.
 const NO_DELETE_MIRRORED: &str = "Mirrored card \u{2014} delete it in the backend";
 /// What `w` answers when the context holds no repository the picker could offer.
@@ -212,12 +216,7 @@ pub(super) fn new_card_in(state: &Entity<AppState>, column: usize, cx: &mut App)
 ///
 /// Through the same guards `,` has; the column is only handed to the seed once the dialog is
 /// actually opening, so a refused `,` leaves nothing behind for the next one.
-pub(super) fn column_settings(
-    state: &Entity<AppState>,
-    bridge: &Bridge,
-    column: usize,
-    cx: &mut App,
-) {
+pub(super) fn column_settings(state: &Entity<AppState>, column: usize, cx: &mut App) {
     state.update(cx, |app, cx| {
         app.board.focus.column = column;
         app.clamp_board_focus();
@@ -231,7 +230,7 @@ pub(super) fn column_settings(
         return;
     }
     dialogs::with_host(state, cx, |host| host.board_settings_column = Some(column));
-    settings(state, bridge, cx);
+    settings(state, cx);
 }
 
 /// `s` — status picker.
@@ -657,6 +656,69 @@ pub(crate) fn sync(state: &Entity<AppState>, bridge: &Bridge, full: bool, cx: &m
     .detach();
 }
 
+/// `B` — open the review card's pull request in the browser: the focused card on the Review
+/// board, or the card on show in its detail. The URL is the one the card was created with, so
+/// the key opens exactly what the tile and the detail's `Pull request` row name.
+pub(crate) fn open_pull_request(state: &Entity<AppState>, _bridge: &Bridge, cx: &mut App) {
+    if let Some(url) = resolve_pull_request(state, cx) {
+        cx.open_url(&url);
+    }
+}
+
+/// `y` — copy the review card's pull request URL, on the same card `B` would open.
+pub(crate) fn copy_pull_request_url(state: &Entity<AppState>, _bridge: &Bridge, cx: &mut App) {
+    let Some(url) = resolve_pull_request(state, cx) else {
+        return;
+    };
+    cx.write_to_clipboard(gpui::ClipboardItem::new_string(url));
+    state.update(cx, |app, cx| {
+        app.toast_short(PULL_REQUEST_COPIED, Icon::ClipboardCheck, Instant::now());
+        cx.notify();
+    });
+}
+
+/// The URL `B` and `y` act on, or the sentence that says why there is none.
+///
+/// The card is the one [`picker_target`] names: the detail's own card while the detail is up,
+/// so a refresh that moves the board's cursor under the sheet never retargets the key.
+pub(super) fn pull_request_url(
+    app: &AppState,
+    from_detail: bool,
+    detail: Option<&CardId>,
+) -> Result<String, &'static str> {
+    let selected = selected_card(app).map(|card| card.id.clone());
+    let id = picker_target(selected, from_detail, detail).ok_or(NO_CARD)?;
+    let card = app
+        .board()
+        .and_then(|view| view.cards.iter().find(|card| card.id == id))
+        .ok_or(NO_CARD)?;
+    card.pull_request
+        .as_ref()
+        .map(|pull_request| pull_request.url.clone())
+        .ok_or(NO_PULL_REQUEST)
+}
+
+/// Reads the pull request URL out of the mirror, saying why when there is none: on the sheet's
+/// own error line while the detail is up — where its `x` answers too — as a toast otherwise.
+fn resolve_pull_request(state: &Entity<AppState>, cx: &mut App) -> Option<String> {
+    let from_detail = state.read(cx).overlay == Some(Overlay::Dialog(Dialogs::CardDetail));
+    let detail = dialogs::with_host(state, cx, |host| host.card_detail.card_id.clone());
+    match pull_request_url(state.read(cx), from_detail, detail.as_ref()) {
+        Ok(url) => Some(url),
+        Err(message) if from_detail => {
+            dialogs::with_host(state, cx, |host| {
+                host.card_detail.error = Some(message.to_owned());
+            });
+            dialogs::notify(state, cx);
+            None
+        }
+        Err(message) => {
+            needs(state, message, cx);
+            None
+        }
+    }
+}
+
 /// `x` — open the focused card's remote issue in the browser.
 ///
 /// The link is the one the backend itself put on the card (`RemoteLink.url`), so a backend
@@ -734,7 +796,10 @@ pub(crate) fn delete_card(state: &Entity<AppState>, _bridge: &Bridge, cx: &mut A
 }
 
 /// `,` — board settings.
-pub(crate) fn settings(state: &Entity<AppState>, _bridge: &Bridge, cx: &mut App) {
+///
+/// Opens nothing while the daemon is gone or no board is loaded, so a caller that goes on to
+/// pick a section checks the overlay first.
+pub(crate) fn settings(state: &Entity<AppState>, cx: &mut App) {
     if refuses(state, cx) {
         return;
     }
@@ -864,6 +929,7 @@ mod tests {
             files_changed: 0,
             cost_usd: None,
             tokens: None,
+            worktree_id: None,
         });
     }
 
@@ -1081,5 +1147,121 @@ mod tests {
             fact,
             "FLE-1 is waiting for a free slot; the run it is owed is dropped"
         );
+    }
+
+    const PR_URL: &str = "https://github.com/acme/api/pull/412";
+
+    /// The board of [`board`] with its only card reviewing `acme/api#412`.
+    fn review_board() -> AppState {
+        let mut state = board();
+        let view = state
+            .board
+            .view
+            .as_mut()
+            .unwrap_or_else(|| panic!("no board"));
+        view.cards[0].pull_request = Some(fleet_core::board::PullRequestRef {
+            repo: "acme/api".parse().unwrap_or_else(|error| panic!("{error}")),
+            number: 412,
+            url: PR_URL.to_owned(),
+        });
+        state
+    }
+
+    #[test]
+    fn b_and_y_act_on_the_cards_own_pull_request_url() {
+        let state = review_board();
+        assert_eq!(pull_request_url(&state, false, None), Ok(PR_URL.to_owned()));
+    }
+
+    #[test]
+    fn a_card_without_a_pull_request_says_so() {
+        let state = board();
+        assert_eq!(pull_request_url(&state, false, None), Err(NO_PULL_REQUEST));
+    }
+
+    #[test]
+    fn with_no_card_under_the_cursor_the_keys_say_no_card() {
+        let mut state = review_board();
+        state.board.focus.row = 5;
+        assert_eq!(pull_request_url(&state, false, None), Err(NO_CARD));
+    }
+
+    /// The detail's card wins over the board's cursor, which a refresh may have moved.
+    #[test]
+    fn the_detail_names_its_own_card_whatever_the_cursor_says() {
+        let mut state = review_board();
+        let id = state.board().unwrap_or_else(|| panic!("no board")).cards[0]
+            .id
+            .clone();
+        state.board.focus.row = 5;
+        assert_eq!(
+            pull_request_url(&state, true, Some(&id)),
+            Ok(PR_URL.to_owned())
+        );
+        assert_eq!(pull_request_url(&state, true, None), Err(NO_CARD));
+    }
+
+    #[gpui::test]
+    fn b_opens_the_pull_request_in_the_browser(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| review_board());
+        let bridge = Bridge::closed();
+        cx.update(|cx| open_pull_request(&state, &bridge, cx));
+        assert_eq!(cx.opened_url().as_deref(), Some(PR_URL));
+    }
+
+    #[gpui::test]
+    fn b_on_a_card_without_a_pull_request_opens_nothing_and_says_why(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let state = cx.new(|_| board());
+        let bridge = Bridge::closed();
+        cx.update(|cx| open_pull_request(&state, &bridge, cx));
+        assert_eq!(cx.opened_url(), None);
+        let toasts: Vec<String> = cx.update(|cx| {
+            state
+                .read(cx)
+                .toasts
+                .iter()
+                .map(|toast| toast.toast.text.to_string())
+                .collect()
+        });
+        assert_eq!(toasts, [NO_PULL_REQUEST]);
+    }
+
+    #[gpui::test]
+    fn y_copies_the_pull_request_url_and_says_so(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| review_board());
+        let bridge = Bridge::closed();
+        cx.update(|cx| copy_pull_request_url(&state, &bridge, cx));
+        let copied = cx.update(|cx| cx.read_from_clipboard().and_then(|item| item.text()));
+        assert_eq!(copied.as_deref(), Some(PR_URL));
+        let toasts: Vec<String> = cx.update(|cx| {
+            state
+                .read(cx)
+                .toasts
+                .iter()
+                .map(|toast| toast.toast.text.to_string())
+                .collect()
+        });
+        assert_eq!(toasts, [PULL_REQUEST_COPIED]);
+    }
+
+    /// From the detail the refusal lands on the sheet's error line, where its `x` answers.
+    #[gpui::test]
+    fn y_in_the_detail_refuses_on_the_sheet(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| board());
+        let bridge = Bridge::closed();
+        cx.update(|cx| {
+            let id = state.read(cx).board().map(|view| view.cards[0].id.clone());
+            dialogs::with_host(&state, cx, |host| host.card_detail.card_id = id);
+            state.update(cx, |app, _| {
+                app.open_overlay(Overlay::Dialog(Dialogs::CardDetail));
+            });
+            copy_pull_request_url(&state, &bridge, cx);
+        });
+        let error =
+            cx.update(|cx| dialogs::with_host(&state, cx, |host| host.card_detail.error.clone()));
+        assert_eq!(error.as_deref(), Some(NO_PULL_REQUEST));
+        assert_eq!(cx.update(|cx| cx.read_from_clipboard()), None);
     }
 }

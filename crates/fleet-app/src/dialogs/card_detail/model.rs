@@ -86,6 +86,7 @@ fn row_action(row: &detail::PropertyRow) -> Option<Box<dyn gpui::Action>> {
         T::ReadOnly => return None,
         T::Worktree => Box::new(board_actions::OpenWorktree),
         T::Remote => Box::new(card_actions::OpenRemote),
+        T::PullRequest => Box::new(board_actions::OpenPullRequest),
         T::Pick(_) if row.label.is_empty() => Box::new(card_actions::EditProperty),
         T::Pick(PickerKind::Status) => Box::new(board_actions::PickStatus),
         T::Pick(PickerKind::Priority) => Box::new(board_actions::PickPriority),

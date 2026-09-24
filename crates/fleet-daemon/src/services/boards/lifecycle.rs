@@ -49,7 +49,8 @@ impl Boards {
         // too; the board's own scope is a local question and is not checked here.
         let mirrored = self.mirrored_worktrees();
         let context = doc.board.context_id.clone();
-        scrub_repo(&state, &context, &mut doc.board.default_repo_id);
+        scrub_repo(&state, Some(&context), &mut doc.board.default_repo_id);
+        let card_context = card_repo_context(&doc.board).cloned();
         let mut index = self.index.write().await;
         index.retain(|_, board| board != id);
         for card in &mut doc.cards {
@@ -61,7 +62,7 @@ impl Boards {
             {
                 card.worktree_id = None;
             }
-            scrub_repo(&state, &context, &mut card.repo_id);
+            scrub_repo(&state, card_context.as_ref(), &mut card.repo_id);
         }
         // The card index is not held across the delegation read: the join asks another service.
         drop(index);
@@ -108,6 +109,47 @@ impl Boards {
             cards: doc.cards,
             // A board created by this call has no cards, so nothing can have called a run.
             // Every *existing*-board path above returns through `get`, which joins them.
+            live_runs: Vec::new(),
+        })
+    }
+
+    /// Gets or creates the context's Reviews board; unknown contexts are errors.
+    ///
+    /// `ensure` line for line, over the Reviews scope: the context's task board is neither read
+    /// nor touched, and deleting the context deletes this board with it (`delete_for_context`).
+    pub async fn ensure_reviews(&self, context: &ContextId) -> DaemonResult<BoardView> {
+        let state = self.state_store.load().await?;
+        let context_record = state
+            .contexts
+            .iter()
+            .find(|c| c.id == *context)
+            .ok_or_else(|| DaemonError::NotFound(format!("context {context}")))?
+            .clone();
+        // The refresh path after every BoardChanged, as for `ensure`: an existing board is read
+        // without a lock.
+        if let Some(id) = self.reviews_board(context)? {
+            return self.get(&id).await;
+        }
+        let mut board = new_reviews_board(&context_record, &self.clock.now().to_rfc3339());
+        let _guard = self.gate(&board.id).await;
+        if let Some(id) = self.reviews_board(context)? {
+            return self.get(&id).await;
+        }
+        let backend = self.backends.get(&board.backend.kind)?;
+        backend.validate(&board.backend.settings).await?;
+        board.backend.settings = backend.normalize(&board.backend.settings).await?;
+        let _allocation = self.allocation.lock().await;
+        board.id = self.available_board_id(&board.id)?;
+        let doc = BoardDocument {
+            version: BOARD_DOCUMENT_VERSION,
+            board,
+            cards: Vec::new(),
+        };
+        self.save(&doc, BoardChangeReason::Created).await?;
+        Ok(BoardView {
+            board: doc.board,
+            cards: doc.cards,
+            // A board created by this call has no cards, so nothing can have called a run.
             live_runs: Vec::new(),
         })
     }
@@ -513,7 +555,7 @@ impl Boards {
         // The columns as they were, so what the patch did to them can be read off afterwards:
         // which went away, which lost their action, and which changed category.
         let before = doc.board.statuses.clone();
-        let throttle_before = doc.board.settings.max_live_runs;
+        let settings_before = doc.board.settings.clone();
         let now = self.now();
         if !apply_board_patch(&mut doc.board, patch, &now)? {
             // A patch that changes nothing writes nothing and announces nothing, exactly as an
@@ -524,7 +566,7 @@ impl Boards {
         // are checked on what the patch produced, and only when the patch asked for automation
         // at all: a board whose worktree a host adopted afterwards must stay renamable, and
         // must stay able to give its automation up.
-        if asks_for_automation(&before, &doc.board, throttle_before) {
+        if asks_for_automation(&before, &settings_before, &doc.board) {
             self.require_automatable(&doc.board).await?;
         }
         // A column a run started in cannot be taken away under it: the run's own row names that
@@ -619,7 +661,9 @@ impl Boards {
         // `start_for_card` re-acquires this same gate to record what the delegation service
         // answered, and the gates are not reentrant (`docs/BOARD.md` §4).
         drop(guard);
-        self.apply_starts(&doc.board.id, plan).await?;
+        // Handed off on a card-worktree board, as a card write's starts are: a pull-request
+        // fetch must not hold this request past the client's timeout.
+        self.apply_starts_after_answer(&doc.board, plan).await?;
         self.get(id).await
     }
 
@@ -630,20 +674,28 @@ impl Boards {
     /// host owns. The same three run again when a card enters an action column, because a
     /// worktree can be adopted by a host long after its board was configured.
     ///
+    /// A board that runs each card in the card's own worktree (`RunLocation::CardWorktree`)
+    /// needs no worktree of its own, so the first rule is the board-worktree rule only; and
+    /// the host rule is asked here only of a board worktree, because each card's worktree can
+    /// live somewhere else and the start path asks it of that one.
+    ///
     /// # Errors
     ///
     /// `Validation` carrying whichever of the three sentences applies.
     pub(crate) async fn require_automatable(&self, board: &Board) -> DaemonResult<()> {
-        let Some(worktree) = board.worktree_id.as_ref() else {
+        if board.settings.run_location.is_board_worktree() && board.worktree_id.is_none() {
             return Err(refused_automation(
                 "automation is available on worktree boards only",
             ));
-        };
+        }
         if !board.backend.is_local() {
             return Err(refused_automation(
                 "automation is available on local boards only",
             ));
         }
+        let Some(worktree) = board.worktree_id.as_ref() else {
+            return Ok(());
+        };
         let state = self.state_store.load().await?;
         // The mirror counts here, unlike board *scope*: a worktree this daemon published and one
         // it merely mirrors are both answers to "who owns the tree this run would touch".
@@ -671,7 +723,12 @@ impl Boards {
 
     /// Deletes every board belonging to `context`, so deleting a context cannot strand a
     /// document that a later context with the same derived id would silently adopt.
-    pub async fn delete_for_context(&self, context: &ContextId) -> DaemonResult<()> {
+    ///
+    /// Every board scoped to the context goes, whatever its kind: the task board and the
+    /// Reviews board alike. Returns the boards it deleted, so the caller can cascade what hangs
+    /// off a board without `Boards` depending on it (a board's schedules).
+    pub async fn delete_for_context(&self, context: &ContextId) -> DaemonResult<Vec<BoardId>> {
+        let mut deleted = Vec::new();
         for id in self.store.list()? {
             let owned = match self.store.peek(&id) {
                 Ok(Some(doc)) => doc.board.context_id == *context,
@@ -692,17 +749,22 @@ impl Boards {
                 self.summaries.write().await.remove(&id);
                 self.index.write().await.retain(|_, board| *board != id);
                 self.changed(&id, BoardChangeReason::Deleted);
+                deleted.push(id);
             }
         }
-        Ok(())
+        Ok(deleted)
     }
 
     /// Deletes every board scoped to `worktree` after that worktree is removed.
+    ///
+    /// Returns the boards it deleted, so the caller can cascade what hangs off a board without
+    /// `Boards` depending on it (a board's schedules), exactly as `delete_for_context` does.
     pub async fn delete_for_worktree(
         &self,
         worktree: &WorktreeId,
         trash: &std::path::Path,
-    ) -> DaemonResult<()> {
+    ) -> DaemonResult<Vec<BoardId>> {
+        let mut deleted = Vec::new();
         for id in self.store.list()? {
             let owned = match self.store.peek(&id) {
                 Ok(Some(doc)) => doc.board.worktree_id.as_ref() == Some(worktree),
@@ -722,9 +784,10 @@ impl Boards {
                 self.summaries.write().await.remove(&id);
                 self.index.write().await.retain(|_, board| *board != id);
                 self.changed(&id, BoardChangeReason::Deleted);
+                deleted.push(id);
             }
         }
-        Ok(())
+        Ok(deleted)
     }
 
     /// Moves this daemon's own document for a worktree another host owns into the trash.
@@ -811,7 +874,9 @@ impl WorktreeCascade for Boards {
         worktree: &WorktreeId,
         trash: &std::path::Path,
     ) -> DaemonResult<()> {
-        Boards::delete_for_worktree(self, worktree, trash).await
+        Boards::delete_for_worktree(self, worktree, trash)
+            .await
+            .map(drop)
     }
 
     async fn restore_for_worktree(
@@ -848,8 +913,21 @@ fn refused_automation(reason: &str) -> DaemonError {
 /// Only a patch that asks for automation is held to the three rules. Holding every patch to
 /// them would strand a board whose worktree a host adopted after the fact: it could no longer
 /// be renamed, and — worse — its automation could no longer be taken off.
-fn asks_for_automation(before: &[Status], board: &Board, throttle_before: Option<u32>) -> bool {
-    if board.settings.max_live_runs.is_some() && board.settings.max_live_runs != throttle_before {
+///
+/// Moving where an automated board runs is asking for automation too: a context board that
+/// automates in its cards' worktrees and is patched back to its own worktree would otherwise
+/// keep columns that can never run.
+fn asks_for_automation(before: &[Status], settings_before: &BoardSettings, board: &Board) -> bool {
+    let settings = &board.settings;
+    if settings.max_live_runs.is_some() && settings.max_live_runs != settings_before.max_live_runs {
+        return true;
+    }
+    if settings.run_location != settings_before.run_location
+        && board
+            .statuses
+            .iter()
+            .any(|status| status.automation.is_some())
+    {
         return true;
     }
     board.statuses.iter().any(|status| {
@@ -981,3 +1059,6 @@ fn suffixed_board_id(base: &BoardId, suffix: u32) -> BoardId {
     stem.push_str(&suffix);
     BoardId::try_from(stem).expect("a suffixed worktree board id is always a valid board slug")
 }
+
+#[cfg(test)]
+pub(super) mod tests;

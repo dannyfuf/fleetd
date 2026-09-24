@@ -74,7 +74,7 @@ impl Drop for PeriodicTasks {
 }
 
 impl Services {
-    /// Starts status, host, prepared-pool, and PR-cache maintenance loops.
+    /// Starts status, host, prepared-pool, PR-cache, and schedule maintenance loops.
     pub async fn start_periodic_tasks(
         self: &Arc<Self>,
         events: BroadcastBus,
@@ -105,7 +105,8 @@ impl Services {
             tokio::spawn(checkpoints::run_sweep(Arc::clone(self), shutdown.clone())),
             tokio::spawn(run_delegation_outbox(Arc::clone(self), shutdown.clone())),
             tokio::spawn(run_board_automation(Arc::clone(self), shutdown.clone())),
-            tokio::spawn(run_pr_cache_expiry(Arc::clone(self), shutdown)),
+            tokio::spawn(run_pr_cache_expiry(Arc::clone(self), shutdown.clone())),
+            tokio::spawn(self.schedules.clone().run_schedules(shutdown)),
         ];
         Ok(PeriodicTasks { handles })
     }

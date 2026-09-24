@@ -33,6 +33,7 @@ use crate::{action_catalogue, actions::board as board_actions};
 
 mod drag;
 mod model;
+mod schedules;
 #[cfg(test)]
 mod tests;
 
@@ -47,6 +48,7 @@ pub use model::{
     BoardMarks, BoardModel, CardMenu, CardRow, ColumnRows, HeaderFacts, LinkedBranch,
     ReadonlyFields, TileMark, build, counts, visible_cards,
 };
+pub use schedules::{SUMMARY_BUDGET as SCHEDULE_SUMMARY_BUDGET, ScheduleStrip, runnable_schedules};
 
 /// How many skeleton columns a cold load shows.
 const SKELETON_COLUMNS: usize = 3;
@@ -301,6 +303,9 @@ fn header(props: &BoardProps<'_>, model: &BoardModel, on_click: &OnClick, cx: &A
     if let Some(needs_you) = needs_you {
         page = page.fact(dot()).fact(needs_you);
     }
+    if let Some(strip) = &model.schedules {
+        page = page.fact(dot()).fact(schedules_strip(strip, cx));
+    }
     if facts.dirty > 0 {
         page = page.fact(
             Chip::counter(Icon::CloudUpload, facts.dirty)
@@ -428,6 +433,30 @@ fn header(props: &BoardProps<'_>, model: &BoardModel, on_click: &OnClick, cx: &A
         .into_any_element()
 }
 
+/// The header's schedules strip: its prepared words, in the warning tone while a schedule's last
+/// run failed. A click runs what `T` runs — Board settings on Schedules.
+fn schedules_strip(strip: &ScheduleStrip, cx: &App) -> impl IntoElement {
+    let theme = cx.theme();
+    // The label's summary clause is capped where it is folded; the strip may still shrink
+    // (a long schedule name) and ellipsizes rather than push the header's facts out.
+    let text = Text::caption(strip.label.clone()).ellipsize();
+    div()
+        .id("board-schedules")
+        .flex()
+        .min_w_0()
+        .items_center()
+        .gap(theme.space.xs)
+        .cursor_pointer()
+        .on_click(|_, window, cx| {
+            window.dispatch_action(Box::new(board_actions::Schedules), cx);
+        })
+        .child(if strip.failed {
+            text.tone(Tone::Warning)
+        } else {
+            text.muted()
+        })
+}
+
 /// One menu entry running `action`, labelled from the catalogue, its key from the live keymap.
 fn menu_item(action: Box<dyn Action>) -> MenuItem {
     let destructive = action_catalogue::info(action.name()).is_some_and(|info| info.destructive);
@@ -472,6 +501,11 @@ fn card_menu(menu: Menu, facts: CardMenu, at: TileContext) -> Menu {
     }
     if facts.open_remote {
         menu = menu.item(item(Box::new(board_actions::OpenRemote)));
+    }
+    if facts.pull_request {
+        menu = menu
+            .item(item(Box::new(board_actions::OpenPullRequest)))
+            .item(item(Box::new(board_actions::CopyPullRequestUrl)));
     }
     if !readonly.status && !first {
         menu = menu.item(item(Box::new(board_actions::MovePrevColumn)));
@@ -760,6 +794,7 @@ fn card_face(id: SharedString, card: &CardRow) -> CardTile {
         .worktree(card.worktree)
         .branch(card.link.as_ref().map(|link| link.branch.clone()))
         .pr(card.link.as_ref().and_then(|link| link.pr))
+        .reference(card.reference.clone())
         .dirty(card.dirty)
         .conflict(card.conflict)
         // The tile decides nothing: which of the two the key line carries is the kit's own

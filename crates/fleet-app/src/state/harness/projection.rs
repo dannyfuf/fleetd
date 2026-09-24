@@ -368,6 +368,11 @@ impl AppState {
                     "board.column[{}].card[{}]",
                     self.board.focus.column, self.board.focus.row
                 ),
+                // The Review tab draws the Reviews board, and its cursor is the board's.
+                (HubPane::List, HubTab::Prs) if self.review_board_is_shown() => format!(
+                    "board.column[{}].card[{}]",
+                    self.board.focus.column, self.board.focus.row
+                ),
                 (HubPane::Repos, _) => format!("repos.row[{}]", self.cursors.repos),
                 (HubPane::List, HubTab::Worktrees) => {
                     format!("worktrees.row[{}]", self.cursors.worktrees)
@@ -1169,7 +1174,10 @@ fn card_row(prefix: &str, card: &Card, marks: Option<&TileMarks>) -> RowSnapshot
     RowSnapshot {
         id: card.id.as_str().to_owned(),
         label: card.title.clone(),
-        badges: vec![format!("{prefix}-{}", card.number)],
+        // The key, then a review card's pull request as its tile's reference draws it.
+        badges: std::iter::once(format!("{prefix}-{}", card.number))
+            .chain(card.pull_request.as_ref().map(|pull| pull.key()))
+            .collect(),
         marks: row_marks,
     }
 }
@@ -1217,13 +1225,15 @@ fn column_marks(status: &fleet_core::board::Status) -> Vec<String> {
 
 /// The Board settings Columns pane, as the board it is seeded from states it.
 ///
-/// `disabled` is the draft's `automation_locked` (`board_settings::persistence::seed`): a
-/// context board has no checkout to run in and a linked board's columns answer to its backend,
-/// so every column of such a board draws its automation rows disabled. It rides on the column
+/// `disabled` is the draft's `automation_locked`, read through the same predicate
+/// (`dialogs::automation_locked`): a context board that runs in its own worktree has no
+/// checkout to run in, and a linked board's columns answer to its backend, so every column of
+/// such a board draws its automation rows disabled. A board that runs in each card's worktree
+/// (a Reviews board) keeps its columns editable. It rides on the column
 /// rather than on the drilled-in row because the drill-in belongs to the `DialogHost` entity,
 /// which the builder cannot read.
 fn settings_column_rows(view: &BoardView) -> Vec<RowSnapshot> {
-    let locked = view.board.worktree_id.is_none() || !view.board.backend.is_local();
+    let locked = crate::dialogs::automation_locked(&view.board);
     view.board
         .statuses
         .iter()

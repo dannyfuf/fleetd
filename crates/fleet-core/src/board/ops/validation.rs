@@ -194,6 +194,33 @@ pub fn validate_links(board: &Board, cards: &[Card], card: &Card) -> Result<(), 
     Ok(())
 }
 
+/// Refuses two cards on one board that hold the same pull request, archived cards included.
+///
+/// Pure, and separate from [`validate_card`] because it needs every card: the daemon's store
+/// runs it on every save, so two racing upserts can never persist a duplicate.
+pub fn validate_pull_requests(board: &Board, cards: &[Card]) -> Result<(), BoardError> {
+    let mut holders: std::collections::HashMap<String, &Card> = std::collections::HashMap::new();
+    for card in cards {
+        let Some(pull_request) = &card.pull_request else {
+            continue;
+        };
+        // Keyed without case, for the reason `PullRequestRef::same_pull_request` gives.
+        let identity = pull_request.key().to_ascii_lowercase();
+        if let Some(holder) = holders.get(&identity) {
+            return Err(invalid(
+                "pull_request",
+                &format!(
+                    "{} is already on this board as {}",
+                    pull_request.key(),
+                    holder.display_key(board)
+                ),
+            ));
+        }
+        holders.insert(identity, card);
+    }
+    Ok(())
+}
+
 /// The display-key path from `card` back to `target`, when following blockers reaches it.
 ///
 /// `seen` keeps a diamond from being walked twice and makes a cycle that does not involve

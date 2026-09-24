@@ -78,7 +78,7 @@ const MODES: [PermissionMode; 6] = [
 ];
 
 /// The providers, in cycle order after "column default".
-const PROVIDERS: [AgentKind; 2] = [AgentKind::Claude, AgentKind::Codex];
+pub(super) const PROVIDERS: [AgentKind; 2] = [AgentKind::Claude, AgentKind::Codex];
 
 /// What a row with no opinion of its own reads as.
 const INHERITED: &str = "column default";
@@ -669,7 +669,7 @@ pub(super) const fn category_word(category: StatusCategory) -> &'static str {
 
 /// The word `--provider` takes.
 #[must_use]
-const fn provider_word(kind: AgentKind) -> &'static str {
+pub(super) const fn provider_word(kind: AgentKind) -> &'static str {
     match kind {
         AgentKind::Claude => "claude",
         AgentKind::Codex => "codex",
@@ -678,7 +678,7 @@ const fn provider_word(kind: AgentKind) -> &'static str {
 
 /// The word `--mode` takes.
 #[must_use]
-const fn mode_word(mode: PermissionMode) -> &'static str {
+pub(super) const fn mode_word(mode: PermissionMode) -> &'static str {
     match mode {
         PermissionMode::Ask => "ask",
         PermissionMode::AcceptEdits => "accept-edits",

@@ -132,7 +132,7 @@ chrome — it is the pane's content, like a list header — and it stays.
 | --- | --- | --- | --- |
 | Title bar | Top, full width; the unified macOS titlebar, so it starts at x = 84 after the traffic lights (12 px on other platforms) | 44 px, `chrome` ground, hairline below | One row does what three did: where you are, a way to search or run anything, and what needs you. |
 | Context switcher | Title bar, left: a monogram tile, the context name and a chevron | compact ghost button | Contexts are the outermost coordinate. It opens a menu of every context with its `1`–`9` key (a context past nine has none), then *New context* `N`, *Edit context* `E`, *Delete context* `D` (red). The keys keep working without it, and `gt` / `gT` still cycle. |
-| Section nav | Title bar, after the switcher | a segmented control | *Worktrees · Pull requests · Board*, each with its count (worktrees in the context, PRs waiting for your review, open board cards; zero-suppressed). The same actions as `g w` / `p` / `g b`; the segments are the harness's `hub.tab[N]`. Hub only. |
+| Section nav | Title bar, after the switcher | a segmented control | *Worktrees · Pull requests · Board*, each with its count (worktrees in the context, reviews waiting on you, open board cards; zero-suppressed). The review count is the Reviews board's non-archived cards that either want you — `attention(card, now)`: the newest run ended needing a person and nobody has moved the card since, or a run owed for 60 s on a card that is not queued (BOARD.md §11.5) — or stand in a `Started` column with no live or owed run, each card once. A run parked on a question is a live run, so it is counted by the status cluster's `needs you`, not here. While the Review tab shows the board the app folds this rule from the cards it holds, in the card-marks update and never in render; anywhere else it reads the same rule from the board's summary, `attention_count + idle_started`, so the count is the same on and off the tab. On a daemon without `board.reviews` it is still the number of PRs waiting for your review. The same actions as `g w` / `p` / `g b`; the segments are the harness's `hub.tab[N]`. Hub only. |
 | Command field | Title bar, centred in the window | 340 × 30 | Looks like a search input — magnifier, *Search or run a command*, the palette key — and is a button: a click opens the palette. Nobody has to know a key to find a command. |
 | Status cluster (§2.3) | Title bar, right | compact ghost buttons | What needs you and what is running, each shown only while non-zero, each opening what it counts. Top-right is the OS status corner, far from the cursor. |
 | Help, Settings | Title bar, far right | 26 px icon buttons | `?` and `,` as controls; the tooltip names the key. |
@@ -171,7 +171,8 @@ Each one is a button that opens what it counts, and its tooltip carries the key 
 | Daemon | dot | amber / red | nothing while healthy; `Reconnecting…` (amber) while the link retries on its own, `fleetd down` (red) once it stopped or could not start | the fleetd log (`l` on the banner) |
 
 **[D-1]** The live, unknown/offline and review counts left the chrome with the context bar. The
-review count is the *Pull requests* segment's count; the session counts move to the Worktrees
+review count is the *Pull requests* segment's count — the reviews waiting on you on the context's
+Reviews board (§3.5); the session counts move to the Worktrees
 subtitle, and until they do only `sleeping` stays, muted. An unreachable host is still shown on its
 rows and in the rail.
 **[D-2]** "Update available" is a button and a Settings › About row — **never** a sticky toast. An
@@ -284,7 +285,7 @@ unchanged — they decide the key context, and the harness snapshot reports them
 
 | Mode (snapshot `mode`) | gpui key context | Where it shows |
 | --- | --- | --- |
-| `Normal` | `Hub`, `Hub > Repos`, `Hub > Worktrees`, `Hub > Prs` | the focused pane's ring and the cursor row |
+| `Normal` | `Hub`, `Hub > Repos`, `Hub > Worktrees`, `Hub > Prs`, `Hub > Prs > Board` (the Review tab's Reviews board) | the focused pane's ring and the cursor row |
 | `Terminal` | `Workspace > Terminal` | the focused terminal grid and its cursor |
 | `Native` | `Workspace > Native` | the Fleet-drawn pane in the selected tab |
 | `Agent` | `Agent > AgentIdle` / `AgentWorking` / `AgentDecision > …` | the thread's composer, or its open decision |
@@ -619,6 +620,11 @@ buttons are pointer twins of those keys and act on the cursor row.
 
 **Purpose:** *What am I waiting on, what is waiting on me, and can I start on it in one key?*
 
+The screen has two tabs. **Mine** is the list below. **Waiting for my review** is the context's
+**Reviews board** (ADR 0024, `docs/BOARD.md` §11.6) — the same kanban, tiles, card detail and run
+keys every board has — shown in the list-and-detail area. The table and states below describe
+Mine, and the Review tab's own rules follow them under *The Review tab*.
+
 ```
  Pull requests                                              [⌕ Filter /]  [⟳ Refresh r]
  Open on GitHub for Acme · fetched 12s ago
@@ -729,6 +735,32 @@ never refuses).
 previous) · `O` keep previous awake · `c` create without opening (KEYMAP A9) · `b` browser · `y` copy
 URL · `r` force refresh both tabs · `I` inspect the matching local worktree · `i` detail ·
 `/` filter · `p`/`q` back. Every one of them is also a button or a menu item above.
+
+**The Review tab.** Selecting *Waiting for my review* enters the board scope
+`Reviews(active context)` and draws the board pane in place of the list and the detail panel; the
+repos rail is hidden, as on the Board tab, because a Reviews board spans repositories. Its columns
+are *Pending review → Reviewing → Reviewed → Review published*, plus *Dismissed*. A request becomes
+a card (from a schedule, §12 of `docs/BOARD.md`, or from `fleet board --reviews card new --pr`); a
+card entering *Pending review* starts reviewing at once in its pull request's own worktree, two at
+a time; a finished review waits in *Reviewed* with its report on the card; commenting on the card
+corrects the review, and moving it to *Review published* posts it. Each tile carries its pull
+request, `owner/name#123`, and the card detail a `Pull request` row. Leaving the tab gives the
+board mirror back to whatever the Hub's Board tab showed.
+
+The pane publishes `Hub > Prs > Board`: every board key works there, except that `Tab`/`S-Tab`
+still switch tabs, `h`/`l` move between **columns** rather than tabs, and `p`/`q` still go back.
+The run keys `A` attach, `X` cancel and `>` run now work there, because a review card runs in its
+own worktree; `B` opens the selected card's pull request in the browser and `y` copies its URL
+(`b` stays the board's *blocked by*). The tab's count is the Reviews board's cards that want you
+(`attention`) or stand in a `Started` column with no live or owed run, each card once; away from
+the tab the summary's `attention_count + idle_started` is the same number (§2.2). The app no longer asks `gh` for the
+review tab when the daemon advertises `board.reviews`; the Mine fetch is unchanged. On a daemon
+without it the tab keeps the old flat list of `gh` results, with its old empty state.
+
+| State | Rendering |
+| --- | --- |
+| Reviews board with no cards | `No reviews yet.` — and, when the board has no schedule and the daemon advertises `schedules`, `⏎ add the GitHub review schedule` as a button, whose `Enter` or click opens Board settings on Schedules with the GitHub starter filled in (§3.13) |
+| Loading, error, stale | the board pane's own states (§ Board, *States*) |
 
 ---
 
@@ -1169,7 +1201,9 @@ The list is ordered live and failed jobs first, then the finished group, each in
 order; the cursor, `j`/`k` and `jobs.row[N]` all index that one order. A press on a row selects
 it, a double-click opens its log (`Enter`), a right click opens its menu — Show log, Retry,
 Cancel, Copy log path, each only when it can work. A row's button first puts the cursor on its
-row, then runs the same action as the key.
+row, then runs the same action as the key. A schedule's run (`ScheduledTask`, BOARD §12) is an
+ordinary row: its kind reads `sched`, its sentence `Run schedule`, and it is cancellable but never
+retryable — the next fire is the retry.
 
 **Log view.** `Enter` (or Show log, or a double-click) expands the sheet to 640 px and shows the
 tail of `logs/jobs/<id>.log` (last 200 lines, mono 11.5 px, 16 ms batched — the existing budget
@@ -1579,7 +1613,7 @@ The footer sentence is mandatory: the action *sounds* destructive and is not.
 760 × 600: a header, a 196 px section rail beside a pane of controls, and a button footer.
 **Board settings** (§Board, "The other three dialogs") is the older shape, 720 × 560 with a 180 px
 rail, and borrows this section's rules for browsing, editing and cycling a row; where the two
-differ is stated there — its three sections are the board's own, it remembers the section it was
+differ is stated there — its four sections are the board's own, it remembers the section it was
 left on for the app session, and `^s` rather than `⏎` is its save, because `⏎` inside its Columns
 pane has a level to drill into.
 
@@ -2019,7 +2053,8 @@ no control to put it in (the terminal exit strip).
 | No worktrees for a repo | `No worktrees for <repo> yet` | primary `New worktree  n` button |
 | Filter miss | `Nothing matches "<filter>".` | `Clear filter  esc` button |
 | PR mine | `No open PRs authored by you in <scope>.` | `Refresh  r` button |
-| PR review | `No PRs waiting for your review in <scope>.` | `Refresh  r` button |
+| PR review (Reviews board) | `No reviews yet.` | `⏎ add the GitHub review schedule`, a button (ADR 0023) — only while the board has no schedule and the daemon advertises `schedules`; `Enter` or a click opens Board settings on Schedules with the starter draft |
+| PR review (daemon without `board.reviews`) | `No PRs waiting for your review in <scope>.` | `Refresh  r` button |
 | Jobs | `Nothing running.` | `Jobs and sessions live in fleetd, so they survive closing this window.` |
 | Terminal exited | `process exited (<code>)` | `^s x  close    ^s c  new    ^s r  restart` |
 
@@ -2365,6 +2400,11 @@ answer. A daemon too old to serve worktree boards refuses the tab and says so
 (`this daemon does not support worktree boards; run fleet daemon restart`, §2.7) rather than
 opening a tab it could never fill.
 
+The Pull requests screen's Review tab (§3.5) is a third surface for the same pane: it shows the
+active context's **Reviews board**, `EnsureReviewsBoard(active_context)`, under the key context
+`Hub > Prs > Board`. The Hub's Board tab never shows the Reviews board, and the Review tab never
+shows the task board. A daemon too old to serve review boards leaves the Review tab its flat list.
+
 The `Board` tab carries the active context's **unscoped** `Snapshot.boards` summary: `open_count`
 as the tab count, and a `•` appended to the label when `conflict_count > 0`. Worktree-scoped
 summaries from that context are ignored — the Hub's count is the context board's count, not the
@@ -2405,6 +2445,18 @@ daemon's registry (`Jira (acli)`), not its registry key; until the registry answ
 stands in, because an empty label reads as a broken header. A `board.sync` job in
 `Snapshot.jobs` puts a `syncing` spinner before the sync button.
 
+**Schedules strip.** A board that owns schedules (`BOARD.md` §12), on a daemon that advertises
+`schedules`, carries one compact strip in its header: `⟳ GitHub reviews · next 14:05 · last 3
+created` for one schedule — its name, its next run and its last summary — and `⟳ 3 schedules ·
+next 14:05` for several. The strip takes the warning tone, as the conflict counter does, while
+the last run of a schedule failed or timed out. A click on it, or `T`, opens Board settings on
+Schedules; `R` runs every enabled schedule of the board now. The strings are folded when the
+schedules mirror changes or the minute ticks, never in render, and the strip moves when a run
+finishes (`SchedulesChanged`). The summary clause is cut at 40 columns with `…`, and the strip
+itself ellipsizes rather than push the header's facts out. No schedule, or no capability, and
+there is no strip; nor on a worktree board stored on another host, which this machine's daemon
+does not schedule (`BOARD.md` §11.8).
+
 **Error callouts.** Under the header, never over the columns: the load error verbatim with a
 **Reload** button, the board's own `sync.last_error` as `Sync failed: …` with **Board settings**,
 and the orphan sentence — cards whose status the board no longer has — with **Board settings** and
@@ -2431,7 +2483,9 @@ FLT-5`, or `blocked by 2 cards`. The run wins over the blockers, because a card 
 has nothing left to wait for. The blocked pill is neutral while a blocker can still finish and
 amber when one of them is canceled, archived or gone from the board, because nothing will release
 the card on its own. Then the title, two lines at most. Then the meta row: label chips, `n pt`,
-the due date, the linked worktree's **branch** and its PR badge (`#14 Review`), the dirty and
+the due date, the linked worktree's **branch** and its PR badge (`#14 Review`), on a review card
+its pull request as a short muted mono reference (`acme/api#412`, the tile's generic `reference`
+slot), the dirty and
 conflict dots, `show_on_card` extras — and at its right end an **Answer** button on a card whose
 run needs you (the worktree board only; it runs `A`), and the assignee's avatar. Everything but
 the first line and the title is zero-suppressed. Hover lifts a tile (a stronger hairline and a
@@ -2440,7 +2494,8 @@ short shadow) and reveals its `⋯`, which a selected tile keeps.
 **The card menu.** The `⋯` and a right-click open the same menu, which holds every card action
 with its key: **Status** `s`, **Priority** `p`, **Assignee** `a`, **Labels** `t`, **Estimate** `e`,
 **Blocked by** `b`, **Agent** `m`; then **New worktree** `w`, **Open worktree** `o`, **Open remote
-issue** `x`, **Move to previous / next column** `[` / `]`; on the worktree board **Attach run** `A`,
+issue** `x`, on a review card **Open pull request** `B` and **Copy pull request link** `y`, **Move
+to previous / next column** `[` / `]`; on the worktree board and the Review board **Attach run** `A`,
 **Run now** `>` and **Cancel run** `X`; and last **Delete** `d`, in red. An entry that could only
 refuse is left out rather than shown and refused: a picker for a field the backend owns, Open
 worktree on a card with none, Open remote issue without an address, `[` in the first column and
@@ -2517,9 +2572,14 @@ the board rather than on a card, is on both boards and not in the detail:
 | `b` | Opens the multi-select picker over the cards this one is **blocked by**. | — |
 | `m` | Opens the agent pickers — provider, model, effort. | — |
 | `C` | Opens Board settings on its **Columns** section. | — |
+| `T` | Opens Board settings on its **Schedules** section (`S` and `F` are the board's sync keys). | ``this daemon does not support schedules; run `fleet daemon restart` ``; on a remote worktree's board `this board is stored on {host}; schedules run only on this machine's boards` |
+| `R` | Runs every enabled schedule of the board now, one `RunScheduleNow` each; a fire the daemon records as `Skipped` says `skipped {name}: {summary}`. | `T`'s two sentences; `No board loaded yet`; `schedules are still loading` (or the load's error) before the board's schedules are listed; `No enabled schedule on this board`; else the daemon's sentence |
+| `B` / `y` | On a review card: opens its pull request in the browser / copies its URL (`b` stays *blocked by*). | `No pull request on this card`; `No card selected` |
 
 `A`, `X` and `>` are **not** bound on the Hub's context board: a context board has no worktree to
-run in. `b` shadows the Hub's own `b` (open in browser) while the board owns the keys
+run in. They **are** bound on the Review tab's Reviews board, whose cards each run in their own
+pull-request worktree. On the Review board `Tab` / `Shift-Tab` still switch the PR screen's tabs
+and `p` / `q` still go back, so the priority picker there is the card menu's and the detail's. `b` shadows the Hub's own `b` (open in browser) while the board owns the keys
 (`KEYMAP.md`, `APP-CONTRACTS.md` §3). Every refusal is the daemon's own sentence where the daemon
 has one, so the key, the palette row and `fleet board` cannot disagree.
 
@@ -2606,7 +2666,10 @@ property"; the button is drawn only while one is closed, so nothing on screen ev
 that would do nothing. Expansion lasts as long as the sheet.
 
 *Right column* — the card as facts, under `Properties`: `Status`, then the workflow rows below,
-then `Priority, Assignee, Labels, Estimate, Due, Parent`, a hairline, `Repo, Worktree`, then
+then `Priority, Assignee, Labels, Estimate, Due, Parent`, a hairline, `Repo, Worktree`, on a
+review card `Pull request` — `acme/api#412 · open ↗`, in the Worktree row's style, whose `⏎` or
+click opens the pull request in the browser (`B` opens it and `y` copies its URL from anywhere on
+the sheet) — then
 `Remote` / `URL` / `Synced` when the card is linked, then the board's custom properties in schema
 order. Under them, **Activity**: the last three entries, newest first, `message · age`, with
 `Show all n` opening the last ten.
@@ -2686,8 +2749,8 @@ for the centred Card property dialog, which returns to the sheet when it closes.
   still has to be settable. Each of the three replaces its one field and sends the card's whole
   `agent` block, last writer wins, exactly as labels do.
 * **Board settings** (720 × 560) — the same two-column shape as the global Settings dialog
-  (§3.8.6): a section rail and a pane. Three sections, `Tab` between them — **General**,
-  **Backend**, **Columns**. `,` opens it on the section last used in this app session (General on
+  (§3.8.6): a section rail and a pane. Four sections, `Tab` between them — **General**,
+  **Backend**, **Columns** and, on a daemon that advertises `schedules` and stores the board (not a remote worktree's), **Schedules**. `,` opens it on the section last used in this app session (General on
   the first open of a session) and `C` opens it on Columns. While it is open the status bar's
   breadcrumb drops its row: the dialog edits the board, and the focused card is the one thing it
   cannot change. The rail's sections and every row take a click that puts the cursor there, a
@@ -2695,8 +2758,10 @@ for the centred Card property dialog, which returns to the sheet when it closes.
   a click on one lands where `h` / `l` would, and a flag's switch flips as `space` does.
 
   **General** — name, prefix, default repository, start-on-worktree, push-new-cards, conflict
-  policy, then `Max live runs` with the hint `runs share one checkout`, last because it is the
-  only row about *runs* rather than about the board's identity. **Push new cards** is drawn
+  policy, then `Max live runs` with the hint `runs share one checkout` and the read-only fact
+  `Runs in   each card's worktree` (a Reviews board) or `Runs in   this worktree`, last because
+  they are the only rows about *runs* rather than about the board's identity. Where runs execute
+  is not editable here: changing it under live runs would strand them. **Push new cards** is drawn
   disabled on a local board, where there is no backend to file anything with; it defaults to
   **off**, so on a linked board it is the row that says why a card made here has not become a
   remote issue. **Backend** is the kind cycler and that backend's own schema rows, generically
@@ -2730,9 +2795,40 @@ for the centred Card property dialog, which returns to the sheet when it closes.
   (`branchTemplate`) is carried through unchanged. `esc` goes back a level — out of an editor, out
   of a column, out of an armed delete — and at the top level with unsaved edits it asks **once**,
   on the dialog's own error line (`unsaved changes — esc again to discard them`), rather than
-  opening a second dialog over the one it is asking about. On a context or Jira board every
-  automation row is disabled and the pane says why, once, under the rows:
-  `Automation is available on worktree boards`.
+  opening a second dialog over the one it is asking about. On a context board that runs in its
+  own worktree, or a Jira board, every automation row is disabled and the pane says why, once,
+  under the rows: `Automation is available on worktree boards`. A Reviews board runs each card in
+  its own worktree, so its columns and actions are edited like a worktree board's.
+
+  **Schedules** lists the board's schedules and is shaped like Columns: a list, `⏎` into a form,
+  `^s` to save. A row reads `● GitHub reviews   every 15m   next 14:05   last ✓ 3 created, 5
+  existing` — `●` enabled, `○` disabled, then the last run's glyph and tone (`✓` succeeded, `✗`
+  failed or timed out, `⤼` skipped) and its summary, cut at 40 columns with `…`. Keys on the list: `n` new, `⏎` edit, `space`
+  enable or disable (sent at once, `UpdateSchedule`), `r` run now (`RunScheduleNow`; the notice
+  reads `running {name} now`, or `skipped {name}: {summary}` when the daemon skipped the fire
+  because the previous run is still going), `d` delete
+  after an inline confirm: the first `d` arms the row and the notice reads `delete {name} and its
+  run logs? d again to delete, esc to keep it`; a second `d` on it deletes (`DeleteSchedule`),
+  and `esc`, a move, a click, or `space` or `r` (whose own answer takes the notice's place)
+  disarms it. Inline rather than the Confirm dialog of §3.8.3, because dialogs do not stack. The form's rows: `Name`; `Provider ◂ claude ▸` (changing it clears
+  `Model` and `Effort`, which name the old provider's options, as `fleet schedule edit
+  --provider` does); `Model` (free
+  text against the suggested list, as a column's); `Effort`; `Mode` (the provider's supported
+  modes, `full access` by default — nobody is there to answer a prompt); `Cadence ◂ every ▸` with
+  `Every [15] minutes` or `Once at [2026-09-23 09:00]`; `Timeout [20] minutes`; `Prompt` (the
+  multi-line editor a column's Instructions use); `Enabled`; and a read-only `Last runs` with the
+  last five runs' outcome, summary and log path, which follows the mirror while the form is open
+  (a run it started, a fire, a run that finished) and leaves the typed fields alone. `^s` sends `CreateSchedule` or `UpdateSchedule`; a
+  refusal — `every must be between 5 and 1440 minutes`, say — is the red footer line and the dialog
+  stays open. A form with unsaved edits holds `esc`, `tab`, `shift-tab` and a rail click once:
+  the red line reads `unsaved schedule — esc again to discard it`, and the next one leaves and
+  drops the form (§5.4: one question, once). A request's answer that lands after the user left
+  the section updates the list and moves neither the cursor nor the notice of the section now
+  shown; a refusal still reaches the red line. `n` on a Reviews board pre-fills the starter: `GitHub reviews`, every 15 minutes, and
+  the prompt that lists every open pull request requesting your review with `gh`. The empty Review
+  tab's `⏎ add the GitHub review schedule` (its key or a click on it) opens the dialog here, in
+  that state. The list is read
+  from the app's schedules mirror, refreshed on `SchedulesChanged`.
 
   The backend rows are **generic**: the dialog knows no backend by name. `Backend` is a cycler
   over the kinds the daemon registers, drawn by their labels, and every row under it is one entry

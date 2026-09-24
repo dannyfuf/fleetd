@@ -222,6 +222,9 @@ impl Shell {
                         &shell.bridge,
                         cx,
                     );
+                    // `SchedulesChanged` only marks the schedules mirror stale; the batch that
+                    // carried it re-reads each stale board once.
+                    crate::dialogs::refresh_stale_schedules(&shell.state, &shell.bridge, cx);
                     tracing::trace!(
                         events = count,
                         recovery = damage.recover.len(),

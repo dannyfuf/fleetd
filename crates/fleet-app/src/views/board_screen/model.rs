@@ -369,6 +369,9 @@ pub struct CardRow {
     pub blocked_label: Option<SharedString>,
     /// The linked worktree's branch and pull request.
     pub link: Option<LinkedBranch>,
+    /// The card's own pull request, `owner/name#123`, when it has one (a Reviews board's card):
+    /// the tile's reference line.
+    pub reference: Option<SharedString>,
     /// Which of the card's menu entries can do something for it.
     pub menu: CardMenu,
 }
@@ -384,6 +387,8 @@ pub struct CardMenu {
     pub open_worktree: bool,
     /// `x`: the card's remote issue has an address.
     pub open_remote: bool,
+    /// `B` and `y`: the card is a review card with a pull request (BOARD §11.9).
+    pub pull_request: bool,
     /// `d`: the card is Fleet's own — a mirrored card is deleted in its backend.
     pub delete: bool,
     /// `A`: the card has a run a thread can be attached from.
@@ -418,6 +423,7 @@ impl CardMenu {
         Self {
             open_worktree: card.worktree_id.is_some(),
             open_remote: crate::screens::board::remote_url(card).is_some(),
+            pull_request: card.pull_request.is_some(),
             delete: card.remote.is_none(),
             attach: run.is_some() || card.runs.iter().any(|run| run.thread_id.is_some()),
             cancel: live,
@@ -498,6 +504,10 @@ impl CardRow {
                 .blocked
                 .map(|(count, _)| blocked_label(view, card, count)),
             link,
+            reference: card
+                .pull_request
+                .as_ref()
+                .map(|pull_request| SharedString::from(pull_request.key())),
             menu,
         }
     }
@@ -694,6 +704,18 @@ pub struct BoardModel {
     pub needs_you_at: Option<(usize, usize)>,
     /// The card fields this board's backend owns.
     pub readonly: ReadonlyFields,
+    /// The header's schedules strip, when the board has schedules and the daemon runs them.
+    pub schedules: Option<ScheduleStrip>,
+}
+
+impl BoardModel {
+    /// The model with its schedules strip, which the projection folds from the schedules
+    /// mirror beside [`build`]: the mirror is app state, and the model is built from the view.
+    #[must_use]
+    pub fn with_schedules(mut self, schedules: Option<ScheduleStrip>) -> Self {
+        self.schedules = schedules;
+        self
+    }
 }
 
 /// Builds the whole board model from a loaded view.
@@ -763,6 +785,7 @@ pub fn build(
         no_columns: view.board.statuses.is_empty(),
         orphans: orphan_sentence(view),
         facts,
+        schedules: None,
     }
 }
 

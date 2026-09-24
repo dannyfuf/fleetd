@@ -1,6 +1,12 @@
-# UX-SPEC §3.5 and §5.1 — the pull requests screen by pointer: the Mine / Waiting-for-my-review
-# tabs are clickable, a click on a row selects it, the row's ⋯ and a right click open the same
-# menu, and the keys still do what the buttons do.
+# UX-SPEC §3.5 and §5.1 — the pull requests screen by pointer: the Mine / Review tabs are
+# clickable, a click on a row selects it, the row's ⋯ and a right click open the same menu, and
+# the keys still do what the buttons do.
+#
+# The daemon advertises `board.reviews`, so the Review tab is the context's Reviews board rather
+# than a second `gh` list (BOARD.md §8): the snapshot tells the two tabs apart by the key chain —
+# `Hub > Prs > Board` on Review — and by which list is populated. On the board `h`/`l` move
+# between columns, so `tab`, which wraps between the two tabs, is the key that leaves it.
+# `prs/review-board.scenario` pins the board itself.
 #
 # Nothing here opens a worktree: `⏎`, a double-click and the menu's Open would create one from a
 # pull request, which is the create-worktree scenarios' business. The menu is proven by what it
@@ -10,24 +16,28 @@ await idle 30000
 key g p
 await hub_tab == Prs 15000
 await lists.prs.rows[0] exists 15000
-# The fixture's Mine tab lists three pull requests and the review tab one, which is how the
-# snapshot tells the two tabs apart.
+# The fixture's Mine tab lists three pull requests.
 assert focused == prs.row[0] && lists.prs.rows[2] exists
+assert key_contexts[1] == "Prs" && key_contexts[2] absent
 shot prs-mine
 dump prs-mine
 
-# A click on the second tab is `Tab`: the review list, with its own cursor.
+# A click on the second tab is `Tab`: the Reviews board, under its own key chain.
 click prs.tab[1]
-await lists.prs.rows[1] absent 15000
-assert hub_tab == Prs && overlay absent && lists.prs.rows[0] exists
+await key_contexts[2] == "Board" 15000
+await lists.board.rows[0].label == "Pending review" 15000
+assert hub_tab == Prs && overlay absent
 shot prs-review
 click prs.tab[0]
+await key_contexts[2] absent 15000
 await lists.prs.rows[2] exists 15000
 
-# The keys still switch tabs after a click.
+# The keys still switch tabs after a click: `l` on Mine is the next tab, and `tab` on the board
+# wraps back to Mine.
 key l
-await lists.prs.rows[1] absent 15000
-key h
+await key_contexts[2] == "Board" 15000
+key tab
+await key_contexts[2] absent 15000
 await lists.prs.rows[2] exists 15000
 
 # A click on a row puts the cursor on it, as `j` would.

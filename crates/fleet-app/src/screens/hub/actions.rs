@@ -383,6 +383,43 @@ impl HubCtx {
         self.toast("Branch copied", Icon::ClipboardCheck, true, cx);
     }
 
+    /// `Tab` / `Shift-Tab` / `h` / `l`: the other of the PR screen's two tabs. It wraps, so
+    /// `Tab` on the Review tab's board is the way back to Mine (§3.5).
+    pub(super) fn cycle_tab(&self, cx: &mut App) {
+        let next = match self.state.read(cx).pr_tab {
+            PrTab::Mine => PrTab::Review,
+            PrTab::Review => PrTab::Mine,
+        };
+        self.switch_tab(next, cx);
+    }
+
+    /// `Enter` on the Review tab's empty Reviews board: Board settings on its Schedules section
+    /// with the GitHub starter filled in (§3.5, §3.13). Everywhere else `Enter` is the board's
+    /// own `OpenCard`, so the action goes on to the shell.
+    pub(super) fn open_review_card(&self, cx: &mut App) {
+        if !self.add_review_schedule(cx) {
+            cx.propagate();
+        }
+    }
+
+    /// Opens Board settings on Schedules with the GitHub starter, when the Review tab's empty
+    /// board offers it: what `Enter` there and a click on the empty state's button run.
+    /// Returns whether the offer was shown.
+    pub(super) fn add_review_schedule(&self, cx: &mut App) -> bool {
+        let offers_schedule = self.state.read(cx).review_board_is_shown()
+            && self.hub.read(cx).prs.review_board.empty == Some(true);
+        if !offers_schedule {
+            return false;
+        }
+        // Through the guards `,` goes through, then the section: the request only lands on a
+        // dialog that opened, so a refused open leaves nothing pending for the next `,`.
+        crate::screens::board::settings(&self.state, cx);
+        if self.state.read(cx).overlay == Some(Overlay::Dialog(Dialogs::BoardSettings)) {
+            dialogs::open_schedules_section(&self.state, true, cx);
+        }
+        true
+    }
+
     pub(super) fn switch_tab(&self, tab: PrTab, cx: &mut App) {
         self.state.update(cx, |state, cx| {
             if state.pr_tab != tab {

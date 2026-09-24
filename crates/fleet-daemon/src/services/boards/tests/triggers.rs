@@ -373,14 +373,20 @@ async fn deleting_a_blocker_drops_its_links_in_the_same_write() {
     let view = services.boards.get(&board.id).await.unwrap();
     assert_eq!(view.cards.len(), 1);
     assert!(view.cards[0].blocked_by.is_empty());
-    assert_eq!(
-        view.cards[0]
-            .activity
-            .last()
-            .map(|entry| entry.message.clone()),
-        Some(format!("Unblocked: {key} was deleted")),
-        "{:?}",
-        view.cards[0].activity
+    let activity = &view.cards[0].activity;
+    assert!(
+        activity
+            .iter()
+            .any(|entry| entry.message == format!("Unblocked: {key} was deleted")),
+        "{activity:?}"
+    );
+    // Freed in a routing column, the card advances at once (§11.7 rule 0).
+    assert!(
+        activity
+            .iter()
+            .any(|entry| entry.kind == ActivityKind::AutoMoved
+                && entry.message == "Moved to Todo: nothing blocks it"),
+        "{activity:?}"
     );
 }
 

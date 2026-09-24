@@ -1917,7 +1917,8 @@ a **key line** — priority glyph · key (muted data face) · a flex spacer · a
 on the tone's fill) or else what blocks the card, never both · the **title** (`UiStrong`, wrapped
 to `CARD_TITLE_LINES` = 2 with an ellipsis on the last line) · a zero-suppressed **meta row**:
 label chips · estimate (`n pt`) · due date behind a `clock` glyph · the linked branch (`git-branch`
-glyph + mono name) or a bare `git-branch` glyph · its `PrBadge` · amber dirty dot · red conflict
+glyph + mono name) or a bare `git-branch` glyph · its `PrBadge` · the **reference** (a short
+mono line in `Caption` at `fg.muted`, e.g. `acme/api#412`) · amber dirty dot · red conflict
 dot · `show_on_card` extras · then, at the right end, the state's **action** slot (`Answer`) and
 the assignee's round `avatar_size` initials. A **menu** slot (the `⋯` trigger) floats over the
 key line's right end.
@@ -1925,7 +1926,7 @@ key line's right end.
 .labels(Vec<(SharedString, Option<SharedString>)>).assignee(..).estimate(..).due(..)
 .worktree(bool).branch(Option<SharedString>).pr(Option<(u64, PrBadgeState)>).dirty(bool)
 .conflict(bool).selected(bool).focused(bool).lifted(bool).left_behind(bool).extras(..)
-.run(RunMark).run_label(..)
+.reference(Option<SharedString>).run(RunMark).run_label(..)
 .blocked(u32, BlockedTone).blocked_label(..).action(impl IntoElement).menu(impl IntoElement)
 .on_click(..).on_double_click(..).on_secondary_click(..)`; helpers `label_tone(Option<&str>) ->
 Tone` and `initials(&str) -> String` (`ASSIGNEE_INITIALS` = 2); `RunMark::{Pending, Stalled,
@@ -1941,7 +1942,10 @@ and a dashed hairline at the tile's own height, so the column does not reflow un
 calls `on_secondary_click` — the caller selects there and wraps the tile in a `ContextMenu`. The
 `⋯` is that same menu's visible twin, so no card action is right-click-only.
 **Usage rule.** Selection and focus are the **same two tokens `ListView`'s cursor row uses**, so
-a board and a list say "where am I" identically. A label's color arrives as a **token name**
+a board and a list say "where am I" identically. `reference` is a generic short identifier the
+caller chooses — the app passes a review card's `PullRequestRef::key()` — and the tile knows no
+pull request; `None` draws nothing, so every existing tile is unchanged. The gallery shows a tile
+with a reference. A label's color arrives as a **token name**
 (`"accent"`, `"danger"`), never as a hex string: a remote backend cannot smuggle a color into a
 Fleet surface, and an unknown name falls back to the neutral chip. Everything but the key line
 and the title is zero-suppressed, so a bare card costs exactly a key and a title. `run` wins over

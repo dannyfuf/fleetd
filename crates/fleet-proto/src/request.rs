@@ -11,10 +11,11 @@ use fleet_core::{
     config::Agent,
     github::PrTab,
     ids::{
-        BoardId, CardId, ContextId, HostId, JobId, RepoId, SessionId, StatusId, TerminalId,
-        WorktreeId,
+        BoardId, CardId, ContextId, HostId, JobId, RepoId, ScheduleId, SessionId, StatusId,
+        TerminalId, WorktreeId,
     },
     model::RepoHooks,
+    schedule::{ScheduleDraft, SchedulePatch},
     sessions::AgentActivity,
     watches::{WatchId, WatchStream},
 };
@@ -569,6 +570,62 @@ pub enum RequestBody {
     },
     /// List the board backend kinds this daemon registers.
     ListBoardBackends {},
+    /// Get or create the Reviews board of one context.
+    ///
+    /// Gated on [`BOARD_REVIEWS_CAPABILITY`](crate::response::BOARD_REVIEWS_CAPABILITY).
+    EnsureReviewsBoard {
+        /// Context whose Reviews board is wanted.
+        context_id: ContextId,
+    },
+    /// Create a pull request card, or answer the card that already tracks that pull request.
+    ///
+    /// Idempotent per pull request, compared without case: an open card answers `Existing`; a
+    /// completed or archived card is reopened when `requested_at` is later than its last move
+    /// (its newest `Moved`/`AutoMoved` activity, else `updated_at`); a dismissed card, or one
+    /// whose run is still live or starting, never is. `draft.pull_request` must be set. The answer comes
+    /// once the save lands: on a card-worktree board a run the card's new column starts is
+    /// recorded after it. Gated on
+    /// [`BOARD_REVIEWS_CAPABILITY`](crate::response::BOARD_REVIEWS_CAPABILITY).
+    UpsertPullRequestCard {
+        /// Board the card belongs to.
+        board_id: BoardId,
+        /// Card to create; its `pull_request` names the pull request.
+        draft: CardDraft,
+        /// RFC 3339 time the review was requested, when the source knows it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        requested_at: Option<String>,
+    },
+    /// List schedules, of one board or of every board.
+    ///
+    /// Gated on [`SCHEDULES_CAPABILITY`](crate::response::SCHEDULES_CAPABILITY), as are the
+    /// other four schedule requests.
+    ListSchedules {
+        /// Board whose schedules are wanted; every board's when absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        board_id: Option<BoardId>,
+    },
+    /// Create a schedule.
+    CreateSchedule {
+        /// Schedule to create.
+        draft: ScheduleDraft,
+    },
+    /// Change a schedule.
+    UpdateSchedule {
+        /// Schedule id.
+        id: ScheduleId,
+        /// Fields to change.
+        patch: SchedulePatch,
+    },
+    /// Delete a schedule and its run logs.
+    DeleteSchedule {
+        /// Schedule id.
+        id: ScheduleId,
+    },
+    /// Fire a schedule now, whatever its cadence; answers the schedule with the run started.
+    RunScheduleNow {
+        /// Schedule id.
+        id: ScheduleId,
+    },
 
     /// Register a child watch under an existing terminal.
     StartWatch {

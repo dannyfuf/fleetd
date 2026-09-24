@@ -289,11 +289,13 @@ fn board_tab_summary_ignores_worktree_boards_in_the_active_context() {
         id: id.parse().expect("board id"),
         context_id: context.clone(),
         worktree_id: worktree_id.map(|id| id.parse().expect("worktree id")),
+        kind: Default::default(),
         name: id.to_owned(),
         prefix: "ZED".to_owned(),
         backend_kind: "local".to_owned(),
         working_count: 0,
         attention_count: 0,
+        idle_started: 0,
         card_count: open_count,
         open_count,
         dirty_count: 0,
@@ -1427,3 +1429,6 @@ fn opening_an_offline_remote_worktree_toasts_rather_than_sticking(cx: &mut gpui:
         );
     });
 }
+
+/// The Review tab as the context's Reviews board (UX-SPEC §3.5, FEA-23).
+mod review_board;

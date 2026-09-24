@@ -81,6 +81,12 @@ struct Inner {
     worktrees: Worktrees,
     /// Locally accepted submissions awaiting their durable transcript-origin commit.
     in_flight_rows: std::sync::Mutex<HashSet<i64>>,
+    /// Delegations whose row is reserved but whose child `create_with` has not answered yet.
+    ///
+    /// The drain releases a live row whose child the manager does not know — a restart orphan —
+    /// and a row in this window looks exactly like one. Marked before the reservation is written
+    /// and cleared once creation has answered, so a drain pass that lands in between leaves it be.
+    creating: std::sync::Mutex<HashSet<DelegationId>>,
     /// Where a terminal *card*-called delegation is recorded, installed by composition once the
     /// boards service exists.
     ///
@@ -89,6 +95,52 @@ struct Inner {
     /// caller — a card delivery with no hook is `Undeliverable { reason: "no board service" }`
     /// rather than a lost row.
     run_hook: std::sync::Mutex<Option<Weak<dyn RunDeliveryHook>>>,
+}
+
+/// Marks one delegation as being created for as long as it lives; see `Inner::creating`.
+///
+/// A guard rather than a pair of calls so a start whose future is dropped mid-creation cannot
+/// leave the mark behind, which would shield a real orphan from the drain for good.
+pub(super) struct CreatingGuard {
+    service: DelegationService,
+    delegation: DelegationId,
+}
+
+impl CreatingGuard {
+    pub(super) fn new(service: &DelegationService, delegation: DelegationId) -> Self {
+        service
+            .inner
+            .creating
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(delegation);
+        Self {
+            service: service.clone(),
+            delegation,
+        }
+    }
+}
+
+impl Drop for CreatingGuard {
+    fn drop(&mut self) {
+        self.service
+            .inner
+            .creating
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.delegation);
+    }
+}
+
+impl DelegationService {
+    /// Whether a start is between reserving this delegation's row and creating its child.
+    pub(super) fn is_creating(&self, delegation: DelegationId) -> bool {
+        self.inner
+            .creating
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&delegation)
+    }
 }
 
 impl DelegationService {
@@ -114,6 +166,7 @@ impl DelegationService {
                 config,
                 worktrees,
                 in_flight_rows: std::sync::Mutex::new(HashSet::new()),
+                creating: std::sync::Mutex::new(HashSet::new()),
                 run_hook: std::sync::Mutex::new(None),
             }),
         };

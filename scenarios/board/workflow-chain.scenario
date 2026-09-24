@@ -15,8 +15,10 @@
 #                 labels it with the same tab title. That is the no-work claim of the phase: a
 #                 card-called child has `parent: None` (`delegation/run.rs`), so every list that
 #                 groups children under their caller thread already treats it as its own root.
-#   `>` twice     the refusal in a column that runs nothing (`Ready has no action`) and the
-#                 re-run ask on a card that has runs.
+#   `>` twice     the refusal in a column that runs nothing (`Ready has no action`, asked of
+#                 AGE-1 once its cancelled run has put it back in Ready — a card moved into
+#                 Ready with nothing blocking it would otherwise go straight on, §11.7 rule 0)
+#                 and the re-run ask on a card that has runs.
 #   `X`           the confirm, its sentence, and the run reaching a terminal outcome: the first
 #                 row of `card.runs` reads `cancelled …` and stays that way.
 #   `]` and `[`   `ConfirmRequest::MoveCancelsRun`, read back through `dialog.message` — the one
@@ -88,22 +90,13 @@ await toasts[0].text == "AGE-1 has no run" 15000
 advance 20000
 await toasts[0] absent 10000
 
-# Into Ready, which routes a card nothing blocks no further (BOARD.md §11.7) and runs nothing:
-# `>` names the column rather than starting something no automation asked for.
-key ]
-await lists.board.selected.label == "Ready" 20000
-assert lists["board.cards"].rows[0].badges[0] == "AGE-1"
-key >
-await toasts[0].text == "Ready has no action" 15000
-advance 20000
-await toasts[0] absent 10000
-
-# In Progress is the prompt column, and the card's default provider is Claude, whose child asks
-# a question and parks on it. The tile is painted from the delegation mirror (BOARD.md §11.8), so
-# a child that opens its gate milliseconds after its turn starts reaches the face as `needs you`
-# without ever showing `working`; the delegation itself says `blocked` once the gate is open —
-# which is what gives `[` a live child to offer to cancel, and the beginning of the twenty
-# seconds (`agent::GATE_BUDGET`) the child holds it for.
+# Into Ready, which routes a card nothing blocks straight on (BOARD.md §11.7 rule 0): one `]`
+# lands AGE-1 in In Progress, the prompt column, and the cursor follows it there. The card's
+# default provider is Claude, whose child asks a question and parks on it. The tile is painted
+# from the delegation mirror (BOARD.md §11.8), so a child that opens its gate milliseconds after
+# its turn starts reaches the face as `needs you` without ever showing `working`; the delegation
+# itself says `blocked` once the gate is open — which is what gives `[` a live child to offer to
+# cancel, and the beginning of the twenty seconds (`agent::GATE_BUDGET`) the child holds it for.
 key ]
 await lists.board.selected.label == "In Progress" 20000
 await lists["board.cards"].rows[0].marks[0] == "needs you" 60000
@@ -118,6 +111,18 @@ assert dialog.message ~= "^AGE-1 is working \(.+\)\. Move to Ready and cancel th
 key y
 await lists.board.selected.label == "Ready" 30000
 await lists["board.cards"].rows[0].badges[0] == "AGE-1" 15000
+
+# Ready runs nothing: `>` names the column rather than starting something no automation asked
+# for. (The card stays in Ready: rule 0 skips a card whose cancelled run is still live, and the
+# cancel's delivery settles the card where it stands.) The key reads the column of a card's live
+# run, so it waits for the cancel to be delivered before it asks.
+await agents.delegations[0].status == cancelled 30000
+await lists["board.cards"].rows[0].marks[0] absent 15000
+await idle 30000
+key >
+await toasts[0].text == "Ready has no action" 15000
+advance 20000
+await toasts[0] absent 10000
 
 # `A` — the run as an ordinary tab. A run that has ended still has its thread, and the tab it
 # opens is the ordinary one: the thread title the daemon minted is `↳ AGE-1 — …`
@@ -148,12 +153,10 @@ await overlay absent 10000
 await focused == "board.column[2].card[0]" 15000
 
 # The next card in the chain, through Ready into the column that runs it. Nothing is running
-# now, so this card is given the slot rather than owed it.
+# now, so this card is given the slot rather than owed it, and one `]` carries it through.
 key h
 await lists.board.selected.label == "Todo" 15000
 assert lists["board.cards"].rows[0].badges[0] == "AGE-2"
-key ]
-await lists.board.selected.label == "Ready" 20000
 key ]
 await lists.board.selected.label == "In Progress" 20000
 assert lists["board.cards"].rows[0].badges[0] == "AGE-2"

@@ -244,6 +244,7 @@ async fn a_column_with_live_runs_cannot_be_removed_under_them() {
         files_changed: 0,
         cost_usd: None,
         tokens: None,
+        worktree_id: None,
     });
     assert_eq!(doc.cards[0].id, card.id);
     services.boards.store.save(&doc).unwrap();

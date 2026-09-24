@@ -407,10 +407,12 @@ pub fn boards(boards: &[fleet_core::board::BoardSummary]) -> String {
         let mut row = vec![
             board.id.to_string(),
             board.context_id.to_string(),
-            board
-                .worktree_id
-                .as_ref()
-                .map_or_else(|| "context".to_owned(), ToString::to_string),
+            // A context has two boards, and the scope is what tells them apart.
+            match (&board.worktree_id, board.kind) {
+                (Some(worktree), _) => worktree.to_string(),
+                (None, fleet_core::board::BoardKind::Reviews) => "reviews".to_owned(),
+                (None, _) => "context".to_owned(),
+            },
             crate::envelope::single_line(&board.name),
             crate::envelope::single_line(&board.backend_kind),
             board.card_count.to_string(),
@@ -480,11 +482,16 @@ pub fn board(
     backend: Option<&fleet_core::board::BackendDescriptor>,
     now: i64,
 ) -> String {
-    let scope = view
-        .board
-        .worktree_id
-        .as_ref()
-        .map_or_else(String::new, |id| format!(" · worktree {id}"));
+    // A Reviews board belongs to its context the way a worktree board belongs to its worktree,
+    // and a reader who sees two boards with the same name needs to know which one this is.
+    let scope = match (&view.board.worktree_id, view.board.kind) {
+        (Some(id), _) => format!(" · worktree {id}"),
+        (None, fleet_core::board::BoardKind::Reviews) => format!(
+            " · reviews of {}",
+            crate::envelope::single_line(view.board.context_id.as_str())
+        ),
+        (None, fleet_core::board::BoardKind::Tasks) => String::new(),
+    };
     let mut sections = vec![format!(
         "{} ({}){}\n{}",
         crate::envelope::single_line(&view.board.name),
@@ -656,10 +663,19 @@ fn board_header(
     // What the board is doing right now comes before what its remote is doing: a run in flight
     // is this minute's fact, and a sync stamp is not. Both counts are dropped while they are
     // zero, so a board nobody has automated prints exactly the header it always printed.
-    if summary.working_count > 0 {
+    // The live runs and the owed ones are stated apart, as the app's header states them: a
+    // queue behind the limit is the throttle working, and one count over the limit would read
+    // as the limit broken (`4/2 working`).
+    let open = || view.cards.iter().filter(|card| !card.archived);
+    let live = open().filter(|card| is_working(view, card)).count();
+    let owed = open()
+        .filter(|card| card.pending_run.is_some() && !is_working(view, card))
+        .count();
+    if owed > 0 {
+        parts.push(format!("{live} working \u{b7} {owed} waiting"));
+    } else if live > 0 {
         parts.push(format!(
-            "{}/{} working",
-            summary.working_count,
+            "{live}/{} working",
             view.board.settings.max_live_runs()
         ));
     }
@@ -985,7 +1001,7 @@ pub fn card_runs(
                 .find(|status| status.id == run.status_id)
                 .map_or(run.status_id.as_str(), |status| status.name.as_str());
             format!(
-                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                 run.id,
                 crate::envelope::single_line(column),
                 run_state(run, live),
@@ -1000,10 +1016,28 @@ pub fn card_runs(
                 run.thread_id
                     .as_ref()
                     .map_or_else(|| "\u{2014}".to_owned(), ToString::to_string),
+                run_refusal(run).unwrap_or_else(|| "\u{2014}".to_owned()),
             )
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// The sentence a run that never started was refused with, as one line.
+///
+/// The daemon records the refusal under its error kind (`validation failed: invalid automation:
+/// …`, `conflict: …`); the sentence after those prefixes is the one every surface prints
+/// verbatim (`docs/BOARD.md` §11.2).
+#[must_use]
+pub fn run_refusal(run: &fleet_core::board::CardRun) -> Option<String> {
+    if !run.failed_to_start() || run.outcome != Some(fleet_core::board::RunOutcome::Failed) {
+        return None;
+    }
+    let mut sentence = run.detail.as_deref()?;
+    for prefix in ["validation failed: ", "invalid automation: ", "conflict: "] {
+        sentence = sentence.strip_prefix(prefix).unwrap_or(sentence);
+    }
+    Some(crate::envelope::single_line(sentence))
 }
 
 /// A run's state word: its outcome once it has one, else what the daemon says it is doing.
@@ -1190,6 +1224,17 @@ pub fn board_card(
             "Worktree: {}",
             card.worktree_id.as_ref().map_or("—", |id| id.as_str())
         ),
+    ];
+    // Only a review card has a pull request, so only a review card is told one: a task card
+    // prints exactly the report it printed before Reviews boards existed.
+    if let Some(pull_request) = &card.pull_request {
+        lines.push(format!(
+            "Pull request: {}  {}",
+            crate::envelope::single_line(&pull_request.key()),
+            crate::envelope::single_line(&pull_request.url)
+        ));
+    }
+    lines.extend([
         format!("Archived: {}", card.archived),
         format!("Dirty: {}", card.dirty),
         format!(
@@ -1200,7 +1245,7 @@ pub fn board_card(
             "Updated: {}",
             crate::envelope::single_line(&card.updated_at)
         ),
-    ];
+    ]);
     // The workflow rows appear only when the card has something to say through them: a board
     // nobody has automated prints exactly the report it printed before automation existed, and
     // three em dashes on every card is not a feature anybody asked for.
@@ -1462,8 +1507,20 @@ mod tests {
         assert!(text.contains("Ready (2) \u{26a1}"), "{text}");
         assert!(text.contains("Todo (1)\n"), "{text}");
         let header = text.lines().nth(1).expect("the header is the second line");
+        // One run is live and one card is owed a slot: stated apart, never as `2/2 working`,
+        // so a queue behind the limit cannot read as the limit broken.
         assert_eq!(
-            header, "backend: local \u{b7} 2/2 working \u{b7} 1 needs you",
+            header, "backend: local \u{b7} 1 working \u{b7} 1 waiting \u{b7} 1 needs you",
+            "{text}"
+        );
+        let mut running = view();
+        for card in &mut running.cards {
+            card.pending_run = None;
+        }
+        let text = board(&running, None, NOW);
+        assert_eq!(
+            text.lines().nth(1),
+            Some("backend: local \u{b7} 1/2 working \u{b7} 1 needs you"),
             "{text}"
         );
     }
@@ -1503,14 +1560,15 @@ mod tests {
         assert_eq!(counts, ["1", "2"], "{text}");
     }
 
-    /// The run line is the same ten fields wherever it is printed, and the live join names the
+    /// The run line is the same eleven fields wherever it is printed, and the live join names the
     /// state the daemon would use.
     #[test]
     fn a_run_line_names_its_column_state_spend_and_thread() {
         let view = view();
         let live = card_runs(&view.board, &view.cards[1], &view.live_runs, Some(NOW));
         let fields: Vec<&str> = live.split('\t').collect();
-        assert_eq!(fields.len(), 10, "{live}");
+        assert_eq!(fields.len(), 11, "{live}");
+        assert_eq!(fields[10], "\u{2014}", "{live}");
         assert_eq!(fields[1], "Ready", "{live}");
         assert_eq!(fields[2], "blocked", "{live}");
         assert_eq!(fields[3], "codex", "{live}");

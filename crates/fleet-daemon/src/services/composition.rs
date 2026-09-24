@@ -106,7 +106,6 @@ impl Services {
                 boards::Automation::new(delegations.clone(), Arc::new(checkpoints.clone()))
             }),
         ));
-        worktrees.set_cascade(boards.clone());
         // Where a terminal card-called delegation is recorded. A `Weak`, because the boards
         // service holds the delegation service through `Automation`: a strong handle back would
         // close a cycle neither half could ever break.
@@ -118,6 +117,27 @@ impl Services {
             delegations.set_run_delivery_hook(Arc::downgrade(&hook));
         }
         repos.set_context_mover(boards.clone());
+        let schedules = schedules::Schedules::new(
+            Arc::new(crate::stores::schedules::ScheduleStore::new(
+                &fleet_core::paths::FleetHome::new(home.clone()),
+                Arc::clone(&adapters.files),
+                Arc::clone(&adapters.clock),
+            )),
+            Arc::new(schedules::HeadlessRunner::new(
+                Arc::clone(&adapters.shell),
+                Arc::clone(&config),
+                fleet_core::paths::FleetHome::new(home.clone()),
+            )),
+            Arc::clone(&jobs),
+            Arc::clone(&adapters.clock),
+            events.clone(),
+            Arc::clone(&boards),
+        );
+        // The schedules service is the cascade because it wraps the boards one: a worktree's
+        // boards are deleted first and their schedules after, without `Boards` knowing schedules.
+        // `Worktrees` holds it weakly, so `Services` keeps the strong handle.
+        let worktree_cascade: Arc<dyn worktrees::WorktreeCascade> = Arc::new(schedules.clone());
+        worktrees.set_cascade(Arc::clone(&worktree_cascade));
         let pool = Pool::new(
             Arc::clone(&config),
             Arc::clone(&state),
@@ -226,6 +246,8 @@ impl Services {
         );
         Self {
             boards,
+            schedules,
+            _worktree_cascade: worktree_cascade,
             hosts,
             machines,
             mirror,

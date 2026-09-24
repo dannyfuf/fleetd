@@ -32,6 +32,7 @@ pub fn job_kind_label(kind: &JobKind) -> &str {
         JobKind::RepoDiscovery => "discover",
         JobKind::Update => "update",
         JobKind::Import => "import",
+        JobKind::ScheduledTask => "sched",
         JobKind::Custom(name) => name,
     }
 }
@@ -126,6 +127,7 @@ pub fn job_outcome_toast(job: &JobRecord, jobs_panel_open: bool) -> Option<Strin
         | JobKind::PrFetch
         | JobKind::RepoFetch
         | JobKind::RepoDiscovery
+        | JobKind::ScheduledTask
         | JobKind::Custom(_) => None,
     }
 }
@@ -158,6 +160,7 @@ const fn kind_lead(kind: &JobKind) -> &str {
         JobKind::RepoDiscovery => "Discover repositories for",
         JobKind::Update => "Update Fleet",
         JobKind::Import => "Import from",
+        JobKind::ScheduledTask => "Run schedule",
         JobKind::Custom(name) => name.as_str(),
     }
 }

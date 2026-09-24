@@ -634,6 +634,72 @@ async fn the_board_workflow_preset_boots_with_an_automated_worktree_board() {
 }
 
 #[tokio::test]
+async fn the_reviews_preset_boots_with_a_pull_request_card_on_the_reviews_board() {
+    let (booted, mut daemon, _environment) = boot(Preset::Reviews).await;
+    assert_eq!(booted.worktree_slugs(), vec!["acme/api#feature".to_owned()]);
+    let client = daemon
+        .client()
+        .await
+        .unwrap_or_else(|error| panic!("connect for the Reviews board: {error:#}"));
+    let context = booted.context();
+    let boards = client
+        .list_boards(Some(context.clone()))
+        .await
+        .unwrap_or_else(|error| panic!("list boards: {error}"));
+    assert_eq!(
+        boards
+            .iter()
+            .map(|summary| summary.id.to_string())
+            .collect::<Vec<_>>(),
+        vec![fleet_core::board::reviews_board_id(&context).to_string()],
+        "reviews seeds one board and it is the context's Reviews board"
+    );
+    let view = client
+        .get_board(boards[0].id.clone())
+        .await
+        .unwrap_or_else(|error| panic!("read the Reviews board: {error}"));
+    assert_eq!(
+        view.board
+            .statuses
+            .iter()
+            .map(|status| status.name.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            "Pending review".to_owned(),
+            "Reviewing".to_owned(),
+            "Reviewed".to_owned(),
+            "Review published".to_owned(),
+            "Dismissed".to_owned(),
+        ],
+        "the columns are EnsureReviewsBoard's own"
+    );
+    assert_eq!(view.board.prefix, "REV");
+    assert_eq!(view.cards.len(), 1, "one pull request card");
+    let card = &view.cards[0];
+    assert_eq!(
+        card.pull_request
+            .as_ref()
+            .map(|pull_request| pull_request.key()),
+        Some("acme/api#1".to_owned())
+    );
+    assert_eq!(
+        card.status_id.to_string(),
+        "reviewed",
+        "the card sits in the one review column that neither routes nor runs"
+    );
+    assert!(
+        card.runs.is_empty(),
+        "nothing ran on the seeded card, so a scenario sees only runs it started"
+    );
+
+    drop(client);
+    daemon
+        .shutdown()
+        .await
+        .unwrap_or_else(|error| panic!("shut the verification daemon down: {error}"));
+}
+
+#[tokio::test]
 async fn the_agents_preset_points_both_agent_launchers_at_the_scripted_binary() {
     let (booted, mut daemon, environment) = boot(Preset::Agents).await;
     assert_eq!(booted.worktree_slugs(), vec!["acme/api#agent".to_owned()]);

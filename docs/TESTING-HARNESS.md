@@ -120,7 +120,7 @@ Arguments after `type` and `clipboard set` have leading and trailing whitespace 
 spaces are preserved. The frozen line grammar is:
 
 ```text
-fixture: empty|one-repo|busy|board|agents|agents-subagent|agents-subagent-other-worktree|board-workflow
+fixture: empty|one-repo|busy|board|agents|agents-subagent|agents-subagent-other-worktree|board-workflow|reviews
 meta
 quit
 wait <milliseconds>
@@ -253,7 +253,10 @@ line. Everything else below is additive within version 1.
 A `board.cards` row carries, in this order, its card's run mark — one of `working`, `pending`,
 `stalled`, `needs you`, `done` — then `blocked:<n>` for the cards still blocking it, then the
 assignee it already carried; a card whose tile draws neither mark carries only the assignee, so
-`marks[0]` is the run state whenever there is one. `board.cards` is the focused column exactly as
+`marks[0]` is the run state whenever there is one. Its badges are the card's key and then, on a
+review card, its pull request as `owner/name#number` — the text the tile's reference slot draws.
+While the Pull requests screen's Review tab draws the Reviews board, `focused` names
+`board.column[C].card[R]`, as the Hub's Board tab does. `board.cards` is the focused column exactly as
 the pane draws it — ordered by the card's position, archived cards left out, and narrowed by the
 board filter — so `rows[R]` and `focused == board.column[C].card[R]` always name the same card;
 a `board` row's badge counts that same population. A `board` row carries `action` when its
@@ -572,6 +575,12 @@ started is gone by the time the scenario's own daemon reads the home — a scena
 and watches the run it started itself. The run's child is the scripted provider in its delegation
 role (§5), so Codex completes its card and Claude asks a question and parks it.
 
+A fourth additive preset, `reviews`, seeds what `one-repo` seeds plus the context's Reviews board
+(BOARD.md §4), asked for with `EnsureReviewsBoard` so its id, columns and `REV` prefix are the
+daemon's own derivation. It holds one card, `Review the retry budget` (`REV-1`), added through
+`UpsertPullRequestCard` for `acme/api#1` exactly as a review schedule's run would add it, and left
+in Reviewed, the column that neither routes nor runs. `scenarios/prs/` reads it.
+
 ## 5. Scripted-agent transcripts
 
 The `fleet-harness agent --provider <claude|codex> --transcript <file>` subcommand reads one JSON
@@ -720,10 +729,17 @@ A file counts as a scenario when its extension is `.scenario` or `.txt`, which i
 `.scenario`: the extension is what tells a reader which files run.
 
 Surface directories group scenarios by the part of Fleet they exercise — `hub/`, `workspace/`,
-`agents/`, `daemon/`, `board/` — plus `pointer/`, whose journeys cross surfaces: each completes a
+`agents/`, `daemon/`, `board/`, `prs/` — plus `pointer/`, whose journeys cross surfaces: each completes a
 real task by pointer alone, with no `key` line, only `type` into the field a click focused
 (ADR 0023). A scenario's corpus-relative path without its extension is
 also its baseline key, so `hub/help.scenario` and `agents/help.scenario` never collide.
+Review boards (ADR 0024, ADR 0025) are pinned by three scenarios, one behaviour each:
+`prs/review-board` opens the Pull requests screen, tabs to Review, awaits the board scope and
+asserts the Reviews board's five column names (with one `shot`); `prs/review-card-pr` asserts that a
+seeded pull-request card's tile shows `owner/name#1` and that its detail shows the `Pull request`
+row; `board/schedules-section` opens Board settings on the Reviews board, goes to Schedules, presses
+`n` and asserts the starter's name and prompt in the form (with one `shot`). They read the board's
+existing targets.
 The agent corpus includes a headless two-turn wheel regression and a structured Codex
 file-approval assertion; the latter reads `agents.threads[0].decision.paths` and `has_diff` to
 prove the named item supplied the rendered diff rather than merely observing that a gate opened.
@@ -843,7 +859,7 @@ integration notes to the owner.
 | `scripted-agent` | `crates/fleet-harness/src/agent/` and `crates/fleet-harness/transcripts/` starter assets |
 | `fault` | `crates/fleet-harness/src/fault.rs` |
 | `baseline` | `crates/fleet-harness/src/baseline.rs`, `scenarios/baselines/` |
-| `corpus-*` | corresponding `scenarios/{hub,workspace,agents,daemon,board}/` surface directory |
+| `corpus-*` | corresponding `scenarios/{hub,workspace,agents,daemon,board,prs}/` surface directory |
 | `makefile` | `Makefile` and the owned headless wrapper under `crates/fleet-app/tests/` |
 | `docs` | `docs/TESTING-HARNESS.md`, its `docs/README.md` row, assigned harness doc edits, and phase tracker deviation notes |
 

@@ -73,7 +73,7 @@ pub(super) fn on_click(click: BoardClick, state: &Entity<AppState>, bridge: &Bri
             return;
         }
         BoardClick::ColumnSettings(column) => {
-            super::actions::column_settings(state, bridge, column, cx);
+            super::actions::column_settings(state, column, cx);
             return;
         }
         BoardClick::Drop { card, column, slot } => {

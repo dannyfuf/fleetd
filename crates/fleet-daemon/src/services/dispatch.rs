@@ -80,6 +80,17 @@ impl Services {
         }
     }
 
+    /// Deletes a deleted board's schedules and their directories (`docs/BOARD.md` §12).
+    ///
+    /// Called here rather than from `Boards` so boards never depend on schedules. The board is
+    /// already gone when this runs, so a failure cannot be rolled back: it is logged, and the
+    /// orphaned schedule's next fire finds no board, launches nothing and disables it.
+    async fn delete_board_schedules(&self, board: &fleet_core::ids::BoardId) {
+        if let Err(error) = self.schedules.delete_for_board(board).await {
+            tracing::warn!(%board, %error, "board deleted but its schedules could not be");
+        }
+    }
+
     /// Trashes this daemon's own document for a worktree board another host owns.
     ///
     /// Before PR #42 the laptop answered `EnsureWorktreeBoard` locally and wrote an empty
@@ -224,6 +235,9 @@ impl Services {
             RequestBody::EnsureBoard { context_id } => {
                 Ok(ResponseBody::Board(self.boards.ensure(&context_id).await?))
             }
+            RequestBody::EnsureReviewsBoard { context_id } => Ok(ResponseBody::Board(
+                self.boards.ensure_reviews(&context_id).await?,
+            )),
             RequestBody::EnsureWorktreeBoard { worktree_id } => Ok(ResponseBody::Board(
                 self.boards.ensure_for_worktree(&worktree_id).await?,
             )),
@@ -252,11 +266,39 @@ impl Services {
             )),
             RequestBody::DeleteBoard { board_id } => {
                 self.boards.delete(&board_id).await?;
+                self.delete_board_schedules(&board_id).await;
                 Ok(ResponseBody::Ack)
             }
             RequestBody::CreateCard { board_id, draft } => Ok(ResponseBody::Card(
                 self.boards.create_card(&board_id, draft).await?,
             )),
+            RequestBody::UpsertPullRequestCard {
+                board_id,
+                draft,
+                requested_at,
+            } => {
+                let (card, outcome) = self
+                    .boards
+                    .upsert_pull_request_card(&board_id, draft, requested_at)
+                    .await?;
+                Ok(ResponseBody::CardUpsert { card, outcome })
+            }
+            RequestBody::ListSchedules { board_id } => Ok(ResponseBody::Schedules(
+                self.schedules.list(board_id.as_ref()).await?,
+            )),
+            RequestBody::CreateSchedule { draft } => {
+                Ok(ResponseBody::Schedule(self.schedules.create(draft).await?))
+            }
+            RequestBody::UpdateSchedule { id, patch } => Ok(ResponseBody::Schedule(
+                self.schedules.update(&id, patch).await?,
+            )),
+            RequestBody::DeleteSchedule { id } => {
+                self.schedules.delete(&id).await?;
+                Ok(ResponseBody::Ack)
+            }
+            RequestBody::RunScheduleNow { id } => {
+                Ok(ResponseBody::Schedule(self.schedules.run_now(&id).await?))
+            }
             RequestBody::UpdateCard { card_id, patch } => Ok(ResponseBody::Card(
                 self.boards.update_card(&card_id, patch).await?,
             )),
@@ -939,7 +981,9 @@ impl Services {
             if repositories.is_empty() {
                 // The board must go with its context: a stranded document would be adopted by
                 // the next context whose name derives the same id, resurrecting deleted cards.
-                self.boards.delete_for_context(&context).await?;
+                for board in self.boards.delete_for_context(&context).await? {
+                    self.delete_board_schedules(&board).await;
+                }
                 match self.contexts.delete(context.clone()).await {
                     Ok(()) => return Ok(()),
                     Err(DaemonError::Conflict(message))
@@ -964,6 +1008,9 @@ impl Services {
         }
     }
 }
+
+#[cfg(test)]
+mod reviews_and_schedules;
 
 #[cfg(test)]
 mod tests {

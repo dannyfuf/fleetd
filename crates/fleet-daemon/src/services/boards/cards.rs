@@ -1,5 +1,8 @@
 use super::*;
 
+#[cfg(test)]
+mod tests;
+
 impl Boards {
     /// Allocates a UUID and local number, then persists a validated card.
     pub async fn create_card(&self, board: &BoardId, draft: CardDraft) -> DaemonResult<Card> {
@@ -21,6 +24,94 @@ impl Boards {
         doc.cards.push(card);
         self.commit(guard, &mut doc, &seeds, &now).await?;
         Ok(doc.cards[index].clone())
+    }
+
+    /// Creates a pull request card, or answers the card already tracking that pull request.
+    ///
+    /// The whole read-decide-write runs under the board gate, so two callers upserting the same
+    /// pull request at once are serialised: the second sees the first one's card and answers
+    /// `Existing`. An `Existing` answer changed nothing, so it writes nothing and announces
+    /// nothing. A created or reopened card is seeded exactly as `create_card` seeds one: the
+    /// column it lands in decides what runs, with no special case for any column.
+    ///
+    /// On a Reviews board the pull request's repository may belong to any context, so the
+    /// draft's repository is not validated there. It is set to the pull request's repository
+    /// when that is a Fleet repository and left empty otherwise: the card is still created and
+    /// visible, and its run refuses later with a sentence that names the repository.
+    ///
+    /// # Errors
+    ///
+    /// A draft with no pull request, an unknown board, a refused draft field, a link that
+    /// would close a cycle, or the failure of the save or of the first run it started.
+    pub async fn upsert_pull_request_card(
+        &self,
+        board: &BoardId,
+        mut draft: CardDraft,
+        requested_at: Option<String>,
+    ) -> DaemonResult<(Card, UpsertOutcome)> {
+        let guard = self.gate(board).await;
+        let mut doc = self.load(board)?;
+        // A card whose run is still going — or still starting, which on a card-worktree board
+        // can take the length of a pull-request fetch — is not reopened under it: the run would
+        // report into a column the card has left, exactly the wound `move_card` refuses. The
+        // request stands as it is, and the next upsert after the run ends compares again.
+        if let Some(pull_request) = &draft.pull_request
+            && let Some(held) = doc.cards.iter().find(|card| {
+                card.board_id == doc.board.id
+                    && card
+                        .pull_request
+                        .as_ref()
+                        .is_some_and(|held| held.same_pull_request(pull_request))
+            })
+            && (is_working(held) || self.start_in_flight(&doc.board.id, &held.id).await)
+        {
+            return Ok((held.clone(), UpsertOutcome::Existing));
+        }
+        if doc.board.kind.is_tasks() {
+            self.validate_repo(&doc.board, draft.repo_id.as_ref())
+                .await?;
+        } else if let Some(pull_request) = &draft.pull_request {
+            // Matched without case, as the pull request itself is, and linked under the id Fleet
+            // registered it with.
+            draft.repo_id = self
+                .state_store
+                .load()
+                .await?
+                .repos
+                .iter()
+                .find(|fleet| {
+                    fleet
+                        .id
+                        .as_str()
+                        .eq_ignore_ascii_case(pull_request.repo.as_str())
+                })
+                .map(|fleet| fleet.id.clone());
+        }
+        validate_parent(&doc.cards, None, draft.parent_id.as_ref())?;
+        let now = self.now();
+        ops::check_draft_writable(&doc.board, &draft)?;
+        let (outcome, index) = ops::upsert_pull_request_card(
+            &mut doc.board,
+            &mut doc.cards,
+            new_card_id()?,
+            draft,
+            requested_at.as_deref(),
+            &now,
+        )?;
+        if outcome == UpsertOutcome::Existing {
+            return Ok((doc.cards[index].clone(), outcome));
+        }
+        // Checked against the set the card now stands in, for the reason `create_card` gives.
+        validate_links(&doc.board, &doc.cards, &doc.cards[index])?;
+        if outcome == UpsertOutcome::Reopened {
+            // A run owed to the column the card has left is not owed any more; the reopen's own
+            // activity entry already says what happened.
+            doc.cards[index].pending_run = None;
+            doc.board.updated_at.clone_from(&now);
+        }
+        let seeds = [doc.cards[index].id.clone()];
+        self.commit(guard, &mut doc, &seeds, &now).await?;
+        Ok((doc.cards[index].clone(), outcome))
     }
 
     /// Applies a partial card edit through the pure domain operations.
@@ -274,6 +365,10 @@ impl Boards {
     /// gate to record its run, and the gates are not reentrant
     /// (`docs/BOARD.md` §4, [`super::automation`]).
     ///
+    /// On a board that runs each card in its own worktree the starts are handed off rather than
+    /// awaited ([`Boards::apply_starts_after_answer`]): creating the card's worktree can take
+    /// minutes, and the request must answer once the save has landed.
+    ///
     /// # Errors
     ///
     /// The failure of the evaluation, of the save, or of the first run the plan asked for.
@@ -292,7 +387,7 @@ impl Boards {
         )
         .await;
         drop(guard);
-        self.apply_starts(&doc.board.id, plan).await
+        self.apply_starts_after_answer(&doc.board, plan).await
     }
 }
 

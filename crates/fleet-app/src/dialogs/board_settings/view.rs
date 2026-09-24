@@ -2,15 +2,15 @@ use super::*;
 
 /// Everything a click on this dialog needs, cloned into each handler that needs it.
 #[derive(Clone)]
-struct Wire {
-    state: Entity<AppState>,
-    bridge: Bridge,
-    focus: FocusHandle,
+pub(super) struct Wire {
+    pub(super) state: Entity<AppState>,
+    pub(super) bridge: Bridge,
+    pub(super) focus: FocusHandle,
 }
 
 impl Wire {
     /// Row `row` of the open pane, made clickable: a press puts the cursor there.
-    fn row(&self, row: usize, element: impl IntoElement) -> AnyElement {
+    pub(super) fn row(&self, row: usize, element: impl IntoElement) -> AnyElement {
         let wire = self.clone();
         div()
             .id(("board-settings-row", row))
@@ -23,7 +23,7 @@ impl Wire {
     }
 
     /// A closed choice's click, for the row showing option `current`.
-    fn pick(
+    pub(super) fn pick(
         &self,
         row: usize,
         current: Option<usize>,
@@ -35,7 +35,7 @@ impl Wire {
     }
 
     /// A flag's switch.
-    fn switch(&self, row: usize) -> impl Fn(bool, &mut Window, &mut App) + 'static {
+    pub(super) fn switch(&self, row: usize) -> impl Fn(bool, &mut Window, &mut App) + 'static {
         let wire = self.clone();
         move |on, window, cx| switch(&wire.state, row, on, &wire.focus, window, cx)
     }
@@ -88,27 +88,23 @@ pub(crate) fn render(
         .flex_none()
         .w(px(RAIL_WIDTH))
         .gap(tight)
-        .children(
-            BoardSection::ALL
-                .iter()
-                .enumerate()
-                .map(|(index, section)| {
-                    let selected = *section == draft.section;
-                    let wire = wire.clone();
-                    Row::with_id(("board-settings-section", index))
-                        .selected(selected)
-                        .cursor(selected)
-                        .column(RowColumn::flex(Text::ui(section.title())))
-                        .on_click(move |_, window, cx| {
-                            select_section(&wire.state, index, &wire.focus, window, cx);
-                        })
-                }),
-        );
+        .children(draft.sections().iter().enumerate().map(|(index, section)| {
+            let selected = *section == draft.section;
+            let wire = wire.clone();
+            Row::with_id(("board-settings-section", index))
+                .selected(selected)
+                .cursor(selected)
+                .column(RowColumn::flex(Text::ui(section.title())))
+                .on_click(move |_, window, cx| {
+                    select_section(&wire.state, &wire.bridge, index, &wire.focus, window, cx);
+                })
+        }));
 
     let rows = match draft.section {
         BoardSection::General => general_rows(&wire, &draft, input.as_ref(), focused, cx),
         BoardSection::Backend => backend_pane(&wire, &draft, input.as_ref(), focused, cx),
         BoardSection::Columns => columns_pane(&wire, &draft, input.as_ref(), tight),
+        BoardSection::Schedules => schedules_pane(&wire, &draft, input.as_ref(), cx),
     };
     let pane = div()
         .id("board-settings-pane")
@@ -157,7 +153,14 @@ pub(crate) fn render(
                 "Save",
                 Box::new(board_settings_actions::Save),
             )
-            .disabled(draft.saving || !draft.dirty()),
+            // With a schedule's form open, `^s` saves that schedule, and so does this button.
+            .disabled(
+                if draft.schedules.form.is_some() && draft.section == BoardSection::Schedules {
+                    draft.schedules.busy
+                } else {
+                    draft.saving || !draft.dirty()
+                },
+            ),
         ]);
     if let Some(message) = draft.error.clone().or_else(|| draft.validate()) {
         card = card.error(message);
@@ -180,6 +183,45 @@ fn footer_start(draft: &BoardSettingsState) -> Option<AnyElement> {
                 .icon(icon)
                 .action(action)
         };
+    if draft.in_schedule_list() && draft.schedules_supported {
+        return Some(
+            div()
+                .flex()
+                .items_center()
+                .children([
+                    ghost(
+                        "board-settings-new-schedule",
+                        "New schedule",
+                        Icon::Plus,
+                        Box::new(board_settings_actions::NewColumn),
+                    ),
+                    ghost(
+                        "board-settings-run-schedule",
+                        "Run now",
+                        Icon::Zap,
+                        Box::new(board_settings_actions::RunScheduleNow),
+                    ),
+                    ghost(
+                        "board-settings-delete-schedule",
+                        "Delete",
+                        Icon::Trash2,
+                        Box::new(board_settings_actions::DeleteColumn),
+                    ),
+                ])
+                .into_any_element(),
+        );
+    }
+    if draft.section == BoardSection::Schedules {
+        return (draft.schedules.form.is_some() && !draft.editing).then(|| {
+            ghost(
+                "board-settings-back",
+                "Schedules",
+                Icon::ChevronLeft,
+                Box::new(dialog::Cancel),
+            )
+            .into_any_element()
+        });
+    }
     if draft.in_column_list() && draft.pending_delete.is_none() {
         return Some(
             div()
@@ -373,8 +415,24 @@ fn general_rows(
                             .has_next(limit < MAX_LIVE_RUNS_PER_BOARD)
                             .focused(focused == SettingRow::MaxLiveRuns),
                     )
-                    .child(Text::hint("runs share one checkout").muted()),
+                    .child(
+                        Text::hint(if draft.run_location.is_board_worktree() {
+                            "runs share one checkout"
+                        } else {
+                            "each run works in its card's worktree"
+                        })
+                        .muted(),
+                    ),
             ),
+        )
+        // A fact, not a row: nothing moves the board between the two in v1, because a change
+        // on a board with live runs would strand them (BOARD §11.10).
+        .child(
+            FactRow::new(
+                RUNS_IN_LABEL,
+                FactValue::known(run_location_label(draft.run_location)),
+            )
+            .label_width(px(LABEL_WIDTH)),
         )
         .into_any_element()
 }
@@ -760,13 +818,19 @@ fn actions(
     // why `tab` is a section rather than the next field.
     .on_action({
         let state = state.clone();
+        let bridge = bridge.clone();
         let focus = focus.clone();
-        move |_: &dialog::NextField, window, cx| move_to_section(&state, 1, &focus, window, cx)
+        move |_: &dialog::NextField, window, cx| {
+            move_to_section(&state, &bridge, 1, &focus, window, cx);
+        }
     })
     .on_action({
         let state = state.clone();
+        let bridge = bridge.clone();
         let focus = focus.clone();
-        move |_: &dialog::PrevField, window, cx| move_to_section(&state, -1, &focus, window, cx)
+        move |_: &dialog::PrevField, window, cx| {
+            move_to_section(&state, &bridge, -1, &focus, window, cx);
+        }
     })
     .on_action({
         let state = state.clone();
@@ -776,17 +840,35 @@ fn actions(
         let state = state.clone();
         move |_: &settings_actions::CyclePrev, _window, cx| cycle(&state, -1, cx)
     })
+    // `space`, `n` and `d` are the Schedules list's verbs there, and the Columns list's (or a
+    // flag row's) everywhere else: one key, one meaning per pane.
     .on_action({
         let state = state.clone();
-        move |_: &settings_actions::Toggle, _window, cx| toggle(&state, cx)
+        let bridge = bridge.clone();
+        move |_: &settings_actions::Toggle, _window, cx| {
+            if toggle_listed(&state, &bridge, cx) {
+                cx.stop_propagation();
+            } else {
+                toggle(&state, cx);
+            }
+        }
     })
     .on_action({
         let state = state.clone();
-        move |_: &board_settings_actions::NewColumn, _window, cx| add_column(&state, cx)
+        move |_: &board_settings_actions::NewColumn, _window, cx| {
+            if !new_schedule(&state, cx) {
+                add_column(&state, cx);
+            }
+        }
     })
     .on_action({
         let state = state.clone();
-        move |_: &board_settings_actions::DeleteColumn, _window, cx| arm_delete(&state, cx)
+        let bridge = bridge.clone();
+        move |_: &board_settings_actions::DeleteColumn, _window, cx| {
+            if !delete_schedule(&state, &bridge, cx) {
+                arm_delete(&state, cx);
+            }
+        }
     })
     .on_action({
         let state = state.clone();
@@ -803,8 +885,17 @@ fn actions(
     .on_action({
         let state = state.clone();
         let bridge = bridge.clone();
+        move |_: &board_settings_actions::RunScheduleNow, _window, cx| {
+            run_focused_schedule(&state, &bridge, cx);
+        }
+    })
+    .on_action({
+        let state = state.clone();
+        let bridge = bridge.clone();
         move |_: &board_settings_actions::Save, _window, cx| {
-            save(&state, &bridge, cx);
+            if !save_schedule(&state, &bridge, cx) {
+                save(&state, &bridge, cx);
+            }
             cx.stop_propagation();
         }
     })
@@ -818,7 +909,9 @@ fn actions(
             // keeps §3.8.6's meaning, which is to save.
             if delete_armed(&state, cx) {
                 delete_with_cards(&state, &bridge, cx);
-            } else if !confirm_column(&state, window, &focus, cx) {
+            } else if !confirm_column(&state, window, &focus, cx)
+                && !confirm_schedule(&state, window, &focus, cx)
+            {
                 save(&state, &bridge, cx);
             }
             cx.stop_propagation();
@@ -860,11 +953,15 @@ fn move_to_row(
 
 fn move_to_section(
     state: &Entity<AppState>,
+    bridge: &Bridge,
     delta: isize,
     focus: &FocusHandle,
     window: &mut Window,
     cx: &mut App,
 ) {
-    cycle_section(state, delta, cx);
+    if !cycle_section(state, delta, cx) {
+        return;
+    }
     materialize_input(state, Some(window), Some(focus), cx);
+    load_board_schedules(state, bridge, cx);
 }

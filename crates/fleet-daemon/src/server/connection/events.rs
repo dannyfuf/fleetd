@@ -73,6 +73,7 @@ pub(super) fn event_kind(event: &Event) -> EventKind {
         Event::WatchDismissed(_) => EventKind::WatchDismissed,
         Event::SnapshotChanged(_) => EventKind::SnapshotChanged,
         Event::BoardChanged { .. } => EventKind::BoardChanged,
+        Event::SchedulesChanged { .. } => EventKind::SchedulesChanged,
         Event::JobUpdated(_) => EventKind::JobUpdated,
         Event::SessionChanged(_) => EventKind::SessionChanged,
         Event::AgentActivityChanged { .. } => EventKind::AgentActivityChanged,

@@ -12,18 +12,23 @@
 //! still knows *before* it takes each board's gate, applies the answers in one write, and leaves
 //! the runs it decided to start to [`Boards::apply_starts`] afterwards.
 
+use std::collections::BTreeSet;
+
 use chrono::{DateTime, Utc};
 use fleet_core::{
     agents::{Delegation, DelegationId, DeliveryState},
     board::{
-        ActivityKind, BoardDocument, Card, CardRun, Plan, RunOutcome, latest_run, next_pending,
-        push_activity, resolve_prefs,
+        ActivityKind, BoardDocument, Card, CardRun, Plan, RunOutcome, clear_stale_queues,
+        latest_run, next_pending_except, push_activity, resolve_prefs,
     },
     ids::{BoardId, CardId},
 };
 use fleet_proto::{error::ErrorKind, event::BoardChangeReason, response::ResponseBody};
 
-use super::{Automation, RunRow, holds_pending, live_run, on_enter, push_run, run_ended, started};
+use super::{
+    Automation, RunRow, holds_pending, in_worktree, live_run, on_enter, push_run, run_ended,
+    run_worktree, started,
+};
 use crate::{
     DaemonResult, error::from_proto_error, services::agents::delegation::RunDeliveryHook,
     services::boards::Boards,
@@ -116,33 +121,61 @@ impl Boards {
 
     /// Gives one board's freed slot to the card that has waited longest for it.
     ///
+    /// The card may be parked in the action column itself, or queued in the routing column
+    /// before it (`queued`): seeding it through the non-settled walk lets the engine's rule 0
+    /// move a queued card into the column it waits for, and rule 1 then starts it there.
+    ///
     /// A board with nothing parked leaves the memo here: the memo is a hint kept by whoever wrote
     /// a `pending_run`, and a board that never reloads would otherwise be re-read on every
     /// terminal delegation for the life of the daemon.
-    async fn release_slot(&self, board: &BoardId) -> DaemonResult<()> {
-        let plan = {
+    pub(super) async fn release_slot(&self, board: &BoardId) -> DaemonResult<()> {
+        let (next_board, plan) = {
             let _guard = self.gate(board).await;
             let now = self.now();
             let mut doc = self.load(board)?;
-            let Some(next) = next_pending(&doc.board, &doc.cards).map(|card| card.id.clone())
+            // A queued card rule 0 would refuse (blocked since it queued, or its column no
+            // longer routes where it waits) must not take the slot: it would start nothing, and
+            // it stays first in line, so every card behind it would wait for ever.
+            let cleared = clear_stale_queues(&doc.board, &mut doc.cards);
+            // A card an earlier freed slot went to keeps its marker until its start is recorded.
+            // Two runs ending together must fill two slots, so this one passes over it.
+            let reserved = match self.automation() {
+                Some(automation) => automation
+                    .in_flight
+                    .lock()
+                    .await
+                    .get(board)
+                    .cloned()
+                    .unwrap_or_default(),
+                None => BTreeSet::new(),
+            };
+            let Some(next) =
+                next_pending_except(&doc.board, &doc.cards, &reserved).map(|card| card.id.clone())
             else {
+                if cleared {
+                    doc.board.updated_at = now;
+                    self.save(&doc, BoardChangeReason::CardChanged).await?;
+                }
                 self.note_pending(board, false).await;
                 return Ok(());
             };
             let plan = self
                 .evaluate_with_reservation(&mut doc, std::slice::from_ref(&next), &now)
                 .await?;
-            if decided(&plan, &doc.cards, &now) {
+            if cleared || decided(&plan, &doc.cards, &now) {
                 doc.board.updated_at = now;
                 self.save(&doc, BoardChangeReason::CardChanged).await?;
             }
             self.note_pending(board, holds_pending(&doc.cards)).await;
-            plan
+            (doc.board, plan)
         };
-        self.apply_starts(board, plan).await
+        // Handed off on a card-worktree board: the maintenance loop that frees slots must not
+        // wait behind the next card's pull-request fetch.
+        self.apply_starts_after_answer(&next_board, plan).await
     }
 
-    /// Every board a run could belong to: automation happens in a worktree and nowhere else.
+    /// Every board a run could belong to: automation happens in a worktree and nowhere else —
+    /// the board's own, or, on a board that runs each card in the card's worktree, the card's.
     ///
     /// An unreadable document is skipped rather than fatal, exactly as the snapshot scan skips it:
     /// boot recovery reports it once through [`Boards::scan_load`] and recovers the rest.
@@ -156,8 +189,10 @@ impl Boards {
         };
         ids.into_iter()
             .filter(|id| {
-                self.scan_load(id)
-                    .is_some_and(|doc| doc.board.worktree_id.is_some())
+                self.scan_load(id).is_some_and(|doc| {
+                    doc.board.worktree_id.is_some()
+                        || !doc.board.settings.run_location.is_board_worktree()
+                })
             })
             .collect()
     }
@@ -213,7 +248,7 @@ impl Boards {
                 tracing::warn!(%board, %card, %error, "a card run left terminal by the restart could not be recorded");
             }
         }
-        let plan = {
+        let (next_board, plan) = {
             let _guard = self.gate(board).await;
             let now = self.now();
             let mut doc = self.load(board)?;
@@ -236,9 +271,9 @@ impl Boards {
                 self.save(&doc, BoardChangeReason::CardChanged).await?;
             }
             self.note_pending(board, holds_pending(&doc.cards)).await;
-            plan
+            (doc.board, plan)
         };
-        self.apply_starts(board, plan).await
+        self.apply_starts_after_answer(&next_board, plan).await
     }
 
     /// The delegation behind one open run row; `None` when this daemon no longer holds it.
@@ -309,11 +344,12 @@ impl Boards {
 
 /// Whether an evaluation decided anything the document must be saved for.
 ///
-/// `Plan::queued` is not the test on its own: a card already parked for the column it stands in is
-/// re-queued by every walk that reaches it without anything about it changing, and saving on that
+/// `Plan::queued` is not the test on its own: a card already parked for the column it stands in, or
+/// already queued in a routing column for the one after it, is re-queued by every walk that
+/// reaches it without anything about it changing, and saving on that
 /// would rewrite — and broadcast — a board document on every terminal delegation the daemon sees
 /// while one of its cards waits. A park this evaluation actually wrote carries this `now`.
-fn decided(plan: &Plan, cards: &[Card], now: &str) -> bool {
+pub(super) fn decided(plan: &Plan, cards: &[Card], now: &str) -> bool {
     !plan.starts.is_empty()
         || !plan.moved.is_empty()
         || cards.iter().any(|card| {
@@ -400,7 +436,14 @@ fn adopt_run(doc: &mut BoardDocument, card: &CardId, delegation: &Delegation, no
     };
     // Stamped with the delegation's own start, not with `now`: the run has been going since the
     // daemon before this one started it, and the card's duration must say so.
-    let run = started(&row, delegation, &delegation.created.to_rfc3339());
+    // The worktree the run works in, so its delivery diffs the right tree (§11.2); a card that
+    // has lost it keeps the run and records no worktree, as a run from before this field did.
+    let key = doc.cards[index].display_key(&doc.board);
+    let worktree = run_worktree(&doc.board, &doc.cards[index], &key).ok();
+    let run = in_worktree(
+        started(&row, delegation, &delegation.created.to_rfc3339()),
+        worktree,
+    );
     push_run(&mut doc.cards[index], run, now);
     doc.cards[index].pending_run = None;
     push_activity(
@@ -414,6 +457,9 @@ fn adopt_run(doc: &mut BoardDocument, card: &CardId, delegation: &Delegation, no
 }
 
 /// The cards this board still owes a run, which are the only seeds boot recovery has.
+///
+/// A card queued in a routing column carries its `pending_run` too, so a restart seeds it and the
+/// walk moves it on as soon as a slot is free, exactly as a freed slot would have.
 fn owed(cards: &[Card]) -> Vec<CardId> {
     cards
         .iter()
@@ -502,6 +548,7 @@ mod tests {
             files_changed: 0,
             cost_usd: None,
             tokens: None,
+            worktree_id: None,
         }
     }
 
@@ -612,6 +659,62 @@ mod tests {
         card.activity.push(announced(NOW));
         assert!(!lost_start(&card));
         assert_eq!(owed(std::slice::from_ref(&card)).len(), 1);
+    }
+
+    /// A card queued in a routing column for the action column after it (`queued`).
+    fn queued_card(since: &str) -> Card {
+        let mut card = card();
+        card.status_id = "ready".parse().expect("a static slug is valid");
+        card.pending_run = Some(fleet_core::board::PendingRun {
+            status_id: "in-progress".parse().expect("a static slug is valid"),
+            since: since.to_owned(),
+        });
+        card
+    }
+
+    #[test]
+    fn a_queued_card_is_owed_its_run_after_a_restart() {
+        let card = queued_card(EARLIER);
+        assert!(fleet_core::board::queued(&card));
+        assert!(!lost_start(&card));
+        assert_eq!(owed(std::slice::from_ref(&card)), vec![card.id.clone()]);
+    }
+
+    #[test]
+    fn a_queued_card_that_keeps_its_place_is_not_a_decision() {
+        let plan = Plan::default();
+        assert!(!decided(&plan, &[queued_card(EARLIER)], NOW));
+        assert!(decided(&plan, &[queued_card(NOW)], NOW));
+    }
+
+    #[tokio::test]
+    async fn restart_recovery_includes_card_worktree_boards() {
+        let (_temp, services) = crate::services::boards::lifecycle::tests::fixture().await;
+        let context = "work".parse().expect("a static context id is valid");
+        let tasks = services
+            .boards
+            .ensure(&context)
+            .await
+            .expect("the context board is created");
+        let reviews = services
+            .boards
+            .ensure_reviews(&context)
+            .await
+            .expect("the reviews board is created");
+        // A context board runs nowhere until it runs in its cards' worktrees.
+        assert_eq!(
+            services.boards.automated_boards(),
+            vec![reviews.board.id.clone()]
+        );
+        crate::services::boards::lifecycle::tests::run_in_card_worktrees(
+            &services,
+            &tasks.board.id,
+        );
+        let mut recovered = services.boards.automated_boards();
+        recovered.sort();
+        let mut expected = vec![tasks.board.id, reviews.board.id];
+        expected.sort();
+        assert_eq!(recovered, expected);
     }
 
     #[test]

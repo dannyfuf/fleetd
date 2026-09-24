@@ -73,10 +73,8 @@ await dialog absent 20000
 # below is a second mutation, and a run started from the card as it was would be Claude's.
 await idle 20000
 
-# Two `]`: Ready routes a card nothing blocks no further than Ready (BOARD.md §11.7), and the
-# second move is what hands In Progress the card its action then runs.
-key ]
-await lists.board.selected.label == "Ready" 20000
+# One `]`: Ready routes a card nothing blocks straight on (BOARD.md §11.7 rule 0), so the move
+# into Ready is what hands In Progress the card its action then runs, and the cursor follows.
 key ]
 await lists.board.selected.label == "In Progress" 20000
 await lists["board.cards"].rows[0].marks[0] == "working" 60000

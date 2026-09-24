@@ -664,5 +664,10 @@ pub(crate) fn context_board_summary<'a>(
 ) -> Option<&'a BoardSummary> {
     boards
         .iter()
-        .find(|board| board.worktree_id.is_none() && Some(&board.context_id) == context)
+        // The context's task board, never its Reviews board: both are unscoped by worktree.
+        .find(|board| {
+            board.worktree_id.is_none()
+                && board.kind.is_tasks()
+                && Some(&board.context_id) == context
+        })
 }

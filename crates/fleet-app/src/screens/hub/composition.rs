@@ -19,10 +19,30 @@ impl HubScreen {
         self.bind(state, bridge, cx);
         let ctx = self.context(state, bridge);
         let on_board = matches!(state.read(cx).screen, Screen::Hub { tab: HubTab::Board });
+        let review_board = state.read(cx).review_board_is_shown();
+        // `No reviews yet.` replaces the pane, so nothing but the Hub's own root is left to
+        // track the body's focus while it shows.
+        let review_empty = review_board
+            .then(|| self.hub.read(cx).prs.review_board.empty)
+            .flatten();
+        let board_tracks_focus = on_board || (review_board && review_empty.is_none());
         // The board owns the whole body and its own keys, so the Hub's panes are not even
         // composed while it is up (BOARD §8).
         let body = if on_board {
             board.render(state, bridge, focus, window, cx)
+        } else if review_board {
+            // The Review tab is the Reviews board under the PR screen's header and tabs; the
+            // rail and the detail panel go, because the board spans repositories (§3.5).
+            let pane = match review_empty {
+                Some(offer_schedule) => {
+                    let add = ctx.clone();
+                    prs_screen::review_board_empty(offer_schedule, move |_, _, cx| {
+                        add.add_review_schedule(cx);
+                    })
+                }
+                None => board.render(state, bridge, focus, window, cx),
+            };
+            self.review_board_page(state.read(cx), self.hub.read(cx), pane, cx)
         } else {
             let now = now_unix();
             let viewport = window.viewport_size();
@@ -45,7 +65,7 @@ impl HubScreen {
         };
 
         let root = div()
-            .when(!on_board, |el| el.track_focus(focus))
+            .when(!board_tracks_focus, |el| el.track_focus(focus))
             .size_full()
             .flex()
             .flex_col()
@@ -113,8 +133,13 @@ impl HubScreen {
             .on_action(ctx.act(|ctx, _: &worktrees::Inspect, _w, cx| ctx.inspect_selected(cx)))
             .on_action(ctx.act(|ctx, _: &worktrees::CopyPath, _w, cx| ctx.copy_path(cx)))
             .on_action(ctx.act(|ctx, _: &worktrees::CopyBranch, _w, cx| ctx.copy_branch(cx)))
-            .on_action(ctx.act(|ctx, _: &prs::NextTab, _w, cx| ctx.switch_tab(PrTab::Review, cx)))
-            .on_action(ctx.act(|ctx, _: &prs::PrevTab, _w, cx| ctx.switch_tab(PrTab::Mine, cx)))
+            .on_action(ctx.act(|ctx, _: &prs::NextTab, _w, cx| ctx.cycle_tab(cx)))
+            .on_action(ctx.act(|ctx, _: &prs::PrevTab, _w, cx| ctx.cycle_tab(cx)))
+            .on_action(
+                ctx.act(|ctx, _: &crate::actions::board::OpenCard, _w, cx| {
+                    ctx.open_review_card(cx)
+                }),
+            )
             .on_action(ctx.act(|ctx, _: &prs::Open, _w, cx| ctx.open_pr(true, true, cx)))
             .on_action(ctx.act(|ctx, _: &prs::OpenKeepAwake, _w, cx| ctx.open_pr(true, false, cx)))
             .on_action(ctx.act(|ctx, _: &prs::CreateWithoutOpening, _w, cx| {
@@ -128,6 +153,40 @@ impl HubScreen {
         // *container* keeps — the list cursor and `Enter` — hang off the same body the editor
         // is drawn in (§3.10).
         dialogs::filter::key_owner(root, state, ctx).into_any_element()
+    }
+
+    /// The PR screen's header and tabs over the Review tab's Reviews board (UX-SPEC §3.5).
+    fn review_board_page(
+        &self,
+        state: &AppState,
+        hub: &HubState,
+        pane: AnyElement,
+        cx: &App,
+    ) -> AnyElement {
+        let cache_key = cache::PrCacheKey::from_state(state);
+        let cache_matches_scope = hub.prs.matches(&cache_key);
+        let now = now_unix();
+        let handlers = self
+            .pr_handlers
+            .clone()
+            .unwrap_or_else(prs_screen::PrHandlers::inert);
+        prs_screen::render_review_board(
+            prs_screen::ReviewBoardProps {
+                mine_count: cache_matches_scope
+                    .then(|| hub.prs.mine.as_ref().map(|slice| slice.prs.len()))
+                    .flatten(),
+                review_count: hub.prs.review_board.waiting,
+                covers: covers(state),
+                fetched_age: hub
+                    .prs
+                    .slice_for(PrTab::Mine, &cache_key)
+                    .and_then(|slice| age_secs(&slice.fetched_at, now)),
+                loading: cache_matches_scope && hub.prs.loading(PrTab::Mine),
+            },
+            &handlers,
+            pane,
+            cx,
+        )
     }
 
     /// The rail, the list or the PR screen, and the detail panel.
@@ -149,18 +208,7 @@ impl HubScreen {
             .snapshot_age(Instant::now())
             .filter(|_| !state.daemon.is_connected())
             .map(|age| SharedString::from(format!("{age}s")));
-        let context_name = state
-            .snapshot
-            .as_ref()
-            .and_then(|snapshot| {
-                let active = snapshot.active_context.as_ref()?;
-                snapshot
-                    .contexts
-                    .iter()
-                    .find(|context| &context.id == active)
-                    .map(|context| SharedString::from(context.name.clone()))
-            })
-            .unwrap_or_else(|| SharedString::new_static("this context"));
+        let context_name = context_name(state);
         let filter = state
             .filter
             .is_active()
@@ -267,9 +315,15 @@ impl HubScreen {
                         mine_count: cache_matches_scope
                             .then(|| hub.prs.mine.as_ref().map(|slice| slice.prs.len()))
                             .flatten(),
-                        review_count: cache_matches_scope
-                            .then(|| hub.prs.review.as_ref().map(|slice| slice.prs.len()))
-                            .flatten(),
+                        // On a daemon with `board.reviews` the Review tab is the board, and
+                        // its count is the board's even while Mine is showing.
+                        review_count: if hub.prs.review_retired() {
+                            Some(hub.prs.review_board.waiting)
+                        } else {
+                            cache_matches_scope
+                                .then(|| hub.prs.review.as_ref().map(|slice| slice.prs.len()))
+                                .flatten()
+                        },
                         fetched_age: slice.and_then(|slice| age_secs(&slice.fetched_at, now)),
                         loading: cache_matches_scope && hub.prs.loading(state.pr_tab),
                         cold: cache_matches_scope
@@ -283,10 +337,7 @@ impl HubScreen {
                         hidden: model.pr_hidden,
                         pane_ch,
                         multi_repo: state.scope == RepoScope::All,
-                        covers: match &state.scope {
-                            RepoScope::All => context_name.clone(),
-                            RepoScope::Repo(repo) => SharedString::from(repo.to_string()),
-                        },
+                        covers: covers(state),
                         scope: scope_name,
                         filter: filter.filter(|_| state.hub_pane == HubPane::List),
                     },
@@ -425,6 +476,30 @@ impl HubScreen {
     }
 }
 
+/// The active context's name, for the PR screen's subtitle and empty states.
+fn context_name(state: &AppState) -> SharedString {
+    state
+        .snapshot
+        .as_ref()
+        .and_then(|snapshot| {
+            let active = snapshot.active_context.as_ref()?;
+            snapshot
+                .contexts
+                .iter()
+                .find(|context| &context.id == active)
+                .map(|context| SharedString::from(context.name.clone()))
+        })
+        .unwrap_or_else(|| SharedString::new_static("this context"))
+}
+
+/// What the PR screen's subtitle says the Mine list covers: the repository, or the context.
+fn covers(state: &AppState) -> SharedString {
+    match &state.scope {
+        RepoScope::All => context_name(state),
+        RepoScope::Repo(repo) => SharedString::from(repo.to_string()),
+    }
+}
+
 /// Publishes the focused row into the status-bar breadcrumb (`APP-CONTRACTS` §2).
 ///
 /// The write is silent on purpose: this runs from `HubCtx::synchronize`, itself an observer of
@@ -462,4 +537,17 @@ pub(super) fn publish_breadcrumb(state: &Entity<AppState>, model: &HubModel, cx:
             cx.notify();
         }
     });
+}
+
+impl AppState {
+    /// Whether the PR screen's Review tab is drawing the context's Reviews board, which is
+    /// what publishes `Hub > Prs > Board` (KEYMAP § Hub › Pull requests › Review board).
+    ///
+    /// On a daemon without `board.reviews` the Review tab keeps its flat list and this is false.
+    #[must_use]
+    pub(crate) fn review_board_is_shown(&self) -> bool {
+        matches!(self.screen, Screen::Hub { tab: HubTab::Prs })
+            && self.pr_tab == PrTab::Review
+            && self.supports_review_boards()
+    }
 }

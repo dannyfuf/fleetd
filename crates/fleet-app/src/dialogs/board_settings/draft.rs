@@ -9,6 +9,8 @@ pub(super) enum EscapeStep {
     Delete,
     /// Left one column's form for the list.
     Column,
+    /// Left one schedule's form for the Schedules list.
+    Schedule,
     /// Asked about the unsaved draft, which is the one question §5.4 allows.
     Ask,
     /// Nothing left to leave: the shell closes the dialog.
@@ -94,6 +96,10 @@ pub(crate) struct BoardSettingsState {
     /// so the automation rows are drawn disabled rather than hidden: the order and the names
     /// are still this board's to change.
     pub(super) automation_locked: bool,
+    /// Where the board's runs execute, stated read-only in General (BOARD §11.10).
+    ///
+    /// Not editable in v1: changing it on a board with live runs would strand them.
+    pub(super) run_location: RunLocation,
     /// The cards each column holds, in board order, for the delete rule.
     ///
     /// Behind an `Rc` for the reason the board above is: this one is the whole board's cards,
@@ -113,6 +119,14 @@ pub(crate) struct BoardSettingsState {
     pub(super) prepared: Vec<ColumnRow>,
     /// Why the draft cannot be saved.
     pub(super) error: Option<String>,
+    /// Whether the board can have schedules, read at seed time: the daemon serves `schedules`
+    /// and stores the board (`AppState::board_takes_schedules`). The rail shows Schedules
+    /// only then.
+    pub(super) schedules_supported: bool,
+    /// Why it cannot, when it cannot: what `T` says instead of opening the section.
+    pub(super) schedules_refusal: Option<String>,
+    /// The Schedules section's list and form.
+    pub(super) schedules: SchedulesPane,
 }
 
 impl BoardSettingsState {
@@ -139,6 +153,7 @@ impl BoardSettingsState {
         Some(match self.focused() {
             SettingRow::BackendSetting(index) => self.rows.get(index)?.name.to_lowercase(),
             SettingRow::ColumnField(field) => field.label().to_lowercase(),
+            SettingRow::ScheduleField(field) => field.label().to_lowercase(),
             row => row.label().to_lowercase(),
         })
     }
@@ -164,6 +179,7 @@ impl BoardSettingsState {
                 rows
             }
             BoardSection::Columns => self.prepared.iter().map(|row| row.row).collect(),
+            BoardSection::Schedules => self.schedules.rows(),
         }
     }
 
@@ -209,6 +225,9 @@ impl BoardSettingsState {
         if self.pending_delete.take().is_some() {
             self.notice = None;
             return EscapeStep::Delete;
+        }
+        if let Some(step) = self.escape_schedules() {
+            return step;
         }
         if let Some(index) = self.opened_column.take() {
             self.row = index.min(self.columns.len().saturating_sub(1));
@@ -287,7 +306,7 @@ impl BoardSettingsState {
         self.rows()
             .get(self.row)
             .copied()
-            .unwrap_or(SettingRow::Name)
+            .unwrap_or(SettingRow::NoRow)
     }
 
     /// Whether the draft still points at the kind the board is stored with.
@@ -380,6 +399,7 @@ impl BoardSettingsState {
                 }
                 field_text(self.opened()?, field)
             }
+            SettingRow::ScheduleField(field) => self.schedule_text(field),
             _ => None,
         }
     }
@@ -414,6 +434,7 @@ impl BoardSettingsState {
                 set_field_text(&mut self.columns, index, field, text, locked);
                 self.prepare();
             }
+            SettingRow::ScheduleField(field) => self.set_schedule_text(field, text),
             _ => return,
         }
         self.error = None;

@@ -82,6 +82,20 @@ struct PostCreateIntent {
     intent_path: PathBuf,
 }
 
+/// Where an existing pull-request worktree stands against the pull request's current head, as
+/// [`Worktrees::follow_pull_request_head`] left it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PullRequestHead {
+    /// Its `HEAD` already was the head: nothing was changed.
+    Current,
+    /// It was clean, and behind the head or still at the head Fleet last placed there (a
+    /// force-pushed pull request), and was moved to the head.
+    Moved,
+    /// It holds changes to tracked files, or commits Fleet did not place that the head does not
+    /// contain: nothing was changed.
+    LocalChanges,
+}
+
 /// Worktree service owning prepared-copy claim, publication, and deletion orchestration.
 #[derive(Clone)]
 pub struct Worktrees {

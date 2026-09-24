@@ -9,11 +9,12 @@ use std::collections::{BTreeSet, VecDeque};
 use crate::{
     agents::{AgentKind, PermissionMode},
     board::{
-        defaults::render_template,
+        defaults::render_card_template,
         model::{
-            Action, ActionKind, ActivityKind, Board, Card, CardRun, Comment, PendingRun, Status,
+            Action, ActionKind, ActivityKind, Board, Card, CardRun, Comment, PendingRun,
+            RunOutcome, Status,
         },
-        ops::{BoardError, blocks, is_satisfied, latest_run, move_card, push_activity},
+        ops::{BoardError, blocks, is_satisfied, latest_run, move_card, push_activity, queued},
     },
     ids::{CardId, StatusId},
 };
@@ -187,7 +188,7 @@ struct Walk<'a> {
 }
 
 impl Walk<'_> {
-    /// Visits every reachable card, applying rule 1 and then rule 2 to each.
+    /// Visits every reachable card, applying rules 1 and 0 and then rule 2 to each.
     fn walk(mut self, board: &Board, cards: &mut [Card], now: &str) -> Result<Plan, BoardError> {
         while let Some(card_id) = self.queue.pop_front() {
             // A diamond reaches the same card down two arms and a hand-built cycle reaches it
@@ -203,6 +204,17 @@ impl Walk<'_> {
             // column it lands in still gets its say.
             if !self.settled.contains(&card_id) {
                 self.start_on_entry(board, cards, index, now);
+                // Rule 0 moves the card this visit is already standing on, and `seen` would stop
+                // the queue from visiting it again, so the column it lands in answers here. The
+                // bound is the number of columns: a hand-built loop of routing columns stops
+                // after one lap instead of spinning.
+                let mut hops = 0;
+                while hops < board.statuses.len()
+                    && self.advance_on_entry(board, cards, index, now)?
+                {
+                    self.start_on_entry(board, cards, index, now);
+                    hops += 1;
+                }
             }
             self.advance_dependants(board, cards, &card_id, now)?;
         }
@@ -275,6 +287,85 @@ impl Walk<'_> {
         }
     }
 
+    /// Rule 0: a card standing in a routing column with nothing blocking it moves on at once, or
+    /// is queued there for the slot the column it is bound for needs.
+    ///
+    /// Returns whether the card moved, so the walk can let the column it landed in answer.
+    fn advance_on_entry(
+        &mut self,
+        board: &Board,
+        cards: &mut [Card],
+        index: usize,
+        now: &str,
+    ) -> Result<bool, BoardError> {
+        let card = &cards[index];
+        if card.archived {
+            return Ok(false);
+        }
+        let Some(target) = advance_target(board, &card.status_id) else {
+            return Ok(false);
+        };
+        if self.live.contains(&card.id)
+            || self.in_flight.contains(&card.id)
+            || latest_run(card).is_some_and(CardRun::is_live)
+        {
+            return Ok(false);
+        }
+        // A card owed a run by the column it stands in has already arrived: advancing it would
+        // strand that run in a column the card has left, exactly as rule 2 refuses to.
+        if card
+            .pending_run
+            .as_ref()
+            .is_some_and(|pending| pending.status_id == card.status_id)
+        {
+            return Ok(false);
+        }
+        if card
+            .blocked_by
+            .iter()
+            .any(|blocker| !is_satisfied(board, cards, blocker))
+        {
+            return Ok(false);
+        }
+        let reason = if queued(card) {
+            "a run slot freed"
+        } else {
+            "nothing blocks it"
+        };
+        let message = format!("Moved to {}: {reason}", column_name(board, &target));
+        self.try_advance(board, cards, index, &target, message, now)
+    }
+
+    /// Moves a card out of its routing column into `target`, or queues it there when `target`
+    /// runs something and the board has no slot left.
+    ///
+    /// A queued card keeps its place in line: [`Walk::park`] leaves an older `since` for the same
+    /// column alone. Returns whether the card moved.
+    fn try_advance(
+        &mut self,
+        board: &Board,
+        cards: &mut [Card],
+        index: usize,
+        target: &StatusId,
+        message: String,
+        now: &str,
+    ) -> Result<bool, BoardError> {
+        if on_enter(board, target).is_some()
+            && self.live.len() + self.in_flight.len() >= board.settings.max_live_runs() as usize
+        {
+            self.park(cards, index, target.clone(), now);
+            return Ok(false);
+        }
+        let id = cards[index].id.clone();
+        if !move_card(board, cards, &id, target, None, now)? {
+            return Ok(false);
+        }
+        record_auto_move(&mut cards[index], message, now);
+        self.plan.moved.push((id.clone(), target.clone()));
+        self.queue.push_back(id);
+        Ok(true)
+    }
+
     /// Rule 2: every card this one blocks whose column releases it once nothing blocks it.
     fn advance_dependants(
         &mut self,
@@ -300,10 +391,7 @@ impl Walk<'_> {
             if card.archived {
                 continue;
             }
-            let Some(target) = column(board, &card.status_id)
-                .and_then(|status| status.automation.as_ref())
-                .and_then(|automation| automation.advance_when_unblocked.clone())
-            else {
+            let Some(target) = advance_target(board, &card.status_id) else {
                 continue;
             };
             // A card that is working, or owed a run, stays where its run is: advancing it would
@@ -326,11 +414,7 @@ impl Walk<'_> {
                 "Moved to {}: unblocked by {key} reaching {reached}",
                 column_name(board, &target)
             );
-            if move_card(board, cards, &dependant, &target, None, now)? {
-                record_auto_move(&mut cards[index], message, now);
-                self.plan.moved.push((dependant.clone(), target));
-                self.queue.push_back(dependant);
-            }
+            self.try_advance(board, cards, index, &target, message, now)?;
         }
         Ok(())
     }
@@ -385,6 +469,13 @@ fn on_enter<'a>(board: &'a Board, status_id: &StatusId) -> Option<&'a Action> {
         .and_then(|automation| automation.on_enter.as_ref())
 }
 
+/// Where a routing column sends a card nothing blocks, if it is one.
+fn advance_target(board: &Board, status_id: &StatusId) -> Option<StatusId> {
+    column(board, status_id)
+        .and_then(|status| status.automation.as_ref())
+        .and_then(|automation| automation.advance_when_unblocked.clone())
+}
+
 /// A column's name, falling back to its id on a board that no longer carries it.
 fn column_name(board: &Board, status_id: &StatusId) -> String {
     column(board, status_id).map_or_else(|| status_id.to_string(), |status| status.name.clone())
@@ -397,9 +488,21 @@ fn column_name(board: &Board, status_id: &StatusId) -> String {
 /// board that always started the newest arrival would leave its own review column starved.
 #[must_use]
 pub fn next_pending<'a>(board: &Board, cards: &'a [Card]) -> Option<&'a Card> {
+    next_pending_except(board, cards, &BTreeSet::new())
+}
+
+/// [`next_pending`], passing over the cards in `reserved`: those an earlier freed slot already
+/// went to, whose start has not cleared their marker yet. Handing a second freed slot to one of
+/// them would start nothing and lose the slot.
+#[must_use]
+pub fn next_pending_except<'a>(
+    board: &Board,
+    cards: &'a [Card],
+    reserved: &BTreeSet<CardId>,
+) -> Option<&'a Card> {
     cards
         .iter()
-        .filter(|card| !card.archived)
+        .filter(|card| !card.archived && !reserved.contains(&card.id))
         .filter_map(|card| {
             let pending = card.pending_run.as_ref()?;
             // A column whose action was taken away owes nothing, even to a card still marked
@@ -421,6 +524,38 @@ pub fn next_pending<'a>(board: &Board, cards: &'a [Card]) -> Option<&'a Card> {
                 .then_with(|| right_card.number.cmp(&left_card.number))
         })
         .map(|(_, _, card)| card)
+}
+
+/// Clears the marker of every queued card that can no longer take the slot it waits for, and
+/// answers whether it cleared any.
+///
+/// A card queued in a routing column ([`queued`]) is moved on by rule 0 when a slot frees, and
+/// rule 0 refuses a card something now blocks, or one whose column no longer routes to the
+/// column it waits for. [`next_pending`] would still hand such a card every freed slot — the
+/// oldest wait wins — and each would start nothing, so every newer card behind it would wait
+/// forever. Clearing the marker takes it out of line; rule 2 moves it on, and it queues again,
+/// once nothing blocks it. Nothing is announced: the card never moved, and the wait was never
+/// an event either.
+pub fn clear_stale_queues(board: &Board, cards: &mut [Card]) -> bool {
+    let stale: Vec<usize> = cards
+        .iter()
+        .enumerate()
+        .filter(|(_, card)| queued(card))
+        .filter(|(_, card)| {
+            let bound = card.pending_run.as_ref().map(|pending| &pending.status_id);
+            card.archived
+                || advance_target(board, &card.status_id).as_ref() != bound
+                || card
+                    .blocked_by
+                    .iter()
+                    .any(|blocker| !is_satisfied(board, cards, blocker))
+        })
+        .map(|(index, _)| index)
+        .collect();
+    for &index in &stale {
+        cards[index].pending_run = None;
+    }
+    !stale.is_empty()
 }
 
 /// The agent one run asks for: the card first, then the column, then the daemon's own default.
@@ -449,8 +584,11 @@ pub fn resolve_prefs(card: &Card, action: &Action) -> ResolvedPrefs {
     }
 }
 
-/// The child's brief without its footer: the column's instructions, the card, and the reports its
-/// previous runs left.
+/// The child's brief without its footer: the column's instructions, the card, the pull request it
+/// is about, the notes its person left since the last run, and the reports its previous runs left.
+///
+/// The instructions go through [`render_card_template`], so `{pr_url}`, `{pr_repo}` and
+/// `{pr_number}` resolve on a card about a pull request and stay as written on any other.
 ///
 /// A skill action opens the brief with its own invocation, because [`Action`] reaches the child
 /// as a first message and nothing else carries the skill: that is the same reason
@@ -467,7 +605,7 @@ pub fn brief(action: &Action, key: &str, card: &Card, reports: &[&Comment]) -> S
         }
         brief.push_str("\n\n");
     }
-    let instructions = render_template(&action.instructions, key, &card.title);
+    let instructions = render_card_template(&action.instructions, key, card);
     if !instructions.trim().is_empty() {
         brief.push_str(instructions.trim_end());
         brief.push_str("\n\n");
@@ -478,6 +616,25 @@ pub fn brief(action: &Action, key: &str, card: &Card, reports: &[&Comment]) -> S
         brief.push_str(card.description.trim_end());
         brief.push('\n');
     }
+    if let Some(pull_request) = &card.pull_request {
+        brief.push_str(&format!(
+            "\n## Pull request\n\n{}#{} · {}\n",
+            pull_request.repo, pull_request.number, pull_request.url
+        ));
+    }
+    let notes = notes_since_last_run(card);
+    if !notes.is_empty() {
+        brief.push_str("\n## Notes from you\n\n");
+        for note in notes {
+            let author = note
+                .author
+                .as_deref()
+                .map(str::trim)
+                .filter(|author| !author.is_empty())
+                .unwrap_or("you");
+            brief.push_str(&format!("- {author}: {}\n", note.body.trim_end()));
+        }
+    }
     if !reports.is_empty() {
         brief.push_str("\n## Previous run reports\n");
         // Newest first, whatever order the caller kept them in: the newest report is the one
@@ -486,12 +643,57 @@ pub fn brief(action: &Action, key: &str, card: &Card, reports: &[&Comment]) -> S
         let mut newest: Vec<&&Comment> = reports.iter().collect();
         newest.sort_by(|left, right| right.created_at.cmp(&left.created_at));
         for report in newest {
+            // Labelled with how its run ended, so "the newest succeeded report" names one report
+            // even after a later run failed and left a report of its own.
+            let outcome = report
+                .run_id
+                .and_then(|run| card.runs.iter().find(|row| row.id == run))
+                .and_then(|row| row.outcome)
+                .map_or_else(String::new, |outcome| format!(" · {}", outcome.word()));
             brief.push_str(&format!(
-                "\n### Report from {}\n\n{}\n",
+                "\n### Report from {}{outcome}\n\n{}\n",
                 report.created_at,
                 report.body.trim_end()
             ));
         }
     }
     brief
+}
+
+/// The comments a person wrote on this card since its newest *succeeded* run started, oldest
+/// first.
+///
+/// A comment carrying a `run_id` is a run's own report, which reaches the brief as a report, not
+/// as a note. A card that has never finished a run successfully hands over every note it has:
+/// a run that failed may have read them, but it did nothing with them, and the retry must apply
+/// them too — a note on a *Reviewed* card still reaches the *Review published* run that retries
+/// a failed publish. The cut is the run's start, not its end, because its brief was written
+/// when it started: a note made while it worked never reached it, and must reach the next run.
+fn notes_since_last_run(card: &Card) -> Vec<&Comment> {
+    let started = card
+        .runs
+        .iter()
+        .rev()
+        .find(|run| run.outcome == Some(RunOutcome::Succeeded))
+        .map(|run| run.started_at.as_str());
+    let mut notes: Vec<&Comment> = card
+        .comments
+        .iter()
+        .filter(|comment| comment.run_id.is_none())
+        .filter(|comment| started.is_none_or(|started| is_after(&comment.created_at, started)))
+        .collect();
+    notes.sort_by(|left, right| left.created_at.cmp(&right.created_at));
+    notes
+}
+
+/// Whether `later` is strictly after `earlier`, reading both as RFC 3339 when they parse and as
+/// text otherwise: board stamps come from one daemon clock in one format, so the two agree.
+fn is_after(later: &str, earlier: &str) -> bool {
+    match (
+        chrono::DateTime::parse_from_rfc3339(later),
+        chrono::DateTime::parse_from_rfc3339(earlier),
+    ) {
+        (Ok(later), Ok(earlier)) => later > earlier,
+        _ => later > earlier,
+    }
 }

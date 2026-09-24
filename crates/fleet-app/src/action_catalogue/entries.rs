@@ -851,6 +851,42 @@ pub(super) const ENTRIES: &[Entry] = &[
     )
     .short("Columns")
     .palette(),
+    e(
+        &["board::Schedules"],
+        P::Board,
+        G::Board,
+        "Edit the board's schedules",
+        "Open board settings on its list of schedules.",
+    )
+    .short("Schedules")
+    .palette(),
+    e(
+        &["board::RunSchedules"],
+        P::Board,
+        G::Board,
+        "Run the board's schedules now",
+        "Run every enabled schedule of the board now, without waiting for its next time.",
+    )
+    .short("Run schedules")
+    .palette(),
+    e(
+        &["board::OpenPullRequest"],
+        P::Board,
+        G::Board,
+        "Open the card's pull request in the browser",
+        "Open the pull request this review card is about on GitHub.",
+    )
+    .short("Open pull request")
+    .palette(),
+    e(
+        &["board::CopyPullRequestUrl"],
+        P::Board,
+        G::Board,
+        "Copy the card's pull request link",
+        "Put the review card's pull request web address on the clipboard.",
+    )
+    .short("Copy pull request link")
+    .palette(),
     // ── Card ──────────────────────────────────────────────────────────────────────────────
     e(
         &["card_detail::Close"],
@@ -2087,6 +2123,13 @@ pub(super) const ENTRIES: &[Entry] = &[
         G::Dialog,
         "Add the preset's missing columns",
         "Add the columns the workflow preset expects and the board lacks.",
+    ),
+    e(
+        &["board_settings::RunScheduleNow"],
+        P::Dialog,
+        G::Dialog,
+        "Run the schedule now",
+        "Run the focused schedule once now, without waiting for its next time.",
     ),
     e(
         &["help::Close"],

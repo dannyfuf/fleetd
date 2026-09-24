@@ -150,10 +150,31 @@ mod tests {
         let board = board();
         assert_eq!(backend.capabilities(), BackendCapabilities::default());
         backend.validate(&serde_json::Value::Null).await.unwrap();
+        // A local board describes itself: its columns, labels, properties and prefix.
+        let schema = backend.describe(&board).await.unwrap();
         assert_eq!(
-            backend.describe(&board).await.unwrap(),
-            BackendSchema::default()
+            schema
+                .statuses
+                .iter()
+                .map(|status| status.id.as_str())
+                .collect::<Vec<_>>(),
+            board
+                .statuses
+                .iter()
+                .map(|status| status.id.as_str())
+                .collect::<Vec<_>>()
         );
+        assert_eq!(
+            schema.labels,
+            board
+                .labels
+                .iter()
+                .map(|label| label.id.to_string())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(schema.properties, board.properties);
+        assert_eq!(schema.key_prefix.as_deref(), Some(board.prefix.as_str()));
+        assert!(schema.readonly_fields.is_empty());
         assert_eq!(
             backend.pull(&board, None).await.unwrap(),
             PullResult::default()

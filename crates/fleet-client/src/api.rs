@@ -5,6 +5,7 @@ mod boards;
 mod daemon;
 mod jobs;
 mod repositories;
+mod schedules;
 mod sessions;
 mod terminals;
 mod worktrees;

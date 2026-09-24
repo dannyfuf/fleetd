@@ -33,7 +33,8 @@ mod tests;
 
 pub use jobs::{Injected, Injection};
 pub use plan::{
-    Agent, Board, Card, Fixture, Hook, PrTab, Provider, PullRequest, Repository, Workflow, Worktree,
+    Agent, Board, Card, Fixture, Hook, PrTab, Provider, PullRequest, Repository, ReviewCard,
+    Workflow, Worktree,
 };
 pub use seed::await_job;
 
@@ -42,8 +43,8 @@ use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// The five frozen worlds plus the additive subagent and board-workflow variants a scenario
-/// may ask for.
+/// The five frozen worlds plus the additive subagent, board-workflow and reviews variants a
+/// scenario may ask for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Preset {
@@ -63,6 +64,8 @@ pub enum Preset {
     AgentsSubagentOtherWorktree,
     /// The subagent world plus a worktree board wired for column automation.
     BoardWorkflow,
+    /// The one-repo world plus the context's Reviews board holding a pull request card.
+    Reviews,
 }
 
 impl Preset {
@@ -78,12 +81,13 @@ impl Preset {
             Self::AgentsSubagent => "agents-subagent",
             Self::AgentsSubagentOtherWorktree => "agents-subagent-other-worktree",
             Self::BoardWorkflow => "board-workflow",
+            Self::Reviews => "reviews",
         }
     }
 
     /// Every preset, for tests and for `--help` text.
     #[must_use]
-    pub const fn all() -> [Self; 8] {
+    pub const fn all() -> [Self; 9] {
         [
             Self::Empty,
             Self::OneRepo,
@@ -93,6 +97,7 @@ impl Preset {
             Self::AgentsSubagent,
             Self::AgentsSubagentOtherWorktree,
             Self::BoardWorkflow,
+            Self::Reviews,
         ]
     }
 }

@@ -72,7 +72,8 @@ pub fn event_damage(event: &Event) -> EventDamage {
         }
         // An event family this build cannot decode invalidates nothing: it is data the client
         // never read, and repainting for it would be a frame spent on a guess.
-        Event::Unknown => EventDamage::default(),
+        // Schedules have no Hub projection; the board settings mirror reloads on its own.
+        Event::SchedulesChanged { .. } | Event::Unknown => EventDamage::default(),
         Event::TerminalFrame(frame) => EventDamage {
             terminal: Some(frame.terminal),
             sessions: frame.title.is_some(),

@@ -87,6 +87,7 @@ fn create_honors_explicit_status_and_all_draft_fields() {
             ..CardAgentPrefs::default()
         }),
         blocked_by: vec!["parent".parse().unwrap()],
+        pull_request: None,
     };
     let card = create_card(&mut board, &[], "a".parse().unwrap(), draft.clone(), NOW).unwrap();
     assert_eq!(card.title, draft.title);

@@ -3,4 +3,5 @@
 pub mod board;
 pub mod config;
 pub mod lock;
+pub mod schedules;
 pub mod state;

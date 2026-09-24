@@ -24,6 +24,8 @@ pub enum EventKind {
     AgentSummary,
     /// Board or card mutations.
     BoardChanged,
+    /// Schedule mutations and recorded schedule runs.
+    SchedulesChanged,
     /// Watch registration.
     WatchStarted,
     /// Coalesced watch output.
@@ -122,6 +124,15 @@ pub enum Event {
         board_id: BoardId,
         /// Nature of the mutation.
         reason: BoardChangeReason,
+    },
+    /// A schedule of this board was created, changed, deleted, or recorded a run.
+    ///
+    /// Emitted only to connections that subscribed to [`EventKind::SchedulesChanged`], which a
+    /// client does only after the daemon advertised
+    /// [`SCHEDULES_CAPABILITY`](crate::response::SCHEDULES_CAPABILITY).
+    SchedulesChanged {
+        /// Board whose schedules changed.
+        board_id: BoardId,
     },
     /// A child watch was registered.
     WatchStarted(Watch),

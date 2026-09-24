@@ -638,6 +638,7 @@ fn run_on(card: &Card, outcome: Option<RunOutcome>) -> CardRun {
         files_changed: 0,
         cost_usd: None,
         tokens: None,
+        worktree_id: None,
     }
 }
 
@@ -998,4 +999,38 @@ fn a_board_with_no_runs_and_no_links_carries_no_marks_at_all() {
         state.board.marks.revision, revision,
         "a tick that changes no mark must not rebuild a whole board's model"
     );
+}
+
+/// A worktree board stored on another host is one this daemon refuses to schedule, so every
+/// schedules surface is withheld there and `T` / `R` say why (BOARD §12).
+#[test]
+fn a_remote_worktrees_board_takes_no_schedules() {
+    let mut state = state_on_board_with_worktree_boards();
+    state
+        .daemon_capabilities
+        .insert(fleet_proto::response::SCHEDULES_CAPABILITY.to_owned());
+    let mut remote = worktree("feat-remote");
+    remote.host = Some("devbox".parse().unwrap_or_else(|error| panic!("{error}")));
+    if let Some(snapshot) = state.snapshot.as_mut() {
+        snapshot.worktrees.push(remote.clone());
+    }
+    assert!(state.enter_worktree_board_scope(remote.id.clone(), Instant::now()));
+    state.apply_board_view(worktree_view(&remote));
+    assert!(state.board().is_some());
+    assert_eq!(
+        state.shown_board_host().map(ToString::to_string).as_deref(),
+        Some("devbox")
+    );
+    assert!(!state.board_takes_schedules());
+    assert_eq!(
+        state.board_schedules_refusal().as_deref(),
+        Some("this board is stored on devbox; schedules run only on this machine's boards")
+    );
+
+    // A local worktree's board keeps them.
+    let local = worktree("feat-board");
+    assert!(state.enter_worktree_board_scope(local.id.clone(), Instant::now()));
+    state.apply_board_view(worktree_view(&local));
+    assert!(state.board_takes_schedules());
+    assert_eq!(state.board_schedules_refusal(), None);
 }

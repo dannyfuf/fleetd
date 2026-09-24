@@ -1,5 +1,129 @@
 use super::*;
 
+/// Creates a card for a pull request the board does not hold yet, returns the card that holds
+/// it otherwise, and reopens a completed or archived card when the review is requested again.
+///
+/// The `usize` is the index of the affected card in `cards`. A card is reopened only when
+/// `requested_at` is later than its last completion (the newest `Moved` or `AutoMoved`
+/// activity, else `updated_at`); a card in a `Canceled` column is never reopened, because
+/// dismissing a review is a decision.
+pub fn upsert_pull_request_card(
+    board: &mut Board,
+    cards: &mut Vec<Card>,
+    id: CardId,
+    draft: CardDraft,
+    requested_at: Option<&str>,
+    now: &str,
+) -> Result<(UpsertOutcome, usize), BoardError> {
+    let Some(pull_request) = draft.pull_request.as_ref() else {
+        return Err(invalid(
+            "pull_request",
+            "a pull request card needs a pull request",
+        ));
+    };
+    let requested_at = requested_at.map(parse_requested_at).transpose()?;
+    let existing = cards.iter().position(|card| {
+        card.board_id == board.id
+            && card
+                .pull_request
+                .as_ref()
+                .is_some_and(|held| held.same_pull_request(pull_request))
+    });
+    let Some(index) = existing else {
+        let card = create_card(board, cards, id, draft, now)?;
+        cards.push(card);
+        return Ok((UpsertOutcome::Created, cards.len() - 1));
+    };
+    let card = &cards[index];
+    let category = board
+        .statuses
+        .iter()
+        .find(|status| status.id == card.status_id)
+        .map(|status| status.category);
+    let reopenable = category != Some(StatusCategory::Canceled)
+        && (category == Some(StatusCategory::Completed) || card.archived);
+    let requested_later = requested_at.is_some_and(|requested| {
+        // A completion time this build cannot read is treated as older than any request: the
+        // reopen stamps a fresh one, so the next request compares correctly again.
+        last_completion(card).is_none_or(|completed| requested > completed)
+    });
+    if !reopenable || !requested_later {
+        return Ok((UpsertOutcome::Existing, index));
+    }
+    reopen(board, cards, index, draft.status_id, now)?;
+    Ok((UpsertOutcome::Reopened, index))
+}
+
+/// Reads a pull request's `requested_at`, refusing anything that is not RFC 3339 in the words
+/// every surface uses, so the CLI can refuse it before a board is touched.
+///
+/// # Errors
+/// [`BoardError::Invalid`] on `requested_at`.
+pub fn parse_requested_at(at: &str) -> Result<chrono::DateTime<chrono::FixedOffset>, BoardError> {
+    chrono::DateTime::parse_from_rfc3339(at)
+        .map_err(|_| invalid("requested_at", "must be an RFC 3339 time"))
+}
+
+/// When the card last reached where it is: the newest move, else its last update.
+fn last_completion(card: &Card) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    let at = card
+        .activity
+        .iter()
+        .rev()
+        .find(|entry| matches!(entry.kind, ActivityKind::Moved | ActivityKind::AutoMoved))
+        .map_or(card.updated_at.as_str(), |entry| entry.at.as_str());
+    chrono::DateTime::parse_from_rfc3339(at).ok()
+}
+
+/// Unarchives the card and moves it to `status_id`, or else the first `Unstarted` column.
+///
+/// Every refusal is checked before the card changes, so an error leaves `cards` untouched.
+fn reopen(
+    board: &Board,
+    cards: &mut [Card],
+    index: usize,
+    status_id: Option<StatusId>,
+    now: &str,
+) -> Result<(), BoardError> {
+    let target = status_id
+        .or_else(|| first_status_in(board, StatusCategory::Unstarted).map(|s| s.id.clone()))
+        .ok_or_else(|| {
+            invalid(
+                "statuses",
+                "an unstarted status is required to reopen a card",
+            )
+        })?;
+    if !board.statuses.iter().any(|status| status.id == target) {
+        return Err(BoardError::UnknownStatus(target.to_string()));
+    }
+    let card = &mut cards[index];
+    let (was_archived, was_dirty) = (card.archived, card.dirty);
+    if was_archived {
+        check_writable(board, "archived")?;
+    }
+    if card.status_id != target {
+        check_writable(board, "status_id")?;
+    }
+    let card_id = card.id.clone();
+    card.archived = false;
+    if was_archived {
+        card.dirty = !board.backend.is_local();
+    }
+    if let Err(error) = move_card(board, cards, &card_id, &target, None, now) {
+        cards[index].archived = was_archived;
+        cards[index].dirty = was_dirty;
+        return Err(error);
+    }
+    push_activity(
+        &mut cards[index],
+        ActivityKind::Updated,
+        None,
+        "Review re-requested",
+        now,
+    );
+    Ok(())
+}
+
 /// Creates a numbered card with the supplied stable identifier.
 pub fn create_card(
     board: &mut Board,
@@ -52,6 +176,7 @@ pub fn create_card(
         parent_id: draft.parent_id,
         repo_id: draft.repo_id,
         worktree_id: None,
+        pull_request: draft.pull_request,
         // `Null` means "no value" on a patch; a draft must not be able to store it as one.
         properties: draft
             .properties

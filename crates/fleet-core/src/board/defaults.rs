@@ -2,13 +2,13 @@
 
 use super::{
     model::{
-        Action, ActionKind, BackendRef, Board, BoardSettings, ColumnAgentPrefs, ColumnAutomation,
-        Status, StatusCategory, SyncState,
+        Action, ActionKind, BackendRef, Board, BoardKind, BoardSettings, Card, ColumnAgentPrefs,
+        ColumnAutomation, Label, RunLocation, Status, StatusCategory, SyncState,
     },
     ops::normalise_automation,
 };
 use crate::{
-    ids::{BoardId, StatusId, WorktreeId},
+    ids::{BoardId, ContextId, LabelId, StatusId, WorktreeId},
     model::{Context, Worktree},
     slug::slugify,
 };
@@ -25,6 +25,17 @@ pub const PRESET_EXPECT_IMPLEMENT: &str = "make lint and make test pass";
 pub const PRESET_EXPECT_REVIEW: &str = "the review finds no blocking issue";
 /// The skill the preset's review column invokes.
 pub const PRESET_REVIEW_SKILL: &str = "deep-review";
+
+/// What the reviews preset's Reviewing column tells a run to do.
+pub const PRESET_INSTRUCTIONS_REVIEW_PR: &str = "Review the pull request {pr_url} ({pr_repo}#{pr_number}). This worktree is checked out at the pull request's head. Read the description and the diff with gh (gh pr view {pr_url}, gh pr diff {pr_url}) and read the surrounding code in this checkout. Your report is the review: first a one-line verdict (approve, request changes, or comment), then a short summary, then numbered findings, each with file:line, severity (blocker, major, minor, nit) and a concrete suggested fix. Do not post anything to GitHub, do not commit, and do not push.";
+/// What the reviews preset's Reviewing column expects back.
+pub const PRESET_EXPECT_REVIEW_PR: &str =
+    "a review report: a verdict line, a summary, and numbered findings with file:line";
+/// What the reviews preset's Review published column tells a run to do.
+pub const PRESET_INSTRUCTIONS_PUBLISH_REVIEW: &str = "Publish the review of {pr_url}. The review is the newest succeeded report under \"Previous run reports\"; apply every note under \"Notes from you\" before publishing, and drop any finding a note rejects. Post it with gh as one review: the verdict maps to gh pr review --approve, --request-changes or --comment, the summary is the review body, and each finding with a file:line becomes an inline comment through gh api repos/{pr_repo}/pulls/{pr_number}/reviews. Do not change any code. Report the URL of the published review.";
+/// What the reviews preset's Review published column expects back.
+pub const PRESET_EXPECT_PUBLISH_REVIEW: &str =
+    "the URL of the review now visible on the pull request";
 
 /// Creates the five initial ordered status columns.
 #[must_use]
@@ -154,6 +165,23 @@ pub fn render_template(text: &str, key: &str, title: &str) -> String {
     text.replace("{key}", key).replace("{title}", title)
 }
 
+/// Substitutes `{key}`, `{title}` and, when the card has a pull request, `{pr_url}`,
+/// `{pr_repo}` and `{pr_number}`.
+///
+/// Without a pull request the three PR placeholders are left as written: a Tasks board may
+/// legitimately print `{pr_url}` in its instructions.
+#[must_use]
+pub fn render_card_template(text: &str, key: &str, card: &Card) -> String {
+    let rendered = render_template(text, key, &card.title);
+    match &card.pull_request {
+        Some(pull_request) => rendered
+            .replace("{pr_url}", &pull_request.url)
+            .replace("{pr_repo}", pull_request.repo.as_str())
+            .replace("{pr_number}", &pull_request.number.to_string()),
+        None => rendered,
+    }
+}
+
 /// First three ASCII alphanumeric name characters, uppercased; FLT when absent.
 #[must_use]
 pub fn default_prefix(context: &Context) -> String {
@@ -178,6 +206,7 @@ pub fn new_board(context: &Context, now: &str) -> Board {
         id: context.id.clone().into(),
         context_id: context.id.clone(),
         worktree_id: None,
+        kind: BoardKind::Tasks,
         name: context.name.clone(),
         prefix: default_prefix(context),
         next_number: 1,
@@ -221,6 +250,116 @@ pub fn new_worktree_board(context: &Context, worktree: &Worktree, now: &str) -> 
     board
 }
 
+/// The five-column pipeline of a Reviews board: Pending review, Reviewing, Reviewed, Review
+/// published, Dismissed.
+///
+/// Pending review is the routing column: a card waits there until nothing blocks it and the
+/// board has room, then moves to Reviewing, whose run writes the review without posting it.
+/// Reviewed is where a person reads the report and leaves notes; moving the card to Review
+/// published is the deliberate step that posts it. No column names an agent provider, so the
+/// daemon's default applies.
+#[must_use]
+pub fn reviews_preset() -> Vec<Status> {
+    let status = |id: &str, name: &str, category, automation| Status {
+        id: StatusId::try_from(id).expect("static status slug is valid"),
+        name: name.into(),
+        category,
+        color: None,
+        automation,
+    };
+    let route = |id: &str| StatusId::try_from(id).expect("static status slug is valid");
+    let prompt = |instructions: &str, expect: &str| Action {
+        kind: ActionKind::Prompt,
+        instructions: instructions.into(),
+        expect: expect.into(),
+        agent: ColumnAgentPrefs::default(),
+        env: Vec::new(),
+    };
+    vec![
+        status(
+            "pending",
+            "Pending review",
+            StatusCategory::Unstarted,
+            Some(ColumnAutomation {
+                on_enter: None,
+                on_success: None,
+                advance_when_unblocked: Some(route("reviewing")),
+            }),
+        ),
+        status(
+            "reviewing",
+            "Reviewing",
+            StatusCategory::Started,
+            Some(ColumnAutomation {
+                on_enter: Some(prompt(
+                    PRESET_INSTRUCTIONS_REVIEW_PR,
+                    PRESET_EXPECT_REVIEW_PR,
+                )),
+                on_success: Some(route("reviewed")),
+                advance_when_unblocked: None,
+            }),
+        ),
+        status("reviewed", "Reviewed", StatusCategory::Started, None),
+        status(
+            "published",
+            "Review published",
+            StatusCategory::Completed,
+            Some(ColumnAutomation {
+                on_enter: Some(prompt(
+                    PRESET_INSTRUCTIONS_PUBLISH_REVIEW,
+                    PRESET_EXPECT_PUBLISH_REVIEW,
+                )),
+                on_success: None,
+                advance_when_unblocked: None,
+            }),
+        ),
+        status("dismissed", "Dismissed", StatusCategory::Canceled, None),
+    ]
+}
+
+/// Derives the id of a context's Reviews board, `reviews-<context>`.
+///
+/// The result is truncated to [`BOARD_ID_MAX_LEN`] with any trailing `-` trimmed, the same way
+/// [`worktree_board_id`] bounds its ids.
+#[must_use]
+pub fn reviews_board_id(context: &ContextId) -> BoardId {
+    let mut id = format!("reviews-{context}");
+    id.truncate(BOARD_ID_MAX_LEN);
+    while id.ends_with('-') {
+        id.pop();
+    }
+    BoardId::try_from(id).expect(
+        "a context id is a validated slug, so `reviews-` plus its truncated ASCII form is one too",
+    )
+}
+
+/// Creates a context's Reviews board: the reviews preset, runs in each card's own worktree,
+/// two at a time.
+///
+/// It ships with the two source labels a review request can carry, `github` and `chat`, and
+/// never starts a worktree for a card on its own: the card's pull request decides the checkout.
+#[must_use]
+pub fn new_reviews_board(context: &Context, now: &str) -> Board {
+    let mut board = new_board(context, now);
+    board.id = reviews_board_id(&context.id);
+    board.name = "Reviews".into();
+    board.prefix = "REV".into();
+    board.kind = BoardKind::Reviews;
+    board.statuses = reviews_preset();
+    board.labels = [("github", "accent"), ("chat", "info")]
+        .into_iter()
+        .map(|(id, color)| Label {
+            id: LabelId::try_from(id).expect("static label slug is valid"),
+            name: id.into(),
+            color: Some(color.into()),
+        })
+        .collect();
+    board.settings.run_location = RunLocation::CardWorktree;
+    board.settings.max_live_runs = Some(2);
+    board.settings.start_on_worktree = false;
+    board
+}
+
 fn board_id_part(value: &str) -> String {
     let part = slugify(&slugify(value).replace(['.', '_'], "-"));
     if part.is_empty() { "x".into() } else { part }
@@ -239,3 +378,6 @@ fn worktree_prefix(slug: &str) -> String {
         prefix
     }
 }
+
+#[cfg(test)]
+mod tests;

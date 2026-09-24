@@ -345,6 +345,7 @@ fn live_run(state: &mut AppState) -> fleet_core::agents::Delegation {
         files_changed: 0,
         cost_usd: None,
         tokens: None,
+        worktree_id: None,
     });
     Delegation {
         id,

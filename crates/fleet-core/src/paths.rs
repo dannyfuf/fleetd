@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::{
     github::PrTab,
-    ids::{BoardId, RepoId, TerminalId, WorktreeId},
+    ids::{BoardId, RepoId, ScheduleId, TerminalId, WorktreeId},
 };
 
 /// Prepared-copy freshness marker file name retained for swarm compatibility.
@@ -155,6 +155,44 @@ impl FleetHome {
     #[must_use]
     pub fn pty_log_path(&self) -> PathBuf {
         self.logs_dir().join("pty-hold.log")
+    }
+    /// Returns `schedules.json`.
+    #[must_use]
+    pub fn schedules_path(&self) -> PathBuf {
+        self.root.join("schedules.json")
+    }
+    /// Returns one schedule's directory, `schedules/<id>`.
+    #[must_use]
+    pub fn schedule_dir(&self, id: &ScheduleId) -> PathBuf {
+        self.root.join("schedules").join(id.as_str())
+    }
+    /// Returns the working directory a schedule's runs execute in, `schedules/<id>/work`.
+    #[must_use]
+    pub fn schedule_work_dir(&self, id: &ScheduleId) -> PathBuf {
+        self.schedule_dir(id).join("work")
+    }
+    /// Returns one run's log, `schedules/<id>/logs/<YYYYMMDDTHHMMSSZ>.log`.
+    ///
+    /// `started_at` is the run's RFC 3339 start; an unparsable one keeps only its ASCII
+    /// alphanumerics so the name still sorts and never escapes the directory.
+    #[must_use]
+    pub fn schedule_log_path(&self, id: &ScheduleId, started_at: &str) -> PathBuf {
+        let compact = chrono::DateTime::parse_from_rfc3339(started_at).map_or_else(
+            |_| {
+                started_at
+                    .chars()
+                    .filter(char::is_ascii_alphanumeric)
+                    .collect::<String>()
+            },
+            |at| {
+                at.with_timezone(&chrono::Utc)
+                    .format("%Y%m%dT%H%M%SZ")
+                    .to_string()
+            },
+        );
+        self.schedule_dir(id)
+            .join("logs")
+            .join(format!("{compact}.log"))
     }
 }
 

@@ -5,33 +5,38 @@ pub mod defaults;
 pub mod model;
 pub mod ops;
 pub mod property;
+mod pull_request;
 pub mod sync;
 #[cfg(test)]
 mod tests;
 
 pub use automation::{
-    LiveIndex, Plan, ResolvedPrefs, StartRun, brief, next_pending, re_evaluate,
-    re_evaluate_settled, resolve_prefs,
+    LiveIndex, Plan, ResolvedPrefs, StartRun, brief, clear_stale_queues, next_pending,
+    next_pending_except, re_evaluate, re_evaluate_settled, resolve_prefs,
 };
 pub use defaults::{
-    BOARD_ID_MAX_LEN, PRESET_EXPECT_IMPLEMENT, PRESET_EXPECT_REVIEW, PRESET_INSTRUCTIONS_IMPLEMENT,
-    PRESET_REVIEW_SKILL, apply_workflow_preset, default_statuses, new_board, new_worktree_board,
-    render_template, workflow_preset, worktree_board_id,
+    BOARD_ID_MAX_LEN, PRESET_EXPECT_IMPLEMENT, PRESET_EXPECT_PUBLISH_REVIEW, PRESET_EXPECT_REVIEW,
+    PRESET_EXPECT_REVIEW_PR, PRESET_INSTRUCTIONS_IMPLEMENT, PRESET_INSTRUCTIONS_PUBLISH_REVIEW,
+    PRESET_INSTRUCTIONS_REVIEW_PR, PRESET_REVIEW_SKILL, apply_workflow_preset, default_statuses,
+    new_board, new_reviews_board, new_worktree_board, render_card_template, render_template,
+    reviews_board_id, reviews_preset, workflow_preset, worktree_board_id,
 };
 pub use model::{
     Action, ActionKind, Activity, ActivityKind, BOARD_DOCUMENT_MIN_VERSION, BOARD_DOCUMENT_VERSION,
-    BackendRef, Board, BoardDocument, BoardSettings, BoardSummary, BoardView, Card, CardAgentPrefs,
-    CardRun, ColumnAgentPrefs, ColumnAutomation, Comment, Conflict, ConflictPolicy, Label, LiveRun,
-    MAX_LIVE_RUNS_PER_BOARD, MAX_REPORT_COMMENTS_PER_CARD, MAX_RUNS_PER_CARD,
-    PENDING_AMBER_AFTER_SECS, PendingRun, Priority, REPORT_EXCERPT_CAP_BYTES, RemoteLink,
-    RunOutcome, Status, StatusCategory, SyncState, document_version, field_label,
+    BackendRef, Board, BoardDocument, BoardKind, BoardSettings, BoardSummary, BoardView, Card,
+    CardAgentPrefs, CardRun, ColumnAgentPrefs, ColumnAutomation, Comment, Conflict, ConflictPolicy,
+    Label, LiveRun, MAX_LIVE_RUNS_PER_BOARD, MAX_REPORT_COMMENTS_PER_CARD, MAX_RUNS_PER_CARD,
+    PENDING_AMBER_AFTER_SECS, PendingRun, Priority, PullRequestRef, REPORT_EXCERPT_CAP_BYTES,
+    RemoteLink, RunLocation, RunOutcome, Status, StatusCategory, SyncState, document_version,
+    field_label,
 };
 pub use ops::{
-    Blocked, BlockedTone, BoardError, BoardPatch, CardDraft, CardPatch, add_comment,
+    Blocked, BlockedTone, BoardError, BoardPatch, CardDraft, CardPatch, UpsertOutcome, add_comment,
     apply_board_patch, apply_card_patch, attention, blocked, blocks, check_draft_writable,
     column_cards, create_card, first_status_in, is_satisfied, latest_run, merge_settings,
-    move_card, normalise_automation, push_activity, summarize, valid_date, validate_automation,
-    validate_board, validate_card, validate_env, validate_links, worktree_slug,
+    move_card, normalise_automation, parse_requested_at, push_activity, queued, summarize,
+    upsert_pull_request_card, valid_date, validate_automation, validate_board, validate_card,
+    validate_env, validate_links, validate_pull_requests, worktree_slug,
 };
 pub use property::{
     PropertyKind, PropertyOption, PropertySchema, PropertySource, PropertyValue, REQUIRED_MARKER,

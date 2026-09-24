@@ -4,13 +4,14 @@ use fleet_core::{
     agents::{
         AgentThreadSummary, Delegation, ItemId, SeqEvent, StreamKind, ThreadId, ThreadProjection,
     },
-    board::{BackendDescriptor, BackendSchema, BoardSummary, BoardView, Card},
+    board::{BackendDescriptor, BackendSchema, BoardSummary, BoardView, Card, UpsertOutcome},
     cache::RepoCache,
     config::Config,
     github::{PrTab, PullRequest},
     ids::{HostId, JobId, WorktreeId},
     inspection::WorktreeInspection,
     model::{Context, Repo, Worktree},
+    schedule::Schedule,
     sessions::{Session, Terminal, WorktreeStatus},
 };
 use serde::{Deserialize, Serialize};
@@ -65,6 +66,18 @@ pub const BOARD_WORKTREE_CAPABILITY: &str = "board.worktree";
 /// Defined in phase 1, advertised in phase 3: a daemon that knows the string but not the verbs
 /// must not claim it.
 pub const BOARD_AUTOMATION_CAPABILITY: &str = "board.automation";
+
+/// Capability advertised by daemons that serve Reviews boards.
+///
+/// It gates `EnsureReviewsBoard` and `UpsertPullRequestCard`. Advertised only once the daemon
+/// also runs a card in its own pull request worktree: a daemon that could create review cards
+/// but not run them must not claim it.
+pub const BOARD_REVIEWS_CAPABILITY: &str = "board.reviews";
+
+/// Capability advertised by daemons that run scheduled agent tasks.
+///
+/// It gates the five schedule requests and `Event::SchedulesChanged`.
+pub const SCHEDULES_CAPABILITY: &str = "schedules";
 
 /// Capability name for committing only the worktree IDs reviewed by a prune dry run.
 pub const PRUNE_REVIEWED_IDS_CAPABILITY: &str = "prune.reviewed_ids";
@@ -341,6 +354,13 @@ pub enum ResponseBody {
     Board(BoardView),
     /// Created or changed card.
     Card(Card),
+    /// Card answered by `UpsertPullRequestCard`, and what the upsert did.
+    CardUpsert {
+        /// Created, existing or reopened card.
+        card: Card,
+        /// Whether the card was created, already open, or reopened.
+        outcome: UpsertOutcome,
+    },
     /// Card and the worktree created from it.
     CardWorktree {
         /// Updated linked card.
@@ -355,6 +375,10 @@ pub enum ResponseBody {
     BoardBackendSchema(BackendSchema),
     /// Registered board backend kinds and their generic settings schemas.
     BoardBackends(Vec<BackendDescriptor>),
+    /// Schedules of one board or of every board.
+    Schedules(Vec<Schedule>),
+    /// One created, changed or started schedule.
+    Schedule(Schedule),
     /// Registered watch identifier.
     WatchStarted(fleet_core::watches::WatchId),
     /// Session's current and recently completed watches.

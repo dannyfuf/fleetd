@@ -12,11 +12,19 @@ pub(crate) enum BoardSection {
     Backend,
     /// The status columns, their order and their automation.
     Columns,
+    /// The board's scheduled agent tasks (BOARD §12), on a daemon that serves `schedules`.
+    Schedules,
 }
 
 impl BoardSection {
     /// Every section, in rail order.
-    pub(crate) const ALL: &'static [Self] = &[Self::General, Self::Backend, Self::Columns];
+    pub(crate) const ALL: &'static [Self] =
+        &[Self::General, Self::Backend, Self::Columns, Self::Schedules];
+
+    /// The rail on a daemon without `schedules`: the section is hidden, not disabled, because
+    /// nothing in it could load.
+    pub(crate) const WITHOUT_SCHEDULES: &'static [Self] =
+        &[Self::General, Self::Backend, Self::Columns];
 
     /// The rail label.
     #[must_use]
@@ -25,6 +33,7 @@ impl BoardSection {
             Self::General => "General",
             Self::Backend => "Backend",
             Self::Columns => "Columns",
+            Self::Schedules => "Schedules",
         }
     }
 }
@@ -266,6 +275,12 @@ pub(super) enum SettingRow {
     Column(usize),
     /// One row of the drilled-into column's form.
     ColumnField(ColumnField),
+    /// One schedule of the Schedules list, by position.
+    Schedule(usize),
+    /// One row of the drilled-into schedule's form.
+    ScheduleField(ScheduleField),
+    /// No row at all: an empty Schedules list, where the cursor has nothing to sit on.
+    NoRow,
 }
 
 /// The General pane's rows, in order.
@@ -297,8 +312,25 @@ impl SettingRow {
             Self::Backend => "Backend",
             // A backend row is named by its own schema entry and a column row by its
             // `ColumnField`; neither has a label this table could state.
-            Self::BackendSetting(_) | Self::Column(_) | Self::ColumnField(_) => "",
+            Self::BackendSetting(_)
+            | Self::Column(_)
+            | Self::ColumnField(_)
+            | Self::Schedule(_)
+            | Self::ScheduleField(_)
+            | Self::NoRow => "",
         }
+    }
+}
+
+/// The label of General's read-only `Runs in` fact (BOARD §11.10).
+pub(super) const RUNS_IN_LABEL: &str = "Runs in";
+
+/// Where a board's runs execute, as General's `Runs in` fact states it.
+#[must_use]
+pub(super) const fn run_location_label(location: RunLocation) -> &'static str {
+    match location {
+        RunLocation::BoardWorktree => "this worktree",
+        RunLocation::CardWorktree => "each card's worktree",
     }
 }
 

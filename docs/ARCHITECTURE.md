@@ -88,7 +88,8 @@ system, the native git UI and the diff pipeline — are recorded in `docs/decisi
   transport, the advanced command transport, legacy probing, and one lazy `RemoteLink` endpoint
   per federated host. `fleetd connect` bridges stdin/stdout to the remote daemon's Unix socket;
   neither daemon listens on a tailnet TCP port.
-- **Services**: `Contexts`, `Boards` (documents, cards, remote sync), `Repos` (clone jobs,
+- **Services**: `Contexts`, `Boards` (documents, cards, remote sync, the per-context Reviews
+  board), `Schedules` (board-owned prompts run headless as `ScheduledTask` jobs), `Repos` (clone jobs,
   discovery cache), `Worktrees` (creation, publication, recovery, trash, hooks) with the
   prepared-copy `Pool`, `Inspect`, `Prune`,
   `Github` (PR tabs, caches, TTLs), `Sessions` (registry, lifecycle, host bridge, observations),
@@ -96,7 +97,9 @@ system, the native git UI and the diff pipeline — are recorded in `docs/decisi
   session manager, below), `Router`, `Mirror`, `Bootstrap`, `Awaited`, `Doctor`, `Import`,
   `Update`. `services/composition.rs` wires them, `dispatch.rs` enters the router,
   `snapshots.rs` merges local state with mirrored host fragments, and `maintenance.rs` owns the
-  periodic sweeps.
+  periodic sweeps — among them the schedules loop (`services/schedules/tick.rs`), which sleeps
+  until the earliest due schedule, a change, or at most 60 seconds, fires every due schedule as
+  one job, and stops with the daemon's shutdown token (`docs/BOARD.md` §12).
   Revision-keyed caches in `services/cache.rs` let unchanged inventories be reused instead of
   rebuilt per request. Cache expiry inspects entry types and removes only the file identity it
   observed, so a concurrent refresh or temporary/non-directory entry is never unlinked as stale.
@@ -672,8 +675,9 @@ never obtains a process-control handle.
 
 ## Boards
 
-The daemon `Boards` service owns one versioned document per board: one unscoped board per context
-and, on demand, one additional board per published worktree. It applies
+The daemon `Boards` service owns one versioned document per board: one unscoped task board per
+context, on demand one Reviews board per context (`kind: reviews`, never returned by context
+lookup), and on demand one additional board per published worktree. It applies
 `fleet-core::board` operations, validates the resulting cards, atomically saves the
 whole document, updates its card-to-board index, and publishes `BoardChanged` plus a
 snapshot refresh request. The index is rebuilt lazily from disk after restart. A
@@ -745,7 +749,17 @@ its cards. `BoardStore` validates complete documents and writes via `Files::atom
 The document version is stamped on save from the document's own contents
 (`fleet_core::board::document_version`), so a board that never opted into automation keeps
 writing 1 and a daemon built before that feature keeps reading it, while a board that has opted
-in writes 2; the store reads `1..=2` and refuses anything outside that range by name without
-quarantining the file (`docs/BOARD.md` §2). Malformed documents are renamed beside the original as
+in writes 2, and a board that uses a review field writes 3; the store reads `1..=3` and refuses
+anything outside that range by name without quarantining the file (`docs/BOARD.md` §2). Malformed documents are renamed beside the original as
 `<board-id>.json.broken-<uuid>`; deletion moves the document to
 `$FLEET_HOME/trash/board-<board-id>-<uuid>.json` for recovery.
+
+A board may own **schedules** (`docs/BOARD.md` §12, ADR 0025). The `Schedules` service keeps them
+in one document, `$FLEET_HOME/schedules.json` (`ScheduleStore`, version 1, validated on every load
+and save; a newer version is refused, a corrupt file quarantined), and runs each due schedule as a
+`JobKind::ScheduledTask` job: `claude -p` or `codex exec` through the `Shell` adapter, in
+`$FLEET_HOME/schedules/<id>/work`, with its output streamed to
+`$FLEET_HOME/schedules/<id>/logs/<started>.log`. Mutations publish `SchedulesChanged`. Deleting a
+board — directly, through its context, or with its worktree — deletes its schedules; the dispatch
+site makes that call, and `Schedules` is the worktree cascade (it deletes the worktree's boards
+through `Boards`, then their schedules), so `Boards` does not depend on `Schedules`.

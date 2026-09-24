@@ -14,13 +14,13 @@
 
 use super::{
     git,
-    plan::{Board, Card, Fixture, Repository, Workflow, Worktree},
+    plan::{Board, Card, Fixture, Repository, ReviewCard, Workflow, Worktree},
 };
 use crate::env::{Daemon, HarnessEnv};
 use anyhow::Context as _;
 use fleet_client::Client;
 use fleet_core::{
-    board::{BoardPatch, BoardView, CardDraft, workflow_preset},
+    board::{BoardPatch, BoardView, CardDraft, PullRequestRef, workflow_preset},
     ids::{CardId, ContextId, JobId, RepoId, WorktreeId},
     model::RepoHooks,
 };
@@ -87,6 +87,9 @@ async fn write_everything(
     }
     if let Some(board) = &fixture.board {
         seed_board(&client, &context.id, board).await?;
+    }
+    if !fixture.reviews.is_empty() {
+        seed_reviews(&client, &context.id, &fixture.reviews).await?;
     }
     client
         .set_active_context(Some(context.id))
@@ -297,6 +300,43 @@ async fn seed_board(client: &Client, context: &ContextId, board: &Board) -> anyh
         .await
         .map_err(|error| anyhow::anyhow!("create the {} board: {error}", board.prefix))?;
     create_cards(client, &view, &board.cards).await
+}
+
+/// Seeds the context's Reviews board with pull request cards.
+///
+/// `ensure_reviews_board` is the request the Pull requests screen's Review tab sends, so the
+/// board is the daemon's own derivation, and each card goes in through
+/// `upsert_pull_request_card`, the one path a review card has in production.
+async fn seed_reviews(
+    client: &Client,
+    context: &ContextId,
+    cards: &[ReviewCard],
+) -> anyhow::Result<()> {
+    let view = client
+        .ensure_reviews_board(context.clone())
+        .await
+        .map_err(|error| anyhow::anyhow!("ensure {context}'s Reviews board: {error}"))?;
+    let statuses = &view.board.statuses;
+    anyhow::ensure!(
+        !statuses.is_empty(),
+        "a Reviews board must come with its review columns"
+    );
+    for card in cards {
+        let pull_request = PullRequestRef::parse(&card.pull_request)
+            .map_err(|error| anyhow::anyhow!("name {:?}: {error}", card.pull_request))?;
+        let column = card.column.min(statuses.len() - 1);
+        let draft = CardDraft {
+            title: card.title.clone(),
+            status_id: Some(statuses[column].id.clone()),
+            pull_request: Some(pull_request),
+            ..CardDraft::default()
+        };
+        client
+            .upsert_pull_request_card(view.board.id.clone(), draft, None)
+            .await
+            .map_err(|error| anyhow::anyhow!("upsert the card {:?}: {error}", card.title))?;
+    }
+    Ok(())
 }
 
 /// Writes one description's cards into the columns of the board that was just created.

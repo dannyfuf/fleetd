@@ -2,7 +2,10 @@
 
 use fleet_core::{
     agents::{AttentionKind, Delegation},
-    board::{BackendDescriptor, BackendSchema, Board, BoardSummary, BoardView, Card, LiveRun},
+    board::{
+        BackendDescriptor, BackendSchema, Board, BoardSummary, BoardView, Card, LiveRun,
+        UpsertOutcome,
+    },
     inspection::WorktreeInspection,
     model::{Repo, Worktree},
     sessions::{AgentActivity, WorktreeStatus},
@@ -188,6 +191,17 @@ pub struct BoardListEnvelope<'a> {
 pub struct BoardCardEnvelope<'a> {
     pub protocol: u32,
     pub card: &'a Card,
+}
+
+/// A card `card new --pr` upserted, with what the upsert did, in a protocol-one envelope.
+///
+/// `outcome` is `created`, `existing` or `reopened`: a script that asked for the same pull
+/// request twice learns from it whether the second call changed anything.
+#[derive(Debug, Serialize)]
+pub struct BoardCardUpsertEnvelope<'a> {
+    pub protocol: u32,
+    pub card: &'a Card,
+    pub outcome: UpsertOutcome,
 }
 
 /// A worktree created from a card, with the card it links, in a protocol-one envelope.

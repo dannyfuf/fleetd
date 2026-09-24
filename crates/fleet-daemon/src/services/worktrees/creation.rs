@@ -117,6 +117,70 @@ impl Worktrees {
         awaited.wait().await
     }
 
+    /// Brings an existing pull-request worktree to the pull request's current head.
+    ///
+    /// Fetches the head exactly as [`Self::create_from_pr`] does, into
+    /// `refs/swarm/pulls/<n>/head`. A worktree already there is left alone. A worktree with no
+    /// changes to tracked files is moved to the head when its `HEAD` is still the head Fleet last
+    /// placed there — recorded in [`placed_pull_ref`] — or when the head contains its `HEAD`: a
+    /// force-pushed or rebased pull request is followed as readily as a fast-forward, because
+    /// the old commits are the author's, not the user's. Anything else — changes to tracked
+    /// files, or commits Fleet never placed that the head does not have — is reported and left
+    /// exactly as it was, because those are the user's. Untracked files are not in the way:
+    /// a checkout keeps them, and refuses rather than overwrite one.
+    ///
+    /// # Errors
+    ///
+    /// The fetch's failure, or a Git command that could not read or move the checkout.
+    pub async fn follow_pull_request_head(
+        &self,
+        worktree: &Worktree,
+        number: u64,
+    ) -> DaemonResult<PullRequestHead> {
+        let path = Path::new(&worktree.path);
+        let pull_ref = format!("refs/swarm/pulls/{number}/head");
+        let placed_ref = placed_pull_ref(number);
+        // A worktree made before the marker existed was placed at the head its creation fetched,
+        // which the fetch below is about to overwrite: carry that head into the marker first, so
+        // a refused follow does not lose it.
+        let placed = if self.git.revision_exists(path, &placed_ref).await? {
+            Some(self.git.revision(path, &placed_ref).await?)
+        } else if self.git.revision_exists(path, &pull_ref).await? {
+            let created_at = self.git.revision(path, &pull_ref).await?;
+            self.git.update_ref(path, &placed_ref, &created_at).await?;
+            Some(created_at)
+        } else {
+            None
+        };
+        self.git.fetch_pull_request(path, number).await?;
+        let head = self.git.revision(path, "HEAD").await?;
+        let target = self.git.revision(path, &pull_ref).await?;
+        if head == target {
+            self.git.update_ref(path, &placed_ref, &target).await?;
+            return Ok(PullRequestHead::Current);
+        }
+        if !self.git.tracked_changes(path).await?.trim().is_empty() {
+            return Ok(PullRequestHead::LocalChanges);
+        }
+        let fleet_placed = placed.as_deref() == Some(head.as_str());
+        if !fleet_placed && !self.git.is_ancestor(path, &head, &target).await? {
+            return Ok(PullRequestHead::LocalChanges);
+        }
+        let branch = self.git.current_branch(path).await?;
+        if branch.is_empty() {
+            // A detached checkout stays detached, at the new head.
+            self.git.checkout_branch(path, &target).await?;
+        } else {
+            // Clean, and either behind the head or holding only what Fleet placed there, so
+            // resetting the branch to the head loses nothing of the user's.
+            self.git
+                .checkout_force_branch(path, &branch, &target)
+                .await?;
+        }
+        self.git.update_ref(path, &placed_ref, &target).await?;
+        Ok(PullRequestHead::Moved)
+    }
+
     async fn create_local(
         &self,
         request: CreateRequest,
@@ -202,6 +266,10 @@ impl Worktrees {
             let pull_ref = format!("refs/swarm/pulls/{number}/head");
             self.git
                 .checkout_force_branch(attempt, &branch, &pull_ref)
+                .await?;
+            // What `follow_pull_request_head` later recognises as Fleet's own checkout.
+            self.git
+                .update_ref(attempt, &placed_pull_ref(number), &pull_ref)
                 .await
         })
         .await
@@ -416,4 +484,10 @@ impl Worktrees {
         }
         Ok(())
     }
+}
+
+/// The ref, inside a pull-request worktree, naming the head Fleet last checked out there: set
+/// when the worktree is created and each time it follows the pull request.
+fn placed_pull_ref(number: u64) -> String {
+    format!("refs/fleet/pulls/{number}/placed")
 }

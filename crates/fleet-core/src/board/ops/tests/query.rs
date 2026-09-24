@@ -81,3 +81,37 @@ fn summary_excludes_archived_and_both_terminal_categories() {
         (4, 2, 1, 1)
     );
 }
+
+/// `idle_started` counts the cards standing in a started column with nothing running and nothing
+/// owed, and leaves out what `attention_count` already counts, so the two add up.
+#[test]
+fn summary_counts_idle_started_cards_apart_from_attention() {
+    let mut board = board();
+    let mut cards: Vec<_> = (0..4)
+        .map(|i| create(&mut board, &[], &format!("c{i}")))
+        .collect();
+    let started: StatusId = "in-progress".parse().unwrap();
+    for card in &mut cards[..3] {
+        card.status_id = started.clone();
+    }
+    // Owed a run, and waiting long enough to need a person: working and attention, never idle.
+    cards[1].pending_run = Some(crate::board::model::PendingRun {
+        status_id: started.clone(),
+        since: "2026-09-06T11:00:00Z".into(),
+    });
+    // Owed a run a moment ago: working only.
+    cards[2].pending_run = Some(crate::board::model::PendingRun {
+        status_id: started,
+        since: NOW.into(),
+    });
+    // cards[3] is idle, but in an unstarted column.
+    let summary = summarize(&board, &cards, &[], NOW);
+    assert_eq!(
+        (
+            summary.working_count,
+            summary.attention_count,
+            summary.idle_started
+        ),
+        (2, 1, 1)
+    );
+}

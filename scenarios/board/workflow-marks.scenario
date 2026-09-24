@@ -15,7 +15,8 @@
 #                 together block AGE-4. Read off the face with nothing moved.
 #   `working`     AGE-1's child, from the moment the daemon records the run on the card.
 #   `pending`     AGE-2 behind it. One live run is allowed and AGE-1's child is still holding the
-#                 checkout, so the second card is owed a run rather than given one.
+#                 checkout, so the second card is owed a run rather than given one, and it waits
+#                 for it in Ready, queued for In Progress (contracts C4).
 #
 # The child's park itself is read from the *delegation*, not from the tile: the preset serves
 # Claude `subagent-child-blocked.json`, whose permission gate stands in for a child that cannot
@@ -44,9 +45,11 @@
 # (phase-6 tracker, fixed 2026-09-21), and a scenario state that existed only because of a defect
 # goes with it.
 #
-# Ready is entered and left on the way through: it carries `advance_when_unblocked`, not an
-# action, and the engine only advances the *dependants* of a card it has just visited, so a card
-# nothing blocks waits there until a person moves it on (BOARD.md §11.7). Hence two `]` per card.
+# Ready is a routing column: it carries `advance_when_unblocked`, not an action, and a card that
+# *enters* it with nothing blocking it is advanced at once (rule 0, contracts C4) — into In
+# Progress when a run slot is free, and otherwise it stays in Ready owed a run, queued for In
+# Progress, until the slot frees (BOARD.md §11.7). Hence one `]` per card: the first lands in In
+# Progress on the move's own answer, the second waits in Ready.
 #
 # Every predicate about a run mark is an `await`, never an `assert`, and that is load-bearing
 # rather than stylistic: a mark is written by an event this scenario did not send, and the window
@@ -105,13 +108,12 @@ assert lists["board.cards"].rows[1].badges[0] == "AGE-2" && lists["board.cards"]
 assert lists["board.cards"].rows[2].badges[0] == "AGE-3" && lists["board.cards"].rows[2].marks[0] == "blocked:1"
 assert lists["board.cards"].rows[3].badges[0] == "AGE-4" && lists["board.cards"].rows[3].marks[0] == "blocked:2"
 
-# AGE-1 through Ready into In Progress, whose action starts its child.
-key ]
-await lists.board.selected.label == "Ready" 20000
-assert lists["board.cards"].rows[0].badges[0] == "AGE-1" && lists["board.cards"].rows[0].marks[0] absent
+# AGE-1 into Ready, which nothing blocks and whose target has a free slot, so it is carried
+# straight on into In Progress, whose action starts its child; Ready is left empty.
 key ]
 await lists.board.selected.label == "In Progress" 20000
 assert lists["board.cards"].rows[0].badges[0] == "AGE-1"
+assert lists.board.rows[2].badges[0] == "0"
 await lists["board.cards"].rows[0].marks[0] == "needs you" 30000
 await lists["board.summary"].rows[0].label == "1/1 working · 1 needs you" 20000
 
@@ -143,27 +145,30 @@ await dialog absent 20000
 await idle 20000
 
 # AGE-2 the same way, while AGE-1's child still holds the board's one slot: this card is *owed* a
-# run rather than given one, and the header's numerator counts the owed run beside the live one.
+# run rather than given one, so it stays in Ready queued for In Progress (contracts C4), and the
+# header's numerator counts the owed run beside the live one.
 key ]
 await lists.board.selected.label == "Ready" 20000
-key ]
-await lists.board.selected.label == "In Progress" 20000
-assert lists["board.cards"].rows[1].badges[0] == "AGE-2"
-await lists["board.cards"].rows[1].marks[0] == "pending" 40000
+assert lists["board.cards"].rows[0].badges[0] == "AGE-2"
+await lists["board.cards"].rows[0].marks[0] == "pending" 40000
 await agents.delegations[0].status == blocked 30000
 await lists["board.summary"].rows[0].label == "2/1 working · 1 needs you" 20000
 assert lists["board.summary"].rows[0].marks[0] == "waiting:1"
-assert lists.board.rows[3].badges[0] == "2" && lists.board.rows[3].marks[0] == "action"
+assert lists.board.rows[2].badges[0] == "1" && lists.board.rows[3].badges[0] == "1" && lists.board.rows[3].marks[0] == "action"
 shot workflow-marks
 
 # Then the gate goes unanswered for `GATE_BUDGET` and the child gives up, which settles AGE-1's
 # run as **cancelled** — a run nobody is waiting on any more, so the tile draws nothing at all
 # (§11.8). **Nothing starts the card again**: a column runs its action on entry and this card
 # entered nothing (BOARD.md §11.7), so what the freed slot goes to is the card that has been
-# waiting for it. AGE-2 is given its run, its Codex child reports, and `on_success` carries it
+# waiting for it. AGE-2 is carried out of Ready into In Progress and given its run
+# (`Moved to In Progress: a run slot freed`), its Codex child reports, and `on_success` carries it
 # into In review — which is the whole chain this board exists to show, ending in a board where
 # one card is done with its column and the other is standing where its run stopped.
 await lists.board.rows[4].badges[0] == "1" 120000
+assert lists.board.rows[2].badges[0] == "0"
+key l
+await lists.board.selected.label == "In Progress" 10000
 assert lists["board.cards"].rows[0].badges[0] == "AGE-1" && lists["board.cards"].rows[0].marks[0] absent
 assert lists.board.rows[3].badges[0] == "1"
 quit

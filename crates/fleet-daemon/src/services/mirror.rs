@@ -535,6 +535,7 @@ mod tests {
             id,
             context_id: "personal".parse().expect("context id"),
             worktree_id: worktree.map(|id| WorktreeId::try_from(id).expect("worktree")),
+            kind: Default::default(),
             name: "board".to_owned(),
             prefix: "FLT".to_owned(),
             backend_kind: "local".to_owned(),
@@ -544,6 +545,7 @@ mod tests {
             conflict_count: 0,
             working_count: 0,
             attention_count: 0,
+            idle_started: 0,
             last_synced_at: None,
             last_error: None,
         }

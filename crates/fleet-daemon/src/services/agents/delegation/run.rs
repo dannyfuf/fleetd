@@ -26,7 +26,7 @@ use crate::{
 };
 
 use super::{
-    CardRunRequest, DelegationService, RunRequest,
+    CardRunRequest, CreatingGuard, DelegationService, RunRequest,
     footer::{
         BARE_FLEET, SAME_WORKTREE_WARNING, card_first_message, card_footer, child_title,
         first_message,
@@ -304,6 +304,8 @@ impl DelegationService {
         let stored = delegation.clone();
         // Kept so a resume replays it; `reserve` drops the Fleet identity keys on the way in.
         let stored_env = extra_env.clone();
+        // Held until creation answers: the drain must not take this row for a restart orphan.
+        let _creating = CreatingGuard::new(self, delegation_id);
         let refused = self
             .inner
             .store
@@ -593,6 +595,8 @@ impl DelegationService {
         // The per-caller ceiling is passed for the one signature both callers share: the store
         // applies it to thread callers only, because a card's own reservation already holds it to
         // one live run.
+        // Held until creation answers: the drain must not take this row for a restart orphan.
+        let _creating = CreatingGuard::new(self, delegation_id);
         let refused = self
             .inner
             .store

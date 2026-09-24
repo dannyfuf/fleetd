@@ -47,6 +47,7 @@ pub mod pool;
 pub mod prune;
 pub mod repos;
 pub mod router;
+pub mod schedules;
 pub mod sessions;
 pub mod sleep;
 pub mod update;
@@ -84,6 +85,10 @@ pub use maintenance::PeriodicTasks;
 pub struct Services {
     /// Backend-independent board service.
     pub boards: Arc<boards::Boards>,
+    /// Scheduled agent tasks and their firing loop.
+    pub schedules: schedules::Schedules,
+    /// What a deleted worktree takes with it; `Worktrees` holds it weakly, so this keeps it alive.
+    _worktree_cascade: Arc<dyn worktrees::WorktreeCascade>,
     pub config: Arc<ConfigStore>,
     pub state: Arc<StateStore>,
     pub jobs: Arc<JobManager>,

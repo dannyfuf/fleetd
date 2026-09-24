@@ -1,6 +1,6 @@
 //! Orthogonal session, turn, attention, mode, and harness-capability state.
 
-use std::{cmp::Ordering, collections::BTreeSet};
+use std::{cmp::Ordering, collections::BTreeSet, fmt};
 
 use chrono::{DateTime, Utc};
 use semver::Version;
@@ -193,6 +193,27 @@ pub enum PermissionMode {
     DontAsk,
     /// Auto-allow supported harness operations.
     FullAccess,
+}
+
+impl PermissionMode {
+    /// The word the CLI's `--mode` takes and refusals print, e.g. `full-access`.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::AcceptEdits => "accept-edits",
+            Self::Plan => "plan",
+            Self::Auto => "auto",
+            Self::DontAsk => "dont-ask",
+            Self::FullAccess => "full-access",
+        }
+    }
+}
+
+impl fmt::Display for PermissionMode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.word())
+    }
 }
 
 /// Provider-neutral model and reasoning-effort selection.

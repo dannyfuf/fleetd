@@ -179,6 +179,31 @@ to fix `PATH`, only when neither is there. The line speaks for that daemon-side 
 doctor runs with no delegation in flight, so it cannot see the `fleet` path a caller sends with
 its own `fleet subagent run`.
 
+Two scripted smokes drive the board's automation end to end against a private daemon — a private
+`FLEET_HOME`, a local git origin, scripted agent binaries on a private `PATH`, no network, no real
+agent — and both run in `make ci`:
+
+```sh
+make smoke-workflow   # scripts/board-workflow-smoke.sh: the workflow preset carries a four-card diamond to Done
+make smoke-reviews    # scripts/reviews-smoke.sh: a review card goes Pending review → Reviewing → Reviewed
+```
+
+`smoke-reviews` gives its bare-repo origin `refs/pull/1/head` and `refs/pull/2/head` (written with
+`git update-ref`), runs `fleet board --context acme --reviews card new "Fixture PR" --pr
+<owner>/<name>#1`, and asserts that the card reaches *Reviewed* with a succeeded run in its own
+pull-request worktree, and that a second `card new --pr` prints `Existing`. The review column runs
+on the Codex shim, so every review is a scripted transcript. A scripted `gh` sits on the private
+`PATH` because creating a pull-request worktree runs `gh pr view`: it answers `pr view 1|2`, returns
+`[]` for `pr list`, and fails anything else. It then proves a schedule: a fake `claude`, which acts
+as the headless agent only when `FLEET_SCHEDULE` is set, creates a card by calling the private
+`fleet` by its absolute path (the runner's login-shell environment may not carry the private
+`FLEET_HOME`) with `board --board "$FLEET_BOARD" card new … --pr <owner>/<name>#2 --label github`,
+and prints a Claude-shaped result line whose text is `SUMMARY: 1 created, 0 existing, 0 reopened`.
+The smoke creates the schedule `--every 5 --disabled` so the daemon's own tick cannot race it — `run`
+fires a disabled schedule anyway — runs it with `fleet schedule run --wait`, and asserts exactly one
+run, succeeded with that summary, a job and a log, and that the card exists with the `github` label
+(`docs/BOARD.md` §12). The smokes need `python3` to read the JSON envelopes.
+
 ## Lints and formatting
 
 `rustfmt.toml` selects edition 2024 and its style edition, so `cargo fmt` is the only formatter.

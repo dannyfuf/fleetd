@@ -38,26 +38,38 @@ pub(crate) fn open_on_section(state: &Entity<AppState>, section: BoardSection, c
 /// The cursor goes back to the first row and any drill-in is left, because a row index means
 /// something different in every pane and a section arrived at mid-form is a form the user did
 /// not open.
-pub(super) fn cycle_section(state: &Entity<AppState>, delta: isize, cx: &mut App) {
-    with_host(state, cx, |host| {
+///
+/// Returns whether the section changed: an unsaved schedule form holds the cursor until the
+/// question it raises has been asked once (§5.4), the same question `esc` asks.
+pub(super) fn cycle_section(state: &Entity<AppState>, delta: isize, cx: &mut App) -> bool {
+    let moved = with_host(state, cx, |host| {
+        if host.board_settings.holds_unsaved_schedule() {
+            return false;
+        }
+        // The rail the user can see: Schedules is not on it without the capability, so it is
+        // not a step `⇥` can land on either.
+        let sections = host.board_settings.sections();
         let index = step(
-            BoardSection::ALL
+            sections
                 .iter()
                 .position(|section| *section == host.board_settings.section)
                 .unwrap_or(0),
             delta,
-            BoardSection::ALL.len(),
+            sections.len(),
         );
-        let section = BoardSection::ALL.get(index).copied().unwrap_or_default();
+        let section = sections.get(index).copied().unwrap_or_default();
         host.board_settings.section = section;
         host.board_settings.row = 0;
         host.board_settings.opened_column = None;
         host.board_settings.editing = false;
         host.board_settings.discard_armed = false;
+        host.board_settings.schedules.leave();
         host.board_settings.prepare();
         LAST_SECTION.set(section);
+        true
     });
     notify(state, cx);
+    moved
 }
 
 /// `j` / `k`: move the cursor while no text row owns the keyboard.
@@ -71,6 +83,9 @@ pub(super) fn move_row(state: &Entity<AppState>, delta: isize, cx: &mut App) {
         host.board_settings.editing = false;
         host.board_settings.discard_armed = false;
         host.board_settings.notice = None;
+        // The notice was the armed delete's question; with it gone the arm goes too, so a
+        // later `d` asks again instead of deleting with nothing on screen.
+        host.board_settings.schedules.pending_delete = None;
     });
     cx.stop_propagation();
 }
@@ -154,9 +169,20 @@ pub(super) fn cycle(state: &Entity<AppState>, delta: isize, cx: &mut App) {
                 }
                 return;
             }
+            SettingRow::ScheduleField(field) => {
+                if draft.cycle_schedule(field, delta) {
+                    draft.error = None;
+                    draft.notice = None;
+                }
+                return;
+            }
             // A column list row cycles nothing: `J` and `K` are what move one, and they say so
-            // in the hint row.
-            SettingRow::Column(_) | SettingRow::Name | SettingRow::Prefix => {}
+            // in the hint row. A schedule row is acted on by `space`, `r` and `d`.
+            SettingRow::Column(_)
+            | SettingRow::Schedule(_)
+            | SettingRow::NoRow
+            | SettingRow::Name
+            | SettingRow::Prefix => {}
         }
         draft.error = None;
     });
@@ -234,6 +260,9 @@ pub(super) fn toggle(state: &Entity<AppState>, cx: &mut App) {
                 row.present = true;
                 true
             }
+            SettingRow::ScheduleField(ScheduleField::Enabled) => {
+                host.board_settings.toggle_schedule_flag()
+            }
             _ => false,
         }
     });
@@ -300,7 +329,10 @@ pub(super) fn cancel(
 ) -> bool {
     let step = with_host(state, cx, |host| host.board_settings.escape());
     let kept = step != EscapeStep::Close;
-    if matches!(step, EscapeStep::Editor | EscapeStep::Column) {
+    if matches!(
+        step,
+        EscapeStep::Editor | EscapeStep::Column | EscapeStep::Schedule
+    ) {
         materialize_input(state, Some(window), Some(focus), cx);
     }
     if kept {
@@ -469,6 +501,13 @@ pub(super) fn materialize_input(
                 field.placeholder().to_owned(),
                 matches!(field, ColumnField::OnEnter | ColumnField::Env),
                 false,
+                field.is_multiline(),
+            ),
+            SettingRow::ScheduleField(field) => (
+                field.label().to_owned(),
+                field.placeholder().to_owned(),
+                field.is_mono(),
+                field.is_number(),
                 field.is_multiline(),
             ),
             _ => return None,

@@ -770,6 +770,7 @@ fn card_tile_section(cx: &mut App) -> AnyElement {
         .estimate(Some(8))
         .due(Some("2026-03-04".into()))
         .worktree(true)
+        .reference(Some("acme/api#412".into()))
         .dirty(true)
         .conflict(true)
         .extras(vec!["QA: pending".into()]),
@@ -915,8 +916,36 @@ fn card_tile_section(cx: &mut App) -> AnyElement {
         .run(RunMark::Working),
     );
 
+    let reference = panel(
+        TILE_W,
+        CardTile::new(
+            "tile-reference",
+            "REV-1",
+            "Add retry budget to the sync worker",
+        )
+        .reference(Some("acme/api#412".into())),
+    );
+    let reference_running = panel(
+        TILE_W,
+        CardTile::new(
+            "tile-reference-running",
+            "REV-2",
+            "A reference beside the branch, with a run in words",
+        )
+        .run(RunMark::Working)
+        .run_label("working 2m \u{b7} claude")
+        .labels(vec![("github".into(), Some("info".into()))])
+        .branch(Some("pr-418".into()))
+        .reference(Some("acme/a-rather-long-repository-name#418".into())),
+    );
+
     let children = vec![
         LAYOUT.labeled("bare · every slot", &t, row_of(&t, vec![bare, full])),
+        LAYOUT.labeled(
+            "reference · with branch and run",
+            &t,
+            row_of(&t, vec![reference, reference_running]),
+        ),
         LAYOUT.labeled("run marks", &t, row_of(&t, runs)),
         LAYOUT.labeled("run pills in words", &t, row_of(&t, worded)),
         LAYOUT.labeled(

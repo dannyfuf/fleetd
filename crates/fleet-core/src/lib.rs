@@ -9,6 +9,7 @@ pub mod ids;
 pub mod inspection;
 pub mod model;
 pub mod paths;
+pub mod schedule;
 pub mod sessions;
 pub mod sleep;
 pub mod slug;

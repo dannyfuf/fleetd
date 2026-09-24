@@ -19,10 +19,10 @@ use fleet_proto::response::PrSlice;
 use fleet_proto::snapshot::LinkState;
 use fleet_ui_kit::{
     ActiveTheme, AgeLabel, Button, ButtonSize, ButtonStyle, Callout, Chip, ColumnLadder,
-    FilterField, HarnessTargetExt, Icon, IconButton, IconSize, ListHeader, ListPointer, ListView,
-    Menu, MenuAnchor, MenuItem, PageHeader, Pane, PaneBorder, PopoverMenu, PrBadge, ResolvedColumn,
-    Row, RowColumn, SegmentedTab, SegmentedTabs, SkeletonRows, Spinner, StatusKind, Text, Tone,
-    Truncate, format_age, truncate,
+    EmptyState, FilterField, HarnessTargetExt, Icon, IconButton, IconSize, ListHeader, ListPointer,
+    ListView, Menu, MenuAnchor, MenuItem, PageHeader, Pane, PaneBorder, PopoverMenu, PrBadge,
+    ResolvedColumn, Row, RowColumn, SegmentedTab, SegmentedTabs, SkeletonRows, Spinner, StatusKind,
+    Text, Tone, Truncate, format_age, truncate,
 };
 use gpui::{
     Action, AnyElement, App, Context, IntoElement, SharedString, UniformListScrollHandle, Window,
@@ -66,6 +66,10 @@ const REVIEW: &str = "Waiting for my review";
 const HAS_WORKTREE: &str = "has worktree";
 /// The tag while `Enter` / `c` is creating that worktree.
 const CREATING: &str = "creating worktree";
+/// The Review tab's empty Reviews board (UX-SPEC §3.5, §3.13).
+pub const REVIEWS_EMPTY: &str = "No reviews yet.";
+/// The hint beside it while the board has no schedule; `Enter` does it.
+pub const REVIEWS_ADD_SCHEDULE: &str = "\u{23CE} add the GitHub review schedule";
 /// The error callout's button. It runs `r`, whose catalogue label is the longer "Refresh pull
 /// requests"; next to a failure the verb a person looks for is "Retry".
 const RETRY: &str = "Retry";
@@ -375,21 +379,7 @@ pub fn render(
         filter,
     } = props;
 
-    let select_tab = handlers.select_tab.clone();
-    let tabs = SegmentedTabs::new([
-        tab_of(MINE, mine_count),
-        tab_of(REVIEW, review_count).attention(true),
-    ])
-    .active(usize::from(tab == PrTab::Review))
-    .harness_tabs("prs.tab")
-    .on_select(move |index, window, cx| {
-        let tab = if index == 0 {
-            PrTab::Mine
-        } else {
-            PrTab::Review
-        };
-        select_tab(tab, window, cx);
-    });
+    let tabs = tabs(tab, mine_count, review_count, handlers);
 
     let header = page_header(covers, fetch_stamp_text(loading, fetched_age), filter_slot);
 
@@ -478,6 +468,120 @@ pub fn render(
         .focused(focused)
         .body(page)
         .into_any_element()
+}
+
+/// The Mine / Waiting-for-my-review tabs; a click is the switch `Tab` makes.
+fn tabs(
+    tab: PrTab,
+    mine_count: Option<usize>,
+    review_count: Option<usize>,
+    handlers: &PrHandlers,
+) -> SegmentedTabs {
+    let select_tab = handlers.select_tab.clone();
+    SegmentedTabs::new([
+        tab_of(MINE, mine_count),
+        tab_of(REVIEW, review_count).attention(true),
+    ])
+    .active(usize::from(tab == PrTab::Review))
+    .harness_tabs("prs.tab")
+    .on_select(move |index, window, cx| {
+        let tab = if index == 0 {
+            PrTab::Mine
+        } else {
+            PrTab::Review
+        };
+        select_tab(tab, window, cx);
+    })
+}
+
+/// What the Review tab draws around the Reviews board: the page header and both tabs.
+pub struct ReviewBoardProps {
+    /// Mine's count, or `None` while it is loading (`…`).
+    pub mine_count: Option<usize>,
+    /// Reviews waiting on the user, folded from the board (§2.2).
+    pub review_count: usize,
+    /// What the subtitle says the Mine list covers.
+    pub covers: SharedString,
+    /// Age of Mine's `fetchedAt`, in seconds.
+    pub fetched_age: Option<i64>,
+    /// Whether a Mine fetch is running.
+    pub loading: bool,
+}
+
+/// The Review tab on a daemon with `board.reviews`: the page header and the tabs over `pane`,
+/// the Reviews board (or its empty state), which takes the list's and the detail's place.
+///
+/// The header keeps its subtitle and drops the filter field and Refresh: on the board `/` is
+/// the board's own filter and `r` reloads the board, both from the pane's header.
+#[must_use]
+pub fn render_review_board(
+    props: ReviewBoardProps,
+    handlers: &PrHandlers,
+    pane: AnyElement,
+    cx: &App,
+) -> AnyElement {
+    let theme = cx.theme();
+    let ReviewBoardProps {
+        mine_count,
+        review_count,
+        covers,
+        fetched_age,
+        loading,
+    } = props;
+    let header = PageHeader::new(TITLE).subtitle(format!(
+        "Open on GitHub for {covers} \u{00b7} {}",
+        fetch_stamp_text(loading, fetched_age)
+    ));
+    div()
+        .flex()
+        .flex_col()
+        .size_full()
+        .min_h_0()
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_none()
+                .px(theme.space.xl)
+                .pt(theme.space.xl)
+                .child(div().pb(theme.space.md).child(header))
+                .child(
+                    div()
+                        .flex_none()
+                        .w_full()
+                        .border_b(theme.metrics.hairline)
+                        .border_color(theme.colors.border)
+                        .child(tabs(
+                            PrTab::Review,
+                            mine_count,
+                            Some(review_count),
+                            handlers,
+                        )),
+                ),
+        )
+        .child(div().flex().flex_col().flex_1().min_h_0().child(pane))
+        .into_any_element()
+}
+
+/// `No reviews yet.`, with the schedule offer while the board has none to fill it.
+///
+/// The offer is a control, not a key line (ADR 0023): a click runs `on_add`, which does what
+/// its `⏎` does.
+#[must_use]
+pub fn review_board_empty(
+    offer_schedule: bool,
+    on_add: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    let empty = EmptyState::new(REVIEWS_EMPTY);
+    if offer_schedule {
+        empty
+            .button(
+                Button::new("reviews-empty-add-schedule", REVIEWS_ADD_SCHEDULE).on_click(on_add),
+            )
+            .into_any_element()
+    } else {
+        empty.into_any_element()
+    }
 }
 
 fn tab_of(label: &'static str, count: Option<usize>) -> SegmentedTab {

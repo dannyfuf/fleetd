@@ -4,10 +4,11 @@ use fleet_client::{Client, TerminalUpdate, ensure_daemon};
 use fleet_core::{
     board::{
         BackendDescriptor, BackendRef, BackendSchema, BoardPatch, BoardView, Card, CardDraft,
-        CardPatch, ConflictResolution, new_board, summarize,
+        CardPatch, ConflictResolution, PullRequestRef, UpsertOutcome, new_board, summarize,
     },
-    ids::{TerminalId, WorktreeId},
+    ids::{BoardId, ScheduleId, TerminalId, WorktreeId},
     model::{Context, Worktree},
+    schedule::{Cadence, Schedule, ScheduleDraft, SchedulePatch},
 };
 use fleet_proto::{
     PROTOCOL_VERSION,
@@ -16,7 +17,10 @@ use fleet_proto::{
     event::{Event, EventKind, ToastLevel},
     job::{JobKind, JobRecord, JobStatus},
     request::{Request, RequestBody},
-    response::{BOARD_WORKTREE_CAPABILITY, HelloResponse, Response, ResponseBody},
+    response::{
+        BOARD_REVIEWS_CAPABILITY, BOARD_WORKTREE_CAPABILITY, HelloResponse, Response, ResponseBody,
+        SCHEDULES_CAPABILITY,
+    },
     terminal::{
         Cell, CellAttrs, CellWidth, Color, CursorShape, CursorState, FrameUpdate, RowUpdate,
         TerminalModes, ViewportInfo,
@@ -388,6 +392,240 @@ async fn worktree_board_api_requires_capability_before_sending_requests() {
     })
     .await
     .expect("worktree board capability check");
+}
+
+#[tokio::test]
+async fn review_and_schedule_apis_require_their_capabilities_before_sending_requests() {
+    timeout(Duration::from_secs(10), async {
+        let home = TempDir::new().unwrap();
+        let listener = bind(home.path()).await;
+        let server = async {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut transport = Framed::new(socket, FleetCodec::new());
+            authenticate(&mut transport, None).await;
+            transport
+        };
+        let (client, mut transport) = tokio::join!(Client::connect(home.path()), server);
+        let client = client.unwrap();
+        let reviews = "this daemon does not support review boards; run `fleet daemon restart`";
+        let schedules = "this daemon does not support schedules; run `fleet daemon restart`";
+        let schedule: ScheduleId = "sch-0a1b2c3d".parse().unwrap();
+        for (error, message) in [
+            (
+                client
+                    .ensure_reviews_board("work".parse().unwrap())
+                    .await
+                    .unwrap_err(),
+                reviews,
+            ),
+            (
+                client
+                    .upsert_pull_request_card("reviews-work".parse().unwrap(), review_draft(), None)
+                    .await
+                    .unwrap_err(),
+                reviews,
+            ),
+            (client.list_schedules(None).await.unwrap_err(), schedules),
+            (
+                client.create_schedule(schedule_draft()).await.unwrap_err(),
+                schedules,
+            ),
+            (
+                client
+                    .update_schedule(schedule.clone(), SchedulePatch::default())
+                    .await
+                    .unwrap_err(),
+                schedules,
+            ),
+            (
+                client.delete_schedule(schedule.clone()).await.unwrap_err(),
+                schedules,
+            ),
+            (
+                client.run_schedule_now(schedule).await.unwrap_err(),
+                schedules,
+            ),
+        ] {
+            assert_eq!(error.kind, ErrorKind::Validation);
+            assert_eq!(error.message, message);
+        }
+        assert!(transport.next().now_or_never().is_none());
+    })
+    .await
+    .expect("review and schedule capability checks");
+}
+
+#[tokio::test]
+async fn review_and_schedule_apis_round_trip_over_the_unix_socket() {
+    timeout(Duration::from_secs(10), async {
+        let home = TempDir::new().unwrap();
+        let listener = bind(home.path()).await;
+        let server = async {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut transport = Framed::new(socket, FleetCodec::new());
+            authenticate_with_capabilities(
+                &mut transport,
+                None,
+                vec![
+                    BOARD_REVIEWS_CAPABILITY.to_owned(),
+                    SCHEDULES_CAPABILITY.to_owned(),
+                ],
+            )
+            .await;
+            transport
+        };
+        let (client, mut transport) = tokio::join!(Client::connect(home.path()), server);
+        let client = client.unwrap();
+        let context = Context {
+            id: "work".parse().unwrap(),
+            name: "Work".into(),
+            owners: vec![],
+            created_at: "now".into(),
+        };
+        let view = BoardView {
+            board: new_board(&context, "now"),
+            cards: Vec::new(),
+            live_runs: Vec::new(),
+        };
+        let card: Card = serde_json::from_value(serde_json::json!({
+            "id":"card-1", "boardId":"reviews-work", "number":1, "title":"Review",
+            "statusId":"pending", "createdAt":"now", "updatedAt":"now"
+        }))
+        .unwrap();
+        let schedule: Schedule = serde_json::from_value(serde_json::json!({
+            "id":"sch-0a1b2c3d", "boardId":"reviews-work", "name":"GitHub reviews",
+            "prompt":"List my review requests", "cadence":{"kind":"every","minutes":15},
+            "agent":{"provider":"claude","mode":"full_access"}, "enabled":true,
+            "timeoutMinutes":20, "createdAt":"now", "updatedAt":"now", "runs":[]
+        }))
+        .unwrap();
+        let board: BoardId = "reviews-work".parse().unwrap();
+        let id = schedule.id.clone();
+        assert_eq!(
+            exchange(
+                &mut transport,
+                RequestBody::EnsureReviewsBoard {
+                    context_id: context.id.clone()
+                },
+                Ok(ResponseBody::Board(view.clone())),
+                client.ensure_reviews_board(context.id.clone()),
+            )
+            .await
+            .unwrap(),
+            view
+        );
+        assert_eq!(
+            exchange(
+                &mut transport,
+                RequestBody::UpsertPullRequestCard {
+                    board_id: board.clone(),
+                    draft: review_draft(),
+                    requested_at: Some("2026-09-22T10:00:00Z".to_owned()),
+                },
+                Ok(ResponseBody::CardUpsert {
+                    card: card.clone(),
+                    outcome: UpsertOutcome::Reopened,
+                }),
+                client.upsert_pull_request_card(
+                    board.clone(),
+                    review_draft(),
+                    Some("2026-09-22T10:00:00Z".to_owned()),
+                ),
+            )
+            .await
+            .unwrap(),
+            (card, UpsertOutcome::Reopened)
+        );
+        assert_eq!(
+            exchange(
+                &mut transport,
+                RequestBody::ListSchedules {
+                    board_id: Some(board.clone())
+                },
+                Ok(ResponseBody::Schedules(vec![schedule.clone()])),
+                client.list_schedules(Some(board)),
+            )
+            .await
+            .unwrap(),
+            vec![schedule.clone()]
+        );
+        assert_eq!(
+            exchange(
+                &mut transport,
+                RequestBody::CreateSchedule {
+                    draft: schedule_draft()
+                },
+                Ok(ResponseBody::Schedule(schedule.clone())),
+                client.create_schedule(schedule_draft()),
+            )
+            .await
+            .unwrap(),
+            schedule
+        );
+        let patch = SchedulePatch {
+            enabled: Some(false),
+            ..SchedulePatch::default()
+        };
+        assert_eq!(
+            exchange(
+                &mut transport,
+                RequestBody::UpdateSchedule {
+                    id: id.clone(),
+                    patch: patch.clone()
+                },
+                Ok(ResponseBody::Schedule(schedule.clone())),
+                client.update_schedule(id.clone(), patch),
+            )
+            .await
+            .unwrap(),
+            schedule
+        );
+        exchange(
+            &mut transport,
+            RequestBody::DeleteSchedule { id: id.clone() },
+            Ok(ResponseBody::Ack),
+            client.delete_schedule(id.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            exchange(
+                &mut transport,
+                RequestBody::RunScheduleNow { id: id.clone() },
+                Ok(ResponseBody::Schedule(schedule.clone())),
+                client.run_schedule_now(id),
+            )
+            .await
+            .unwrap(),
+            schedule
+        );
+    })
+    .await
+    .expect("review and schedule round trips");
+}
+
+fn review_draft() -> CardDraft {
+    CardDraft {
+        title: "Review".to_owned(),
+        pull_request: Some(PullRequestRef {
+            repo: "o/n".parse().unwrap(),
+            number: 12,
+            url: "https://github.com/o/n/pull/12".to_owned(),
+        }),
+        ..CardDraft::default()
+    }
+}
+
+fn schedule_draft() -> ScheduleDraft {
+    ScheduleDraft {
+        board_id: "reviews-work".parse().unwrap(),
+        name: "GitHub reviews".to_owned(),
+        prompt: "List my review requests".to_owned(),
+        cadence: Cadence::Every { minutes: 15 },
+        agent: None,
+        enabled: None,
+        timeout_minutes: None,
+    }
 }
 
 async fn board_api_round_trips() {
@@ -769,7 +1007,7 @@ async fn authenticate_with_capabilities(
                     }),
                 },
                 snapshot_revision: None,
-                capabilities,
+                capabilities: capabilities.clone(),
                 daemon_id: "test-daemon".to_owned(),
                 build_commit: None,
             })
@@ -784,8 +1022,12 @@ async fn authenticate_with_capabilities(
     };
     // `Subscribe` is additive on the daemon, so the set the client replays on a reconnect is
     // the union the daemon holds; a connection never receives fewer kinds after a reconnect
-    // than before one.
-    assert_eq!(events.len(), 18);
+    // than before one. `SchedulesChanged` is only named to a daemon that can decode it.
+    let schedules = capabilities
+        .iter()
+        .any(|capability| capability == fleet_proto::response::SCHEDULES_CAPABILITY);
+    assert_eq!(events.len(), if schedules { 19 } else { 18 });
+    assert_eq!(events.contains(&EventKind::SchedulesChanged), schedules);
     for kind in [
         EventKind::Agent,
         EventKind::AgentSummary,

@@ -77,6 +77,7 @@ pub(super) fn open_row(
             board::open_session(id, board::Refusal::CardDetail(card_id), state, bridge, cx);
         }
         PropertyTarget::Remote => open_remote(state, bridge, cx),
+        PropertyTarget::PullRequest => board::open_pull_request(state, bridge, cx),
         PropertyTarget::ReadOnly => {
             // A locked row is a backend-declared property the remote owns; it answers with the
             // same sentence the standard read-only rows do, because two rows that carry the
