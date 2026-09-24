@@ -5,7 +5,7 @@
 
 use fleet_ui_kit::{
     Button, ButtonSize, ButtonStyle, Dialog, EmptyState, FactRow, FactValue, IconButton, IconSize,
-    Kbd, KbdSize, Row, RowColumn, Text, Tone, ValueField,
+    Kbd, Row, RowColumn, Text, Tone, ValueField,
 };
 use gpui::{MouseButton, SharedString};
 
@@ -49,8 +49,8 @@ pub(crate) fn render(
         .height()
         .unwrap_or(viewport.height)
         .min(viewport.height - theme.space.xl * 2.0);
-    // Chips are resolved against the dialog's own handle. While the search field or a row
-    // editor holds the keyboard, `E`, `D` and `/` type instead, so their chips drop out; the
+    // Keys are resolved against the dialog's own handle. While the search field or a row
+    // editor holds the keyboard, `E` and `D` type instead, so their tooltips drop the key; the
     // buttons still work by pointer.
     let chip = |action: &dyn gpui::Action| Kbd::for_action_in(action, focus, window);
 
@@ -64,12 +64,7 @@ pub(crate) fn render(
                 .flex_1()
                 .min_w_0()
                 .child(input.harness_target("settings.search"))
-        }))
-        .children(
-            (!draft.search_focused)
-                .then(|| chip(&settings_actions::Search).map(|kbd| kbd.size(KbdSize::Small)))
-                .flatten(),
-        );
+        }));
 
     let pane = match draft.search.as_ref().filter(|search| search.active()) {
         Some(search) => hits_pane(search, &draft.hit_scroll, &handlers, cx).into_any_element(),
@@ -108,7 +103,7 @@ pub(crate) fn render(
         .flex_1()
         .min_w_0()
         // The footer's own `md` gap keeps this group off Cancel only while nothing in it paints
-        // past its box: the status is one word so it fits beside two keyed buttons at the
+        // past its box: the status is one word so it fits beside the two buttons at the
         // dialog's width, and on a narrower one it gives way (ellipsised) instead of running
         // into Cancel. The amber strip above says the rest.
         .overflow_hidden()

@@ -424,6 +424,24 @@ pub fn keystrokes_in(context: &str, action: &dyn Action) -> Option<Vec<Keystroke
     let spec = cached_table()
         .iter()
         .find(|spec| spec.context == context && spec.action == name)?;
+    parse_keys(spec)
+}
+
+/// The keystrokes of the **last** row binding `action` in exactly `context`: the one gpui ranks
+/// highest there, since a later row wins a tie. For a chip that must name the key a live lookup
+/// would have named, without depending on focus — the command field's `⌘K` beside the Hub's `:`.
+#[must_use]
+pub fn highest_keystrokes_in(context: &str, action: &dyn Action) -> Option<Vec<Keystroke>> {
+    let name = action.name();
+    let spec = cached_table()
+        .iter()
+        .rev()
+        .find(|spec| spec.context == context && spec.action == name)?;
+    parse_keys(spec)
+}
+
+/// One row's keys as keystrokes; an unparsable row is logged and gives `None`.
+fn parse_keys(spec: &BindingSpec) -> Option<Vec<Keystroke>> {
     spec.keys
         .split_whitespace()
         .map(Keystroke::parse)

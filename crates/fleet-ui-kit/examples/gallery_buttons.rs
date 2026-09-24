@@ -123,10 +123,17 @@ fn styles_section(cx: &App) -> AnyElement {
                     vec![
                         base("plain").into_any_element(),
                         base("icon").icon(icon).into_any_element(),
+                        // The key rides in the tooltip: hover it.
                         base("kbd").action(action.boxed_clone()).into_any_element(),
                         base("both")
                             .icon(icon)
                             .action(action.boxed_clone())
+                            .into_any_element(),
+                        // The opt-in for the few buttons whose job is to teach a key.
+                        base("face")
+                            .icon(icon)
+                            .action(action.boxed_clone())
+                            .show_kbd()
                             .into_any_element(),
                         base("disabled")
                             .icon(icon)
@@ -171,7 +178,7 @@ fn states_section(pinned: bool, cx: &mut Context<ButtonsGallery>) -> AnyElement 
             ),
         ),
         LAYOUT.labeled(
-            "sequence chip",
+            "sequence · in the tooltip, and on the face (show_kbd)",
             &t,
             strip(
                 &t,
@@ -181,6 +188,7 @@ fn states_section(pinned: bool, cx: &mut Context<ButtonsGallery>) -> AnyElement 
                         .into_any_element(),
                     Button::new("explicit", "Explicit kbd")
                         .kbd(kbd("ctrl-s x"))
+                        .show_kbd()
                         .into_any_element(),
                 ],
             ),
@@ -190,7 +198,7 @@ fn states_section(pinned: bool, cx: &mut Context<ButtonsGallery>) -> AnyElement 
             &t,
             Button::new("archive", "Archive")
                 .action(Box::new(Archive))
-                .tooltip("Archive has no key here, so it shows no chip"),
+                .tooltip("Archive has no key here, so the tooltip names none"),
         ),
         LAYOUT.labeled(
             "with tooltip",

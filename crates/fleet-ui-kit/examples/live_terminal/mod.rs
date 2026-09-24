@@ -178,10 +178,7 @@ impl LiveTerminal {
             self.scroll,
             ScrollState::ScrollMode | ScrollState::Selecting
         ) {
-            grid = grid.scroll_pill(
-                ScrollPill::new(self.scroll.offset(), 2000)
-                    .selecting(self.scroll == ScrollState::Selecting),
-            );
+            grid = grid.scroll_pill(ScrollPill::new(self.scroll.offset(), 2000));
         }
         if self.selection {
             grid = grid.selection(GridSelection::new(2, 0, 4, 28));

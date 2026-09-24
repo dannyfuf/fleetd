@@ -457,8 +457,6 @@ pub struct NoticeRow {
 pub struct ErrorRow {
     /// What broke.
     pub message: SharedString,
-    /// Whether the daemon says the turn can be retried, which is what draws `[r] retry`.
-    pub retryable: bool,
 }
 
 /// What the working row is waiting on.

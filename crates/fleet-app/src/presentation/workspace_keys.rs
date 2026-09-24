@@ -30,6 +30,8 @@ pub(crate) struct WorkspaceKeys {
     pub(crate) go_hub: Option<Kbd>,
     /// `⌃S ?`: Help.
     pub(crate) help: Option<Kbd>,
+    /// `⌃S k`: the palette.
+    pub(crate) palette: Option<Kbd>,
     /// `⌃S J`: the Jobs sheet.
     pub(crate) jobs: Option<Kbd>,
     /// `⌃S d`: the agents picker.
@@ -83,6 +85,34 @@ pub(crate) fn hub_jobs_key() -> Option<Kbd> {
     .clone()
 }
 
+/// The Hub's `?`, for the status bar's `Shortcuts` button, whose chip must not change with focus.
+pub(crate) fn hub_help_key() -> Option<Kbd> {
+    static KEY: OnceLock<Option<Kbd>> = OnceLock::new();
+    KEY.get_or_init(|| {
+        keymap::keystrokes_in("Hub", &fleet::OpenHelp).map(|strokes| Kbd::new(&strokes))
+    })
+    .clone()
+}
+
+/// The palette's key, for the title bar's command field, which must not lose its chip when the
+/// palette or a dialog takes the focus: `⌘K` / `ctrl-k` in the Hub (the key a live lookup ranks
+/// above `:`), and in the Workspace `⌘K` on macOS or `⌃S k` elsewhere, where a terminal keeps
+/// `ctrl-k` (KEYMAP.md § Palette mode).
+pub(crate) fn palette_key(workspace: bool) -> Option<Kbd> {
+    static KEYS: OnceLock<[Option<Kbd>; 2]> = OnceLock::new();
+    let [hub, terminal] = KEYS.get_or_init(|| {
+        let hub = keymap::highest_keystrokes_in("Hub", &fleet::OpenPalette);
+        let terminal = keymap::highest_keystrokes_in(TERMINAL_CONTEXT, &fleet::OpenPalette);
+        [
+            hub.map(|strokes| Kbd::new(&strokes)),
+            terminal
+                .map(|strokes| Kbd::new(&strokes))
+                .or_else(|| workspace_keys().palette.clone()),
+        ]
+    });
+    if workspace { terminal } else { hub }.clone()
+}
+
 pub(crate) fn workspace_keys() -> &'static WorkspaceKeys {
     static KEYS: OnceLock<WorkspaceKeys> = OnceLock::new();
     KEYS.get_or_init(|| {
@@ -96,6 +126,7 @@ pub(crate) fn workspace_keys() -> &'static WorkspaceKeys {
             prefix: prefix.as_deref().map(Kbd::new),
             go_hub: prefixed(&prefix::GoHub),
             help: prefixed(&fleet::OpenHelp),
+            palette: prefixed(&fleet::OpenPalette),
             jobs: prefixed(&fleet::OpenJobs),
             agents: prefixed(&prefix::AgentsPicker),
             last_session: prefixed(&prefix::LastSession),
@@ -148,6 +179,7 @@ mod tests {
         assert_eq!(spelled(&keys.prefix), "ctrl-s");
         assert_eq!(spelled(&keys.go_hub), "ctrl-s s");
         assert_eq!(spelled(&keys.help), "ctrl-s ?");
+        assert_eq!(spelled(&keys.palette), "ctrl-s k");
         assert_eq!(spelled(&keys.jobs), "ctrl-s shift-j");
         assert_eq!(spelled(&keys.agents), "ctrl-s d");
         assert_eq!(spelled(&keys.last_session), "ctrl-s w");
@@ -167,5 +199,16 @@ mod tests {
         assert_eq!(spelled(&keys.sticky_error), "ctrl-s !");
         assert_eq!(spelled(&hub_sticky_error_key()), "!");
         assert_eq!(spelled(&hub_jobs_key()), "shift-j");
+        assert_eq!(spelled(&hub_help_key()), "?");
+    }
+
+    #[test]
+    fn the_command_fields_key_is_the_palette_key_each_screen_ranks_highest() {
+        #[cfg(target_os = "macos")]
+        let (hub, workspace) = ("cmd-k", "cmd-k");
+        #[cfg(not(target_os = "macos"))]
+        let (hub, workspace) = ("ctrl-k", "ctrl-s k");
+        assert_eq!(spelled(&palette_key(false)), hub);
+        assert_eq!(spelled(&palette_key(true)), workspace);
     }
 }

@@ -769,9 +769,7 @@ fn glyphs_section(cx: &mut App) -> AnyElement {
                     ])
                     .width_ch(18.0)
                     .into_any_element(),
-                    DegradedChip::hooks_failed()
-                        .hint("J", "for log")
-                        .into_any_element(),
+                    DegradedChip::hooks_failed().into_any_element(),
                 ],
             ),
         ),
@@ -1725,7 +1723,7 @@ fn terminal_section(cx: &mut App) -> AnyElement {
             .relative()
             .size_full()
             .bg(t.terminal.background)
-            .child(ScrollPill::new(412, 2000).selecting(true))
+            .child(ScrollPill::new(412, 2000))
             .child(support::prefix_menu::sample(
                 &t,
                 "overview-prefix-menu",

@@ -5,12 +5,12 @@
 //!
 //! - **Idle.** A control drawn as a field. A click dispatches [`FilterField::action`] (the
 //!   list's own open-filter action, the one `/` runs), which puts the surface in filter mode;
-//!   the chip shows that key from the live keymap. A retained query (§3.10 stage two of `Esc`)
+//!   the tooltip names that key from the live keymap. A retained query (§3.10 stage two of `Esc`)
 //!   reads in body text instead of the placeholder, so a filtered list always says why rows are
 //!   missing.
 //! - **Editing.** The surface hands in its live [`TextInput`] with [`FilterField::editor`]
 //!   (built embedded: the field is the chrome), and the box draws it with the `shown/total`
-//!   count where the chip was — amber when the query hides every row.
+//!   count at its end — amber when the query hides every row.
 //!
 //! Either face can carry a clear `✕` ([`FilterField::on_clear`]) while a query is set, and a
 //! surface whose filter is not an action (a board header's own editor) opens it with
@@ -27,7 +27,8 @@ use gpui::{Action, App, ElementId, Entity, Pixels, SharedString, Window, div, pr
 
 use super::{
     ButtonSize, IconButton, TextInput, control,
-    kbd::{Kbd, KbdSize},
+    kbd::Kbd,
+    tooltip::{Tooltip, WithTooltip},
 };
 use crate::{
     icons::{Icon, IconSize},
@@ -89,13 +90,14 @@ impl FilterField {
         self
     }
 
-    /// Dispatch `action` to the focused element on click, and show its live key binding.
+    /// Dispatch `action` to the focused element on click, and name its live key binding in the
+    /// tooltip.
     pub fn action(mut self, action: Box<dyn Action>) -> Self {
         self.action = Some(action);
         self
     }
 
-    /// Show this key instead of the one [`Self::action`] resolves.
+    /// Name this key instead of the one [`Self::action`] resolves.
     pub fn kbd(mut self, kbd: Kbd) -> Self {
         self.kbd = Some(kbd);
         self
@@ -181,16 +183,10 @@ impl RenderOnce for FilterField {
                 })
                 .into_any_element(),
         };
-        let trailing = if editing {
-            self.counts.map(|(shown, total)| {
-                Text::label(format!("{shown}/{total}"))
-                    .tone(count_tone)
-                    .into_any_element()
-            })
-        } else {
-            kbd.clone()
-                .map(|kbd| kbd.size(KbdSize::Small).into_any_element())
-        };
+        let counts = self
+            .counts
+            .filter(|_| editing)
+            .map(|(shown, total)| Text::label(format!("{shown}/{total}")).tone(count_tone));
         let field = div()
             .id(self.id)
             .flex()
@@ -214,11 +210,15 @@ impl RenderOnce for FilterField {
             })
             .child(Icon::Search.el().size(IconSize::Small).color(icon_color))
             .child(body)
-            .children(trailing)
+            .children(counts)
             .children(clear);
         if editing {
             return field.into_any_element();
         }
+        let field = match kbd {
+            Some(kbd) => field.with_tooltip(Tooltip::new(self.placeholder.clone()).kbd(kbd), cx),
+            None => field,
+        };
         let action = self.action;
         let on_click = self.on_click;
         control::on_click_named(field, self.placeholder, move |_, window, cx| {

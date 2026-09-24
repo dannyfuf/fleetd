@@ -491,7 +491,6 @@ fn trailing_rows(inputs: &RowInputs<'_>, built: &mut BuiltRows) {
                         "{} exited {code}",
                         projection.provider.executable()
                     )),
-                    retryable: false,
                 }),
             ),
             None,

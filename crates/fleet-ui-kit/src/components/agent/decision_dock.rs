@@ -15,7 +15,9 @@
 //! Every option is a real control (ADR 0023): an approval's and a plan's verbs are
 //! [`Button`]s, a question's options are clickable rows. Each shows its key as a [`Kbd`] chip the
 //! owner resolves from the live keymap ([`DecisionDock::kbd_for`]), and a click reports the very
-//! [`DecisionAction`] the key resolves to, so the pointer and the keyboard share one path.
+//! [`DecisionAction`] the key resolves to, so the pointer and the keyboard share one path. This
+//! is one of the few surfaces whose buttons keep their key on the face (DESIGN-SYSTEM §4): the
+//! keys are how a decision is answered, and the dock is where they are learnt.
 
 use std::rc::Rc;
 
@@ -104,7 +106,9 @@ impl DecisionDock {
 
     /// The key chip each control shows, looked up in the live keymap by the owner, which knows
     /// which app action each [`DecisionAction`] is bound as. A control whose action resolves to
-    /// nothing shows no chip. Never a hand-typed key.
+    /// nothing shows no chip. Never a hand-typed key. Resolve it from the key table rather than
+    /// from the focused element, so an overlay taking the focus does not strip the chips and
+    /// resize the controls under it.
     #[must_use]
     pub fn kbd_for(
         mut self,
@@ -322,7 +326,9 @@ fn control_row(
         let button = Button::new(("decision-button", ix), option.label.clone())
             .style(style)
             .disabled(answering)
-            .when_some(kbd(&option.action), Button::kbd)
+            .when_some(kbd(&option.action), |button, kbd| {
+                button.kbd(kbd).show_kbd()
+            })
             .when_some(on_action.clone(), |button, dispatch| {
                 let action = option.action.clone();
                 button.on_click(move |_, window, cx| dispatch(action.clone(), window, cx))
@@ -457,7 +463,16 @@ fn option_rows(
                             dispatch(DecisionAction::Choose(ox), window, cx);
                         })
                 })
-                .child(div().flex_none().child(chip))
+                // One chip-wide slot whichever form the key takes, so an option's label never
+                // moves when the chip resolves or does not.
+                .child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .justify_center()
+                        .min_w(theme.metrics.kbd_h_small)
+                        .child(chip),
+                )
                 .children(check)
                 .child(Text::ui(label).flex_none())
                 .children(description.map(|description| {

@@ -3,14 +3,15 @@
 //!
 //! Every control runs what its key runs. The section nav, the command field, Jobs, Help,
 //! Settings, the update and the daemon pill dispatch the very action their key is bound to, and
-//! show that key as a chip or in their tooltip, read from the live keymap. Two controls are not
-//! actions: the context switcher opens a menu whose rows are the context actions (each with its
-//! key), and `1 needs you` opens the waiting thread the way the palette's `AGENTS` row does.
+//! name that key in their tooltip. The command field alone shows its key on its face: the palette
+//! reaches everything else. Two controls are not actions: the context switcher opens a menu whose
+//! rows are the context actions (each with its key), and `1 needs you` opens the waiting thread
+//! the way the palette's `AGENTS` row does.
 //!
-//! In the Workspace the leading region is a breadcrumb, `← Worktrees / repo / worktree ⌄`: the
-//! back button is `⌃S s`, the worktree is a switcher listing every session as `⌃S W` does, and
-//! the chips after it say what git knows about the worktree (`↑2 ↓0`, `3 files changed`) and
-//! which pull request it has, a click away on GitHub (see [`workspace_breadcrumb`]).
+//! In the Workspace the leading region is a breadcrumb, `‹ repo / worktree ⌄`, then what git and
+//! GitHub know about the worktree: the back button is `⌃S s`, the worktree is a switcher listing
+//! every session as `⌃S W` does, and the facts after it (`#412 CI fail`, `↑2 ↓0`,
+//! `3 files changed`) give way first when the window narrows (see [`workspace_breadcrumb`]).
 
 use std::rc::Rc;
 
@@ -18,9 +19,9 @@ use fleet_core::sessions::TerminalStatus;
 use fleet_core::{agents::ThreadId, ids::ContextId};
 use fleet_proto::request::RequestBody;
 use fleet_ui_kit::{
-    ActiveTheme, Button, ButtonSize, ButtonStyle, Chip, CommandField, DaemonState,
-    HarnessTargetExt, Icon, IconButton, MenuItem, PopoverMenu, PrBadgeState, Segment,
-    SegmentedControl, StatusButton, StatusMark, SwitcherButton, Text, TitleBar, Tone,
+    ActiveTheme, ButtonSize, Chip, CommandField, DaemonState, HarnessTargetExt, Icon, IconButton,
+    MenuItem, PopoverMenu, PrBadgeState, Segment, SegmentedControl, StatusButton, StatusMark,
+    SwitcherButton, Text, TitleBar, Tone,
 };
 use gpui::{Action, AnyElement, App, Entity, IntoElement, SharedString, div, prelude::*};
 
@@ -28,7 +29,7 @@ use crate::{
     actions::{board, daemon, fleet, hub, prefix},
     bridge::Bridge,
     dialogs,
-    presentation::workspace_keys,
+    presentation::{palette_key, workspace_keys},
     screens::{
         hub::{context_board_summary, effective_context},
         workspace::host_unreachable,
@@ -347,11 +348,15 @@ pub(super) fn render(
         Place::Workspace(place) => bar.leading(workspace_breadcrumb(place, state, bridge, cx)),
     };
     let workspace = matches!(model.place, Place::Workspace(_));
-    let bar = bar.center(
-        CommandField::new("titlebar-command", "Search or run a command")
-            .action(Box::new(fleet::OpenPalette))
-            .harness_target("titlebar.command"),
-    );
+    // The key is the key table's, not the focused element's: the palette or a dialog taking the
+    // focus must not take the chip with it.
+    let command = CommandField::new("titlebar-command", "Search or run a command")
+        .action(Box::new(fleet::OpenPalette));
+    let command = match palette_key(workspace) {
+        Some(kbd) => command.kbd(kbd),
+        None => command,
+    };
+    let bar = bar.command(command.harness_target("titlebar.command"));
     trailing(bar, model, workspace, state, bridge).into_any_element()
 }
 
@@ -457,7 +462,13 @@ fn section_nav(place: &HubPlace) -> SegmentedControl {
     })
 }
 
-/// `← Worktrees / acme/api / ⎇ agent ⌄  ↑2 ↓0  3 files changed  #412 CI fail`.
+/// `‹ acme/api / ⎇ agent ⌄   #412 CI fail  ↑2 ↓0  3 files changed`.
+///
+/// Two groups, a wider gap between them: the path (where you are) and the facts about it. As the
+/// window narrows the facts give way first, clipped from their far end so the pull request, which
+/// leads them, goes last; then the repository ellipsizes; the worktree, the name that matters,
+/// holds longest. The facts take no width of their own (a zero flex basis): they get only what
+/// the path leaves.
 fn workspace_breadcrumb(
     place: &WorkspacePlace,
     state: &Entity<AppState>,
@@ -465,49 +476,41 @@ fn workspace_breadcrumb(
     cx: &App,
 ) -> AnyElement {
     let theme = cx.theme();
-    let keys = workspace_keys();
-    let mut back = Button::new("titlebar-back", "Worktrees")
-        .icon(Icon::ChevronLeft)
-        .style(ButtonStyle::Ghost)
+    let back = IconButton::new("titlebar-back", Icon::ChevronLeft, "Back to Worktrees")
         .size(ButtonSize::Compact)
         .action(Box::new(prefix::GoHub))
-        .tooltip("Back to the Hub; the session keeps running");
-    if let Some(kbd) = keys.go_hub.clone() {
-        back = back.kbd(kbd);
-    }
+        .when_some(workspace_keys().go_hub.clone(), IconButton::kbd)
+        .harness_target("titlebar.back")
+        .harness_target("workspace.back");
     let separator = || Text::ui("/").faint().flex_none();
     let chip = |label: SharedString| Chip::new().text(label).filled(true);
-    div()
+    let path = div()
         .flex()
         .min_w_0()
         .items_center()
         .gap(theme.space.sm)
-        .overflow_hidden()
-        .child(
-            back.harness_target("titlebar.back")
-                .harness_target("workspace.back"),
-        )
+        .child(back)
         .when(!place.repo.is_empty(), |el| {
-            el.child(separator())
-                .child(Text::ui(place.repo.clone()).muted().flex_none())
+            el.child(
+                div()
+                    .min_w_0()
+                    .child(Text::ui(place.repo.clone()).muted().ellipsize()),
+            )
+            .child(separator())
         })
-        .child(separator())
         .child(worktree_switcher(place.worktree.clone(), state, bridge))
         .children(
             place
                 .waking
                 .then(|| Text::ui("waking\u{2026}").muted().flex_none()),
-        )
-        .children(place.divergence.clone().map(chip))
-        .children(place.changed.clone().map(chip))
-        .children(place.host.clone().map(|(host, reachable)| {
-            let (icon, tone) = if reachable {
-                (Icon::Cloud, Tone::Secondary)
-            } else {
-                (Icon::CloudOff, Tone::Warning)
-            };
-            Chip::labeled(icon, host).tone(tone).filled(true)
-        }))
+        );
+    let facts = div()
+        .flex()
+        .flex_1()
+        .min_w_0()
+        .items_center()
+        .gap(theme.space.sm)
+        .overflow_hidden()
         .children(place.pr.clone().map(|pr| {
             let url = pr.url.clone();
             StatusButton::new("titlebar-pr", pr.label)
@@ -517,6 +520,25 @@ fn workspace_breadcrumb(
                 .on_click(move |_, _, cx| cx.open_url(&url))
                 .harness_target("workspace.pr")
         }))
+        .children(place.host.clone().map(|(host, reachable)| {
+            let (icon, tone) = if reachable {
+                (Icon::Cloud, Tone::Secondary)
+            } else {
+                (Icon::CloudOff, Tone::Warning)
+            };
+            Chip::labeled(icon, host).tone(tone).filled(true)
+        }))
+        .children(place.divergence.clone().map(chip))
+        .children(place.changed.clone().map(chip));
+    div()
+        .flex()
+        .flex_1()
+        .min_w_0()
+        .items_center()
+        .gap(theme.space.lg)
+        .overflow_hidden()
+        .child(path)
+        .child(facts)
         .into_any_element()
 }
 

@@ -137,15 +137,14 @@ pub(super) fn watch_width(window_width: f32) -> f32 {
     (window_width * 0.4).clamp(360.0, 640.0)
 }
 
-/// A toggle at the right end of the tab strip: a compact ghost button showing its `⌃S` key.
+/// A toggle at the right end of the tab strip: a compact ghost button naming its `⌃S` key in its
+/// tooltip. The key is passed in because over a terminal it is bound only after the prefix, where
+/// a lookup from the focused element finds nothing.
 fn strip_button(id: &'static str, label: &'static str, kbd: Option<Kbd>) -> Button {
-    let button = Button::new(id, label)
+    Button::new(id, label)
         .style(ButtonStyle::Ghost)
-        .size(ButtonSize::Compact);
-    match kbd {
-        Some(kbd) => button.kbd(kbd),
-        None => button,
-    }
+        .size(ButtonSize::Compact)
+        .when_some(kbd, Button::kbd)
 }
 
 /// What the strip's position `position` names right now.

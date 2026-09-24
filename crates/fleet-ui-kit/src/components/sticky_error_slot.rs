@@ -5,27 +5,28 @@
 //!
 //! It is the reason Fleet has no error toasts. A toast that carries the only copy of "gh:
 //! HTTP 502" is a bug: the one message the user needs is also the one that disappears while
-//! they are reading something else. The slot keeps it, shows the key that focuses it, and
-//! lets the user decide when it is over.
+//! they are reading something else. The slot keeps it, names the key that focuses it in its
+//! tooltip, and lets the user decide when it is over.
 //!
 //! ## Pointer and keyboard (ADR 0023)
 //!
 //! ```text
-//! [ ⚠ gh: HTTP 502  x3  ! ][ ✕ ]
+//! [ ⚠ gh: HTTP 502  x3 ][ ✕ ]
 //! ```
 //!
 //! The error itself is one control: clicking it runs [`StickyErrorSlot::action`] (Fleet's `!`,
-//! which opens the failure in the Jobs panel), and the chip after the text is that action's key,
-//! read from the live keymap by the caller. The ✕ beside it is [`StickyErrorSlot::dismiss_action`]
+//! which opens the failure in the Jobs panel), and its tooltip names that action's key, read from
+//! the live keymap by the caller. The ✕ beside it is [`StickyErrorSlot::dismiss_action`]
 //! and paints `sticky_error.close`. The two are siblings, not nested, so a click on the ✕ never
 //! also opens the failure.
 
 use gpui::{Action, App, ElementId, SharedString, Window, div, prelude::*};
 
 use super::{
-    Kbd, KbdSize,
+    Kbd,
     button::ButtonSize,
     dismiss::{Dismiss, dismiss_builders},
+    tooltip::{Tooltip, WithTooltip},
 };
 use crate::{
     harness::HarnessTargetExt as _,
@@ -37,7 +38,7 @@ use crate::{
 
 type ActivateFn = Box<dyn Fn(&mut Window, &mut App) + 'static>;
 
-/// `⚠ gh: HTTP 502 · !`
+/// `⚠ gh: HTTP 502`
 #[derive(IntoElement)]
 pub struct StickyErrorSlot {
     id: ElementId,
@@ -63,7 +64,8 @@ impl StickyErrorSlot {
         }
     }
 
-    /// The key that focuses the error, resolved by the caller from the live keymap.
+    /// The key that focuses the error, named in the tooltip; resolved by the caller from the
+    /// live keymap.
     ///
     /// Inside the Workspace this is the prefixed chord (`⌃S !`, never `!`) — [D-8]: over a
     /// terminal a bare `!` goes to the PTY.
@@ -79,8 +81,8 @@ impl StickyErrorSlot {
         self
     }
 
-    /// What a click on the error does: dispatch `action` to the focused element, exactly as the
-    /// key on the chip would.
+    /// What a click on the error does: dispatch `action` to the focused element, exactly as its
+    /// key would.
     pub fn action(mut self, action: Box<dyn Action>) -> Self {
         self.action = Some(action);
         self
@@ -137,10 +139,9 @@ impl RenderOnce for StickyErrorSlot {
                     .tone(Tone::Danger)
                     .flex_none()
             }))
-            .children(
-                self.kbd
-                    .map(|kbd| div().flex_none().child(kbd.size(KbdSize::Small))),
-            )
+            .when_some(self.kbd, |el, kbd| {
+                el.with_tooltip(Tooltip::new("Show the failure").kbd(kbd), cx)
+            })
             .when_some(activate, |el, activate| {
                 super::control::on_activate(
                     el.hover(move |s| s.bg(hover_bg)),

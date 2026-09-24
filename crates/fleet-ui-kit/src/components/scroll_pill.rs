@@ -7,7 +7,7 @@
 //! toast `no scrollback in alt-screen` instead.
 //!
 //! The two components here are not variants of each other. The **pill** is a *mode*
-//! affordance: it exists while Scroll mode is active and it lists the keys that mode adds. The
+//! affordance: it exists while Scroll mode is active and says where in the scrollback you are. The
 //! **badge** is a *state* affordance: a viewport scrolled up with the wheel is not in Scroll
 //! mode and would otherwise look exactly like a live one — which is how "my agent stopped
 //! printing" bug reports are born.
@@ -15,7 +15,6 @@
 use gpui::{App, Window, div, prelude::*};
 
 use crate::{
-    components::KeyHintRow,
     icons::{Icon, IconSize},
     text::Text,
     theme::ActiveTheme,
@@ -27,7 +26,6 @@ use crate::{
 pub struct ScrollPill {
     offset: usize,
     scrollback_len: usize,
-    selecting: bool,
     alt_screen: bool,
 }
 
@@ -37,15 +35,8 @@ impl ScrollPill {
         Self {
             offset,
             scrollback_len,
-            selecting: false,
             alt_screen: false,
         }
-    }
-
-    /// Add the second line `v select · y yank · Esc exit`.
-    pub fn selecting(mut self, selecting: bool) -> Self {
-        self.selecting = selecting;
-        self
     }
 
     /// Suppress the pill because an alt-screen app is running.
@@ -103,12 +94,6 @@ impl RenderOnce for ScrollPill {
                             .tone(Tone::Secondary),
                     ),
             )
-            .children(self.selecting.then(|| {
-                KeyHintRow::new()
-                    .key("v", "select")
-                    .key("y", "yank")
-                    .key("Esc", "exit")
-            }))
             .into_any_element()
     }
 }
