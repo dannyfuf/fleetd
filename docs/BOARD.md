@@ -2432,11 +2432,15 @@ and the copy, and the repaired document is written at once — and every other s
 time the service writes is RFC 3339 UTC to the second (`2026-09-24T10:00:00Z`).
 
 Each schedule has a directory, `<FLEET_HOME>/schedules/<id>/`: `work/` is every run's working
-directory, and `logs/<YYYYMMDDTHHMMSSZ>.log` holds one run's whole output, named from its
-`started_at`. A run's `started_at` is its key — its job, its outcome and its log are matched by it
-— so it is unique within the schedule: a fire in the same second as a run already recorded is
-stamped one second later. The log of a run `push_run` drops past the cap is deleted with it; the
-cap drops the oldest *finished* runs and never a live one, whose child is still writing its log. Retention unlinks a stored `log_path` only when its absolute, parent-dir-free path has a
+directory, and `logs/<YYYYMMDDTHHMMSSZ>.log` holds one run's output, named from its `started_at`.
+Each stdout or stderr line is capped at 64 KiB including a truncation marker; the rest of an
+over-long line is drained without buffering. A log stores at most 16 MiB of complete lines plus
+one truncation-marker line. Output after that cap is still drained and parsed for the provider's
+result, but is not persisted. A run's `started_at` is its key — its job, its outcome and its log are
+matched by it — so it is unique within the schedule: a fire in the same second as a run already
+recorded is stamped one second later. The log of a run `push_run` drops past the cap is deleted with
+it; the cap drops the oldest *finished* runs and never a live one, whose child is still writing its
+log. Retention unlinks a stored `log_path` only when its absolute, parent-dir-free path has a
 canonical parent inside that schedule's `logs/` directory; malformed or escaped paths are removed
 from history but left on disk. Deleting a schedule deletes its directory.
 
@@ -2460,16 +2464,18 @@ The program is the configured `agent_binaries` entry for the provider, else bare
 The run's working directory is the schedule's `work/`, created on demand. Its environment is the
 login environment of that directory, with the directory of the `fleet` binary prepended to `PATH`,
 `FLEET_HOME=<daemon home>`, `FLEET_BOARD=<board id>` and `FLEET_SCHEDULE=<schedule id>` set, and the
-variables the Claude and Codex adapters strip removed. The footer's `{fleet}` is `ScheduleRunner::fleet_program`, the very
-binary whose directory leads that `PATH`. The timeout is `timeout_minutes`; a timeout, a cancel and a
+variables the Claude and Codex adapters strip removed. The footer's `{fleet}` is
+`ScheduleRunner::fleet_program`, the very binary whose directory leads that `PATH`. The timeout is
+`timeout_minutes`; a timeout, a cancel and a
 daemon shutdown that drops the run all kill the child's whole process group, and so does the
 agent's own exit (`ShellCommand::kill_group_on_exit`), so the MCP servers and tool shells an agent
 started go with it. Any command streamed through the shell whose descendants keep its output open
 after it exited is not failed for it: after the two-second drain those descendants are killed, a
 `warn` names the command, and the exit status stands. A shell error names the program and its
-subcommands only, never the prompt. Every output line is appended to the run's log file. For Claude the last `{"type":"result"}` line is kept (non-JSON lines are ignored);
-for Codex the `-o` file is read after exit, lossily like the output stream, so an invalid byte
-does not cost the run its `SUMMARY:` line.
+subcommands only, never the prompt. Every capped output line reaches the result parser and, until
+the run-log cap, the log file. For Claude the last `{"type":"result"}` line is kept (non-JSON lines
+are ignored); for Codex the `-o` file is read after exit, lossily like the output stream, so an
+invalid byte does not cost the run its `SUMMARY:` line.
 
 | What happened | Outcome | Summary |
 | --- | --- | --- |

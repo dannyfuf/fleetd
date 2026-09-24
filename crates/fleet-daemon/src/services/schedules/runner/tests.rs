@@ -7,17 +7,21 @@ use fleet_core::{
     paths::FleetHome,
     schedule::{Cadence, Schedule, ScheduleAgent, ScheduleOutcome, ScheduleRun},
 };
+use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    CANCELED_SUMMARY, EnvironmentSource, HeadlessRunner, ScheduleRunner, claude_argv, codex_argv,
-    lock,
+    CANCELED_SUMMARY, EnvironmentSource, HeadlessRunner, RUN_LOG_MAX_BYTES, RUN_LOG_QUEUE_CAPACITY,
+    RUN_LOG_TRUNCATION_MARKER, RunLog, ScheduleRunner, StreamState, claude_argv, codex_argv, lock,
 };
 use crate::{
     DaemonError, DaemonResult,
     adapters::{
         files::RealFiles,
-        shell::{DetachedProcess, LineCallback, Shell, ShellCommand, ShellResult},
+        shell::{
+            DetachedProcess, LineCallback, STREAM_LINE_MAX_BYTES, STREAM_LINE_TRUNCATION_MARKER,
+            Shell, ShellCommand, ShellResult,
+        },
     },
     stores::config::ConfigStore,
 };
@@ -92,7 +96,7 @@ impl Shell for ScriptedShell {
         }
         lock(&self.commands).push(command);
         for line in &self.lines {
-            on_line(line.clone());
+            on_line(line.clone()).await;
         }
         match self.exit {
             Exit::Status(status) => Ok(ShellResult {
@@ -541,6 +545,91 @@ async fn the_log_file_receives_every_line() {
         .await;
     let written = std::fs::read_to_string(&log_path).expect("log written");
     assert_eq!(written, format!("{}\n", lines.join("\n")));
+}
+
+#[tokio::test]
+async fn output_beyond_the_run_log_cap_writes_one_marker_and_keeps_parsing_results() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let path = directory.path().join("capped.log");
+    let log = RunLog::open(&path).await.expect("open run log");
+    let stream = Arc::new(std::sync::Mutex::new(StreamState::default()));
+    let callback = log.callback(Arc::clone(&stream));
+    let line = "x".repeat(STREAM_LINE_MAX_BYTES);
+    let lines_to_cap = RUN_LOG_MAX_BYTES / (line.len() + 1) + 2;
+
+    for _ in 0..lines_to_cap {
+        callback(line.clone()).await;
+    }
+    callback(RESULT_LINE.to_owned()).await;
+    drop(callback);
+    log.finish(&schedule(AgentKind::Claude).id).await;
+
+    let written = std::fs::read(&path).expect("read capped log");
+    assert!(
+        written.len() <= RUN_LOG_MAX_BYTES + RUN_LOG_TRUNCATION_MARKER.len(),
+        "{} bytes",
+        written.len()
+    );
+    let text = String::from_utf8(written).expect("the test output is UTF-8");
+    assert_eq!(text.matches(RUN_LOG_TRUNCATION_MARKER.trim()).count(), 1);
+    assert!(text.ends_with(RUN_LOG_TRUNCATION_MARKER));
+    assert_eq!(
+        lock(&stream).claude_final_message().as_deref(),
+        Some("Done.\nSUMMARY: 2 created, 1 existing, 0 reopened")
+    );
+}
+
+#[test]
+fn the_remembered_last_line_is_capped() {
+    let mut stream = StreamState::default();
+    stream.observe(&"x".repeat(STREAM_LINE_MAX_BYTES * 2));
+
+    let line = stream.last_line.expect("last line");
+    assert_eq!(line.len(), STREAM_LINE_MAX_BYTES);
+    assert!(line.ends_with(STREAM_LINE_TRUNCATION_MARKER));
+}
+
+#[tokio::test]
+async fn a_slow_log_writer_delivers_every_queued_line_under_the_cap() {
+    let (writer, mut reader) = tokio::io::duplex(1);
+    let log = RunLog::with_writer(writer, "slow test writer".to_owned(), 0);
+    let stream = Arc::new(std::sync::Mutex::new(StreamState::default()));
+    let callback = log.callback(stream);
+    let lines = (0..RUN_LOG_QUEUE_CAPACITY + 4)
+        .map(|index| format!("line-{index}"))
+        .collect::<Vec<_>>();
+    let expected = format!("{}\n", lines.join("\n"));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let producer_started = started.notified();
+    let producer = tokio::spawn({
+        let started = Arc::clone(&started);
+        async move {
+            started.notify_one();
+            for line in lines {
+                callback(line).await;
+            }
+        }
+    });
+
+    producer_started.await;
+    tokio::task::yield_now().await;
+    assert!(
+        !producer.is_finished(),
+        "the bounded queue applies backpressure while the writer is stalled"
+    );
+    let reader = tokio::spawn(async move {
+        let mut bytes = Vec::new();
+        reader
+            .read_to_end(&mut bytes)
+            .await
+            .expect("read slow writer output");
+        bytes
+    });
+
+    producer.await.expect("line producer completes");
+    log.finish(&schedule(AgentKind::Claude).id).await;
+    let written = reader.await.expect("reader completes");
+    assert_eq!(String::from_utf8(written).expect("UTF-8 log"), expected);
 }
 
 #[tokio::test]

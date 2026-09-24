@@ -124,7 +124,7 @@ impl Shell for FakeShell {
             return Err(DaemonError::Cancelled);
         }
         for line in result.stdout.lines().chain(result.stderr.lines()) {
-            on_line(line.to_owned());
+            on_line(line.to_owned()).await;
         }
         // `RealShell` streams every line through `on_line` and keeps the captured buffers
         // empty; a fake that returned them would let tests assert output production never has.
@@ -441,7 +441,10 @@ mod tests {
             .run_streaming(
                 command,
                 CancellationToken::new(),
-                Arc::new(move |line| lock(&sink).push(line)),
+                Arc::new(move |line| {
+                    lock(&sink).push(line);
+                    Box::pin(async {})
+                }),
             )
             .await
             .unwrap_or_else(|error| panic!("{error}"));

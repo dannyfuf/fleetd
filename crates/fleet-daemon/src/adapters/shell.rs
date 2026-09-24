@@ -2,7 +2,9 @@
 
 use std::{
     collections::BTreeMap,
+    future::Future,
     path::{Path, PathBuf},
+    pin::Pin,
     process::Stdio,
     sync::Arc,
     time::Duration,
@@ -20,6 +22,9 @@ use tokio_util::sync::CancellationToken;
 use crate::{DaemonError, DaemonResult};
 
 const STREAM_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+/// Maximum encoded size of one streamed line, including its truncation marker.
+pub(crate) const STREAM_LINE_MAX_BYTES: usize = 64 * 1024;
+pub(crate) const STREAM_LINE_TRUNCATION_MARKER: &str = " [fleet: line truncated]";
 
 /// A fully specified process invocation without shell interpolation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,8 +153,14 @@ pub struct DetachedProcess {
     pub pid: u32,
 }
 
+/// Future returned by a streaming line callback.
+pub type LineCallbackFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
+
 /// Callback receiving complete, lossily decoded stdout and stderr lines from a streaming child.
-pub type LineCallback = Arc<dyn Fn(String) + Send + Sync>;
+///
+/// The future lets a bounded consumer apply backpressure without blocking a Tokio worker. Stream
+/// drain tasks remain abortable while they wait for the consumer.
+pub type LineCallback = Arc<dyn Fn(String) -> LineCallbackFuture + Send + Sync>;
 
 /// External process boundary used by all command-line adapters.
 #[async_trait]
@@ -506,18 +517,55 @@ where
     R: tokio::io::AsyncRead + Unpin,
 {
     let mut reader = BufReader::new(reader);
-    let mut buffer = Vec::new();
-    while reader.read_until(b'\n', &mut buffer).await? != 0 {
-        while buffer
-            .last()
-            .is_some_and(|byte| matches!(byte, b'\n' | b'\r'))
-        {
-            buffer.pop();
+    let mut line = Vec::with_capacity(STREAM_LINE_MAX_BYTES);
+    let mut truncated = false;
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            if !line.is_empty() || truncated {
+                on_line(finish_stream_line(&mut line, truncated)).await;
+            }
+            break;
         }
-        on_line(String::from_utf8_lossy(&buffer).into_owned());
-        buffer.clear();
+
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let consumed = newline.map_or(available.len(), |position| position + 1);
+        let content = &available[..newline.unwrap_or(available.len())];
+        if !truncated {
+            let remaining = STREAM_LINE_MAX_BYTES.saturating_sub(line.len());
+            line.extend_from_slice(&content[..content.len().min(remaining)]);
+            truncated = content.len() > remaining;
+        }
+        reader.consume(consumed);
+
+        if newline.is_some() {
+            on_line(finish_stream_line(&mut line, truncated)).await;
+            truncated = false;
+        }
     }
     Ok(())
+}
+
+fn finish_stream_line(buffer: &mut Vec<u8>, truncated: bool) -> String {
+    while buffer.last() == Some(&b'\r') {
+        buffer.pop();
+    }
+    let mut line = String::from_utf8_lossy(buffer).into_owned();
+    buffer.clear();
+    cap_stream_line(&mut line, truncated);
+    line
+}
+
+pub(crate) fn cap_stream_line(line: &mut String, force_marker: bool) {
+    if force_marker || line.len() > STREAM_LINE_MAX_BYTES {
+        let limit = STREAM_LINE_MAX_BYTES - STREAM_LINE_TRUNCATION_MARKER.len();
+        let mut boundary = limit.min(line.len());
+        while !line.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        line.truncate(boundary);
+        line.push_str(STREAM_LINE_TRUNCATION_MARKER);
+    }
 }
 
 fn concise_output<'a>(stderr: &'a str, stdout: &'a str) -> &'a str {
@@ -584,7 +632,7 @@ mod tests {
                     secret.clone(),
                 ]),
                 CancellationToken::new(),
-                Arc::new(|_| {}),
+                Arc::new(|_| Box::pin(async {})),
             )
             .await
             .expect_err("a program that is not on PATH cannot stream");
@@ -604,6 +652,7 @@ mod tests {
                 CancellationToken::new(),
                 Arc::new(move |_| {
                     observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    Box::pin(async {})
                 }),
             ),
         )
@@ -627,6 +676,7 @@ mod tests {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .push(line);
+                    Box::pin(async {})
                 }),
             )
             .await
@@ -639,6 +689,33 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
             ["ok", "�", "after"]
         );
+    }
+
+    #[tokio::test]
+    async fn a_newline_free_stream_is_capped_without_buffering_the_remainder() {
+        let input = vec![b'x'; STREAM_LINE_MAX_BYTES * 3];
+        let lines = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = Arc::clone(&lines);
+
+        stream_lines(
+            input.as_slice(),
+            Arc::new(move |line| {
+                observed
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(line);
+                Box::pin(async {})
+            }),
+        )
+        .await
+        .expect("the oversized line is drained");
+
+        let lines = lines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].len(), STREAM_LINE_MAX_BYTES);
+        assert!(lines[0].ends_with(STREAM_LINE_TRUNCATION_MARKER));
     }
 
     #[tokio::test]
@@ -655,6 +732,7 @@ mod tests {
                         if let Ok(pid) = line.parse() {
                             let _ignored = pid_sender.send(pid);
                         }
+                        Box::pin(async {})
                     }),
                 )
                 .await
@@ -697,6 +775,7 @@ mod tests {
                         if let Ok(pid) = line.parse() {
                             let _ignored = pid_sender.send(pid);
                         }
+                        Box::pin(async {})
                     }),
                 )
                 .await
@@ -741,6 +820,7 @@ mod tests {
                         if let Ok(pid) = line.parse::<u32>() {
                             let _ignored = pid_sender.send(pid);
                         }
+                        Box::pin(async {})
                     }),
                 ),
             )
@@ -764,7 +844,7 @@ mod tests {
 
     #[tokio::test]
     async fn stream_read_failure_fails_command() {
-        let error = stream_lines(BrokenReader::default(), Arc::new(|_| {}))
+        let error = stream_lines(BrokenReader::default(), Arc::new(|_| Box::pin(async {})))
             .await
             .expect_err("read failure must propagate");
         assert_eq!(error.kind(), std::io::ErrorKind::Other);

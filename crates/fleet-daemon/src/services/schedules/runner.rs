@@ -18,12 +18,17 @@ use fleet_core::{
         SCHEDULE_SUMMARY_MAX_CHARS, Schedule, ScheduleAgent, ScheduleOutcome, summary_line,
     },
 };
-use tokio::{io::AsyncWriteExt, sync::mpsc};
+use tokio::{
+    io::{AsyncWrite, AsyncWriteExt},
+    sync::mpsc,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     DaemonError, DaemonResult,
-    adapters::shell::{LineCallback, Shell, ShellCommand, ShellResult},
+    adapters::shell::{
+        LineCallback, STREAM_LINE_MAX_BYTES, Shell, ShellCommand, ShellResult, cap_stream_line,
+    },
     agents::{
         claude::argv::permission_mode_to_wire,
         harness::{probe::strip_list, process},
@@ -36,6 +41,12 @@ mod tests;
 
 /// The summary a run cancelled through its job carries.
 const CANCELED_SUMMARY: &str = "canceled";
+/// Thirty-two capped lines absorb stdout/stderr bursts while bounding the queue near 2 MiB.
+const RUN_LOG_QUEUE_CAPACITY: usize = 32;
+/// Maximum logged output for one run, excluding the single truncation marker.
+const RUN_LOG_MAX_BYTES: usize = 16 * 1024 * 1024;
+const RUN_LOG_TRUNCATION_MARKER: &str = "[fleet: run log truncated at 16 MiB]\n";
+const RUN_LOG_WRITER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// What one headless run produced.
 #[derive(Debug, Clone, PartialEq)]
@@ -358,7 +369,12 @@ impl StreamState {
                     self.result = Some(value);
                 }
             }
-            _ => self.last_line = Some(trimmed.to_owned()),
+            _ => {
+                let mut line = trimmed.to_owned();
+                cap_stream_line(&mut line, false);
+                debug_assert!(line.len() <= STREAM_LINE_MAX_BYTES);
+                self.last_line = Some(line);
+            }
         }
     }
 
@@ -473,10 +489,10 @@ async fn read_last_message(path: &Path) -> Option<String> {
     Some(text)
 }
 
-/// The run's log file, written by a task fed from the synchronous line callback.
+/// The run's log file, written by a task fed from the asynchronous line callback.
 struct RunLog {
     /// Taken by `finish`, so a callback the shell kept alive cannot hold the writer open.
-    sender: Arc<Mutex<Option<mpsc::UnboundedSender<String>>>>,
+    sender: Arc<Mutex<Option<mpsc::Sender<String>>>>,
     writer: tokio::task::JoinHandle<()>,
 }
 
@@ -487,55 +503,100 @@ impl RunLog {
                 .await
                 .map_err(|error| DaemonError::fs(parent, error))?;
         }
-        let mut file = tokio::fs::OpenOptions::new()
+        let file = tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(path)
             .await
             .map_err(|error| DaemonError::fs(path, error))?;
-        let (sender, mut receiver) = mpsc::unbounded_channel::<String>();
-        let log_name = path.display().to_string();
+        let bytes_written = file
+            .metadata()
+            .await
+            .map_err(|error| DaemonError::fs(path, error))?
+            .len();
+        let bytes_written = match usize::try_from(bytes_written) {
+            Ok(bytes) => bytes,
+            Err(_) => usize::MAX,
+        };
+        Ok(Self::with_writer(
+            file,
+            path.display().to_string(),
+            bytes_written,
+        ))
+    }
+
+    fn with_writer<W>(mut output: W, log_name: String, mut bytes_written: usize) -> Self
+    where
+        W: AsyncWrite + Send + Unpin + 'static,
+    {
+        let (sender, mut receiver) = mpsc::channel::<String>(RUN_LOG_QUEUE_CAPACITY);
         let writer = tokio::spawn(async move {
             let mut failed = false;
+            let mut truncated = false;
             while let Some(mut line) = receiver.recv().await {
-                if failed {
+                if failed || truncated {
                     continue;
                 }
                 line.push('\n');
-                if let Err(error) = file.write_all(line.as_bytes()).await {
+                if bytes_written.saturating_add(line.len()) > RUN_LOG_MAX_BYTES {
+                    if let Err(error) = output.write_all(RUN_LOG_TRUNCATION_MARKER.as_bytes()).await
+                    {
+                        tracing::warn!(path = %log_name, %error, "could not append to a scheduled run's log");
+                        failed = true;
+                    }
+                    truncated = true;
+                    continue;
+                }
+                if let Err(error) = output.write_all(line.as_bytes()).await {
                     tracing::warn!(path = %log_name, %error, "could not append to a scheduled run's log");
                     failed = true;
+                } else {
+                    bytes_written += line.len();
                 }
             }
-            if let Err(error) = file.flush().await {
+            if let Err(error) = output.flush().await {
                 tracing::warn!(path = %log_name, %error, "could not flush a scheduled run's log");
             }
         });
-        Ok(Self {
+        Self {
             sender: Arc::new(Mutex::new(Some(sender))),
             writer,
-        })
+        }
     }
 
     /// The line callback: remembers what the result mapping needs and queues the line.
     fn callback(&self, stream: Arc<Mutex<StreamState>>) -> LineCallback {
         let sender = Arc::clone(&self.sender);
         Arc::new(move |line: String| {
-            lock(&stream).observe(&line);
-            let queued = lock(&sender)
-                .as_ref()
-                .is_some_and(|sender| sender.send(line).is_ok());
-            if !queued {
-                tracing::debug!("a scheduled run printed a line after its log closed");
-            }
+            let sender = Arc::clone(&sender);
+            let stream = Arc::clone(&stream);
+            Box::pin(async move {
+                // Result parsing remains live after the file cap; only persistence is truncated.
+                lock(&stream).observe(&line);
+                let queued_sender = { lock(&sender).clone() };
+                let queued = match queued_sender {
+                    Some(sender) => sender.send(line).await.is_ok(),
+                    None => false,
+                };
+                if !queued {
+                    tracing::debug!("a scheduled run printed a line after its log closed");
+                }
+            })
         })
     }
 
     /// Closes the queue and waits for every queued line to reach the file.
-    async fn finish(self, schedule: &fleet_core::ids::ScheduleId) {
+    async fn finish(mut self, schedule: &fleet_core::ids::ScheduleId) {
         drop(lock(&self.sender).take());
-        if let Err(error) = self.writer.await {
-            tracing::warn!(%schedule, %error, "a scheduled run's log writer failed");
+        match tokio::time::timeout(RUN_LOG_WRITER_SHUTDOWN_TIMEOUT, &mut self.writer).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(%schedule, %error, "a scheduled run's log writer failed");
+            }
+            Err(_) => {
+                self.writer.abort();
+                tracing::warn!(%schedule, "a scheduled run's log writer did not stop; aborting it");
+            }
         }
     }
 }
