@@ -9,7 +9,7 @@
       "models": ["scripted-sonnet", "scripted-opus"],
       "reasoning_efforts": ["low", "medium", "high"]
     },
-    { "type": "text", "text": "Let me read the manifest first.", "pace_ms": 10 },
+    { "type": "text", "text": "Let me read the manifest first.", "pace_ms": 100 },
     {
       "type": "tool_call",
       "id": "toolu_01scripted0000000000001",
@@ -20,13 +20,13 @@
     {
       "type": "text",
       "text": "It is a plain binary crate called demo, with no dependencies.",
-      "pace_ms": 10
+      "pace_ms": 100
     },
     { "type": "end_turn" },
     {
       "type": "text",
       "text": "Yes. The binary name is demo, declared in the package table.",
-      "pace_ms": 10
+      "pace_ms": 100
     },
     { "type": "end_turn" }
   ]
