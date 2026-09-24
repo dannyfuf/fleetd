@@ -320,8 +320,8 @@ alias.
 commands, `target/`, lints, Zig, scripting and logs but no performance section; add the 8 ms
 frame budget there in the same commit as the first perf fix. `crates/fleet-term/benches/viewport.rs`
 is a `#[test] #[ignore]` manual timer with no `[[bench]]`/`harness = false` in its `Cargo.toml` —
-convert it to `criterion` before quoting numbers from it. Root `Cargo.toml` has only
-`[profile.dev]` (`:81-88`); add `[profile.release]` with `lto = "thin"`, `codegen-units = 1`,
+convert it to `criterion` before quoting numbers from it. Root `Cargo.toml` has only the
+`[profile.dev]` family; add `[profile.release]` with `lto = "thin"`, `codegen-units = 1`,
 `debug = "limited"` plus a `release-fast` profile, mirroring `zed/Cargo.toml:1059-1071`.
 
 ## Review checklist

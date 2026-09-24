@@ -13,33 +13,107 @@ make run         # build the workspace, restart fleetd, and open Fleet (ARGS="..
 make run-release # the same with the release profile
 make restart     # restart fleetd from this build — run it after changing daemon code
 make daemon      # restart fleetd and follow its log
-make build       # build the workspace
+make build       # build the workspace with the dev profile
+make release     # build the workspace with the release profile, into target/release
 make check       # cargo check --workspace --all-targets
 make test        # build fleetd, then cargo test --workspace against it
 make fmt         # cargo fmt --all
 make lint        # fmt --check plus Clippy with warnings denied
 make doctor      # build Fleet and run its diagnostics
 make bootstrap   # install and verify the pinned Zig toolchain
+make timings     # build with Cargo's per-crate compile-time report
+make build-info  # toolchain, compiler cache and target/ size
 make prune       # drop build artifacts unused for SWEEP_DAYS (7) days; runs before every build
 make fresh       # cargo clean, then rebuild from scratch (RELEASE=1 supported)
 ```
 
-## Keeping `target/` small
+`RELEASE=1` switches `build`, `run`, `restart`, `daemon`, `doctor`, `timings` and the harness
+targets to the release profile.
 
-A debug build of this workspace used to weigh ~19 GB, mostly per-crate debuginfo objects for
-dependencies (macOS keeps them unpacked next to the `.rlib`s) plus `incremental/` state. Cargo
-also never garbage-collects `target/`, so dependency bumps and toolchain updates accumulate stale
-artifacts on top. Two things keep it in check:
+## Building
 
-- The dev profile disables debuginfo for dependencies (`[profile.dev.package."*"]` in
-  `Cargo.toml`). They are already optimized, so that debuginfo was mostly dead weight; workspace
-  crates keep full debuginfo.
-- `make build` (and therefore `make run`) runs `make prune` first, which uses
-  [`cargo-sweep`](https://github.com/holmgr/cargo-sweep) (installed on first use) to delete
-  artifacts not touched in `SWEEP_DAYS` days or built by toolchains no longer installed. Anything
-  it removes is simply rebuilt on demand.
+### The two profiles
 
-When `target/` still grows past what you want, `make fresh` wipes it and rebuilds from scratch.
+| | Dev (`make build`, `make run`) | Release (`make release`, `make run-release`) |
+| --- | --- | --- |
+| Workspace crates | `opt-level = 1`, `debug = "limited"`, incremental | `opt-level = 3`, no debuginfo |
+| Dependencies | `opt-level = 0` except a hot list at 3, no debuginfo | `opt-level = 3` |
+| Output | `target/debug/` | `target/release/` |
+| Cold build, 12-core 16 GB Linux | ~5 min | ~6 min |
+| Use it for | everything day to day: editing, tests, the harness | measuring performance, a build you keep running |
+
+The dev profile is Zed's shape (`docs/decisions/0001-gpui-and-toolchain.md`): the ~800 dependencies
+compile unoptimized, except the ones GPUI spends its frames in — layout, text shaping and fonts,
+SVG, images, the `wgpu` renderer, syntax highlighting, JSON and the proc-macros — which the
+`[profile.dev.package]` list in `Cargo.toml` optimizes. A dependency that shows up hot in a profile
+of a dev build joins that list; `[profile.dev.package."*"]` does not go back to `opt-level = 3`,
+which more than doubled the cold build and pushed a 16 GB machine into swap.
+
+`debug = "limited"` keeps backtraces and function breakpoints but not local variables. For a
+debugging session that needs them, `CARGO_PROFILE_DEV_DEBUG=full make build`; switching back
+recompiles the workspace crates once.
+
+Only `cargo test` and `make test` use a third build of much of the graph: test-only features
+(`tokio/test-util`, `gpui/test-support`) change those crates, so the first test run after a build
+compiles them again (~7 min cold). Integration tests are one binary per crate
+(`crates/<crate>/tests/integration.rs`), so each links the dependency graph once.
+
+### Measuring
+
+`make timings` builds with `cargo build --timings` and prints the path of the HTML report: a bar
+per crate, the critical path and CPU use. It only shows crates that build compiled, so run it after
+`make clean` for the cold picture or after an edit for the incremental one. `make build-info`
+prints the toolchain, whether a compiler cache is active and its hit rate, and how much of
+`target/` is incremental state.
+
+### Sharing dependencies between worktrees
+
+Build artifacts use Cargo's default target directory, `target/` inside this repository. Sharing
+that repository-local directory between commands in the same worktree is supported. Do not point
+multiple worktrees at one external `CARGO_TARGET_DIR`: Cargo's relative dep-info paths can make
+one worktree accept another's stale artifacts. Give parallel worktrees separate target
+directories when an override is necessary. The same holds for a shared `build.build-dir`:
+workspace crates hash identically in every worktree, so they would overwrite each other.
+
+To stop every new worktree from compiling all its dependencies again, share them through
+[sccache](https://github.com/mozilla/sccache) instead. It keys on the content of each `rustc`
+invocation and skips incremental builds, so third-party crates are shared and workspace crates
+never are. Put a Cargo config in the directory that holds your worktrees (Cargo reads config from
+the working directory's ancestors), for example `~/.fleet/worktrees/<owner>/fleetd/.cargo/config.toml`:
+
+```toml
+[build]
+rustc-wrapper = "/path/to/sccache"
+```
+
+It is per machine, not in the repository, and `make build-info` shows whether it is active. Do not
+export `CARGO_TARGET_DIR` alongside it: sccache hashes every `CARGO_*` variable, so a per-worktree
+value turns every lookup into a miss. Measured, a new worktree's first build drops from ~4m50s to
+~4m: about a quarter of dependencies still miss because their build scripts embed the checkout
+path, and build scripts themselves are never cached — `libghostty-vt-sys` still runs its ~100 s
+`zig build` of Ghostty once per worktree.
+
+### Cleaning up
+
+Cargo never garbage-collects `target/`: dependency bumps, toolchain updates and profile changes
+leave stale artifacts behind, and incremental state grows with every edit. From least to most
+drastic:
+
+```sh
+make prune              # artifacts unused for SWEEP_DAYS (7) days or built by uninstalled toolchains
+make clean-incremental  # incremental caches — usually most of target/debug; edits recompile a crate whole once
+make clean-release      # target/release only; the dev build is untouched
+make clean              # all of target/; the next build is a cold one
+make fresh              # clean, then rebuild (RELEASE=1 supported)
+make harness-prune      # harness run directories older than SWEEP_DAYS, outside target/
+```
+
+`make build` (and therefore `make run`) runs `make prune` first. It uses
+[`cargo-sweep`](https://github.com/holmgr/cargo-sweep), installed on first use; anything it removes
+is rebuilt on demand. A worktree you are done with takes its `target/` with it when you delete it —
+removing the worktree directory is the cleanup.
+
+## Restarting the daemon
 
 `make run` restarts the daemon: it depends on `make restart`, so the freshly built app never talks
 to a stale `fleetd`. Restarting is also explicit through `make restart` or:
@@ -53,6 +127,17 @@ waits for its socket to disappear, and starts the newly built sibling `fleetd` b
 survive it: each PTY lives in a detached `fleetd pty-hold` process that the next daemon reattaches
 to (`docs/ARCHITECTURE.md`, "Detached PTY holders"), so restarting after a daemon change no longer
 kills the agents you have running. Only `ctrl-shift-q` stops them.
+
+## Running tests
+
+Each crate's integration tests are one binary, `integration`, whose modules are the files in
+`crates/<crate>/tests/` (`tests/integration.rs` declares them; `autotests = false` in the
+manifest). A new test file needs a `mod` line there, and the `workspace_layering` suite fails
+until it has one. Select a file by module path:
+
+```sh
+cargo test -p fleet-daemon --test integration pty_holder::
+```
 
 A test that creates a PTY terminal must end its session: the terminal's child lives in a
 `fleetd pty-hold` process that deliberately outlives every daemon, so letting the test process
@@ -93,12 +178,6 @@ cannot resolve is therefore still a pass while the sibling exists; the check fai
 to fix `PATH`, only when neither is there. The line speaks for that daemon-side fallback alone:
 doctor runs with no delegation in flight, so it cannot see the `fleet` path a caller sends with
 its own `fleet subagent run`.
-
-Direct Cargo equivalents work as usual. Build artifacts use Cargo's default target directory,
-`target/` inside this repository. Sharing that repository-local directory between commands in
-the same worktree is supported. Do not point multiple worktrees at one external
-`CARGO_TARGET_DIR`: Cargo's relative dep-info paths can make one worktree accept another's stale
-artifacts. Give parallel worktrees separate target directories when an override is necessary.
 
 ## Lints and formatting
 

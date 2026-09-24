@@ -1959,6 +1959,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-channel",
+ "fleet-drive",
  "gpui",
  "regex",
  "serde",

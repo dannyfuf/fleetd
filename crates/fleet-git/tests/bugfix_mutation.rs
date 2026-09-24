@@ -1,5 +1,4 @@
-#[allow(dead_code)]
-mod support;
+use crate::support;
 
 use fleet_git::{
     CommitOptions, ConflictChoice, DiffSide, GitError, HunkSelection, MergeOptions, PatchAction,

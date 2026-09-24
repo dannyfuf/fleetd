@@ -34,7 +34,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::net::UnixStream;
 use tokio_util::codec::Framed;
 
-mod infra;
+use crate::infra;
 
 const IO_TIMEOUT: Duration = Duration::from_secs(60);
 const READY_TIMEOUT: Duration = Duration::from_secs(30);

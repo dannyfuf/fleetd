@@ -33,7 +33,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{broadcast, watch};
 use tokio_util::codec::Framed;
 
-mod infra;
+use crate::infra;
 
 #[tokio::test]
 async fn real_remote_daemon_inventory_is_merged_with_host_ownership() {

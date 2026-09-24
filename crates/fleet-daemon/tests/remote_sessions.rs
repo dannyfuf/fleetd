@@ -17,7 +17,7 @@ use fleet_daemon::{
 };
 use fleet_proto::{event::Event, request::RequestBody, response::ResponseBody};
 
-mod infra;
+use crate::infra;
 
 #[tokio::test]
 async fn remote_terminal_frames_arrive_under_the_local_terminal_id() {

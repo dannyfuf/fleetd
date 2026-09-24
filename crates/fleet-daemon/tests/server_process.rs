@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-mod infra;
+use crate::infra;
 
 use infra::DaemonProcess;
 

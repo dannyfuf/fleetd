@@ -39,7 +39,7 @@ use fleet_proto::{
     snapshot::{DaemonInfo, LinkState, Snapshot},
 };
 
-mod infra;
+use crate::infra;
 
 #[path = "agents_remote/gaps.rs"]
 mod gaps;

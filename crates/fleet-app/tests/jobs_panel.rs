@@ -1,6 +1,6 @@
 //! Real daemon protocol and job progression used by the Jobs panel.
 
-mod common;
+use crate::common;
 
 use fleet_proto::{
     event::Event,

@@ -4,6 +4,8 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
+# One integration-test binary, `tests/integration.rs`, instead of one per file.
+autotests = false
 
 [lints]
 workspace = true
@@ -58,3 +60,7 @@ fleet-daemon = { workspace = true, features = ["test-support"] }
 fleet-harness.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"

@@ -26,7 +26,7 @@ use fleet_proto::{
     snapshot::{DaemonInfo, LinkState, Snapshot},
 };
 
-mod infra;
+use crate::infra;
 
 #[tokio::test]
 async fn delete_fanout_keeps_ready_and_down_outcomes_in_request_order() {

@@ -742,20 +742,29 @@ codegen-units = 16
 `.cargo/config.toml` adds `-C symbol-mangling-version=v0` ("provides more detailed backtraces
 around closures") and a faster linker on some targets.
 
-**fleetd** has only:
+**fleetd** mirrors Zed's dev half (`Cargo.toml`, `[profile.dev]` onwards):
 
 ```toml
-# Cargo.toml:81-88
 [profile.dev]
 opt-level = 1
+debug = "limited"
+split-debuginfo = "unpacked"
 
-# Dependencies are optimized, so their debuginfo is rarely useful and it dominates
-# target/ size. Workspace crates keep full debuginfo.
-[profile.dev.package."*"]
-opt-level = 3
+[profile.dev.build-override]
+opt-level = 0
 debug = false
+
+[profile.dev.package."*"]         # dependencies unoptimized…
+opt-level = 0
+debug = false
+
+[profile.dev.package]             # …except the hot list: taffy, shaping/fonts, SVG, images,
+taffy = { opt-level = 3 }         # wgpu/naga, syntect/regex, serde_json, proc-macros
+# …
 ```
 
+A dependency a profile shows hot in a dev build joins that list; never raise `"*"` back to 3
+(ADR 0001 records the measured cost). It has
 no `[profile.release]`, no `release-fast`, and no `.cargo/` directory. It does already trim gpui's
 features (`Cargo.toml:53`, `default-features = false` — drops wayland/x11/font-kit/windows-manifest,
 with `gpui_platform` supplying the platform at `:54`) and keeps `target/` bounded with

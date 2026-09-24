@@ -8,8 +8,11 @@ publish.workspace = true
 [lints]
 workspace = true
 
+# No `default` list, on purpose: `cargo build --workspace` would switch `default` on while
+# `cargo build -p fleet-app` (dependents name `default-features = false`) would not, and that
+# one flag forks fleet-drive, fleet-lazygit, fleet-harness and fleet-app into two builds each.
+# Dependents name the half they link; this crate's own tests take `socket` below.
 [features]
-default = ["legacy", "socket"]
 # The lazygit driver's own file-script transport (`legacy`), which `fleet-lazygit` is the only
 # consumer of.
 legacy = []
@@ -29,4 +32,5 @@ tokio = { workspace = true, features = ["macros"] }
 tracing.workspace = true
 
 [dev-dependencies]
+fleet-drive = { workspace = true, features = ["socket"] }
 gpui = { workspace = true, features = ["test-support"] }

@@ -661,7 +661,7 @@ fleetd's three shapes, in order of preference:
 | --- | --- | --- |
 | inline `#[cfg(test)] mod tests` | 343 modules | default |
 | sibling `tests.rs` / `tests/` module | `crates/fleet-app/src/dialogs/input/tests.rs`, `crates/fleet-daemon/src/services/sessions/tests.rs`, `crates/fleet-core/src/board/sync/tests/` | the suite outgrew the file, or needs `use super::*` privates |
-| `crates/<crate>/tests/*.rs` | 44 files (28 in `fleet-daemon`) | cross-crate wiring, or a test that launches a binary |
+| `crates/<crate>/tests/*.rs`, one `integration` binary per crate | 52 files (32 in `fleet-daemon`) | cross-crate wiring, or a test that launches a binary |
 
 Never create `mod.rs` for a *module* — but note `tests/common/mod.rs` and `tests/infra/mod.rs`
 are the Cargo-mandated form for a shared integration helper (a bare `tests/common.rs` would
@@ -682,12 +682,11 @@ path = "tests/integration/project_tests.rs"
 with `mod` declarations inside, and 5 crates additionally set `[lib] test = false` so
 `cargo test -p <crate>` cannot silently skip the `test-support`-gated suite.
 
-fleetd has **no `[[test]]` stanza anywhere**: 44 separate integration binaries, each linked
-independently. At this file count that is a measurable share of test build time.
-**Incremental fix**: prefer extending an existing file over adding another; when a crate's
-`tests/` grows past ~30 files, consolidate that crate alone into
-`tests/integration/<crate>.rs` with `mod` declarations and
-`required-features = ["test-support"]`. Do not sweep the workspace in one commit.
+fleetd follows it without moving files: each crate with more than one test file sets
+`autotests = false` and `[[test]] name = "integration", path = "tests/integration.rs"`, and that
+root declares the helpers (`infra`, `common`, `support`) once and every other file as a `mod`.
+`workspace_layering` fails on a test file the root does not declare. It replaced 52 separate
+binaries, each linking the full dependency graph.
 
 ## Assertion ergonomics
 
