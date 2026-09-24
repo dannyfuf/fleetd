@@ -24,7 +24,9 @@ make run
 ```
 
 `make run` builds the workspace, restarts `fleetd` from the same debug build, and opens the app.
-Use `make run-release` for an optimized build. Running `fleet` without a subcommand opens the app.
+Use `make run-release` for an optimized build, or `make release` to only build one into
+`target/release`. [Development](docs/DEVELOPMENT.md#building) explains the two profiles, how to
+measure a build, how to share compiled dependencies between worktrees, and the cleanup targets. Running `fleet` without a subcommand opens the app.
 The client auto-spawns `fleetd` when its Unix socket is unavailable. Fleet stores config, state,
 repositories, worktrees, caches, logs, trash, and daemon files under `FLEET_HOME`, which defaults to
 `~/.fleet`:
@@ -309,17 +311,20 @@ The checked-in `Makefile` provides all workspace targets:
 ```sh
 make help
 make check
-make build
+make build        # dev profile; make release for the optimized one
 make run
 make daemon
 make test
 make fmt
 make clippy
+make build-info   # toolchain, compiler cache, target/ size
+make prune        # also clean-incremental, clean-release, clean, fresh
 ```
 
 `make test` runs the workspace tests. Targeted Cargo tests work normally, for example
 `cargo test -p fleet-cli`. Keep parallel worktrees on separate target directories if overriding
-`CARGO_TARGET_DIR`; shared external artifacts can be stale.
+`CARGO_TARGET_DIR`; shared external artifacts can be stale. Share compiled dependencies between
+worktrees with sccache instead ([Development](docs/DEVELOPMENT.md#sharing-dependencies-between-worktrees)).
 
 Run the complete UI-kit gallery or one of its focused galleries:
 

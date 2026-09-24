@@ -33,7 +33,7 @@ LANE ?= virtual
 # and no other, so the two selectors cannot drift apart.
 HARNESS_PIXEL_BOUND := ^[[:space:]]*(shot|clipboard)([[:space:]]|$$)
 
-.PHONY: run run-release restart daemon build check test test-scripts smoke-workflow harness harness-headless harness-one harness-prune fmt fmt-check clippy lint ci clean prune fresh bootstrap doctor help
+.PHONY: run run-release restart daemon build release timings build-info check test test-scripts smoke-workflow harness harness-headless harness-one harness-prune fmt fmt-check clippy lint ci clean clean-release clean-incremental prune fresh bootstrap doctor help
 
 run: restart ## Build, restart fleetd, and open Fleet (ARGS="..." supported)
 	$(RUNTIME_ENV) "$(FLEET)" $(ARGS)
@@ -48,8 +48,35 @@ daemon: restart ## Restart fleetd from this build and follow its log
 	@echo "Following $(FLEET_HOME)/logs/fleetd.log (Ctrl-C stops following logs)."
 	tail -n 100 -F "$(FLEET_HOME)/logs/fleetd.log"
 
-build: prune ## Build the workspace (set RELEASE=1 for release)
+# The two profiles, and what each is for, are in docs/DEVELOPMENT.md ("Building").
+build: prune ## Build the workspace with the dev profile (set RELEASE=1 for release)
 	cargo build --workspace $(CARGO_PROFILE_FLAG)
+
+release: ## Build optimized binaries into target/release (same as make build RELEASE=1)
+	$(MAKE) build RELEASE=1
+
+timings: ## Build with Cargo's per-crate compile-time report (set RELEASE=1 for release)
+	cargo build --workspace $(CARGO_PROFILE_FLAG) --timings
+	@echo "Report: $(abspath $(CARGO_TARGET_DIR))/cargo-timings/cargo-timing.html (only crates this build compiled appear in it)"
+
+build-info: ## Show the toolchain, the compiler cache and what target/ holds
+	@echo "toolchain:  $$(rustc -V)"
+	@wrapper="$${RUSTC_WRAPPER:-}"; dir="$$PWD"; \
+	while [ -z "$$wrapper" ] && [ "$$dir" != / ]; do \
+		config="$$dir/.cargo/config.toml"; \
+		[ -f "$$config" ] && wrapper=$$(sed -n 's/^rustc-wrapper *= *"\(.*\)"/\1/p' "$$config" | head -n 1); \
+		dir=$$(dirname "$$dir"); \
+	done; \
+	if [ -z "$$wrapper" ]; then \
+		echo "compiler cache: none; each worktree compiles every dependency itself (docs/DEVELOPMENT.md, \"Building\")"; \
+	else \
+		echo "compiler cache: $$wrapper"; \
+		case "$$wrapper" in *sccache*) "$$wrapper" --show-stats 2>/dev/null | grep -E '^(Cache hits rate|Cache size|Max cache size)' | sed 's/^/  /';; esac; \
+	fi
+	@for dir in "$(CARGO_TARGET_DIR)/debug" "$(CARGO_TARGET_DIR)/release"; do \
+		[ -d "$$dir" ] || continue; \
+		echo "$$dir: $$(du -sh "$$dir" | cut -f1) (incremental $$(du -sh "$$dir/incremental" 2>/dev/null | cut -f1 || echo 0))"; \
+	done
 
 check: ## Check the workspace
 	cargo check --workspace --all-targets
@@ -115,8 +142,14 @@ lint: fmt-check clippy ## Run formatting and Clippy checks
 
 ci: lint test test-scripts smoke-workflow ## Run lint and test targets
 
-clean: ## Remove Cargo build artifacts
+clean: ## Remove every build artifact (the next build is a cold one)
 	cargo clean
+
+clean-release: ## Remove release artifacts only; the dev build is untouched
+	cargo clean --release
+
+clean-incremental: ## Drop incremental caches, usually most of target/; the next edit of each crate recompiles it whole
+	rm -rf "$(CARGO_TARGET_DIR)/debug/incremental" "$(CARGO_TARGET_DIR)/release/incremental"
 
 prune: ## Drop build artifacts unused for SWEEP_DAYS days or built by uninstalled toolchains
 	@[ -d "$(CARGO_TARGET_DIR)" ] || exit 0; \
