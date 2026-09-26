@@ -2024,6 +2024,7 @@ version = "0.1.0"
 dependencies = [
  "bitflags 2.13.1",
  "bytes",
+ "base64",
  "chrono",
  "fleet-core",
  "serde",
@@ -2033,6 +2034,7 @@ dependencies = [
  "tokio-util",
 ]
 
+ "uuid",
 [[package]]
 name = "fleet-term"
 version = "0.1.0"
