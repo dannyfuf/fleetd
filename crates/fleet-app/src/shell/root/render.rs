@@ -234,14 +234,21 @@ impl Shell {
                     }
                 })
             }
-            Some(ToastTarget::AgentThread(_)) | None => None,
+            Some(ToastTarget::AgentThread(_) | ToastTarget::MediaUpload(_)) | None => None,
         });
+        let action_only = state
+            .toasts
+            .iter()
+            .map(|live| matches!(live.target, Some(ToastTarget::MediaUpload(_))));
         let stack = ToastStack::new(state.toasts.iter().map(|live| live.toast.clone()))
+            .max(state.toasts.len().max(ToastStack::MAX))
             .bottom_inset(toast_bottom_inset(state, cx))
-            .action_keys(keys.collect::<Vec<_>>());
+            .action_keys(keys.collect::<Vec<_>>())
+            .action_only(action_only.collect::<Vec<_>>());
         let (activate_state, activate_bridge, activate_ids) =
             (self.state.clone(), self.bridge.clone(), Rc::clone(&ids));
-        let (dismiss_state, dismiss_ids) = (self.state.clone(), Rc::clone(&ids));
+        let (dismiss_state, dismiss_bridge, dismiss_ids) =
+            (self.state.clone(), self.bridge.clone(), Rc::clone(&ids));
         let (hover_state, hover_ids) = (self.state.clone(), ids);
         stack
             .on_activate(move |index, window, cx| {
@@ -260,6 +267,9 @@ impl Shell {
                     Some(ToastTarget::AgentThread(thread)) => {
                         dialogs::open_agent_thread(thread, &activate_state, &activate_bridge, cx);
                     }
+                    Some(ToastTarget::MediaUpload(upload)) => {
+                        crate::media::cancel(&activate_state, &activate_bridge, upload, cx);
+                    }
                     None => {}
                 }
             })
@@ -267,11 +277,22 @@ impl Shell {
                 let Some(&id) = dismiss_ids.get(index) else {
                     return;
                 };
-                dismiss_state.update(cx, |state, cx| {
-                    if state.dismiss_toast(id).is_some() {
-                        cx.notify();
-                    }
+                let target = dismiss_state.read_with(cx, |state, _| {
+                    state
+                        .toasts
+                        .iter()
+                        .find(|live| live.id == id)
+                        .and_then(|live| live.target)
                 });
+                if let Some(ToastTarget::MediaUpload(upload)) = target {
+                    crate::media::cancel(&dismiss_state, &dismiss_bridge, upload, cx);
+                } else {
+                    dismiss_state.update(cx, |state, cx| {
+                        if state.dismiss_toast(id).is_some() {
+                            cx.notify();
+                        }
+                    });
+                }
             })
             .on_hover(move |index, hovered, _, cx| {
                 let Some(&id) = hover_ids.get(index) else {

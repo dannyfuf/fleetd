@@ -1864,6 +1864,8 @@ dependencies = [
  "log",
  "serde",
  "serde_json",
+ "sha2",
+ "shell-words",
  "tempfile",
  "tokio",
  "tracing",
@@ -2022,9 +2024,9 @@ dependencies = [
 name = "fleet-proto"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "bitflags 2.13.1",
  "bytes",
- "base64",
  "chrono",
  "fleet-core",
  "serde",
@@ -2032,9 +2034,9 @@ dependencies = [
  "smol_str",
  "thiserror 2.0.20",
  "tokio-util",
+ "uuid",
 ]
 
- "uuid",
 [[package]]
 name = "fleet-term"
 version = "0.1.0"

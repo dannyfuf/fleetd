@@ -5,6 +5,86 @@ use super::{
 };
 use crate::terminal::{AbsoluteCellPoint, AbsoluteCellSelection, SelectionGranularity};
 use gpui::{Context, Render, Subscription, Window};
+use std::path::PathBuf;
+
+fn app_with_popup_terminal() -> AppState {
+    use fleet_core::sessions::{Session, SessionKind, Terminal, TerminalKind, TerminalStatus};
+
+    let mut app = AppState::new("/tmp/fleet-popup-media", Instant::now());
+    app.toggle_agent_popup(Agent::Claude, None);
+    let session = fleet_core::sessions::agent_session_id(Agent::Claude)
+        .unwrap_or_else(|error| panic!("{error}"));
+    let terminal = Terminal {
+        id: TerminalId(7),
+        name: "claude".to_owned(),
+        command: "claude".to_owned(),
+        cwd: "/tmp".to_owned(),
+        shell_pid: None,
+        foreground_command: None,
+        status: TerminalStatus::Running,
+        title: None,
+        keep_alive: Vec::new(),
+        has_unseen_output: false,
+        agent_attention: None,
+        kind: TerminalKind::Pty,
+    };
+    app.snapshot = Some(fleet_proto::snapshot::Snapshot {
+        boards: Vec::new(),
+        generated_at: "2026-09-24T12:00:00Z".to_owned(),
+        revision: None,
+        contexts: Vec::new(),
+        repos: Vec::new(),
+        clones: Vec::new(),
+        worktrees: Vec::new(),
+        active_context: None,
+        sessions: vec![Session {
+            id: session,
+            host: None,
+            kind: SessionKind::Agent(Agent::Claude),
+            cwd: "/tmp".to_owned(),
+            active_terminal: Some(terminal.id),
+            terminals: vec![terminal],
+            slept_at: None,
+            kept_terminals: Vec::new(),
+        }],
+        agent_threads: Vec::new(),
+        statuses: Vec::new(),
+        pools: Vec::new(),
+        hosts: Vec::new(),
+        jobs: Vec::new(),
+        daemon: fleet_proto::snapshot::DaemonInfo {
+            version: "0.1.0".to_owned(),
+            pid: 42,
+            started_at: "2026-09-24T09:00:00Z".to_owned(),
+            home: "/tmp/fleet".to_owned(),
+        },
+    });
+    let mut grid = crate::state::MirrorGrid::new(80, 24);
+    grid.primed = true;
+    app.grids.insert(TerminalId(7), grid);
+    app
+}
+
+#[gpui::test]
+fn popup_file_paste_uses_the_same_quoted_delivery_gate(cx: &mut gpui::TestAppContext) {
+    let state = cx.new(|_| app_with_popup_terminal());
+    let local = Rc::new(RefCell::new(Local::default()));
+    let (bridge, requests) = Bridge::recording();
+    cx.update(|cx| {
+        cx.write_to_clipboard(ClipboardItem {
+            entries: vec![gpui::ClipboardEntry::ExternalPaths(gpui::ExternalPaths(
+                vec![PathBuf::from("/tmp/popup image.png")].into(),
+            ))],
+        });
+        paste(&local, &state, &bridge, cx);
+    });
+
+    assert!(matches!(
+        requests.take().as_slice(),
+        [RequestBody::PasteTerminal { terminal: TerminalId(7), text }]
+            if text == "'/tmp/popup image.png'"
+    ));
+}
 
 #[test]
 fn creation_input_survives_terminal_discovery_for_the_same_owner() {
@@ -133,6 +213,7 @@ fn model_with(state: AgentTerminalState, activity: AgentActivity) -> Model {
         status_line: status_line(state, activity, true),
         mode: AgentPopupMode::Terminal,
         terminal: None,
+        drop_label: None,
         base_terminal: None,
         generation: 1,
         primed: false,

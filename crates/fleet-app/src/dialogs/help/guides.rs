@@ -352,8 +352,11 @@ pub(crate) const GUIDES: &[Guide] = &[
                 &[act("Copy", &["workspace::CopySelection"])],
             ),
             step(
-                "Paste",
-                "Pastes the clipboard into the program, bracketed when the program asks for it.",
+                "Paste or drop",
+                "Pastes text into the program, bracketed when the program asks for it. Images \
+                 and copied files are staged on the terminal's machine, then their quoted path \
+                 is pasted instead. Dropped local paths stay in place; Fleet copies remote \
+                 drops to the terminal's machine first.",
                 &[act(
                     "Paste",
                     &["workspace::PasteClipboard", "prefix::Paste"],

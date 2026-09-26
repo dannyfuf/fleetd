@@ -1,5 +1,60 @@
 use super::*;
 
+use fleet_proto::request::{MediaAnchor, StageEntry, StageOp, UploadId};
+
+/// App-side upload operation. Chunk bytes stay binary until this bridge boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum MediaStageOp {
+    /// Declare one file or directory manifest.
+    Begin { entry: StageEntry },
+    /// Send one decoded chunk; [`Bridge::stage_media`] performs the base64 conversion.
+    Chunk {
+        file: u32,
+        offset: u64,
+        bytes: Vec<u8>,
+    },
+    /// Verify every file and publish the staged path.
+    Finish { sha256: Vec<String> },
+    /// Remove the remote partial upload.
+    Cancel,
+}
+
+impl MediaStageOp {
+    fn into_proto(self) -> StageOp {
+        match self {
+            Self::Begin { entry } => StageOp::Begin { entry },
+            Self::Chunk {
+                file,
+                offset,
+                bytes,
+            } => StageOp::Chunk {
+                file,
+                offset,
+                data: fleet_proto::media::encode(&bytes),
+            },
+            Self::Finish { sha256 } => StageOp::Finish { sha256 },
+            Self::Cancel => StageOp::Cancel,
+        }
+    }
+}
+
+impl Bridge {
+    /// Sends one media-staging operation without exposing base64 or a bare request to screens.
+    #[must_use]
+    pub(crate) fn stage_media(
+        &self,
+        anchor: MediaAnchor,
+        upload: UploadId,
+        op: MediaStageOp,
+    ) -> Receiver<Result<ResponseBody, ProtoError>> {
+        self.request(RequestBody::StageMedia {
+            anchor,
+            upload,
+            op: op.into_proto(),
+        })
+    }
+}
+
 pub(super) enum Request {
     Command {
         client: Option<Client>,
@@ -216,6 +271,25 @@ mod regression_tests {
     use super::*;
     use crate::state::AppState;
     use std::time::Instant;
+
+    #[test]
+    fn media_chunks_are_encoded_only_at_the_bridge_boundary() {
+        let bytes = vec![0, 1, 2, 254, 255];
+        let op = MediaStageOp::Chunk {
+            file: 3,
+            offset: 128,
+            bytes: bytes.clone(),
+        }
+        .into_proto();
+
+        let StageOp::Chunk { data, .. } = op else {
+            panic!("the app chunk stays a protocol chunk");
+        };
+        assert_eq!(
+            fleet_proto::media::decode(&data).unwrap_or_else(|error| panic!("{error}")),
+            bytes
+        );
+    }
 
     struct RejectingDaemon {
         home: tempfile::TempDir,

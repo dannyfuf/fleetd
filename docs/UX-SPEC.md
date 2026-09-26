@@ -268,14 +268,19 @@ that would drift. Consequences today:
 | Duplicate action suppressed | `Already running` | 1.6 s | `info` |
 | Mode no-op | `no scrollback in alt-screen` | 1.6 s | `chevrons-up` |
 | Agent attention | `<session>: needs permission` / `asks a question` / `proposed a plan` / `agent finished`; a native agent thread's adds `View`, which opens that thread | 3.2 s | `lock` / `circle-question-mark` / `clipboard-check` / `circle-check` |
+| Media copy in progress | `Copying <name> to <host>… <percent>%`, `Finishing <name>…`, or `Waiting for <host> to reconnect…` + button-only `Cancel` | refreshed while live, bounded by the 3 min receiver expiry | `cloud-upload` |
+| Terminal closed after copy | `Terminal closed. Copied file/files to <quoted-paths>` | 3.2 s | `cloud-upload` |
+| Completed copy skipped entries | `Skipped <n> symbolic link or special file entry/entries while copying <name>` | 3.2 s | `info` |
 
 **Never a toast:** job started, job succeeded when its row is on screen, worktree created,
 PR refreshed, context switched, session opened, settings saved, update available, **and any
 error** — errors are sticky (§1.8), never transient.
 
-Identical toast text within **1 s** coalesces into one toast with a `×2` suffix (this kills the
-duplicate spam §6 attributes to overlapping operations with no duplicate suppression). Max 3
-stacked; oldest evicted first.
+Identical toast text with the same target within **1 s** coalesces into one toast with a `×2`
+suffix (this kills the duplicate spam §6 attributes to overlapping operations with no duplicate
+suppression while keeping distinct actions distinct). Max 3 transient toasts are stacked; oldest
+transient first. A live media-progress toast is pinned until completion or cancellation, so later
+feedback cannot remove its progress and only cancel affordance.
 
 ### 2.8 Input modes (no mode word)
 
@@ -847,6 +852,44 @@ replaces them. The kit's `TerminalModes` stays for the gallery.
 keys go to the PTY except `ctrl-s` and the standard `cmd-c` / `cmd-v` clipboard actions, so
 bare-key hints (`r restart`, `l log`, `⏎ start now`) are forbidden anywhere in this screen; they
 are written `^s r`, `^s l`, `^s ⏎`.
+
+**Terminal media paste and drop.** Both the Workspace terminal and the floating agent terminal
+apply the same gesture contract:
+
+- `cmd-v` first recognizes GPUI external paths, then a platform image. External paths already on
+  the target's machine are inserted without a copy; a clipboard image, or any path targeting a
+  remote terminal, is staged on that terminal's owning machine first. A text-only clipboard item
+  follows the existing paste path byte-for-byte. In particular, Wayland file-manager copies that
+  GPUI exposes only as URI-list text remain text; Fleet does not reinterpret them as files.
+- Dropping operating-system files or folders over the Workspace shell targets its active terminal;
+  dropping over the floating agent card targets that card's terminal. While either root is a valid
+  drop target, it is veiled and centered copy reads `Drop to paste path` locally or
+  `Drop to copy to <host>` remotely. The affordance is pointer feedback only and never takes focus.
+- A finished gesture inserts absolute paths in source order, each shell-quoted when necessary and
+  separated by one space, with no trailing newline. Folder manifests preserve empty directories;
+  symlinks and special files inside one are skipped rather than followed. A completed copy with
+  skipped entries warns `Skipped <n> symbolic link or special file entry/entries while copying
+  <name>`.
+- Every copy has a cancellable toast: `Copying <name> to this machine… <percent>%` or
+  `Copying <name> to <host>… <percent>%`; hashing changes it to `Finishing <name>…`. A down link
+  changes it to `Waiting for <host> to reconnect…`. Pressing `Cancel` drops the retained task and
+  asks the receiver to remove its part; receiver expiry is the fallback if that request cannot
+  arrive. Progress is upload state, prepared outside render.
+- If the terminal closes while a copy is in flight, Fleet does not type into a replacement. It
+  shows `Terminal closed. Copied file to <quoted-path>` (or `files`) so the completed data remains
+  discoverable. If only some items in a multi-path gesture succeed, those successful paths are
+  still inserted in their original relative order. One deterministic sticky error names every
+  failed item in source order; later failures do not overwrite earlier ones from the gesture.
+
+Limits and remote failures are sticky errors, not transient toasts. A gesture that must stage
+bytes is refused before transfer with `This drop is larger than the 1 GiB limit`
+or `This drop has more than 10,000 files and folders`; a single-item failure may prefix
+that copy with `<name>: `. Local paths inserted without copying have no staging limit. A remote
+without the capability reports `host <host>: media staging is unavailable; update fleetd on this
+host`; a local outdated daemon reports `media staging is unavailable; update fleetd on this
+machine`. A host that disappears may report `host <host> is unreachable`, while exhausting the
+reconnect wait reports `Timed out waiting for <host> to reconnect`. Plain-text paste never shows
+staging UI.
 
 **Changes panel (`ctrl-s g`, the strip's *Changes*).** An optional 300 px column
 (`metrics.changes_w`) at the right of the Workspace body, beside whatever tab is showing — a
@@ -1969,7 +2012,8 @@ repo change or a screen change.
 
 ### 3.11 Toasts
 
-Rendering: bottom-right, above the status bar, **320 px** wide, 12 px insets, max **3** stacked,
+Rendering: bottom-right, above the status bar, **320 px** wide, 12 px insets, max **3** transient
+rows plus any pinned live media uploads,
 **3.2 s** (1.6 s for instant-action acknowledgements). A toast appears and vanishes in place —
 it does not slide or fade (DESIGN-SYSTEM §2.7). One line, one icon, no title, and a ✕ that takes
 it down at once.
@@ -1980,7 +2024,10 @@ to the same place (`J` for Jobs; none for a thread, which `1 needs you` in the t
 opens); a click on the button or on the line goes there and retires the toast. The key is never
 spelled into the text (`· J` is gone). **Hovering a toast holds its dwell**: it does not decay
 while the pointer rests on it, and resumes with the time it had left when the pointer leaves.
-Contents and the governing law: **§2.7**.
+Contents and the governing law: **§2.7**. A destructive media `Cancel` is button-only: clicking
+the progress line does nothing, while either `Cancel` or ✕ cancels the live upload and removes its
+part. In-progress work may use a longer, continually refreshed dwell and is pinned against normal
+toast-stack eviction until it finishes or is cancelled.
 
 ---
 

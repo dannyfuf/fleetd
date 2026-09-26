@@ -14,6 +14,7 @@ use gpui::{Bounds, Hsla, IntoElement, Pixels, Point, Rgba, Size, canvas, prelude
 use crate::state::MirrorGrid;
 
 mod geometry;
+pub(crate) mod media_input;
 mod presentation;
 mod selection;
 pub(crate) mod surface;

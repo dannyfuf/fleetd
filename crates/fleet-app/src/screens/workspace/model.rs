@@ -59,6 +59,8 @@ pub(super) struct Model {
     pub(super) branch_key: Option<String>,
     pub(super) repo: Option<RepoId>,
     pub(super) host: Option<(SharedString, HostReachability)>,
+    /// File-drop copy prepared while synchronizing, never formatted from the render path.
+    pub(super) drop_label: Option<SharedString>,
     /// Which Fleet-drawn surface the active tab is, when it is one rather than a PTY.
     ///
     /// The reserved command decides it, not the tab's name: the daemon owns the tab list and
@@ -188,6 +190,18 @@ impl Model {
                 TerminalStatus::Exited { code } => Some(code),
                 TerminalStatus::Running | TerminalStatus::Starting => None,
             });
+        let native = agent
+            .is_none()
+            .then(|| {
+                session
+                    .terminals
+                    .iter()
+                    .find(|entry| Some(entry.id) == terminal && entry.is_native())
+                    .map(|entry| NativeTab::of(&entry.command))
+            })
+            .flatten();
+        let drop_label = (terminal.is_some() && native.is_none() && agent.is_none())
+            .then(|| crate::terminal::media_input::drop_label(session.host.as_ref()));
 
         Self {
             session: session.id.clone(),
@@ -205,16 +219,8 @@ impl Model {
             branch_key,
             repo,
             host,
-            native: agent
-                .is_none()
-                .then(|| {
-                    session
-                        .terminals
-                        .iter()
-                        .find(|entry| Some(entry.id) == terminal && entry.is_native())
-                        .map(|entry| NativeTab::of(&entry.command))
-                })
-                .flatten(),
+            drop_label,
+            native,
             agent,
             worktree: worktree.map(|worktree| {
                 (

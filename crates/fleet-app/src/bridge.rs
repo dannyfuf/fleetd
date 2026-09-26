@@ -45,6 +45,8 @@ mod runtime;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use requests::MediaStageOp;
+
 /// How often the bridge probes daemon liveness.
 const HEALTH_INTERVAL: Duration = Duration::from_secs(2);
 /// How long a liveness probe may take before the daemon counts as gone.

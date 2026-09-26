@@ -227,6 +227,8 @@ pub struct AppState {
     pub session_mru: Mru<SessionId>,
     /// Per-session terminal MRU: `ctrl-s Tab` jumps to [`Mru::alternate`].
     pub terminal_mru: HashMap<SessionId, Mru<TerminalId>>,
+    /// Live media uploads, their retained tasks, link waiters, and shared per-host windows.
+    pub(crate) media_uploads: crate::media::UploadRegistry,
     /// The live toasts, oldest first.
     pub toasts: Vec<LiveToast>,
     /// Most recently observed aggregate heuristic activity, per session.
@@ -349,6 +351,7 @@ impl AppState {
             zoomed: false,
             session_mru: Mru::default(),
             terminal_mru: HashMap::new(),
+            media_uploads: crate::media::UploadRegistry::default(),
             toasts: Vec::new(),
             last_agent_activity: HashMap::new(),
             last_agent_attention: HashMap::new(),

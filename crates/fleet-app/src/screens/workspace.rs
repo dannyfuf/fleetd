@@ -87,6 +87,7 @@ pub(crate) struct WorkspaceScreen {
     panes: HashMap<WorktreeId, Pane>,
     /// One live view per opened agent thread, shared with the root's action listeners.
     agent_views: Rc<RefCell<AgentViews>>,
+    media_drop: crate::terminal::media_input::MediaDropState,
 }
 
 impl WorkspaceScreen {
@@ -98,6 +99,7 @@ impl WorkspaceScreen {
             model: None,
             panes: HashMap::new(),
             agent_views: Rc::new(RefCell::new(AgentViews::new())),
+            media_drop: crate::terminal::media_input::MediaDropState::default(),
         }
     }
 
@@ -225,7 +227,18 @@ impl WorkspaceScreen {
             .children(model.exit_code.map(ExitStrip::new))
             .children(prefix_menu);
 
-        self.with_keys(root, bridge, state).into_any_element()
+        let root = self.with_keys(root, bridge, state);
+        let Some((terminal, label)) = model.terminal.zip(model.drop_label.clone()) else {
+            return root.into_any_element();
+        };
+        let root =
+            crate::terminal::media_input::drop_affordance(root, label, self.media_drop.hovered(cx));
+        let (local, bridge, state) = self.handles(bridge, state);
+        self.media_drop
+            .install(root, move |paths, cx| {
+                drop_paths(&local, &bridge, &state, terminal, paths, cx);
+            })
+            .into_any_element()
     }
 
     /// The three handles every listener needs, cloned once per listener.
