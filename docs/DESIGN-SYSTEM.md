@@ -1119,7 +1119,11 @@ The separate non-`Copy` `TextInputMedia::{Pasted(ClipboardItem), Dropped(Externa
 media payloads only while `set_accepts_media(true, cx)` is active. A clipboard item containing
 any image or external-path entry emits one `Pasted` event and inserts no text; a text-only item
 still follows normal paste. A typed external-path drop emits one `Dropped` event. The mode is off
-by default, and a read-only input does neither. `Submitted` is emitted only
+by default, and a read-only input does neither. With media mode off, paste concatenates every
+`String` entry byte-for-byte; only when no `String` entry exists does it fall back to external
+paths, joining several with one space in a single-line input or one newline in a logical
+multi-line input. The kit never shell-quotes paths: a shell-owning app surface does that before it
+calls `insert`. `Submitted` is emitted only
 when a single-line owner explicitly calls `submit`; the input does not consume `Enter` itself.
 `Focused` and `Blurred` report the editor's own focus handle, including the focus a click on the
 value takes for itself. `Focused` also fires on the input's first paint when its handle is already

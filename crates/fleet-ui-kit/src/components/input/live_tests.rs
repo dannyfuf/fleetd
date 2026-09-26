@@ -375,6 +375,64 @@ fn media_off_keeps_plain_text_paste_byte_for_byte(cx: &mut gpui::TestAppContext)
 }
 
 #[gpui::test]
+fn media_off_separates_paths_only_paste_in_a_single_line_input(cx: &mut gpui::TestAppContext) {
+    let (mut visual, input, _, media, _, _) = hosted(cx, InputMode::SingleLine, "", |_, _| {});
+    let paths = ExternalPaths(
+        [
+            PathBuf::from("/tmp/fleet one"),
+            PathBuf::from("/tmp/fleet-two"),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    visual.update(|_, cx| {
+        cx.write_to_clipboard(ClipboardItem {
+            entries: vec![ClipboardEntry::ExternalPaths(paths)],
+        });
+    });
+
+    visual.simulate_keystrokes("cmd-v");
+
+    input.read_with(&visual, |input, _| {
+        assert_eq!(input.text(), "/tmp/fleet one /tmp/fleet-two");
+    });
+    assert!(media.borrow().is_empty());
+}
+
+#[gpui::test]
+fn media_off_separates_paths_only_paste_in_a_multiline_input(cx: &mut gpui::TestAppContext) {
+    let (mut visual, input, _, media, _, _) = hosted(
+        cx,
+        InputMode::Multiline {
+            min_rows: 2,
+            max_rows: 4,
+        },
+        "",
+        |_, _| {},
+    );
+    let paths = ExternalPaths(
+        [
+            PathBuf::from("/tmp/fleet-one"),
+            PathBuf::from("/tmp/fleet-two"),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    visual.update(|_, cx| {
+        cx.write_to_clipboard(ClipboardItem {
+            entries: vec![ClipboardEntry::ExternalPaths(paths)],
+        });
+    });
+
+    visual.simulate_keystrokes("cmd-v");
+
+    input.read_with(&visual, |input, _| {
+        assert_eq!(input.text(), "/tmp/fleet-one\n/tmp/fleet-two");
+    });
+    assert!(media.borrow().is_empty());
+}
+
+#[gpui::test]
 fn media_paste_emits_one_payload_and_does_not_edit_text(cx: &mut gpui::TestAppContext) {
     let (mut visual, input, _, media, _, _) =
         hosted(cx, InputMode::SingleLine, "unchanged", |input, cx| {
