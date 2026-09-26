@@ -5,7 +5,7 @@
 //! than that — `newline`'s propagation, the clipboard pair, undo's composition flush — says why
 //! inline.
 
-use gpui::{ClipboardItem, Context, Window};
+use gpui::{ClipboardEntry, ClipboardItem, Context, Window};
 
 use super::actions::*;
 use super::{InputBuffer, InputMode, TextInput};
@@ -255,7 +255,21 @@ impl TextInput {
         if self.read_only {
             return;
         }
-        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+        let Some(item) = cx.read_from_clipboard() else {
+            return;
+        };
+        if self.accepts_media
+            && item.entries().iter().any(|entry| {
+                matches!(
+                    entry,
+                    ClipboardEntry::Image(_) | ClipboardEntry::ExternalPaths(_)
+                )
+            })
+        {
+            cx.emit(super::TextInputMedia::Pasted(item));
+            return;
+        }
+        let Some(text) = item.text() else {
             return;
         };
         let text = self.filtered(&text);

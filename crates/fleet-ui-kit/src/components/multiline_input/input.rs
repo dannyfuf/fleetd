@@ -10,7 +10,8 @@ use super::{
     triggers::active_trigger,
 };
 use crate::{
-    InputBuffer, InputMode, Text, TextInput, TextInputEvent, TextRole, theme::ActiveTheme,
+    InputBuffer, InputMode, Text, TextInput, TextInputEvent, TextInputMedia, TextRole,
+    theme::ActiveTheme,
 };
 
 const PROMPT_GLYPH: &str = "❯";
@@ -46,7 +47,7 @@ impl MultilineInput {
             input
         });
         let focus_handle = input.read(cx).focus_handle();
-        let subscription = cx.subscribe(&input, |this, input, event, cx| {
+        let editing_subscription = cx.subscribe(&input, |this, input, event, cx| {
             if !matches!(event, TextInputEvent::Changed) {
                 return;
             }
@@ -61,6 +62,10 @@ impl MultilineInput {
             this.active_trigger_id = trigger_id;
             cx.emit(MultilineInputEvent::Changed);
         });
+        let media_subscription =
+            cx.subscribe(&input, |_this, _input, event: &TextInputMedia, cx| {
+                cx.emit(MultilineInputEvent::Media(event.clone()));
+            });
         Self {
             input,
             focus_handle,
@@ -69,7 +74,7 @@ impl MultilineInput {
             read_only: false,
             framed: true,
             active_trigger_id: None,
-            _subscriptions: vec![subscription],
+            _subscriptions: vec![editing_subscription, media_subscription],
         }
     }
 
@@ -99,6 +104,13 @@ impl MultilineInput {
                 .update(cx, |input, cx| input.set_read_only(read_only, cx));
             cx.notify();
         }
+    }
+
+    /// Opt the inner editor into reporting image paste and external-path drop gestures.
+    pub fn set_accepts_media(&mut self, accepts_media: bool, cx: &mut Context<Self>) {
+        self.input.update(cx, |input, cx| {
+            input.set_accepts_media(accepts_media, cx);
+        });
     }
 
     /// Whether user interaction can mutate this composer.

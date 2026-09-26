@@ -3,8 +3,8 @@
 //! `docs/DESIGN-SYSTEM.md` §8.3: *if a state is not in a gallery, it is not implemented.* Every
 //! state of every component in §6.6 has a panel here — the six `ToolRow` states, every
 //! transcript row, the three `DecisionDock` occupants and their queue and in-flight states,
-//! the `MetadataRow` collapse ladder, the live `MultilineInput` with its trigger reports, and
-//! the streaming `Markdown` invariants.
+//! the `MetadataRow` collapse ladder, pending attachments in every state, the live
+//! `MultilineInput` with its trigger reports, and the streaming `Markdown` invariants.
 //!
 //! The transcript, the composer and the dock are *live*: a real
 //! [`fleet_ui_kit::TranscriptList`] entity over GPUI `list`, a real
@@ -577,6 +577,73 @@ fn composer_states(gallery: &AgentGallery, cx: &mut App) -> AnyElement {
     LAYOUT.section("composer · non-editing states", &theme, children)
 }
 
+/// Pending attachment lifecycle, wrapping pressure and filename truncation.
+fn attachment_states(cx: &mut App) -> AnyElement {
+    let theme = cx.theme().clone();
+    let states = ComposerAttachmentRow::new()
+        .attachment(
+            PendingAttachmentChip::new(
+                "attachment-staging",
+                "screenshot.png",
+                PendingAttachmentState::Staging(0.42),
+            )
+            .on_remove(|_, _, _| {}),
+        )
+        .attachment(
+            PendingAttachmentChip::new(
+                "attachment-waiting",
+                "trace.json",
+                PendingAttachmentState::Waiting,
+            )
+            .on_remove(|_, _, _| {}),
+        )
+        .attachment(
+            PendingAttachmentChip::new(
+                "attachment-ready",
+                "design.webp",
+                PendingAttachmentState::Ready,
+            )
+            .on_remove(|_, _, _| {}),
+        )
+        .attachment(
+            PendingAttachmentChip::new(
+                "attachment-failed",
+                "recording.mov",
+                PendingAttachmentState::Failed("file exceeds 50 MiB".into()),
+            )
+            .on_remove(|_, _, _| {}),
+        );
+    let eight = ComposerAttachmentRow::new().attachments((0_usize..8).map(|index| {
+        PendingAttachmentChip::new(
+            ("attachment-eight", index),
+            format!("file-{}.png", index + 1),
+            PendingAttachmentState::Ready,
+        )
+        .on_remove(|_, _, _| {})
+    }));
+    let long = ComposerAttachmentRow::new().attachment(
+        PendingAttachmentChip::new(
+            "attachment-long",
+            "a-very-long-customer-supplied-screenshot-name-that-must-truncate-before-it-breaks-the-composer.png",
+            PendingAttachmentState::Ready,
+        )
+        .on_remove(|_, _, _| {}),
+    );
+    LAYOUT.section(
+        "pending attachment chips",
+        &theme,
+        vec![
+            LAYOUT.labeled("staging · waiting · ready · failed", &theme, states),
+            LAYOUT.labeled("eight · wraps", &theme, eight),
+            LAYOUT.labeled(
+                "long name · truncates",
+                &theme,
+                div().w(px(300.0)).child(long),
+            ),
+        ],
+    )
+}
+
 impl Render for AgentGallery {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
@@ -625,6 +692,7 @@ impl Render for AgentGallery {
                     .flex()
                     .flex_col()
                     .child(tool_states(cx))
+                    .child(attachment_states(cx))
                     .child(composer_states(self, cx))
                     .child(markdown_states(self, cx)),
             )

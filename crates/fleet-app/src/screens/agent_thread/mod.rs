@@ -707,6 +707,8 @@ impl AgentThreadView {
             // instead of the keymap consuming the key.
             MultilineInputEvent::Changed => self.on_composer_changed(cx),
             MultilineInputEvent::Escape => self.stop(cx),
+            // The composer does not opt into media yet, so the kit never emits this here.
+            MultilineInputEvent::Media(_) => {}
         }
     }
 }

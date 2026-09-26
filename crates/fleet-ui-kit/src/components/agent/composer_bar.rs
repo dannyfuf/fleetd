@@ -9,7 +9,7 @@
 //! Use a [`crate::components::Dropdown`] instead for a labelled form field; a composer chip is
 //! chrome inside the composer, so it has no border until the pointer is on it.
 
-use gpui::{App, ElementId, SharedString, Window, div, prelude::*, relative};
+use gpui::{AnyElement, App, ElementId, SharedString, Window, div, prelude::*, relative};
 
 use super::metrics::AGENT_CONTEXT_METER_W;
 use crate::{
@@ -18,6 +18,51 @@ use crate::{
     text::Text,
     theme::ActiveTheme,
 };
+
+/// The wrapping composer slot for pending attachment chips.
+///
+/// It owns only row layout; each [`super::PendingAttachmentChip`] owns its identity and remove
+/// affordance.
+#[derive(IntoElement, Default)]
+pub struct ComposerAttachmentRow {
+    attachments: Vec<AnyElement>,
+}
+
+impl ComposerAttachmentRow {
+    /// An empty pending-attachment row.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add one pending attachment to the row.
+    pub fn attachment(mut self, attachment: impl IntoElement) -> Self {
+        self.attachments.push(attachment.into_any_element());
+        self
+    }
+
+    /// Add pending attachments to the row.
+    pub fn attachments<E>(mut self, attachments: impl IntoIterator<Item = E>) -> Self
+    where
+        E: IntoElement,
+    {
+        self.attachments
+            .extend(attachments.into_iter().map(IntoElement::into_any_element));
+        self
+    }
+}
+
+impl RenderOnce for ComposerAttachmentRow {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(cx.theme().space.xs)
+            .w_full()
+            .min_w_0()
+            .children(self.attachments)
+    }
+}
 
 /// A value and a chevron that opens a menu: `gpt-5 · high ⌄`, `asks before edits ⌄`.
 #[derive(IntoElement)]

@@ -7,6 +7,7 @@
 //! geometry of the canvas lives in [`metrics`], the copy in [`format`] and [`group`], and
 //! everything else comes from the theme.
 
+mod attachment_chip;
 mod composer_bar;
 mod decision;
 mod decision_dock;
@@ -22,7 +23,8 @@ mod transcript_list;
 #[cfg(test)]
 mod tests;
 
-pub use composer_bar::{ComposerChip, ContextMeter};
+pub use attachment_chip::{PendingAttachmentChip, PendingAttachmentState};
+pub use composer_bar::{ComposerAttachmentRow, ComposerChip, ContextMeter};
 pub use decision::{
     ApprovalRequest, Decision, DecisionAction, DecisionKind, DecisionOption, DecisionQuestion,
     MAX_QUESTION_OPTIONS, QuestionOption, QuestionSet, SOMETHING_ELSE,

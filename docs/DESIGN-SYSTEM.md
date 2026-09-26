@@ -1107,13 +1107,19 @@ horizontally instead. Both use the border ladder danger → focus → rest.
 `set_icon(option, cx)`, `set_mono(bool, cx)`, `set_preview(option, cx)`,
 `set_hide_status_line(bool, cx)`, `set_embedded(bool, cx)` (draw the editing surface alone, for
 a surface that already owns the frame around it — the filter bar's 30 px header row and the
-palette's 44 px query row), `set_read_only(bool, cx)`, `set_invalid(option, cx)`,
+palette's 44 px query row), `set_read_only(bool, cx)`, `set_accepts_media(bool, cx)`,
+`set_invalid(option, cx)`,
 `set_filter(option, cx)`, `set_enter_inserts_newline(bool, cx)`, `is_empty()`, `is_composing()`, `is_read_only()`, `is_invalid()`,
 `has_selection()`, `focus_handle()`, `focus(window, cx)`, `mode()`, `buffer()`, and
 `submit(cx)`, plus `move_vertical(down, select, cx) -> bool` for owners that route a claimed
 vertical key back into the editor. `InputMode::{SingleLine, Multiline { min_rows, max_rows }}` selects behavior.
 The filter is `Option<fn(char) -> bool>` and applies only to user insertion and paste.
-**Events.** `TextInputEvent::{Changed, Submitted, Focused, Blurred}`. `Submitted` is emitted only
+**Events.** `TextInputEvent::{Changed, Submitted, Focused, Blurred}` remains `Copy`.
+The separate non-`Copy` `TextInputMedia::{Pasted(ClipboardItem), Dropped(ExternalPaths)}` carries
+media payloads only while `set_accepts_media(true, cx)` is active. A clipboard item containing
+any image or external-path entry emits one `Pasted` event and inserts no text; a text-only item
+still follows normal paste. A typed external-path drop emits one `Dropped` event. The mode is off
+by default, and a read-only input does neither. `Submitted` is emitted only
 when a single-line owner explicitly calls `submit`; the input does not consume `Enter` itself.
 `Focused` and `Blurred` report the editor's own focus handle, including the focus a click on the
 value takes for itself. `Focused` also fires on the input's first paint when its handle is already
@@ -1136,7 +1142,8 @@ standalone and the kit's tests all bind it. `fleet-app` states the same rows ins
 and a test there asserts the two agree.
 **States.** single-line empty with placeholder · filled · focused with caret · selection ·
 marked IME text · invalid with message · read-only · numeric-filtered · label with leading
-icon · derived preview replaced by a validation message in the same slot; multi-line at minimum
+icon · media drop hover (token-backed info wash and hairline outline) · derived preview
+replaced by a validation message in the same slot; multi-line at minimum
 rows · grown to maximum rows with scroll and a multi-line selection · mono · invalid; embedded
 inside a `FilterBar` header row and inside the palette's query row. These are the states in
 `examples/gallery_input.rs`, `examples/gallery_board.rs` and `examples/kit_gallery.rs`; a state
@@ -1814,18 +1821,37 @@ naming what it changes and its key. Meter: 0–100.
 composer, so it draws nothing until the pointer is on it. The chip knows nothing about models or
 modes: the owner builds the menu, with a check on the value the next send carries.
 
+#### `PendingAttachmentChip` / `ComposerAttachmentRow`
+**Purpose.** The attachment staging strip between the draft and the composer's settings: one
+removable pill per image or file, wrapping when the row is full. This is not `ComposerChip`,
+which opens a settings menu, and not the generic chrome `Chip`.
+**API.** `PendingAttachmentChip::new(id, name, PendingAttachmentState).on_remove(Fn)`;
+`PendingAttachmentState::{Staging(f32), Waiting, Ready, Failed(SharedString)}`;
+`ComposerAttachmentRow::new().attachment(..).attachments(..)`.
+**Anatomy.** The same 22 px attachment pill used above a sent user message: leading state glyph,
+one truncating name, optional state detail, then a token-sized remove `x`. `Staging` clamps its
+progress to `0.0..=1.0`, fills that fraction behind the content and spins the loader using the
+theme motion token. `Waiting` is warning, `Ready` neutral and `Failed(message)` danger; the error
+message is visible and truncates with the available row width. Every fill, glyph, hover and
+animation comes from theme tokens.
+**States.** staging with progress · waiting for reconnect · ready · failed with message · eight
+chips wrapping · a long filename truncating. All are shown in `examples/gallery_agent.rs`.
+**Usage rule.** The owner supplies stable ids and one remove handler per chip, and owns all
+staging/cancellation state. The row and chip accept no Fleet domain type.
+
 #### `MultilineInput`
 **Purpose.** The docked composer: a thin owner of a shared multi-line `TextInput` that adds the
 prompt glyph, submission, prompt history and completion-trigger reporting.
 **API.** Entity. `MultilineInput::new(&mut Context<Self>, placeholder)`, `text(cx)`, `is_empty(cx)`,
 `is_composing(cx)`,
 `set_text(.., cx)`, `clear(cx)`, `set_placeholder(.., cx)`, `set_focus_visible(bool, cx)`,
-`set_read_only(bool, cx)`, `set_framed(bool, cx)`, `submit(cx)`, `push_history(..)`,
+`set_read_only(bool, cx)`, `set_accepts_media(bool, cx)`, `set_framed(bool, cx)`, `submit(cx)`, `push_history(..)`,
 `active_trigger(cx)`,
 `focus_handle()`, readers `buffer(cx)` and `history()`, and the three `-> bool` motions an owner
 falls through on — `recall_previous(cx)`, `caret_up(cx)`, `caret_down(cx)`, each answering
 whether it moved; emits `MultilineInputEvent::{Submit(String), Trigger(Trigger), Changed,
-Escape}` under `MULTILINE_INPUT_KEY_CONTEXT`. `buffer(cx)` returns the inner `InputBuffer`;
+Media(TextInputMedia), Escape}` under `MULTILINE_INPUT_KEY_CONTEXT`. The media variant relays the
+inner input payload unchanged. `buffer(cx)` returns the inner `InputBuffer`;
 `PromptHistory` owns the last `HISTORY_LIMIT` (100) prompts plus the draft `↑` opened from.
 **Framing.** Framed by default: its own fill, hairline, focus border and `❯` prompt. The agent
 composer calls `set_framed(false, cx)` and frames the editor together with its settings strip, so
