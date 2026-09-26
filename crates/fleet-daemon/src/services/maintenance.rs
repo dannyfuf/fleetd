@@ -58,7 +58,11 @@ impl PeriodicTasks {
                 Ok(Err(error)) => tracing::warn!(%error, "periodic task failed"),
                 Err(_) => {
                     handle.abort();
-                    let _ = handle.await;
+                    if let Err(error) = handle.await
+                        && !error.is_cancelled()
+                    {
+                        tracing::warn!(%error, "aborted periodic task failed");
+                    }
                 }
             }
         }
@@ -74,7 +78,7 @@ impl Drop for PeriodicTasks {
 }
 
 impl Services {
-    /// Starts status, host, prepared-pool, PR-cache, and schedule maintenance loops.
+    /// Starts media, status, host, prepared-pool, PR-cache, and schedule maintenance loops.
     pub async fn start_periodic_tasks(
         self: &Arc<Self>,
         events: BroadcastBus,
@@ -85,6 +89,8 @@ impl Services {
         let config = self.config.load().await?;
         self.reconcile_runtime_config(&config);
         let handles = vec![
+            tokio::spawn(self.media.clone().run_expiry(shutdown.clone())),
+            tokio::spawn(self.media.clone().run_sweep(shutdown.clone())),
             tokio::spawn(self.watches.clone().run(shutdown.clone())),
             tokio::spawn(self.watch_discovery.clone().run(shutdown.clone())),
             tokio::spawn(run_status_refresh(

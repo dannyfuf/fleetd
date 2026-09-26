@@ -10,7 +10,7 @@ use fleet_core::{
 use fleet_proto::{
     event::Event,
     job::JobRecord,
-    request::RequestBody,
+    request::{MediaAnchor, RequestBody},
     response::{PruneResult, PruneSkipped, ResponseBody, WorktreeDeleteResult},
     snapshot::Snapshot,
 };
@@ -123,6 +123,19 @@ pub fn to_remote(
         | PasteTerminal { terminal, .. } => {
             *terminal = remote_terminal(host, *terminal, ids)?;
         }
+        StageMedia { anchor, .. } => match anchor {
+            MediaAnchor::Terminal { terminal } => {
+                *terminal = remote_terminal(host, *terminal, ids)?;
+            }
+            MediaAnchor::Host { .. } => *anchor = MediaAnchor::Local,
+            // Thread ids and upload ids are global UUIDs and cross the link unchanged.
+            MediaAnchor::Thread { .. } => {}
+            MediaAnchor::Local => {
+                return Err(DaemonError::Protocol(
+                    "a local media anchor cannot be forwarded".to_owned(),
+                ));
+            }
+        },
         CancelJob { job } | RetryJob { job } | TailJob { job, .. } => {
             *job = remote_job(host, job, ids)?;
         }
@@ -798,6 +811,7 @@ pub(crate) fn unavailable_fanout_response(
         | RequestBody::ScrollOrKeyTerminal { .. }
         | RequestBody::RequestFullFrame { .. }
         | RequestBody::PasteTerminal { .. }
+        | RequestBody::StageMedia { .. }
         | RequestBody::ListJobs
         | RequestBody::CancelJob { .. }
         | RequestBody::RetryJob { .. }

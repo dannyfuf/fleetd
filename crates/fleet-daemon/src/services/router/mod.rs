@@ -675,8 +675,7 @@ fn remote_event_bytes(event: &Event) -> usize {
     }
 }
 
-/// Refuses a request the owner's daemon is too old to serve: a worktree-board request, or a
-/// pull request upsert onto a Reviews board another host owns.
+/// Refuses a request the owner's daemon is too old to serve.
 ///
 /// An un-upgraded peer has no such variant, so forwarding one yields a bare protocol error with
 /// no way for the user to know what to do. The sentence is the one the client's own gate uses
@@ -688,14 +687,18 @@ fn capability_refusal(
     host: &HostId,
     body: &RequestBody,
 ) -> Option<DaemonError> {
-    let (capability, feature) = match body {
+    let (capability, refusal) = match body {
         RequestBody::EnsureWorktreeBoard { .. } | RequestBody::CreateWorktreeBoard { .. } => (
             fleet_proto::response::BOARD_WORKTREE_CAPABILITY,
-            "worktree boards",
+            "this daemon does not support worktree boards; run `fleet daemon restart`",
         ),
         RequestBody::UpsertPullRequestCard { .. } => (
             fleet_proto::response::BOARD_REVIEWS_CAPABILITY,
-            "review boards",
+            "this daemon does not support review boards; run `fleet daemon restart`",
+        ),
+        RequestBody::StageMedia { .. } => (
+            fleet_proto::MEDIA_STAGE_CAPABILITY,
+            "media staging is unavailable; update fleetd on this host",
         ),
         _ => return None,
     };
@@ -704,14 +707,7 @@ fn capability_refusal(
         .capabilities
         .iter()
         .any(|advertised| advertised == capability))
-    .then(|| {
-        annotate_remote_error(
-            host,
-            DaemonError::Unsupported(format!(
-                "this daemon does not support {feature}; run `fleet daemon restart`"
-            )),
-        )
-    })
+    .then(|| annotate_remote_error(host, DaemonError::Unsupported(refusal.to_owned())))
 }
 
 fn unreachable(host: &HostId) -> DaemonError {

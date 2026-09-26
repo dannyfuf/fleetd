@@ -54,3 +54,4 @@ what was rejected and why, and cites the research it was distilled from.
 | [0023](decisions/0023-pointer-parity.md) | Pointer parity: every action has a key and a visible control, controls are not focusable, and the mode word is retired |
 | [0024](decisions/0024-review-boards.md) | Review boards: a second board per context, shown in the Review tab, whose cards each run in their own pull-request worktree |
 | [0025](decisions/0025-scheduled-agent-tasks.md) | Scheduled agent tasks run headless as daemon jobs, owned by a board, on an interval or once |
+| [0026](decisions/0026-media-staging.md) | Media is staged in bounded, resumable chunks on the machine that owns its consumer |

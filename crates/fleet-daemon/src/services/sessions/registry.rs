@@ -187,6 +187,14 @@ impl SessionRuntime {
             .cloned()
     }
 
+    pub(crate) fn owns_terminal(&self, terminal: TerminalId) -> bool {
+        self.registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .terminal_sessions
+            .contains_key(&terminal)
+    }
+
     pub(crate) fn record_sleep(
         &self,
         session: &SessionId,

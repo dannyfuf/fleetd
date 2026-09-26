@@ -42,6 +42,7 @@ pub mod github;
 pub mod hosts;
 pub mod import;
 pub mod inspect;
+pub(crate) mod media;
 pub mod mirror;
 pub mod pool;
 pub mod prune;
@@ -129,6 +130,8 @@ pub struct Services {
     pub inspect: Inspect,
     pub prune: Prune,
     pub doctor: Doctor,
+    /// Resumable local media staging and verification.
+    pub(crate) media: media::Media,
     pub import: Import,
     pub update: Update,
     home: PathBuf,

@@ -69,6 +69,11 @@ impl Services {
             sessions.clone(),
         );
         let fleet_home = fleet_core::paths::FleetHome::new(home.clone());
+        let media = media::Media::new(
+            &fleet_home,
+            Arc::clone(&adapters.files),
+            Arc::clone(&adapters.clock),
+        );
         let agents = agents::AgentSessionManager::new(
             fleet_home.agents_db_path(),
             events.clone(),
@@ -273,6 +278,7 @@ impl Services {
             inspect,
             prune,
             doctor,
+            media,
             import,
             update,
             config,

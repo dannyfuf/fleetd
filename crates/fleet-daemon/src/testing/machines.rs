@@ -2,10 +2,14 @@
 
 use std::{
     collections::VecDeque,
+    future::Future,
+    num::NonZeroUsize,
+    pin::Pin,
     sync::{
         Mutex,
         atomic::{AtomicUsize, Ordering},
     },
+    task::{Context, Poll},
     time::Duration,
 };
 
@@ -18,8 +22,9 @@ use fleet_proto::{
     snapshot::{LinkState, Snapshot},
 };
 use tokio::{
-    io::DuplexStream,
+    io::{AsyncRead, AsyncWrite, DuplexStream, ReadBuf},
     sync::{broadcast, watch},
+    time::{Instant, Sleep},
 };
 
 use crate::{
@@ -38,6 +43,7 @@ pub struct FakeMachine {
     execs: Mutex<VecDeque<Result<ExecOutput, MachineError>>>,
     calls: Mutex<Vec<Vec<String>>>,
     peer: Mutex<Option<DuplexStream>>,
+    write_bytes_per_second: Mutex<Option<NonZeroUsize>>,
     stream_opens: AtomicUsize,
 }
 
@@ -51,6 +57,7 @@ impl FakeMachine {
             execs: Mutex::new(VecDeque::new()),
             calls: Mutex::new(Vec::new()),
             peer: Mutex::new(None),
+            write_bytes_per_second: Mutex::new(None),
             stream_opens: AtomicUsize::new(0),
         }
     }
@@ -70,6 +77,10 @@ impl FakeMachine {
     }
     pub fn take_stream_peer(&self) -> Option<DuplexStream> {
         lock(&self.peer).take()
+    }
+    /// Throttles writes from the link side of subsequently opened streams.
+    pub fn throttle_stream_writes(&self, bytes_per_second: NonZeroUsize) {
+        *lock(&self.write_bytes_per_second) = Some(bytes_per_second);
     }
     /// Number of [`MachineProvider::open_stream`] calls observed so far.
     #[must_use]
@@ -119,13 +130,86 @@ impl MachineProvider for FakeMachine {
         self.stream_opens.fetch_add(1, Ordering::Relaxed);
         let (local, peer) = tokio::io::duplex(64 * 1024);
         *lock(&self.peer) = Some(peer);
-        Ok(Box::new(local))
+        match *lock(&self.write_bytes_per_second) {
+            Some(bytes_per_second) => Ok(Box::new(ThrottledWrites::new(local, bytes_per_second))),
+            None => Ok(Box::new(local)),
+        }
     }
     fn fleetd_binary(&self) -> &str {
         "fleetd"
     }
     fn fleet_home(&self) -> Option<&str> {
         Some("~/.fleet")
+    }
+}
+
+const THROTTLED_WRITE_QUANTUM: usize = 16 * 1024;
+
+struct ThrottledWrites {
+    inner: DuplexStream,
+    bytes_per_second: NonZeroUsize,
+    next_write: Pin<Box<Sleep>>,
+}
+
+impl ThrottledWrites {
+    fn new(inner: DuplexStream, bytes_per_second: NonZeroUsize) -> Self {
+        Self {
+            inner,
+            bytes_per_second,
+            next_write: Box::pin(tokio::time::sleep(Duration::ZERO)),
+        }
+    }
+
+    fn delay_for(&self, bytes: usize) -> Duration {
+        let nanos = (bytes as u128 * 1_000_000_000_u128)
+            .div_ceil(self.bytes_per_second.get() as u128)
+            .min(u64::MAX as u128) as u64;
+        Duration::from_nanos(nanos)
+    }
+}
+
+impl AsyncRead for ThrottledWrites {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_read(cx, buffer)
+    }
+}
+
+impl AsyncWrite for ThrottledWrites {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<Result<usize, std::io::Error>> {
+        if self.next_write.as_mut().poll(cx).is_pending() {
+            return Poll::Pending;
+        }
+        let quantum = buffer.len().min(THROTTLED_WRITE_QUANTUM);
+        match Pin::new(&mut self.inner).poll_write(cx, &buffer[..quantum]) {
+            Poll::Ready(Ok(written)) => {
+                let delay = self.delay_for(written);
+                self.next_write.as_mut().reset(Instant::now() + delay);
+                Poll::Ready(Ok(written))
+            }
+            result => result,
+        }
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
     }
 }
 

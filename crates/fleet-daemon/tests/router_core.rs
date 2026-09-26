@@ -24,7 +24,7 @@ use fleet_daemon::{
 };
 use fleet_proto::{
     event::Event,
-    request::RequestBody,
+    request::{MediaAnchor, RequestBody, StageEntry, StageOp, UploadId},
     response::{ResponseBody, WorktreeDeleteResult},
 };
 
@@ -1165,6 +1165,202 @@ async fn a_host_without_the_review_board_capability_is_refused_by_name() {
         "{error:?}"
     );
     assert!(remote.requests().is_empty());
+}
+
+#[tokio::test]
+async fn every_terminal_media_operation_reaches_its_owner_with_stable_ids() {
+    let owner = host("alpha");
+    let (router, remote) = router_with_remote(owner.clone());
+    remote.set_hello(fleet_daemon::machines::RemoteHello {
+        version: "fleetd current".to_owned(),
+        daemon_id: "current".to_owned(),
+        build_commit: None,
+        capabilities: vec![fleet_proto::MEDIA_STAGE_CAPABILITY.to_owned()],
+    });
+    let remote_terminal = TerminalId(17);
+    let local_terminal = router.ids.local_terminal(&owner, remote_terminal);
+    let upload = "00000000-0000-4000-8000-000000000004"
+        .parse::<UploadId>()
+        .expect("upload id");
+    let operations = [
+        StageOp::Begin {
+            entry: StageEntry::File {
+                name: "image.png".to_owned(),
+                size: 3,
+            },
+        },
+        StageOp::Chunk {
+            file: 0,
+            offset: 0,
+            data: "YWJj".to_owned(),
+        },
+        StageOp::Finish {
+            sha256: vec!["digest".to_owned()],
+        },
+        StageOp::Cancel,
+    ];
+
+    for op in &operations {
+        let request = RequestBody::StageMedia {
+            anchor: MediaAnchor::Terminal {
+                terminal: local_terminal,
+            },
+            upload,
+            op: op.clone(),
+        };
+        assert_eq!(router.route(&request), Target::Host(owner.clone()));
+        if matches!(op, StageOp::Finish { .. }) {
+            remote.push_response(Ok(ResponseBody::Path {
+                path: "/remote/image.png".into(),
+                host: None,
+            }));
+            assert_eq!(
+                router
+                    .forward(&owner, request)
+                    .await
+                    .expect("forward media finish"),
+                ResponseBody::Path {
+                    path: "/remote/image.png".into(),
+                    host: Some(owner.clone()),
+                }
+            );
+        } else {
+            remote.push_response(Ok(ResponseBody::Ack));
+            assert_eq!(
+                router
+                    .forward(&owner, request)
+                    .await
+                    .expect("forward media operation"),
+                ResponseBody::Ack
+            );
+        }
+    }
+
+    assert_eq!(
+        remote.requests(),
+        operations
+            .into_iter()
+            .map(|op| RequestBody::StageMedia {
+                anchor: MediaAnchor::Terminal {
+                    terminal: remote_terminal,
+                },
+                upload,
+                op,
+            })
+            .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn host_and_thread_media_anchors_translate_without_rewriting_global_ids() {
+    let owner = host("alpha");
+    let (router, remote) = router_with_remote(owner.clone());
+    remote.set_hello(fleet_daemon::machines::RemoteHello {
+        version: "fleetd current".to_owned(),
+        daemon_id: "current".to_owned(),
+        build_commit: None,
+        capabilities: vec![fleet_proto::MEDIA_STAGE_CAPABILITY.to_owned()],
+    });
+    let thread = ThreadId::new();
+    router.ids.register_thread(&owner, thread);
+    let upload = "00000000-0000-4000-8000-000000000005"
+        .parse::<UploadId>()
+        .expect("upload id");
+
+    for (local_anchor, remote_anchor) in [
+        (
+            MediaAnchor::Host {
+                host: owner.clone(),
+            },
+            MediaAnchor::Local,
+        ),
+        (
+            MediaAnchor::Thread { thread },
+            MediaAnchor::Thread { thread },
+        ),
+    ] {
+        let request = RequestBody::StageMedia {
+            anchor: local_anchor,
+            upload,
+            op: StageOp::Cancel,
+        };
+        assert_eq!(router.route(&request), Target::Host(owner.clone()));
+        remote.push_response(Ok(ResponseBody::Ack));
+        assert_eq!(
+            router
+                .forward(&owner, request)
+                .await
+                .expect("forward anchored media operation"),
+            ResponseBody::Ack
+        );
+        assert!(matches!(
+            remote.requests().last(),
+            Some(RequestBody::StageMedia {
+                anchor,
+                upload: forwarded,
+                op: StageOp::Cancel,
+            }) if anchor == &remote_anchor && forwarded == &upload
+        ));
+    }
+
+    assert_eq!(
+        router.route(&RequestBody::StageMedia {
+            anchor: MediaAnchor::Local,
+            upload,
+            op: StageOp::Cancel,
+        }),
+        Target::Local
+    );
+}
+
+#[tokio::test]
+async fn media_staging_refuses_an_old_host_by_name_without_harming_the_endpoint() {
+    let owner = host("alpha");
+    let (router, remote) = router_with_remote(owner.clone());
+    remote.set_hello(fleet_daemon::machines::RemoteHello {
+        version: "fleetd old".to_owned(),
+        daemon_id: "old".to_owned(),
+        build_commit: None,
+        capabilities: vec![fleet_proto::REMOTE_MACHINES_CAPABILITY.to_owned()],
+    });
+    let upload = "00000000-0000-4000-8000-000000000006"
+        .parse::<UploadId>()
+        .expect("upload id");
+
+    let error = router
+        .forward(
+            &owner,
+            RequestBody::StageMedia {
+                anchor: MediaAnchor::Host {
+                    host: owner.clone(),
+                },
+                upload,
+                op: StageOp::Begin {
+                    entry: StageEntry::File {
+                        name: "image.png".to_owned(),
+                        size: 0,
+                    },
+                },
+            },
+        )
+        .await
+        .expect_err("an old host must be refused before it decodes StageMedia");
+    assert!(
+        matches!(&error, fleet_daemon::DaemonError::Unsupported(message)
+            if message == "host alpha: media staging is unavailable; update fleetd on this host"),
+        "{error:?}"
+    );
+    assert!(remote.requests().is_empty());
+
+    remote.push_response(Ok(ResponseBody::Pong));
+    assert_eq!(
+        router
+            .forward(&owner, RequestBody::DaemonPing)
+            .await
+            .expect("endpoint remains usable after capability refusal"),
+        ResponseBody::Pong
+    );
+    assert_eq!(remote.requests(), vec![RequestBody::DaemonPing]);
 }
 
 #[tokio::test]
