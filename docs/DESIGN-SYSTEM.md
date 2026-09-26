@@ -282,8 +282,8 @@ list below is the complete inventory, in px unless marked `ch`; a unit test in
 | Window chrome | `title_bar_h 44` · `status_bar_h 28` · `traffic_light_inset 84` · `command_field_w 240` · `filter_field_w 220` · `monogram_size 18` · `mode_word_w 84` · `banner_h 28` · `frame_banner_h 40` · `strip_h 22` |
 | Layout columns | `sidebar_w 232` · `sidebar_min_w 200` · `sidebar_max_w 320` · `sidebar_collapsed_w 44` · `resize_handle_w 6` · `detail_w 344` · `changes_w 300` · `detail_overlay_w 320` · `sheet_w 440` · `sheet_expanded_w 640` · `sheet_w_detail 736` · `sheet_detail_props_w 268` · `first_run_w 560` |
 | Rows and headers | `row_h 30` · `row_h_comfortable 44` · `pane_header_h 30` · `section_header_h 20` · `palette_row_h 34` · `palette_tile 22` · `job_row_h 44` · `progress_bar_h 4` |
-| Controls | `button_h 30` · `button_h_compact 26` · `kbd_h 18` · `kbd_h_small 16` · `chip_h 22` · `tile_chip_h 18` · `avatar_size 20` · `text_field_h 36` · `field_status_h 18` · `number_field_w 96` · `segment_h 24` · `switch_w 34` · `switch_h 20` · `checkbox_size 16` · `step_badge 28` |
-| Dialogs and floating layers | `dialog_w 560` · `confirm_compact_w 480` · `dialog_header_h 44` · `dialog_footer_h 44` · `palette_w 640` · `palette_top 120` · `prefix_menu_w 900` · `palette_input_h 44` · `overlay_help_w 640` · `toast_w 320` · `toast_inset 12` · `scroll_pill_w 176` · `menu_min_w 240` · `alert_tile 34` |
+| Controls | `button_h 30` · `button_h_compact 26` · `kbd_h 18` · `kbd_h_small 16` · `chip_h 22` · `tile_chip_h 18` · `avatar_size 20` · `text_field_h 36` · `field_status_h 18` · `number_field_w 96` · `value_box_w 300` · `value_box_short_w 120` · `value_area_h 54` · `segment_h 24` · `switch_w 34` · `switch_h 20` · `checkbox_size 16` · `step_badge 28` |
+| Dialogs and floating layers | `dialog_w 560` · `confirm_compact_w 480` · `dialog_header_h 44` · `dialog_footer_h 44` · `palette_w 640` · `palette_top 120` · `prefix_menu_w 900` · `palette_input_h 44` · `overlay_help_w 640` · `toast_w 320` · `toast_inset 12` · `scroll_pill_w 176` · `menu_min_w 240` · `alert_tile 34` · `settings_rail_w 196` · `card_header_h 36` |
 | Lines and marks | `hairline 1` · `focus_ring_w 2` · `drop_marker_h 2` · `scroll_thumb_w 3` · `dot_size 8` · `dot_size_small 6` |
 | Terminal | `cell_w 7.5` · `cell_h 18` · `terminal_tab_min_w 84` · `terminal_tab_max_w 200` · `tab_strip_h 40` · `terminal_tab_h 34` · `tab_close_size 18` |
 | Detail and doctor columns | `fact_label_w 104` · `doctor_check_w 120` · `doctor_status_w 64` |
@@ -716,6 +716,27 @@ holds the page's own controls — a `FilterField`, secondary `Button`s, at most 
 `Button` — each showing its key. Not a `PaneHeader` (the dense 30 px pane label row) and not a
 `SectionHeader` (a block inside a panel).
 
+#### `Breadcrumb`
+**Purpose.** Where a drill-in sits and the way back: `‹ Columns  In review`. The first line of a
+settings pane that opens one item of its list in place (Board settings' column and schedule
+forms); it replaces the mono hint line those forms carried.
+**Anatomy.** One `row_h` row, `sm` between parts: a compact ghost `Button` leading with
+`chevron-left` and reading the parent's name · the current name in `UiStrong`, ellipsised when the
+row is narrow · an optional `Badge` · a flexible gap · an optional muted `Caption` at the end
+(`4 of 6`, `next 14:05`).
+**API.** `Breadcrumb::new(id, parent, current).back_action(Box<dyn Action>).badge(Badge)
+.trailing(text).harness_back(name)`; `.parent()`, `.shown_trailing()`, `.goes_back()`. An empty
+`trailing` draws nothing.
+**States.** plain · with a badge · with a trailing caption · a long current name (ellipsised; the
+back button and the caption keep their width). Without `back_action` the button is drawn but goes
+nowhere.
+**Pointer and keyboard (ADR 0023).** The back button is wired with `Button::action`: a click
+dispatches the action `Esc` runs from the form (`dialog::Cancel`), and the button's tooltip names
+that key from the live keymap. The crumb decodes no keys itself.
+**Usage rule.** The first line of a drill-in pane, above its cards, and nowhere else; the
+parent's name is the rail section the user came from. A pane's own title is a `PaneHeader`; a
+crumb that opens a menu of siblings rather than going back is a `SwitcherButton`.
+
 #### `FilterField`
 **Purpose.** A page or board header's filter box: magnifier, and the query or a placeholder; while
 editing, the live editor and `shown/total`. The one filter box of the
@@ -779,9 +800,12 @@ runs in that dialog; the pointer dispatches it to the focused element as the key
 **Harness.** The ✕ paints `dialog.close`; footer buttons paint `dialog.button[N]`, `0` leftmost.
 An alert has no ✕, so it paints no `dialog.close`.
 **Widths.** 460 context/assign · 480 compact confirm · 520 quit · 560 create/clone/expanded
-confirm · 720 settings/prune · 1040 help (clamped to the window). The card detail is a
+confirm/repository hooks · 720 prune · 760 × 600 Settings and Board settings (one shell: a
+`settings_rail_w` rail and a pane of `SettingsCard`s) · 1040 help (clamped to the window). The card detail is a
 `Sheet` at `sheet_w_detail`, not a dialog.
-**States.** default · error (red footer line, dialog stays open).
+**States.** default · error (red footer line, dialog stays open) · warning (amber footer line:
+the first `Esc` on a dirty draft asks once). The line is painted only when it has something to
+say; a dialog never carries a permanent reminder in it.
 **Keyboard.** `Esc` closes. Buttons are not focusable (ADR 0023): each shows the key that is
 its keyboard path.
 **Usage rule.** `Dialog` always ghosts the base screen. `Overlay` can do so when configured with
@@ -1085,9 +1109,13 @@ Amber by default, because "in flight" is amber everywhere.
 Inputs are live entities owned by the surface. The caller holds an `Entity<TextInput>`, focuses
 its `FocusHandle`, reads `text()`, and handles no editing keys around it. There is exactly one
 input component (ADR 0020); a value that cannot be edited is not an input at all but a read-only
-`FactRow` or a `Label`, with no box — and so is a resting row of a list where only the row under
-the cursor is edited at a time (Settings, Board settings). `MarkdownText` is grouped here because it is the read half
-of the description surface a multi-line `TextInput` edits.
+`FactRow` or a `Label`, with no box. A settings dialog (Settings, Board settings, Repository
+hooks) is the one place a value sits in a box without being an editor: each setting is a
+`SettingsRow` inside a `SettingsCard`, and a text or number setting shows its value in a
+`ValueBox` that becomes the row's live `TextInput` **in place** when the row is opened — the
+closed choices are an inline `Cycler` and the booleans a `Switch`, at the same row end.
+`MarkdownText` is grouped here because it is the read half of the description surface a multi-line
+`TextInput` edits.
 
 #### `TextInput`
 **Purpose.** Fleet's live IME-safe editor for single-line values and logical multi-line bodies.
@@ -1151,8 +1179,8 @@ selection and copy. Surface code may call `submit` after handling its own single
 action. The single-line status slot is always present and the validation message **replaces** the
 preview in it, so a failing branch name causes **zero layout shift**; fail before a job starts,
 with the exact failing rule. `set_hide_status_line(true)` is only for a surface that can carry
-neither, because it states its rule elsewhere: a settings row inside `NumberField`'s chrome, the
-rename-terminal dialog, the board filter, a `lazygit` prompt.
+neither, because it states its rule elsewhere: an editor inside a `ValueBox` (its `SettingsRow`
+states the rule in place of its helper), the rename-terminal dialog, the board filter, a `lazygit` prompt.
 
 #### `MarkdownText` / `parse_markdown`
 **Purpose.** Read mode for a card description, a comment and any other stored markdown — the
@@ -1220,65 +1248,167 @@ input keeping the filter · second `Esc` clears it. `Esc` **never** quits the ap
 row. A hidden active filter is the classic "where did my rows go" bug, so always show the
 retained chip afterwards.
 
+#### `SearchField`
+**Purpose.** A dialog header's search box: Settings searches every section from it (`/`). The
+field is always live — the caller's subscription to the editor is the whole search.
+**Anatomy.** `button_h` tall, the `control` fill in a `control_border` hairline (`focus_ring`
+while the editor is focused), `radii.control`, `sm` before the glyph and `xs` after the button,
+`sm` between parts: a small muted `search` glyph · the embedded editor (`flex_1 min_w_0`) · at the
+end, the key chip while the query is empty, or the `shown/total` `Caption` and a compact
+`IconButton` ✕ (*Clear search*) while it is not.
+**API.** `SearchField::new(id, Entity<TextInput>).kbd(impl Into<Option<Kbd>>)
+.count(shown, total).on_clear(Fn(window, app)).width(Pixels).harness_clear(name)`;
+`.is_empty(&App)`, `.end(empty) -> SearchEnd::{Nothing, Kbd, Clear { count }}`, `.count_tone()`.
+The caller builds the editor **embedded** (`set_embedded(true, cx)`) with its placeholder
+(`Search settings`); `width` overrides `filter_field_w` (Settings uses 240 px).
+**States.** empty (placeholder and the key chip) · a query (count and ✕) · a query matching
+nothing (the count turns amber: the query hides the rows, they did not vanish) · focused
+(`focus_ring` hairline) · unfocused.
+**Pointer and keyboard (ADR 0023).** A press anywhere on the field focuses the editor, the
+pointer twin of the key its chip names. The ✕ empties the editor — the edit `ctrl-u` makes, so
+the owner hears an ordinary change — then runs `on_clear`; it is drawn only while there is
+something to clear. The field decodes no keys; the editor's table does.
+**Usage rule.** One per dialog, in the `Dialog`'s `header_actions`. The owner binds the key that
+focuses it and passes the same key to `kbd` (resolved with `Kbd::for_action_in`), so the chip and
+the binding cannot drift. A page or board header's filter is a `FilterField`; a dense pane
+header's is a `FilterBar`.
+
 #### `Cycler`
-**Purpose.** A closed choice in a settings row. The keyboard is the cycler's; the drawing picks
-the form that reads at a glance.
-**Anatomy.** The `row_h` cursor band (`control::cursor_row`): the label in `Ui`, then the control
-at the row's end. Given its `options`, a set of up to `SEGMENTED_MAX` (4) options of at most
+**Purpose.** A closed choice, changed with `←`/`→` (`h`/`l`). The keyboard is the surface's; the
+drawing picks the form that reads at a glance.
+**Anatomy.** Given its `options`, a set of up to `SEGMENTED_MAX` (4) options of at most
 `SEGMENTED_MAX_CHARS` (32) characters together draws as a `SegmentedControl` with the value
-raised; any other set, as a compact `Dropdown`. The label keeps its width and the control takes
-the rest of the row, so a long value never pushes the setting's name out. A cycler whose
-caller lists no options, or whose value is off the configured steps (none of the segments), draws
-the compact dropdown field alone, stating the value.
-**API.** `Cycler::{new(value), labeled(label, value)}().options(iter).on_select(Fn(ix, window,
-app)).unavailable(indices).harness_segments(part).harness(options, dropdown).id(..).has_prev(bool).has_next(bool)
-.focused(bool).disabled(bool).label_width(Pixels).off_grid(bool)`; `unavailable` dims those
-options and refuses a click on them (a dropdown leaves them out of its list) while the keys still
-reach them, so the surface states why next to the control; `harness` names the segments `<options>[N]` and the dropdown field `<dropdown>` for the harness target recorder (Settings names its cursor row's control); `.is_visible()`, `.form() -> CyclerForm::{Segmented(ix), Dropdown(listed)}`.
+raised; any other set, as a compact `Dropdown`. A cycler whose caller lists no options, or whose
+value is off the configured steps (none of the segments), draws the compact dropdown field alone,
+stating the value. Two chromes:
+- **Inline** (`inline(true)`): the control alone — no label, no cursor band, no label column —
+  for a `SettingsRow`'s `control` slot, where the row owns the label, the cursor and the dimming.
+  Every settings row uses this one. An inline cycler has no label to take its id from, so give it
+  one with `id(..)`.
+- **Dropdown** (`dropdown(true)`): the compact dropdown whatever the option count — for a set that
+  reads as a list (a repository id, a model catalogue that ends in `Other model id…`), where a
+  segment would read as a value. Everything else about the cycler is unchanged.
+- **Row** (the default): the cycler draws its own `row_h` band (`control::cursor_row`) — the label
+  in `Ui`, the control at the row's end, the cursor fill and bar; the label keeps its width and the
+  control takes the rest. Create worktree's form keeps this one.
+**API.** `Cycler::{new(value), labeled(label, value)}().inline(bool).dropdown(bool).options(iter).details(iter)
+.on_select(Fn(ix, window, app)).unavailable(indices).harness_segments(part).harness(options,
+dropdown).id(..).has_prev(bool).has_next(bool).focused(bool).disabled(bool).label_width(Pixels)
+.off_grid(bool)`; `.is_inline()`, `.is_visible()`, `.form() -> CyclerForm::{Segmented(ix),
+Dropdown(listed)}`. `details` gives each option a muted trailing detail in the dropdown's list, in
+the order of `options` (a model id beside `Opus 5.5`); a side-by-side cycler shows none.
+`unavailable` dims those options and refuses a click on them (a dropdown leaves them out of its
+list) while the keys still reach them, so the surface states why next to the control; `harness`
+names the segments `<options>[N]` and the dropdown field `<dropdown>` for the harness target
+recorder (Settings names its cursor row's control). The form rule, `harness`, `on_select`,
+`unavailable`, `disabled` and `off_grid` work the same in both chromes.
+**States.** segmented · dropdown · dropdown with details · one option unavailable · disabled · off
+the grid · inline or row chrome, each of them.
 **Keyboard.** `←`/`→` (`h`/`l`), bound by the surface. **Pointer.** Only with `on_select`: a click
 on a segment, or on a dropdown option, calls it with the option's index; point it at the update the
 keys make. Without it the control is drawn only and takes no click.
 **Usage rule.** Zero-suppress the whole control when the set has one member (the host cycler is
-hidden when no hosts are configured).
+hidden when no hosts are configured). In a settings dialog it is always inline, inside a
+`SettingsRow`.
 
-#### `Toggle`
-**Purpose.** A boolean settings row: the label, an optional `Caption` detail, and a `Switch` at
-the row's end.
-**API.** `Toggle::{new(checked), labeled(label, checked)}().detail(..).focused(bool).disabled(bool)
-.label_width(Pixels).id(..).on_toggle(Fn(bool, window, app)).harness_switch(name)`; `.is_checked()`.
-`harness_switch` names the switch itself, so a scenario clicks the control and not the row.
-**Keyboard.** `Space`, bound by the surface; the row carries the cursor band. **Pointer.** Only
-with `on_toggle`: a click on the switch asks for the other value.
+#### `SettingsCard`
+**Purpose.** A titled group of `SettingsRow`s: a settings pane is a column of these, each
+answering one question (`Claude`, `Keep awake while running`, `Prepare`), so the pane reads as a
+few named groups instead of one long list. Rows with no heading go in an untitled card.
+**Anatomy.** `flex_col`, the `surface_raised` fill in a `border` hairline, `radii.card` corners,
+`overflow_hidden`, no shadow (elevation 1: it sits inside a `Dialog`, it is not a surface of its
+own). An optional `card_header_h` (36 px) header, `md` side padding, a hairline under it: the
+title in `UiStrong` and an optional muted `note` at its end; a `subtitle` stacks a muted sentence
+under the title and the header grows to fit (the hooks cards). Then the rows, separated by
+hairlines — never by gaps — and an optional last `caption` line (at least 36 px).
+**API.** `SettingsCard::new(id).title(text).note(text).subtitle(text).row(impl IntoElement)
+.rows(impl IntoIterator<Item = AnyElement>).caption(impl IntoElement)`.
+**States.** None of its own: titled · untitled · with a note · with a subtitle · with a caption;
+cursor, hover, invalid and disabled belong to its rows.
+**Usage rule.** A settings pane's groups only, `md` apart inside the pane's `lg` padding; one
+sentence stated once for the whole pane goes after the last card as a muted `Caption`, not in a
+card. A caption *inside* a card belongs to its rows (a rule that does not compile, in `danger`).
+A read-only block of facts is an `InfoCard`; a floating surface is a `Dialog` or a `Sheet`.
 
-#### `ValueField`
-**Purpose.** A text setting in a settings list: the label, then the value in a field box that takes
-the rest of the row. The box states the value; it is not an editor.
-**API.** `ValueField::new(id, value).label(..).placeholder(..).mono(bool).focused(bool)
-.label_width(Pixels).editor(Entity<TextInput>).on_click(Fn(window, app))`; `.shown()`,
-`.is_editing()`.
-**States.** default · focused (the cursor row, a stronger border) · placeholder (an empty value
-drawn faint as what empty means, `Harness default`) · editing (the embedded editor inside the same
-box, focus-ring border).
-**Keyboard.** None of its own: the surface opens the row's live `TextInput` on `Enter` and hands it
-back through `editor`. **Pointer.** With `on_click`, a click on the box does what `Enter` does.
-**Usage rule.** Hand it an **embedded** editor (`TextInput::set_embedded`): the box is the chrome,
-so opening and closing the row never moves it or changes its height. Use `NumberField` for an
-integer and a bare `TextInput` for a field that is always editable.
+#### `SettingsRow`
+**Purpose.** One setting: its label and a helper sentence on the left, its control at the row's
+end, so the three settings dialogs read as one grammar and every value sits down one column.
+**Anatomy.** `[leading] [label + badge / helper] [hover actions] [control] [trailing]`, at least
+`row_h_comfortable` (44 px), `md` side padding, 6 px (`xs + xxs`) vertical padding, `lg` between
+the slots, the slots centred (`tall`: top-aligned with `sm` vertical padding, for a multi-line
+box that grows). The label block is the only flexible slot (`flex_1 min_w_0 flex_col`, `xxs`
+gap): the label in `Ui` with an optional `Badge` `sm` after it, then the helper — a `Caption`
+sentence in `text_muted` that wraps, or a pattern in `DataSmall` — or, when invalid, the broken
+rule in `danger` **in its place**. Every other slot keeps its width, so a long helper wraps
+instead of pushing the control. The six controls: a `Switch` (on / off) · an inline `Cycler`
+(segmented or dropdown) · a `ValueBox` (text, number with unit, multi-line) · a read-only value
+(`Text::data` for a path, an id or a version, else `Text::ui`) with a compact copy `IconButton` in
+`trailing`.
+**API.** `SettingsRow::new(id).label(text).label_badge(Badge).helper(text).helper_mono(text)
+.invalid(rule).leading(impl IntoElement).control(impl IntoElement).trailing(impl IntoElement)
+.hover_actions(impl IntoElement).cursor(bool).disabled(bool).tall(bool)
+.on_click(Fn(&MouseDownEvent, window, app)).on_double_click(..).on_secondary_click(..)`;
+`.is_disabled()`, `.shown_helper()` (the rule when invalid, else the helper). `label_spans(iter of
+(text, strong))` replaces `label` with the same words cut into spans, the `true` ones drawn in the
+`UiStrong` weight inside one ellipsised `Ui` run — a search hit's matched words. `leading` holds a
+category glyph, a number (the hooks rows) or a rule row's `Switch`; `trailing` a drill-in
+`chevron-right` or a copy button. A row with no label, badge or helper at all hands the label
+block's width to its control, so a `Fill` box (a hooks command) really fills the row.
+**States.** rest · pointer hover (`row_hover`; never over the cursor row, never while disabled) ·
+cursor (`row_selected` and the 2 px bar of `FocusRing::cursor_row`: the row the keyboard is on) ·
+editing (the cursor row, its `ValueBox` drawing the live editor — the row never changes height
+and the box never moves) · invalid (the rule replaces the helper) · disabled (the whole row at
+`dimmed_opacity`, no hover, no pointer, its hover actions still shown on the cursor row; the helper
+says why) · tall · with a leading switch · with
+a label badge · with hover actions.
+**Pointer and keyboard (ADR 0023).** A press lands the cursor (`on_click`); the second press of a
+double click opens the row (`on_double_click`, read from the click count: the twin of `⏎`); a
+right click opens the row's `ContextMenu` (`on_secondary_click`). Landing never opens an editor. A
+click on a control does the control's thing, and the second press of a double click on a slot — the
+leading control, a hover action, the control, the trailing button — never opens the row.
+`hover_actions` are revealed while the row is hovered or is the cursor (on the cursor row even while
+disabled), with their width reserved either way, so revealing them never moves the control;
+every one of them must also be the cursor row's key and an item of its menu — nothing lives only
+behind hover. The row is not focusable: the dialog owns focus and the keys.
+**Usage rule.** Every setting a settings pane lists, inside a `SettingsCard`. A list of records
+(worktrees, jobs, a picker) is a `Row`; a form field that is always editable outside a settings
+dialog is a bare `TextInput`. Copy is sentence case: a label with no full stop, a helper that is
+one sentence ending in one, and never a claim the code does not make.
 
-#### `NumberField`
-**Purpose.** An integer with a unit suffix and a clamp.
-**API.** `NumberField::{new(value), labeled(label, value)}().unit(..).range(min, max).min(i64)
-.focused(bool).invalid(message).label_width(Pixels).editor(Entity<TextInput>).end_aligned(bool)`;
-`.clamp(i64)`, `.is_in_range()`, `.range_message()`, `.message()`, `.is_editing()`.
-**States.** default · focused · invalid (out of range, red border) · editing · end-aligned (the box
-at the row's end, where a `Cycler`'s or a `Toggle`'s control sits, and the label at full contrast,
-for a list that mixes them — Settings).
-**Usage rule.** The clamp is part of the contract: §3.8.6 states minimums, and an out-of-range
-value must be refused at the field, not at save time. `editor` hands the field the live
-`TextInput` the row is being typed into: the field draws that editor where the number would be
-and keeps its own label, unit and message around it, so opening and closing a row never moves it.
-While an editor is present the derived range message is suppressed — the number behind it is the
-last committed one, and the editor states its own rule.
+#### `ValueBox`
+**Purpose.** A text, number or multi-line setting's value in a box at the end of its
+`SettingsRow`, which becomes the row's editor **in place**: the surface opens a live `TextInput`
+on `⏎` or a click and hands it back with `editor`, and the box draws it inside itself, so opening
+and closing the editor never moves the box nor changes the row's height. It replaced the
+label-beside-value text and number fields.
+**Anatomy.** The `bg` fill in a `control_border` hairline, `radii.control`, `sm` side padding, `xs`
+before the unit. Width by `ValueBoxWidth`: `Text` `value_box_w` (300, the default) · `Number`
+`number_field_w` (96) · `Short` `value_box_short_w` (120, a board prefix) · `Fill` (the row's
+width: a hooks command). Single line: `button_h_compact` (26) tall, the value in `Ui` (`Data` with
+`mono`) ellipsised, then the muted `unit` `Caption` (`ms`, `min`, `of 8`). Multi-line: at least
+`value_area_h` (54, three lines), the value wrapped, at most `VALUE_BOX_MAX_ROWS` (8) lines; the
+caller gives its editor the same bound (`InputMode::Multiline { min_rows: 3, max_rows: 8 }`). An
+empty value shows the `placeholder` faint in the UI face — what empty means (`Harness default`).
+**API.** `ValueBox::new(id, value).placeholder(text).mono(bool).unit(text).width(ValueBoxWidth)
+.multiline(bool).editor(Entity<TextInput>).invalid(bool).on_click(Fn(window, app))`;
+`.is_editing()`, `.shown() -> (text, is_placeholder)`. `number_rule(value, min, max, unit) ->
+Option<SharedString>` states the rule an integer breaks, as the row shows it: `Must be at least
+500 ms.`, `Must be between 1 and 8.`, `Must be at most 120 min.`.
+**States.** rest · hover (with `on_click`: `border_strong`) · placeholder · mono · with a unit ·
+each width · multi-line resting · **editing** — an editor is present and focused: a `focus_ring`
+border drawn `focus_ring_w` wide **inset**, so the box does not grow · an editor present but not
+focused (a hooks row, where every row is always editable), drawn at rest · invalid (`danger`
+border, the value in `danger`).
+**Keyboard and pointer.** None of its own: `⏎` on the row opens the editor, and `on_click` is its
+pointer twin (the box stops a press's propagation whenever it has an `on_click` or an editor, so the
+row's own press does not also fire and a press inside an open editor only places the caret). Inside the editor
+`⏎` keeps and `Esc` reverts, both closing the box in place.
+**Usage rule.** A `SettingsRow`'s control. Hand it an **embedded** editor
+(`TextInput::set_embedded(true)`, status line hidden): the box is the chrome; the caller sets the
+editor's mode, filter (digits only for a number) and placeholder. The clamp is part of the
+contract: an out-of-range number is refused at the field, stating the exact rule from
+`number_rule` in place of the row's helper, not at save time. A field that is always editable
+outside a settings row is a bare `TextInput`.
 
 #### `SegmentedTabs`
 **Purpose.** Underlined sub-tabs with counts inside a pane (the PR screen's `Mine 3` /
@@ -2286,8 +2416,11 @@ off is `text_muted` with the knob at the start; the knob is an `accent_fill_text
 inside the track. Hover deepens the track (`accent_fill_hover` / `text_secondary`).
 **API.** `Switch::new(id, on).name(label).disabled(bool).on_toggle(Fn(bool, window, app))`.
 **States.** on · off · hover · disabled on · disabled off.
-**Usage rule.** Inside a settings list, use `Toggle`, which owns the row, the label and `Space`.
-Not focusable; announced as `Role::Switch` with the setting's name.
+**Usage rule.** Inside a `SettingsRow`: as its `control` for an on / off setting, or as its
+`leading` slot for a rule row whose label and helper describe what the switch enables (a
+keep-alive rule, a schedule). The row owns the label, the cursor and `Space`; a click on the switch
+asks for the other value through `on_toggle`, pointing at the update `Space` makes. Not focusable;
+announced as `Role::Switch` with the setting's name.
 
 #### `Checkbox`
 **Purpose.** A boolean that qualifies the action beside it: "Open after creating" next to Create.
@@ -2297,7 +2430,7 @@ Not focusable; announced as `Role::Switch` with the setting's name.
 **API.** `Checkbox::new(id, label, checked).disabled(bool).on_toggle(Fn(bool, window, app))`;
 `.is_checked()`.
 **States.** checked · unchecked · hover · disabled.
-**Usage rule.** A boolean *setting* is a `Toggle` row, not a checkbox. Not focusable (ADR 0023):
+**Usage rule.** A boolean *setting* is a `Switch` in a `SettingsRow`, not a checkbox. Not focusable (ADR 0023):
 the surface keeps its key for the same choice (`⌥⏎` creates without opening whatever the box
 says). Announced as `Role::CheckBox` with its label.
 
@@ -2323,22 +2456,39 @@ keymap, and shows a row with a ⋯ `PopoverMenu` (`BottomRight`), a `+ New tab` 
 (`BottomLeft`, with a header, icons and `⌃S` chips), a right-click area, a labelled and a
 full-width `Dropdown`, an item whose action nothing handles (left out of every menu), and an
 always-open `Menu` showing a header, icon, chip, check, separator and destructive item at once.
-`examples/gallery_input.rs` shows every `SegmentedControl`, `Switch`, `Checkbox`, `Callout`,
-`Cycler` form and `Toggle` state, the confirm in its compact and danger forms with every button
-live, with the host and step cyclers, the segmented control and the first toggle live under the
-pointer. `kit_gallery`'s `controls` section is the overview.
+`examples/gallery_input.rs` shows every `SegmentedControl`, `Switch`, `Checkbox`, `Callout` and
+`Cycler` state in both chromes, the confirm in its compact and danger forms with every button
+live, with the host and step cyclers and the segmented control live under the pointer. Its
+settings panels (`examples/gallery_input/settings.rs`) show every state of `SettingsRow`,
+`SettingsCard`, `ValueBox`, `SearchField` and `Breadcrumb` and the inline `Cycler`: the editing
+row, the multi-line boxes and the focused box are live (a click, or `ctrl-e`, opens the editor
+with its inset focus ring), the `Grace` box steps with `+`/`-` until `number_rule` replaces its
+helper, the search field counts live over a sample of setting labels (`ctrl-f`), and the panel
+ends with the acceptance mock — the Settings · Agents pane as its artboard draws it, every row
+landing the cursor on a click and every control live. `kit_gallery`'s `controls` and `input`
+sections are the overview.
 
 ---
 
 ## 7. What is deliberately not in the kit
 
 - **A generic `Card`.** `Pane`, `Dialog`, `Sheet` and `Overlay` are the four surfaces; a fifth
-  would erode the meaning of the other four.
+  would erode the meaning of the other four. `SettingsCard` is not one: it is a group of
+  `SettingsRow`s at elevation 1 inside a settings dialog's pane, with no shadow and no content
+  of any other kind.
 - **Progress bars.** A phase word (`copying files…`, `hooks 2/3`) is more honest than a
   percentage, and `JobRow` shows a percent only when the job actually parses one.
-- **A disabled row or field.** "You cannot edit this here" is said by the *absence* of an input
-  box (a read-only `FactRow`), and an unavailable command is not listed at all. Only a button
-  that becomes valid on the same surface is drawn disabled (§4).
+- **A disabled field.** "You cannot edit this here" is said by the *absence* of an input box (a
+  read-only `FactRow`, or a `SettingsRow` whose control is the value as text), and an unavailable
+  command is not listed at all. Two things are drawn disabled: a button that becomes valid on the
+  same surface (§4), and a `SettingsRow` for a setting that exists but does not apply to this
+  board or this rule — dimmed, with its helper saying why (`This board has none.`).
+- **A control that draws its own label.** The old on/off, text and number fields each drew their
+  own label beside their control, so every settings list aligned its labels three ways. One
+  `SettingsRow` now owns the label, the helper and the cursor, and a `Switch`, an inline `Cycler`
+  or a `ValueBox` is its control.
+- **An inline editor that changes the row.** A value never turns into a different, taller field
+  when it is opened: the `ValueBox` draws its editor inside itself.
 - **Decorative color.** Four semantic colors and three neutrals. Nothing else.
 
 ## 8. Changing the system

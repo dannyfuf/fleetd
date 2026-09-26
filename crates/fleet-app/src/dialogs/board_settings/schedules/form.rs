@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// One field of a schedule's form, in the order UX-SPEC's Board settings table fixes.
+/// One field of a schedule's form (§5.4). [`ScheduleForm::rows`] fixes the order they draw in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::dialogs::board_settings) enum ScheduleField {
     /// The schedule's name.
@@ -39,7 +39,7 @@ impl ScheduleField {
             Self::Model => "Model",
             Self::Effort => "Effort",
             Self::Mode => "Mode",
-            Self::Cadence => "Cadence",
+            Self::Cadence => "Repeat",
             Self::Every => "Every",
             Self::OnceAt => "Once at",
             Self::Timeout => "Timeout",
@@ -87,15 +87,90 @@ impl ScheduleField {
     pub(in crate::dialogs::board_settings) const fn placeholder(self) -> &'static str {
         match self {
             Self::Name => STARTER_NAME,
-            Self::Model | Self::Effort => "provider default",
+            Self::Model | Self::Effort => PROVIDER_DEFAULT,
             Self::Every => "15",
-            Self::OnceAt => "2026-09-23 09:00",
+            Self::OnceAt => "YYYY-MM-DD HH:MM",
             Self::Timeout => "20",
             Self::Prompt => "What the agent does on every run. Markdown.",
             _ => "",
         }
     }
+
+    /// The sentence under the row's label, from the schedule form's artboard (§5.4).
+    #[must_use]
+    pub(in crate::dialogs::board_settings) const fn helper(self) -> Option<&'static str> {
+        Some(match self {
+            Self::Enabled => "A disabled schedule keeps its history and never fires.",
+            Self::Cadence => {
+                "Once runs a single time at the given moment, then stays for its history."
+            }
+            Self::Every => "Between 5 minutes and 24 hours. Each run costs a model call.",
+            Self::OnceAt => {
+                "Local time. The run fires once, then the schedule stays for its history."
+            }
+            Self::Timeout => "A run past this is stopped and recorded as timed out. Up to 120.",
+            Self::Provider => "Changing it clears the model and effort below.",
+            Self::Model => {
+                "The models the provider reported. Provider default follows Settings \u{203a} Agents."
+            }
+            Self::Mode => "Nobody is there to answer a prompt, so full access is the default.",
+            Self::Prompt => {
+                "What the agent does on every run. Markdown. fleetd appends how to report back."
+            }
+            Self::Name | Self::Effort => return None,
+        })
+    }
+
+    /// The unit after a number box's value.
+    #[must_use]
+    pub(in crate::dialogs::board_settings) const fn unit(self) -> Option<&'static str> {
+        match self {
+            Self::Every | Self::Timeout => Some("min"),
+            _ => None,
+        }
+    }
+
+    /// The card of the form this row sits in.
+    #[must_use]
+    pub(in crate::dialogs::board_settings) const fn card(self) -> ScheduleCard {
+        match self {
+            Self::Name | Self::Enabled => ScheduleCard::Identity,
+            Self::Cadence | Self::Every | Self::OnceAt | Self::Timeout => ScheduleCard::Cadence,
+            Self::Provider | Self::Model | Self::Effort | Self::Mode => ScheduleCard::Agent,
+            Self::Prompt => ScheduleCard::Prompt,
+        }
+    }
 }
+
+/// The cards the schedule form groups its rows into (§5.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::dialogs::board_settings) enum ScheduleCard {
+    /// The untitled card: the name and the switch.
+    Identity,
+    /// *Cadence*: when it runs, and for how long.
+    Cadence,
+    /// *Agent*: who runs it, and how.
+    Agent,
+    /// The untitled card holding the prompt.
+    Prompt,
+}
+
+impl ScheduleCard {
+    /// The card's title; the two untitled cards have none.
+    #[must_use]
+    pub(in crate::dialogs::board_settings) const fn title(self) -> Option<&'static str> {
+        match self {
+            Self::Cadence => Some("Cadence"),
+            Self::Agent => Some("Agent"),
+            Self::Identity | Self::Prompt => None,
+        }
+    }
+}
+
+/// What an unset model reads as: the provider picks.
+const PROVIDER_DEFAULT: &str = "provider default";
+/// What an unset effort reads as on its segmented control.
+const EFFORT_DEFAULT: &str = "default";
 
 /// `every` or `once`, the form's `Cadence` cycler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -270,9 +345,31 @@ impl ScheduleFields {
 
     /// `h` / `l` on a closed choice; returns whether anything changed.
     ///
-    /// Every step is clamped, as every other cycler in this dialog is.
-    pub(super) fn cycle(&mut self, field: ScheduleField, delta: isize) -> bool {
+    /// Every step is clamped, as every other cycler in this dialog is. Model and Effort step
+    /// the catalogue the provider declared; a model with no catalogue only types.
+    pub(super) fn cycle(
+        &mut self,
+        field: ScheduleField,
+        delta: isize,
+        catalogue: &Catalogue,
+    ) -> bool {
         match field {
+            ScheduleField::Model | ScheduleField::Effort => {
+                let Some(choice) = self.catalogue_choice(field, catalogue) else {
+                    return false;
+                };
+                let next = choice.stepped(delta).unwrap_or_default();
+                let slot = if field == ScheduleField::Model {
+                    &mut self.model
+                } else {
+                    &mut self.effort
+                };
+                if slot.trim() == next {
+                    return false;
+                }
+                *slot = next;
+                true
+            }
             ScheduleField::Provider => {
                 let at = position_of(&PROVIDERS, self.provider);
                 let next = PROVIDERS[step(at, delta, PROVIDERS.len())];
@@ -317,6 +414,29 @@ impl ScheduleFields {
             _ => false,
         }
     }
+
+    /// The Model or Effort row as a choice over the catalogue; `None` for a model the provider
+    /// has declared nothing for, which stays a text box.
+    #[must_use]
+    fn catalogue_choice(
+        &self,
+        field: ScheduleField,
+        catalogue: &Catalogue,
+    ) -> Option<CatalogueChoice> {
+        let provider = Some(self.provider);
+        match field {
+            ScheduleField::Model => {
+                CatalogueChoice::model(catalogue, provider, Some(&self.model), PROVIDER_DEFAULT)
+            }
+            ScheduleField::Effort => Some(CatalogueChoice::effort(
+                catalogue,
+                provider,
+                Some(&self.effort),
+                EFFORT_DEFAULT,
+            )),
+            _ => None,
+        }
+    }
 }
 
 /// The form the Schedules pane has drilled into.
@@ -328,8 +448,10 @@ pub(in crate::dialogs::board_settings) struct ScheduleForm {
     pub(in crate::dialogs::board_settings) fields: ScheduleFields,
     /// The values the form opened with, for the dirty check and the patch.
     pub(in crate::dialogs::board_settings) baseline: ScheduleFields,
-    /// The read-only `Last runs` block, newest first, prepared when the form opened.
+    /// The read-only `Last runs` card, newest first, prepared when the form opened.
     pub(in crate::dialogs::board_settings) runs: Vec<RunLine>,
+    /// How many runs fleetd keeps for the schedule, for the `Last runs` card's note.
+    pub(in crate::dialogs::board_settings) kept: usize,
 }
 
 impl ScheduleForm {
@@ -339,23 +461,23 @@ impl ScheduleForm {
         self.fields != self.baseline
     }
 
-    /// The rows the form draws, in order: the cadence shows only its own value row.
+    /// The rows the form draws, card by card (§5.4): the cadence shows only its own value row.
     #[must_use]
     pub(in crate::dialogs::board_settings) fn rows(&self) -> Vec<ScheduleField> {
         vec![
             ScheduleField::Name,
-            ScheduleField::Provider,
-            ScheduleField::Model,
-            ScheduleField::Effort,
-            ScheduleField::Mode,
+            ScheduleField::Enabled,
             ScheduleField::Cadence,
             match self.fields.cadence {
                 CadenceKind::Every => ScheduleField::Every,
                 CadenceKind::Once => ScheduleField::OnceAt,
             },
             ScheduleField::Timeout,
+            ScheduleField::Provider,
+            ScheduleField::Model,
+            ScheduleField::Effort,
+            ScheduleField::Mode,
             ScheduleField::Prompt,
-            ScheduleField::Enabled,
         ]
     }
 
@@ -395,7 +517,7 @@ impl ScheduleForm {
 
 /// The form's rows with their values, ready to draw.
 #[must_use]
-pub(super) fn prepare_form(form: &ScheduleForm) -> Vec<ScheduleFormRow> {
+pub(super) fn prepare_form(form: &ScheduleForm, catalogue: &Catalogue) -> Vec<ScheduleFormRow> {
     let fields = &form.fields;
     form.rows()
         .into_iter()
@@ -410,9 +532,9 @@ pub(super) fn prepare_form(form: &ScheduleForm) -> Vec<ScheduleFormRow> {
                 ScheduleField::Mode => {
                     let modes = fields.provider.supported_modes();
                     choice(
-                        mode_word(fields.mode),
+                        mode_label(fields.mode),
                         position_of(modes, fields.mode),
-                        modes.iter().map(|mode| mode_word(*mode)),
+                        modes.iter().map(|mode| mode_label(*mode)),
                     )
                 }
                 ScheduleField::Cadence => choice(
@@ -421,19 +543,26 @@ pub(super) fn prepare_form(form: &ScheduleForm) -> Vec<ScheduleFormRow> {
                     CADENCES.iter().map(|cadence| cadence.word()),
                 ),
                 ScheduleField::Enabled => ScheduleValue::Flag(fields.enabled),
-                ScheduleField::Every | ScheduleField::Timeout => ScheduleValue::Text {
-                    value: fields
-                        .text(field)
-                        .filter(|text| !text.trim().is_empty())
-                        .map_or_else(String::new, |text| format!("{} minutes", text.trim())),
+                ScheduleField::Model | ScheduleField::Effort => {
+                    fields.catalogue_choice(field, catalogue).map_or_else(
+                        || ScheduleValue::Text {
+                            value: fields.text(field).unwrap_or_default().trim().to_owned(),
+                        },
+                        |choice| ScheduleValue::Choice {
+                            value: choice.value,
+                            options: choice.options,
+                            details: choice.details,
+                            at: choice.at,
+                            other: choice.other,
+                        },
+                    )
+                }
+                // The prompt keeps its line breaks: its box wraps the whole of it.
+                ScheduleField::Prompt => ScheduleValue::Text {
+                    value: fields.prompt.clone(),
                 },
-                // The prompt states its first line: it is paragraphs long, and the form is a
-                // list of one-line facts, exactly as the column `Instructions` row is.
                 _ => ScheduleValue::Text {
-                    value: fields
-                        .text(field)
-                        .map(|text| text.lines().next().unwrap_or_default().trim().to_owned())
-                        .unwrap_or_default(),
+                    value: fields.text(field).unwrap_or_default().trim().to_owned(),
                 },
             },
         })
@@ -447,10 +576,13 @@ pub(super) fn choice<'a>(
     at: usize,
     options: impl IntoIterator<Item = &'a str>,
 ) -> ScheduleValue {
+    let options: Vec<String> = options.into_iter().map(str::to_owned).collect();
     ScheduleValue::Choice {
         value: value.to_owned(),
-        options: options.into_iter().map(str::to_owned).collect(),
-        at,
+        details: vec![String::new(); options.len()],
+        options,
+        at: Some(at),
+        other: false,
     }
 }
 

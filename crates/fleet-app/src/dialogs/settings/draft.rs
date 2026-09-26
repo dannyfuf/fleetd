@@ -44,7 +44,32 @@ pub struct SettingsState {
     pub(crate) search_focused: bool,
     /// The search results' scroll position.
     pub(crate) hit_scroll: gpui::ScrollHandle,
+    /// The models each harness reported, refreshed with the rows.
+    pub(crate) models: Models,
+    /// The first `Esc` on a dirty draft asked; the next one discards (§1 Esc ladder).
+    ///
+    /// Any edit, a click on a row or a move to another section disarms it, so the question is
+    /// always about the draft as it now stands.
+    pub(crate) discard_armed: bool,
+    /// The row's value as the editor opened on it, which `Esc` puts back.
+    pub(crate) edit_seed: Option<String>,
+    /// The rule the open number editor's text breaks (`Must be at least 500 ms.`); Save waits.
+    pub(crate) edit_rule: Option<String>,
 }
+
+/// What one `Esc` did, from the deepest thing it could leave outwards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EscapeStep {
+    /// Reverted the open editor's row and closed the editor; the dialog stays.
+    Revert,
+    /// Asked about the unsaved draft, which is the one question the ladder allows.
+    Ask,
+    /// Nothing left to leave: the shell closes the dialog.
+    Close,
+}
+
+/// The amber strip the first `Esc` on a dirty draft paints.
+pub(super) const DISCARD_WARNING: &str = "Unsaved changes. Press Esc again to discard them.";
 
 /// What the search field holds and what it found.
 #[derive(Debug, Default)]
@@ -53,6 +78,8 @@ pub struct SearchState {
     pub(crate) query: String,
     /// The rows it matched, across every section.
     pub(crate) hits: Vec<SearchHit>,
+    /// How many rows every section holds together: the field's `shown/total` count.
+    pub(crate) total: usize,
     /// The hit `Enter` jumps to.
     pub(crate) cursor: usize,
 }
@@ -98,11 +125,12 @@ impl SettingsState {
             return String::new();
         };
         let value = match &row.kind {
-            RowKind::Toggle(true) => "on".to_owned(),
-            RowKind::Toggle(false) => "off".to_owned(),
-            RowKind::Choice { value, .. } | RowKind::Text(value) | RowKind::Fact(value) => {
-                value.clone()
-            }
+            RowKind::Toggle(true) | RowKind::Rule { on: true, .. } => "on".to_owned(),
+            RowKind::Toggle(false) | RowKind::Rule { on: false, .. } => "off".to_owned(),
+            RowKind::Choice { value, .. }
+            | RowKind::Text(value)
+            | RowKind::Model { value, .. }
+            | RowKind::Fact(value) => value.clone(),
             RowKind::Number { value, .. } => value.to_string(),
         };
         format!("{} = {value}", row.label)
@@ -131,7 +159,7 @@ impl SettingsState {
             return true;
         };
         match self.focused_row().map(|row| row.kind) {
-            Some(RowKind::Text(_)) => true,
+            Some(RowKind::Text(_) | RowKind::Model { .. }) => true,
             Some(RowKind::Number { min, .. }) => {
                 input.trim().parse::<i64>().is_ok_and(|value| value >= min)
             }
@@ -171,6 +199,48 @@ impl SettingsState {
         }
         self.doctor_in_flight = false;
         true
+    }
+
+    /// What `Esc` (or Cancel, ✕, the scrim) does next: revert an open editor, then ask once
+    /// about a dirty draft, then let the shell close the dialog.
+    ///
+    /// Split out from [`cancel`] so the whole ladder can be proven without a window. The
+    /// caller drops the editor entity on [`EscapeStep::Revert`].
+    pub fn escape(&mut self) -> EscapeStep {
+        if self.editing.is_some() {
+            self.revert_edit();
+            return EscapeStep::Revert;
+        }
+        if self.dirty() && !self.discard_armed {
+            self.discard_armed = true;
+            return EscapeStep::Ask;
+        }
+        EscapeStep::Close
+    }
+
+    /// Puts back the value the editor opened on and forgets the edit.
+    fn revert_edit(&mut self) {
+        if let (Some(seed), Some(id)) = (self.edit_seed.take(), self.row_id())
+            && let Some(config) = self.config.as_mut()
+        {
+            // The seed is the committed value the editor started from, so it always parses.
+            let _reverted = commit_value(config, &id, &seed);
+        }
+        self.close_editor();
+        self.update_selected();
+    }
+
+    /// Forgets the open edit, keeping whatever it already wrote into the draft.
+    pub(super) fn close_editor(&mut self) {
+        self.editing = None;
+        self.edit_seed = None;
+        self.edit_rule = None;
+    }
+
+    /// The amber strip's sentence, while the first `Esc` on a dirty draft is waiting.
+    #[must_use]
+    pub fn discard_warning(&self) -> Option<&'static str> {
+        (self.discard_armed && self.dirty()).then_some(DISCARD_WARNING)
     }
 }
 
@@ -236,7 +306,11 @@ pub(super) fn focused_row(state: &Entity<AppState>, cx: &mut App) -> Option<Focu
 }
 
 impl SettingsState {
+    /// Re-reads the row under the cursor from the draft after an edit to it.
+    ///
+    /// Every edit passes through here, so it is also what disarms the discard question.
     pub(super) fn update_selected(&mut self) {
+        self.discard_armed = false;
         let Some(focused) = self.focused_row() else {
             return;
         };
@@ -250,6 +324,8 @@ impl SettingsState {
                 (RowKind::Number { value, .. }, RowKind::Number { value: edited, .. }) => {
                     *value = edited
                 }
+                // A rule row keeps its live count and badge; only its switch moved.
+                (RowKind::Rule { on, .. }, RowKind::Toggle(edited)) => *on = edited,
                 (_, kind) => row.kind = kind,
             }
         }
@@ -296,20 +372,19 @@ impl SettingsState {
     pub(super) fn focused_row(&self) -> Option<FocusedSetting> {
         let config = self.config.as_ref()?;
         let id = self.row_id()?;
-        let kind = kind_of(config, &id, &self.efforts)?;
+        let kind = kind_of(config, &id, &self.efforts, &self.models)?;
         Some(FocusedSetting { id, kind })
     }
 }
 
 /// The kind an editable row draws with, straight from the draft, so the row under the cursor can
 /// be refreshed without rebuilding the section. `None` for a keep-alive rule that is gone.
-fn kind_of(config: &Config, id: &RowId, efforts: &Efforts) -> Option<RowKind> {
+fn kind_of(config: &Config, id: &RowId, efforts: &Efforts, models: &Models) -> Option<RowKind> {
     let number = |value, min| RowKind::Number {
         value,
         min,
         unit: None,
     };
-    let text = |value: &Option<String>| RowKind::Text(value.clone().unwrap_or_default());
     if let Some(choice) = choice_of(config, id, efforts) {
         return Some(choice.kind());
     }
@@ -321,8 +396,8 @@ fn kind_of(config: &Config, id: &RowId, efforts: &Efforts) -> Option<RowKind> {
         RowId::CodexCommand => RowKind::Text(config.agent_commands.codex.clone()),
         RowId::ClaudeBinary => RowKind::Text(config.agent_binaries.claude.clone()),
         RowId::CodexBinary => RowKind::Text(config.agent_binaries.codex.clone()),
-        RowId::ClaudeDefaultModel => text(&config.native_agents.claude.model),
-        RowId::CodexDefaultModel => text(&config.native_agents.codex.model),
+        RowId::ClaudeDefaultModel => model_of(config, AgentKind::Claude, models),
+        RowId::CodexDefaultModel => model_of(config, AgentKind::Codex, models),
         RowId::GraceMs => number(config.sleep.grace_ms, 0),
         RowId::HotFreshnessMs => number(
             i64::try_from(config.hot_freshness_ms).unwrap_or(i64::MAX),
@@ -368,6 +443,7 @@ pub(super) fn move_row(
     let len = focused_len(state, cx);
     with_host(state, cx, |host| {
         host.settings.row = step(host.settings.row, delta, len);
+        host.settings.discard_armed = false;
         let block = block_of(&host.settings.prepared, host.settings.row);
         host.settings.scroll.scroll_to_item(block);
     });
@@ -375,13 +451,14 @@ pub(super) fn move_row(
     notify(state, cx);
 }
 
-/// The pane child that holds `row`: consecutive rows of one card are one child.
+/// The pane child that holds `row`: consecutive rows of one card are one child, and so are
+/// consecutive rows with no heading, which share one untitled card.
 #[must_use]
 pub fn block_of(rows: &[SettingRow], row: usize) -> usize {
-    // Every row after the first starts a new child unless it continues the card above it.
+    // Every row after the first starts a new card when its heading differs from the row above.
     rows.windows(2)
         .take(row)
-        .filter(|pair| pair[1].card.is_none() || pair[1].card != pair[0].card)
+        .filter(|pair| pair[1].card != pair[0].card)
         .count()
 }
 
@@ -392,8 +469,12 @@ pub(super) fn cycle_row(state: &Entity<AppState>, delta: isize, cx: &mut App) {
     };
     with_host(state, cx, |host| {
         let efforts = host.settings.efforts.clone();
+        let models = host.settings.models.clone();
         if let Some(config) = host.settings.config.as_mut() {
-            cycle(config, &row.id, delta, &efforts);
+            match model_harness(&row.id) {
+                Some(kind) => cycle_model(config, kind, delta, &models),
+                None => cycle(config, &row.id, delta, &efforts),
+            }
         }
         host.settings.update_selected();
     });
@@ -420,11 +501,24 @@ pub(super) fn toggle_row(state: &Entity<AppState>, cx: &mut App) {
 /// `Enter` its ordinary meaning, which in this dialog is Save.
 pub(super) fn confirm_opens_editing(
     state: &Entity<AppState>,
+    focus: &FocusHandle,
     window: &mut Window,
     cx: &mut App,
 ) -> bool {
-    if read_host(state, cx, |host, _| host.settings_input.is_some()) {
-        return false;
+    let (editing, broken) = read_host(state, cx, |host, _| {
+        (
+            host.settings_input.is_some(),
+            host.settings.edit_rule.is_some(),
+        )
+    });
+    if editing {
+        // `⏎` in an open editor keeps what was typed and closes the box in place; a value that
+        // breaks its rule keeps the box open, because closing it would silently drop the edit.
+        if !broken {
+            end_editing(state, focus, window, cx);
+            notify(state, cx);
+        }
+        return true;
     }
     begin_editing(state, window, cx)
 }
@@ -441,18 +535,34 @@ pub(super) fn begin_editing(state: &Entity<AppState>, window: &mut Window, cx: &
         return false;
     };
     let (text, min) = match &focused.kind {
-        RowKind::Text(value) => (value.clone(), None),
+        RowKind::Text(value) | RowKind::Model { value, .. } => (value.clone(), None),
         RowKind::Number { value, min, .. } => (value.to_string(), Some(*min)),
-        RowKind::Toggle(_) | RowKind::Choice { .. } | RowKind::Fact(_) => return false,
+        RowKind::Toggle(_) | RowKind::Choice { .. } | RowKind::Rule { .. } | RowKind::Fact(_) => {
+            return false;
+        }
     };
+    let placeholder = matches!(focused.kind, RowKind::Model { .. }).then_some(MODEL_DEFAULT);
+    // The unit the rule names (`Must be at least 500 ms.`) is the prepared row's.
+    let unit = read_host(state, cx, |host, _| {
+        host.settings
+            .prepared
+            .get(host.settings.row)
+            .and_then(|row| match &row.kind {
+                RowKind::Number { unit, .. } => unit.clone(),
+                _ => None,
+            })
+    });
     let seed = text.clone();
     let input = cx.new(|cx| {
         let mut input = TextInput::new(InputMode::SingleLine, cx);
         input.set_mono(true, cx);
         input.set_hide_status_line(true, cx);
-        // The row draws the box (`ValueField`, `NumberField`) and keeps its label beside it, so
-        // the editor is only the line of text and its caret.
+        // The row's `ValueBox` is the chrome: the editor is only the line of text and its
+        // caret, drawn inside the same box the value rested in.
         input.set_embedded(true, cx);
+        if let Some(placeholder) = placeholder {
+            input.set_placeholder(placeholder, cx);
+        }
         if min.is_some() {
             // A number row is not a free-text field: a letter that reached the buffer would
             // make `commit_value` fail to parse it and clamp the setting to its minimum.
@@ -463,6 +573,8 @@ pub(super) fn begin_editing(state: &Entity<AppState>, window: &mut Window, cx: &
     });
     let host = crate::dialogs::host::host_for(state, cx);
     host.update(cx, |host, _| {
+        host.settings.edit_seed = Some(text.clone());
+        host.settings.edit_rule = None;
         host.settings.editing = Some(text);
         host.settings_input = Some(input.clone());
     });
@@ -475,17 +587,15 @@ pub(super) fn begin_editing(state: &Entity<AppState>, window: &mut Window, cx: &
             return;
         };
         let typed = input.read(cx).text().to_owned();
-        with_host(&state, cx, |host| host.settings.editing = Some(typed));
-        if let Some(min) = min {
-            let invalid = (!read_host(&state, cx, |host, _| host.settings.editing_is_valid()))
-                .then(|| format!("must be an integer of at least {min}"));
-            let input = input.clone();
-            cx.defer(move |cx| {
-                input.update(cx, |input, cx| {
-                    input.set_invalid(invalid.map(Into::into), cx)
-                })
-            });
-        }
+        // The rule the typed number breaks replaces the row's helper; Save waits for it.
+        let rule = min.and_then(|min| {
+            let value = typed.trim().parse::<i64>().unwrap_or(i64::MIN);
+            number_rule(value, Some(min), None, unit.as_deref()).map(|rule| rule.to_string())
+        });
+        with_host(&state, cx, |host| {
+            host.settings.editing = Some(typed);
+            host.settings.edit_rule = rule;
+        });
         flush(&state, cx);
     });
     host.update(cx, |host, _| {
@@ -504,7 +614,7 @@ pub(super) fn end_editing(
     cx: &mut App,
 ) {
     let had_input = with_host(state, cx, |host| {
-        host.settings.editing = None;
+        host.settings.close_editor();
         host.settings_input_subscription = None;
         host.settings_input.take().is_some()
     });
@@ -576,6 +686,7 @@ pub(super) fn goto_row(
     with_host(state, cx, |host| {
         host.settings.section = section.min(Section::ALL.len() - 1);
         host.settings.row = 0;
+        host.settings.discard_armed = false;
     });
     refresh_rows(state, cx);
     let len = focused_len(state, cx);
@@ -585,6 +696,32 @@ pub(super) fn goto_row(
         host.settings.scroll.scroll_to_item(block);
     });
     notify(state, cx);
+}
+
+/// `Esc`, Cancel, ✕ or the scrim: one step down the ladder.
+///
+/// Returns whether the dialog keeps the key. Only [`EscapeStep::Close`] lets it through to the
+/// shell's own `dialog::Cancel`, which is the single path that closes an overlay.
+pub(super) fn cancel(
+    state: &Entity<AppState>,
+    focus: &FocusHandle,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    let step = with_host(state, cx, |host| host.settings.escape());
+    match step {
+        EscapeStep::Revert => {
+            // The draft is already reverted; this drops the editor and hands the keys back.
+            end_editing(state, focus, window, cx);
+            notify(state, cx);
+            true
+        }
+        EscapeStep::Ask => {
+            notify(state, cx);
+            true
+        }
+        EscapeStep::Close => false,
+    }
 }
 
 pub(super) struct FocusedSetting {

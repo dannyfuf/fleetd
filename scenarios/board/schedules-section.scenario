@@ -1,5 +1,6 @@
-# plans/pr-review-boards-2026-09-22-phase-4-plan.md P4-T07 (FEA-26) · UX-SPEC.md §3.8.6 Board
-# settings ("Schedules") · KEYMAP.md §Dialog > BoardSettings · TESTING-HARNESS.md §11 (the
+# plans/pr-review-boards-2026-09-22-phase-4-plan.md P4-T07 (FEA-26) · UX-SPEC.md §Board "The
+# other three dialogs" (Board settings › Schedules) · KEYMAP.md §Dialog > BoardSettings ·
+# TESTING-HARNESS.md §11 (the
 # `section` and row-editor fields) — on a Reviews board, `n` in the Schedules section starts
 # from the GitHub review starter.
 #
@@ -11,8 +12,9 @@
 #
 # The form's values are read through the one row-scoped editor a row mounts on `⏎`, which is the
 # only place a Board settings text row can be read back (§11): `dialog.fields[1]` is named after
-# the row. The rows run Name, Provider, Model, Effort, Mode, Cadence, Every, Timeout, Prompt,
-# Enabled — Once at is hidden while the cadence is `every` — so Prompt is eight `j` below Name.
+# the row. The rows run Name, Enabled, Repeat, Every, Timeout, Provider, Model, Effort, Mode,
+# Prompt — Once at is hidden while Repeat is `every` — so Prompt is nine `j` below Name. `esc` in
+# an open editor reverts the row and stays in the form.
 #
 # Nothing is saved: `^s` would create a schedule, and that is FEA-26's gpui tests' business. The
 # fields are read with `assert`, never `await`: typing and editors do not notify `AppState` (§11).
@@ -43,7 +45,7 @@ key escape
 assert key_contexts[1] == "BoardSettings" && dialog.fields[0].value == "Schedules"
 
 # And its Prompt row carries the starter's prompt.
-key j j j j j j j j
+key j j j j j j j j j
 key enter
 assert dialog.fields[1].name == "prompt"
 assert dialog.fields[1].value ~= "^List every open pull request where my review is requested, directly or through one of my teams, with gh search prs --review-requested=@me"

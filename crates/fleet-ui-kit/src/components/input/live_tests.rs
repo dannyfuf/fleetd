@@ -159,6 +159,23 @@ fn typing_emits_changed_and_selection_typing_replaces(cx: &mut gpui::TestAppCont
     input.read_with(&visual, |input, _| assert_eq!(input.text(), "helX"));
 }
 
+/// A placeholder is a sentence (`Type the next command…`), so an empty mono input draws it in the
+/// UI face; the first typed character brings the data face.
+#[gpui::test]
+fn an_empty_mono_input_draws_its_placeholder_in_the_ui_face(cx: &mut gpui::TestAppContext) {
+    let (mut visual, input, _, _, _) = hosted(cx, InputMode::SingleLine, "", |input, cx| {
+        input.set_mono(true, cx);
+        input.set_placeholder("Type the next command\u{2026}", cx);
+    });
+    input.read_with(&visual, |input, _| {
+        assert_eq!(input.value_role(), crate::text::TextRole::Ui);
+    });
+    visual.simulate_input("ls");
+    input.read_with(&visual, |input, _| {
+        assert_eq!(input.value_role(), crate::text::TextRole::Data);
+    });
+}
+
 #[gpui::test]
 fn word_and_line_deletion_use_the_shared_actions(cx: &mut gpui::TestAppContext) {
     let (mut visual, input, _, _, _) = hosted(cx, InputMode::SingleLine, "alpha beta", |_, _| {});

@@ -58,10 +58,11 @@ pub(crate) use settings::refresh_rows as settings_refresh_rows;
 const NARROW_W: Pixels = px(460.0);
 /// §3.8 card width for a yes/no prompt with facts above it.
 const PROMPT_W: Pixels = px(520.0);
-/// §3.8 card width for a rail plus pane: Board settings.
-const WIDE_W: Pixels = px(720.0);
-/// §3.8.6 Settings: a rail, a pane of controls and a search in the header, `760 × 600`.
+/// §3.8.6 Settings and Board settings: a rail, a pane of controls and a search in the header,
+/// `760 × 600`. The two dialogs share one shell, so they share one width and one height.
 const SETTINGS_W: Pixels = px(760.0);
+/// §3.8.6 the section rail of a settings dialog, in px; each dialog restates it as `RAIL_WIDTH`.
+pub(crate) const SETTINGS_RAIL_W: f32 = 196.0;
 /// §3.8.6 Settings' header search field.
 pub(crate) const SETTINGS_SEARCH_W: Pixels = px(240.0);
 /// §3.8.7 Help: a large panel, `1040 × 720`, clamped to the window on a narrow one.
@@ -75,9 +76,7 @@ pub(crate) const HELP_KEYS_COL_W: Pixels = px(150.0);
 
 /// §3.8.2 card height for the clone-repo list: `560 × 420`.
 const CLONE_H: Pixels = px(420.0);
-/// Board settings' card height: `720 × 560`.
-const BOARD_SETTINGS_H: Pixels = px(560.0);
-/// §3.8.6 Settings' card height: `760 × 600`.
+/// §3.8.6 Settings' and Board settings' card height: `760 × 600`.
 const SETTINGS_H: Pixels = px(600.0);
 /// §3.8.7 card height for Help: `1040 × 720`.
 const HELP_H: Pixels = px(720.0);
@@ -158,14 +157,12 @@ impl Dialogs {
             | Self::EditHooks
             | Self::CardPicker
             | Self::CardCreate => cx.theme().metrics.dialog_w,
-            // A rail plus a pane, like the global settings: the board settings grew a third
-            // section whose pane is a list of columns (§3.8.6, contracts §5.4).
-            Self::BoardSettings => WIDE_W,
             Self::Confirm => cx.theme().metrics.confirm_compact_w,
             Self::NewContext | Self::EditContext | Self::RenameTerminal | Self::AssignRepo => {
                 NARROW_W
             }
-            Self::Settings => SETTINGS_W,
+            // One shell for both settings dialogs: a rail plus a pane of cards (§3.8.6).
+            Self::Settings | Self::BoardSettings => SETTINGS_W,
             // A sheet, not a card: it docks to the right of the board (UX-SPEC § Card detail).
             Self::CardDetail | Self::ChangesDiff => cx.theme().metrics.sheet_w_detail,
             Self::Help => HELP_W,
@@ -206,8 +203,7 @@ impl Dialogs {
     pub(crate) const fn height(&self) -> Option<Pixels> {
         match self {
             Self::CloneRepo => Some(CLONE_H),
-            Self::BoardSettings => Some(BOARD_SETTINGS_H),
-            Self::Settings => Some(SETTINGS_H),
+            Self::Settings | Self::BoardSettings => Some(SETTINGS_H),
             Self::Help => Some(HELP_H),
             _ => None,
         }

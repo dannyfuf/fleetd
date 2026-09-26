@@ -2,16 +2,29 @@
 //!
 //! Every click lands on the same update its key makes — a rail item is `Tab`, a row is `j`/`k`,
 //! a switch is `Space`, a segment or a dropdown option is `h`/`l` landing on that option, and a
-//! text or number box is `Enter` — and first puts the cursor on the row it touched, so the
-//! keyboard carries on from where the pointer left it.
+//! text or number box (or a double click on its row) is `Enter` — and first puts the cursor on
+//! the row it touched, so the keyboard carries on from where the pointer left it. Landing on a
+//! row never opens its editor.
 
 use fleet_ui_kit::{InputMode, TextInput, TextInputEvent};
 use gpui::ClipboardItem;
 
 use super::*;
 
-/// A click on row `row`: the cursor moves there, and a text or number row opens its editor.
+/// A click on row `row`: the cursor moves there and nothing opens.
 pub(super) fn click_row(
+    state: &Entity<AppState>,
+    row: usize,
+    focus: &FocusHandle,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    put_cursor(state, row, focus, window, cx);
+}
+
+/// A click on row `row`'s box, a double click on the row, or `Other model id…`: the cursor
+/// moves there and a text, number or model row opens its editor, as `Enter` does.
+pub(super) fn open_row(
     state: &Entity<AppState>,
     row: usize,
     focus: &FocusHandle,
@@ -22,8 +35,32 @@ pub(super) fn click_row(
     begin_editing(state, window, cx);
 }
 
+/// A pick from row `row`'s Default model dropdown: `None` is Harness default, else option
+/// `index` of the catalogue, as `h`/`l` landing on it would write.
+pub(super) fn pick_model(
+    state: &Entity<AppState>,
+    row: usize,
+    index: Option<usize>,
+    focus: &FocusHandle,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    put_cursor(state, row, focus, window, cx);
+    let Some(kind) = focused_row(state, cx).and_then(|focused| model_harness(&focused.id)) else {
+        return;
+    };
+    with_host(state, cx, |host| {
+        let models = host.settings.models.clone();
+        if let Some(config) = host.settings.config.as_mut() {
+            select_model(config, kind, index, &models);
+        }
+        host.settings.update_selected();
+    });
+    notify(state, cx);
+}
+
 /// Moves the cursor to `row` of the shown section, closing any editor and leaving the search
-/// field, as `j`/`k` would.
+/// field, as `j`/`k` would. A click on a row disarms the discard question.
 fn put_cursor(
     state: &Entity<AppState>,
     row: usize,
@@ -39,6 +76,7 @@ fn put_cursor(
     let len = focused_len(state, cx);
     with_host(state, cx, |host| {
         host.settings.row = row.min(len.saturating_sub(1));
+        host.settings.discard_armed = false;
     });
     notify(state, cx);
 }
@@ -97,9 +135,10 @@ pub(super) fn copy_value(text: &str, cx: &mut App) {
 pub(super) fn seed_search(state: &Entity<AppState>, cx: &mut App) {
     let input = cx.new(|cx| {
         let mut input = TextInput::new(InputMode::SingleLine, cx);
-        input.set_icon(Some(fleet_ui_kit::Icon::Search), cx);
         input.set_placeholder("Search settings", cx);
         input.set_hide_status_line(true, cx);
+        // The header's `SearchField` is the chrome: its glyph, its chip, its count and ✕.
+        input.set_embedded(true, cx);
         input
     });
     // Weak, like every dialog editor's subscription: the field lives on `DialogHost`, which
@@ -129,8 +168,9 @@ pub(super) fn seed_search(state: &Entity<AppState>, cx: &mut App) {
                 let changed = with_host(&state, cx, |host| {
                     let changed = !host.settings.search_focused;
                     host.settings.search_focused = true;
-                    // A row editor the click took the keyboard from is closed, as `j` would.
-                    host.settings.editing = None;
+                    // A row editor the click took the keyboard from is closed, keeping what it
+                    // wrote, as a click outside its box does.
+                    host.settings.close_editor();
                     host.settings_input_subscription = None;
                     host.settings_input = None;
                     changed

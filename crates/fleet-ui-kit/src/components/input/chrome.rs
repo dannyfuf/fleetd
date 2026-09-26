@@ -21,8 +21,10 @@ impl TextInput {
         }
     }
 
+    /// The face the value is drawn in. A placeholder says what empty means and is a sentence
+    /// (`Type the next command…`), so it is the UI face whatever face the value takes.
     pub(super) fn value_role(&self) -> TextRole {
-        if self.mono {
+        if self.mono && !self.buffer.is_empty() {
             TextRole::Data
         } else {
             TextRole::Ui

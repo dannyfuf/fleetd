@@ -4,11 +4,27 @@
 //! Given its [`Cycler::options`], a set of up to [`SEGMENTED_MAX`] short options (at most
 //! [`SEGMENTED_MAX_CHARS`] characters together) draws as a [`SegmentedControl`] with the value
 //! raised, and any other set as a compact [`Dropdown`] whose list opens on a click. A cycler whose caller has not listed its options (or whose value is off
-//! the configured steps) draws the dropdown field alone, stating the value.
+//! the configured steps) draws the dropdown field alone, stating the value. A caller whose set
+//! reads as a list whatever its size — a repository id, a model catalogue that ends in `Other
+//! model id…`, where a segment would read as a value — asks for the dropdown with
+//! [`Cycler::dropdown`].
 //!
 //! Zero-suppression applies to the control itself: a set with fewer than two members has no
 //! choice in it, so [`Cycler::is_visible`] is false and the host cycler disappears when no
 //! hosts are configured.
+//!
+//! ## Two chromes
+//!
+//! - **Row** (the default): the cycler draws its own `row_h` band — the label, the control at
+//!   the end, the cursor fill and bar. Create worktree's form keeps this one.
+//! - **Inline** ([`Cycler::inline`]): the cycler draws the control alone — no label, no cursor
+//!   band, no label column — for a [`super::SettingsRow`] that owns all of that and takes the
+//!   cycler as its `control`. The form rule, [`Cycler::harness`], [`Cycler::on_select`],
+//!   [`Cycler::unavailable`], [`Cycler::disabled`] and [`Cycler::off_grid`] work the same in
+//!   both. Every settings row uses this one.
+//!
+//! A dropdown's items can name what each option resolves to ([`Cycler::details`], e.g. a model
+//! id beside `Sonnet`), drawn as the menu item's trailing detail.
 
 use std::rc::Rc;
 
@@ -37,6 +53,9 @@ pub struct Cycler {
     label: Option<SharedString>,
     value: SharedString,
     options: Option<Vec<SharedString>>,
+    details: Vec<SharedString>,
+    inline: bool,
+    dropdown: bool,
     has_prev: bool,
     has_next: bool,
     focused: bool,
@@ -66,6 +85,9 @@ impl Cycler {
             label: None,
             value: value.into(),
             options: None,
+            details: Vec::new(),
+            inline: false,
+            dropdown: false,
             has_prev: true,
             has_next: true,
             focused: false,
@@ -100,6 +122,36 @@ impl Cycler {
     /// matches one; a value matching none (off the grid) draws as a dropdown field.
     pub fn options<T: Into<SharedString>>(mut self, options: impl IntoIterator<Item = T>) -> Self {
         self.options = Some(options.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// A muted detail for each option, in the order of [`Cycler::options`], shown beside it in
+    /// the dropdown's list (a model id beside its name). An empty detail draws none. A cycler
+    /// drawn side by side shows no details.
+    pub fn details<T: Into<SharedString>>(mut self, details: impl IntoIterator<Item = T>) -> Self {
+        self.details = details.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Draw the control alone (segmented or dropdown, by [`Cycler::form`]): no label, no cursor
+    /// band, no label column. For a [`super::SettingsRow`]'s `control` slot, where the row owns
+    /// the label, the cursor and the dimming. See the module doc. An inline cycler has no label
+    /// to take its id from, so give it one with [`Cycler::id`].
+    pub fn inline(mut self, inline: bool) -> Self {
+        self.inline = inline;
+        self
+    }
+
+    /// Whether [`Cycler::inline`] is set.
+    pub fn is_inline(&self) -> bool {
+        self.inline
+    }
+
+    /// Draw the compact dropdown whatever the option count: for a set that reads as a list (a
+    /// repository id, a model catalogue ending in `Other model id…`), where a segment would read
+    /// as a value. The keys, the list and the harness names are the dropdown's as usual.
+    pub fn dropdown(mut self, dropdown: bool) -> Self {
+        self.dropdown = dropdown;
         self
     }
 
@@ -198,7 +250,9 @@ impl Cycler {
             .map(|option| option.chars().count())
             .sum();
         match self.position() {
-            Some(ix) if listed <= SEGMENTED_MAX && chars <= SEGMENTED_MAX_CHARS => {
+            Some(ix)
+                if !self.dropdown && listed <= SEGMENTED_MAX && chars <= SEGMENTED_MAX_CHARS =>
+            {
                 CyclerForm::Segmented(ix)
             }
             Some(_) => CyclerForm::Dropdown(self.on_select.is_some() && !self.disabled),
@@ -252,6 +306,7 @@ impl RenderOnce for Cycler {
                     Some(on_select) => {
                         let current = self.value.clone();
                         let unavailable = self.unavailable.clone();
+                        let details = self.details.clone();
                         dropdown
                             .menu(move |menu, _, _| {
                                 options.iter().enumerate().fold(menu, |menu, (ix, option)| {
@@ -260,11 +315,14 @@ impl RenderOnce for Cycler {
                                         return menu;
                                     }
                                     let on_select = on_select.clone();
-                                    menu.item(
-                                        MenuItem::new(option.clone())
-                                            .checked(*option == current)
-                                            .on_select(move |window, cx| on_select(ix, window, cx)),
-                                    )
+                                    let item = MenuItem::new(option.clone())
+                                        .checked(*option == current)
+                                        .on_select(move |window, cx| on_select(ix, window, cx));
+                                    let item = match details.get(ix).filter(|d| !d.is_empty()) {
+                                        Some(detail) => item.detail(detail.clone()),
+                                        None => item,
+                                    };
+                                    menu.item(item)
                                 })
                             })
                             .harness_target_named(harness)
@@ -274,6 +332,19 @@ impl RenderOnce for Cycler {
                 }
             }
         };
+
+        if self.inline {
+            // The row that hosts an inline cycler owns the label, the cursor and its own
+            // dimming; the control still says it is disabled, as a segmented control does.
+            let dim = disabled && matches!(form, CyclerForm::Dropdown(_));
+            return div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .when(dim, |el| el.opacity(theme.metrics.dimmed_opacity))
+                .child(control)
+                .into_any_element();
+        }
 
         let body = div()
             .flex()
@@ -348,6 +419,52 @@ mod tests {
             .options(["1 min", "5 min"])
             .off_grid(true);
         assert_eq!(off.form(), CyclerForm::Dropdown(false));
+    }
+
+    #[test]
+    fn inline_changes_the_chrome_not_the_form() {
+        let effort = || Cycler::new("High").options(["Low", "Medium", "High", "Max"]);
+        assert_eq!(effort().inline(true).form(), effort().form());
+        assert_eq!(effort().inline(true).form(), CyclerForm::Segmented(2));
+        let steps = ["1 min", "5 min", "10 min", "30 min", "1 h"];
+        let long = || Cycler::new("10 min").options(steps).on_select(|_, _, _| {});
+        assert_eq!(long().inline(true).form(), long().form());
+        assert_eq!(long().inline(true).form(), CyclerForm::Dropdown(true));
+        let off = || {
+            Cycler::new("7 min")
+                .options(["1 min", "5 min"])
+                .off_grid(true)
+        };
+        assert_eq!(off().inline(true).form(), off().form());
+        assert!(effort().inline(true).is_inline());
+        assert!(!effort().is_inline());
+    }
+
+    /// A set that reads as a list draws as a dropdown even when it is short enough to segment: a
+    /// two-repository board's `none │ acme/api` would read as two states, and an `Other model
+    /// id…` segment as a model.
+    #[test]
+    fn a_forced_dropdown_ignores_the_segment_rule() {
+        let repos = || Cycler::new("acme/api").options(["none", "acme/api"]);
+        assert_eq!(repos().form(), CyclerForm::Segmented(1));
+        assert_eq!(repos().dropdown(true).form(), CyclerForm::Dropdown(false));
+        let listed = repos().dropdown(true).on_select(|_, _, _| {});
+        assert_eq!(listed.form(), CyclerForm::Dropdown(true));
+        assert_eq!(
+            repos().dropdown(true).inline(true).form(),
+            CyclerForm::Dropdown(false)
+        );
+    }
+
+    #[test]
+    fn a_disabled_inline_dropdown_lists_nothing() {
+        let steps = ["1 min", "5 min", "10 min", "30 min", "1 h"];
+        let cycler = Cycler::new("10 min")
+            .options(steps)
+            .on_select(|_, _, _| {})
+            .disabled(true)
+            .inline(true);
+        assert_eq!(cycler.form(), CyclerForm::Dropdown(false));
     }
 
     #[test]

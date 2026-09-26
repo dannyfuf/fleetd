@@ -1,8 +1,10 @@
 //! Board settings (BOARD §8) — *the facts that change how the board behaves.*
 //!
-//! The rows follow §3.8.6's model exactly, which is why they answer the same keys: `j` / `k`
-//! move, `space` toggles, `h` / `l` cycle a closed choice, and a text row simply types — a
-//! bare `j` in the name field is the letter `j`, never a cursor move.
+//! The dialog is the shared settings shell of §3.8.6 — a section rail, a pane of cards, one row
+//! grammar — so it answers the same keys as Settings: `j` / `k` move, `space` flips a switch,
+//! `h` / `l` step a closed choice, and `\u{23ce}` opens a text or number row's box in place
+//! (`\u{23ce}` again keeps what was typed, `esc` puts the old value back). Landing on a row never
+//! opens its editor, so a bare `j` always moves.
 //!
 //! # The backend rows are generic on purpose
 //!
@@ -36,18 +38,15 @@ use crate::{
         DialogHost, Dialogs, footer, host::complete_request, notify, read_host, root, step,
         with_host,
     },
+    screens::agent_thread::presentation::mode_label,
     state::AppState,
 };
 
-/// The section rail's width, matched to the global Settings dialog (§3.8.6) so the two rails
-/// line up when a user moves between them.
-const RAIL_WIDTH: f32 = 180.0;
-/// How wide the row labels are.
-const LABEL_WIDTH: f32 = 150.0;
 /// The longest identifier prefix the contract allows.
 const MAX_PREFIX: usize = 8;
-/// How many rows a multi-line column editor draws, matching the card description's.
-const MULTILINE_ROWS: usize = 8;
+/// How many lines a multi-line editor opens at: the resting box's three (`value_area_h`), from
+/// which it grows to [`VALUE_BOX_MAX_ROWS`] while it is being typed into.
+const MULTILINE_MIN_ROWS: usize = 3;
 /// What a multi-select settings row is typed as, and split back on.
 const MULTI_SEPARATOR: char = ',';
 
@@ -62,6 +61,7 @@ fn input_placeholder(row: &BackendRow) -> &'static str {
     }
 }
 
+mod catalogue;
 mod columns;
 mod draft;
 mod keys;
@@ -73,6 +73,7 @@ mod schema;
 mod tests;
 mod view;
 
+use catalogue::*;
 use columns::*;
 pub(super) use draft::BoardSettingsState;
 use draft::*;
@@ -95,3 +96,5 @@ pub(crate) use schedules::{SCHEDULES_UNSUPPORTED, skipped_run_notice};
 pub(crate) use schema::BoardSection;
 use schema::*;
 pub(crate) use view::render;
+#[cfg(test)]
+use view::reveal_delta;

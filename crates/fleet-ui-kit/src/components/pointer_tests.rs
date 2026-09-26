@@ -1,8 +1,8 @@
 //! The pointer contract of the list primitives (ADR 0023, UX-SPEC §5.1), driven through real
 //! mouse events in a test window: a press selects, a double-click opens, a right click opens
 //! the menu, a fuzzy row runs on a press, and a fuzzy list scrolls past its old cap. And of the
-//! form controls: a segment, a switch and a dropdown-drawn cycler's option each report a click
-//! with the value it asks for.
+//! form controls: a segment, a switch, a value box and a dropdown-drawn cycler's option (in its
+//! row chrome and inline) each report a click with the value it asks for.
 
 use std::{cell::RefCell, rc::Rc};
 
@@ -14,8 +14,9 @@ use gpui::{
 
 use crate::{
     components::{
-        Cycler, FuzzyItem, FuzzyList, ListPointer, ListView, NavItem, Row, RowColumn, Segment,
-        SegmentedControl, Sidebar, SidebarSection, Switch, Toggle, menu_key_bindings,
+        Cycler, FuzzyItem, FuzzyList, InputMode, ListPointer, ListView, NavItem, Row, RowColumn,
+        Segment, SegmentedControl, SettingsRow, Sidebar, SidebarSection, Switch, TextInput,
+        ValueBox, menu_key_bindings,
     },
     harness::{self, HarnessTargetExt as _},
     text::Text,
@@ -297,6 +298,107 @@ fn hover_actions_show_only_on_the_hovered_or_selected_row(cx: &mut TestAppContex
     );
 }
 
+/// Settings rows whose handlers only record what they were asked: a cursor row with a hover
+/// action, a row whose box holds an open editor, and two disabled rows with a hover action —
+/// one the cursor, one not.
+struct SlotRows {
+    editor: Option<gpui::Entity<TextInput>>,
+    log: Log,
+}
+
+impl Render for SlotRows {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        harness::begin_frame(window);
+        let editor = self
+            .editor
+            .get_or_insert_with(|| {
+                cx.new(|cx| {
+                    let mut input = TextInput::new(InputMode::SingleLine, cx);
+                    input.set_embedded(true, cx);
+                    input
+                })
+            })
+            .clone();
+        let row = |ix: usize, log: &Log| {
+            let (select, open) = (log.clone(), log.clone());
+            SettingsRow::new(("slot-row", ix))
+                .label("row")
+                .on_click(move |_, _, _| select.borrow_mut().push(Asked::Select(ix)))
+                .on_double_click(move |_, _, _| open.borrow_mut().push(Asked::Open(ix)))
+        };
+        let action = |ix: usize| {
+            div()
+                .w(px(40.0))
+                .h(px(10.0))
+                .harness_target_indexed("test.action", ix)
+        };
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .child(row(0, &self.log).cursor(true).hover_actions(action(0)))
+            .child(
+                row(1, &self.log).control(
+                    ValueBox::new("slot-box", "")
+                        .editor(editor)
+                        .harness_target("test.editor_box"),
+                ),
+            )
+            .child(
+                row(2, &self.log)
+                    .cursor(true)
+                    .disabled(true)
+                    .hover_actions(action(2)),
+            )
+            .child(row(3, &self.log).disabled(true).hover_actions(action(3)))
+    }
+}
+
+fn slot_rows(cx: &mut TestAppContext) -> (VisualTestContext, Log) {
+    let log = Log::default();
+    let recorded = log.clone();
+    let cx = open(cx, move || SlotRows { editor: None, log });
+    (cx, recorded)
+}
+
+/// Regression (ADR 0023): the second press of a quick double click on a hover action — *Move
+/// up* twice — reached the row and opened it; after the first *Move up* that row was already
+/// another column. A press on a slot lands the cursor as any press does and never opens.
+#[gpui::test]
+fn a_double_click_on_a_hover_action_lands_the_cursor_and_never_opens_the_row(
+    cx: &mut TestAppContext,
+) {
+    let (mut cx, log) = slot_rows(cx);
+    let at = centre(&mut cx, "test.action[0]");
+    press(&mut cx, at, MouseButton::Left, 1);
+    press(&mut cx, at, MouseButton::Left, 2);
+    assert_eq!(*log.borrow(), vec![Asked::Select(0)]);
+}
+
+/// Regression: a box drawn with an editor and no `on_click` let the second press of a double
+/// click through to the row, whose open handler closed the editor it was meant to select a word
+/// in. A press inside a box is the box's whether it opens the editor or places the caret.
+#[gpui::test]
+fn a_double_click_inside_an_open_editor_never_reaches_the_row(cx: &mut TestAppContext) {
+    let (mut cx, log) = slot_rows(cx);
+    let at = centre(&mut cx, "test.editor_box");
+    press(&mut cx, at, MouseButton::Left, 1);
+    press(&mut cx, at, MouseButton::Left, 2);
+    assert!(log.borrow().is_empty(), "{:?}", log.borrow());
+}
+
+/// A disabled row cannot be hovered, so its hover actions show on the cursor row or nowhere: a
+/// disabled schedule's *Run now* is still `r`'s pointer twin.
+#[gpui::test]
+fn a_disabled_cursor_row_still_paints_its_hover_actions(cx: &mut TestAppContext) {
+    let (mut cx, _) = slot_rows(cx);
+    assert_eq!(
+        painted_actions(&mut cx),
+        vec!["test.action[0]", "test.action[2]"],
+        "the cursor rows show theirs, disabled or not; the disabled row off the cursor hides its own"
+    );
+}
+
 /// One of each form control, every click recorded as the index or value it asks for.
 struct Controls {
     log: Rc<RefCell<Vec<String>>>,
@@ -306,7 +408,8 @@ struct Controls {
 impl Render for Controls {
     fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         harness::begin_frame(window);
-        let (segment, switch, toggle, cycler) = (
+        let (segment, switch, value, cycler, inline) = (
+            self.log.clone(),
             self.log.clone(),
             self.log.clone(),
             self.log.clone(),
@@ -331,10 +434,11 @@ impl Render for Controls {
                     .harness_target("test.switch"),
             )
             .child(
-                div().w(px(300.0)).child(
-                    Toggle::labeled("toggle", true)
-                        .on_toggle(move |on, _, _| toggle.borrow_mut().push(format!("toggle {on}")))
-                        .harness_target("test.toggle"),
+                div().flex().child(
+                    ValueBox::new("value", "250")
+                        .unit("ms")
+                        .on_click(move |_, _| value.borrow_mut().push("value box".to_owned()))
+                        .harness_target("test.value_box"),
                 ),
             )
             .child(
@@ -343,6 +447,18 @@ impl Render for Controls {
                         .options(["a", "b", "c", "d", "e"])
                         .on_select(move |ix, _, _| cycler.borrow_mut().push(format!("cycler {ix}")))
                         .harness_target("test.cycler"),
+                ),
+            )
+            .child(
+                div().flex().child(
+                    Cycler::new("c")
+                        .id("inline-steps")
+                        .options(["a", "b", "c", "d", "e"])
+                        .inline(true)
+                        .harness("test.inline_segment", "test.inline_dropdown")
+                        .on_select(move |ix, _, _| {
+                            inline.borrow_mut().push(format!("inline {ix}"))
+                        }),
                 ),
             )
     }
@@ -424,12 +540,25 @@ fn a_click_on_a_switch_asks_for_the_other_value(cx: &mut TestAppContext) {
     let (mut cx, log) = open_controls(cx, false);
     let at = centre(&mut cx, "test.switch");
     press(&mut cx, at, MouseButton::Left, 1);
-    let at = right_edge(&mut cx, "test.toggle");
+    assert_eq!(*log.borrow(), vec!["switch true".to_owned()]);
+}
+
+#[gpui::test]
+fn a_click_on_a_value_box_asks_to_open_its_editor(cx: &mut TestAppContext) {
+    let (mut cx, log) = open_controls(cx, false);
+    let at = centre(&mut cx, "test.value_box");
     press(&mut cx, at, MouseButton::Left, 1);
-    assert_eq!(
-        *log.borrow(),
-        vec!["switch true".to_owned(), "toggle false".to_owned()]
-    );
+    assert_eq!(*log.borrow(), vec!["value box".to_owned()]);
+}
+
+#[gpui::test]
+fn an_inline_cycler_draws_the_dropdown_alone_and_a_click_picks_an_option(cx: &mut TestAppContext) {
+    let (mut cx, log) = open_controls(cx, false);
+    let field = centre(&mut cx, "test.inline_dropdown");
+    press(&mut cx, field, MouseButton::Left, 1);
+    let option = centre(&mut cx, "menu.item[1]");
+    press(&mut cx, option, MouseButton::Left, 1);
+    assert_eq!(*log.borrow(), vec!["inline 1".to_owned()]);
 }
 
 #[gpui::test]
