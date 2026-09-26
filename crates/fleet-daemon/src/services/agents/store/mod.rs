@@ -44,6 +44,7 @@
 //!   `oneshot` the caller awaits, and a read runs under `spawn_blocking`; blocking a tokio worker
 //!   on either is the thing this store was built to stop doing.
 
+mod attachments;
 mod cursor;
 pub(crate) mod delegations;
 mod import;
@@ -60,7 +61,7 @@ mod usage;
 mod writer;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -77,6 +78,9 @@ use fleet_proto::agents::AgentSeenCursor;
 use super::{
     AGENT_INDEX_VERSION, AgentIndex, AgentThreadRecord, delegation::transition::DelegationFacts,
 };
+use crate::adapters::files::Files;
+#[cfg(test)]
+use crate::adapters::files::RealFiles;
 use cursor::TranscriptCursor;
 pub(crate) use delegations::{OutboxAction, OutboxRow};
 pub(crate) use list::BootWork;
@@ -126,6 +130,7 @@ pub(crate) struct SqliteAgentStore {
 
 struct Inner {
     root: PathBuf,
+    attachments_root: PathBuf,
     boot: BootWork,
     writer: Writer,
     readers: ReaderPool,
@@ -152,8 +157,9 @@ impl SqliteAgentStore {
     /// there is no request to starve, and a migration or an import that had not finished before
     /// the first request would be answering from a database in an unknown shape. Every path *after*
     /// construction is either an awaited `oneshot` on the writer thread or a `spawn_blocking` read.
+    #[cfg(test)]
     pub(crate) fn open(database: PathBuf) -> anyhow::Result<Self> {
-        let root = database
+        let agents_root = database
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
             .map(Path::to_path_buf)
@@ -161,6 +167,30 @@ impl SqliteAgentStore {
                 format!(
                     "the agent database path `{}` has no parent directory to use as the store root",
                     database.display()
+                )
+            })?;
+        let attachments = agents_root.join("attachments");
+        let files: Arc<dyn Files> = Arc::new(RealFiles::new(
+            agents_root.join(".attachment-trash"),
+            [attachments.clone()],
+        ));
+        Self::open_with_files(database, files, attachments)
+    }
+
+    /// Opens the store with the daemon's shared filesystem port and attachment root.
+    pub(crate) fn open_with_files(
+        database: PathBuf,
+        files: Arc<dyn Files>,
+        attachments: PathBuf,
+    ) -> anyhow::Result<Self> {
+        let root = attachments
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+            .with_context(|| {
+                format!(
+                    "the attachment root `{}` has no parent directory to use as the store root",
+                    attachments.display()
                 )
             })?;
         std::fs::create_dir_all(&root)
@@ -174,13 +204,14 @@ impl SqliteAgentStore {
             )
         })?;
         let boot = list::boot_work(&conn)?;
-        let writer = Writer::spawn(conn)?;
+        let writer = Writer::spawn(conn, files, attachments.clone())?;
         // After the writer, never before: the file and its schema have to exist before a
         // read-only open, which does not create one.
         let readers = ReaderPool::open(&database)?;
         Ok(Self {
             inner: Arc::new(Inner {
                 root,
+                attachments_root: attachments,
                 boot,
                 writer,
                 readers,
@@ -190,8 +221,7 @@ impl SqliteAgentStore {
 
     /// The store root, which also holds `attachments/` and the imported NDJSON logs.
     ///
-    /// Unused until attachments land: nothing above the store needs to know where the file is.
-    #[allow(dead_code)]
+    /// The attachment projection uses this to keep SQL paths relative to the shared store root.
     pub(crate) fn root(&self) -> &Path {
         &self.inner.root
     }
@@ -208,6 +238,33 @@ impl SqliteAgentStore {
     /// before this returns.
     pub(crate) async fn append(&self, thread: ThreadId, event: &SeqEvent) -> anyhow::Result<()> {
         self.inner.writer.append(thread, event).await
+    }
+
+    /// Returns every attachment path still referenced by a locally owned transcript row.
+    pub(crate) async fn referenced_attachment_paths(&self) -> anyhow::Result<HashSet<PathBuf>> {
+        debug_assert_eq!(
+            self.root().join("attachments"),
+            self.inner.attachments_root,
+            "the store and media service must share one attachment root"
+        );
+        let root = self.inner.attachments_root.clone();
+        self.inner
+            .readers
+            .read("read attachment references", move |conn| {
+                let mut statement = conn
+                    .prepare_cached("SELECT relative_path FROM item_attachments")
+                    .context("prepare attachment-reference query")?;
+                statement
+                    .query_map([], |row| row.get::<_, String>(0))
+                    .context("query attachment references")?
+                    .map(|relative| {
+                        relative
+                            .map(|relative| root.join(relative))
+                            .context("decode attachment relative path")
+                    })
+                    .collect()
+            })
+            .await
     }
 
     /// The same append, carrying what the delegation rules need to know about `thread`.

@@ -529,12 +529,14 @@ impl Harness {
         );
         let events = BroadcastBus::new(1_024);
         let script = FakeScript::new(capabilities);
+        let database = FleetHome::new(&home).agents_db_path();
         let manager = AgentSessionManager::new_with_factory(
-            FleetHome::new(&home).agents_db_path(),
+            database.clone(),
             events.clone(),
             worktrees.clone(),
             Some(Arc::clone(&config)),
             factory(&script),
+            default_media(&database),
         );
         Self {
             _temp: temp,
@@ -577,12 +579,14 @@ impl Harness {
     /// say when the background pass is done. Running it twice is harmless — a rebuild is
     /// idempotent and a thread already hydrated is no longer an orphan.
     pub(crate) async fn restart(&self) -> AgentSessionManager {
+        let database = FleetHome::new(&self.home).agents_db_path();
         let manager = AgentSessionManager::new_with_factory(
-            FleetHome::new(&self.home).agents_db_path(),
+            database.clone(),
             self.events.clone(),
             self.worktrees.clone(),
             Some(Arc::clone(&self.config)),
             factory(&self.script),
+            default_media(&database),
         );
         manager.clone().repair().await;
         manager

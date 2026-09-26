@@ -29,8 +29,8 @@ fn an_unknown_frame_never_carries_its_payload() {
 }
 
 /// Privacy test 3 of 3: an error a caller sees names the operation, never the payload.
-#[test]
-fn an_error_that_crosses_the_boundary_names_no_payload() {
+#[tokio::test]
+async fn an_error_that_crosses_the_boundary_names_no_payload() {
     let mut session = ClaudeSession::default();
     let turn = TurnId::new();
     session
@@ -50,14 +50,19 @@ fn an_error_that_crosses_the_boundary_names_no_payload() {
     assert_no_secret(&error.to_string(), "a gate error");
     assert_no_secret(&format!("{error:?}"), "a gate error's debug form");
     // A submit that cannot be encoded.
-    let oversized = UserInput {
-        text: "x".repeat(200_000),
-        attachments: Vec::new(),
+    let unsupported = UserInput {
+        text: String::new(),
+        attachments: vec![Attachment {
+            name: None,
+            media_type: "application/octet-stream".to_owned(),
+            source: AttachmentSource::Base64(SECRETS[0].to_owned()),
+        }],
         item: None,
         origin: Default::default(),
     };
-    let error = user_frame(&oversized)
+    let error = user_frame(&unsupported, None, None)
+        .await
         .err()
         .unwrap_or_else(|| panic!("an oversized message is refused"));
-    assert!(!error.to_string().contains("xxxxxxxx"), "{error}");
+    assert_no_secret(&error.to_string(), "an attachment encoding error");
 }

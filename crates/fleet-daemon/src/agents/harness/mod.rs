@@ -26,7 +26,9 @@ pub mod process;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fmt,
     path::PathBuf,
+    sync::Arc,
     time::SystemTime,
 };
 
@@ -119,7 +121,7 @@ pub type HarnessSink = mpsc::UnboundedSender<HarnessEvent>;
 pub type HarnessEvents = mpsc::UnboundedReceiver<HarnessEvent>;
 
 /// Everything an adapter needs before a process exists.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct HarnessConfig {
     /// The configured shell command line, quote-tokenized by the adapter (`claude --model opus`).
     pub command: String,
@@ -132,10 +134,30 @@ pub struct HarnessConfig {
     pub env: BTreeMap<String, String>,
     /// The leaf directory holding this thread's attachments, granted with `--add-dir`.
     pub attachments_dir: Option<PathBuf>,
+    /// Daemon filesystem port used to inspect and read staged attachment paths.
+    ///
+    /// Probe-only and attachment-free harnesses may omit it; production launches that grant an
+    /// attachment leaf always supply the shared daemon adapter.
+    pub files: Option<Arc<dyn crate::adapters::files::Files>>,
     /// Fleet's own version, reported to the harness as client info.
     pub client_version: String,
     /// Directory for the per-thread raw NDJSON debug log, when raw logging is enabled.
     pub raw_log_dir: Option<PathBuf>,
+}
+
+impl fmt::Debug for HarnessConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HarnessConfig")
+            .field("command", &self.command)
+            .field("home", &self.home)
+            .field("env", &self.env)
+            .field("attachments_dir", &self.attachments_dir)
+            .field("files", &self.files.as_ref().map(|_| "configured"))
+            .field("client_version", &self.client_version)
+            .field("raw_log_dir", &self.raw_log_dir)
+            .finish()
+    }
 }
 
 /// Open (or resume) one harness session.

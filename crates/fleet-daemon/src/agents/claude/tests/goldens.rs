@@ -1,18 +1,25 @@
 //! Goldens tests for the Claude adapter.
 
+use std::sync::Arc;
+
 use super::*;
 use crate::agents::golden::{canonical, canonical_text};
 use fleet_core::agents::ItemId;
 
 /// The `user` frame's block order is load-bearing: images first, the final text last.
-#[test]
-fn the_user_frames_block_order_puts_the_text_last() {
-    let plain = user_frame(&UserInput {
-        text: "hello".to_owned(),
-        attachments: Vec::new(),
-        item: None,
-        origin: Default::default(),
-    })
+#[tokio::test]
+async fn the_user_frames_block_order_puts_the_text_last() {
+    let plain = user_frame(
+        &UserInput {
+            text: "hello".to_owned(),
+            attachments: Vec::new(),
+            item: None,
+            origin: Default::default(),
+        },
+        None,
+        None,
+    )
+    .await
     .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(
         canonical(&plain),
@@ -25,11 +32,16 @@ fn the_user_frames_block_order_puts_the_text_last() {
         uuid::Uuid::parse_str("11111111-2222-4333-8444-555555555555")
             .unwrap_or_else(|error| panic!("{error}")),
     );
-    let identified = user_frame(&UserInput {
-        text: "durable delivery".to_owned(),
-        item: Some(item),
-        ..UserInput::default()
-    })
+    let identified = user_frame(
+        &UserInput {
+            text: "durable delivery".to_owned(),
+            item: Some(item),
+            ..UserInput::default()
+        },
+        None,
+        None,
+    )
+    .await
     .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(
         canonical(&identified),
@@ -39,16 +51,21 @@ fn the_user_frames_block_order_puts_the_text_last() {
         "Claude receives the stable item identity as its client UUID"
     );
 
-    let with_image = user_frame(&UserInput {
-        text: "/skill do it".to_owned(),
-        attachments: vec![Attachment {
-            name: Some("shot.png".to_owned()),
-            media_type: "image/png".to_owned(),
-            source: AttachmentSource::Base64("AAAA".to_owned()),
-        }],
-        item: None,
-        origin: Default::default(),
-    })
+    let with_image = user_frame(
+        &UserInput {
+            text: "/skill do it".to_owned(),
+            attachments: vec![Attachment {
+                name: Some("shot.png".to_owned()),
+                media_type: "image/png".to_owned(),
+                source: AttachmentSource::Base64("AAAA".to_owned()),
+            }],
+            item: None,
+            origin: Default::default(),
+        },
+        None,
+        None,
+    )
+    .await
     .unwrap_or_else(|error| panic!("{error}"));
     let blocks = with_image
         .pointer("/message/content")
@@ -64,16 +81,21 @@ fn the_user_frames_block_order_puts_the_text_last() {
     );
 
     // A non-image attachment reaches the agent as an absolute path in the prompt text.
-    let with_file = user_frame(&UserInput {
-        text: "read this".to_owned(),
-        attachments: vec![Attachment {
-            name: Some("notes.md".to_owned()),
-            media_type: "text/markdown".to_owned(),
-            source: AttachmentSource::Path("/w/notes.md".into()),
-        }],
-        item: None,
-        origin: Default::default(),
-    })
+    let with_file = user_frame(
+        &UserInput {
+            text: "read this".to_owned(),
+            attachments: vec![Attachment {
+                name: Some("notes.md".to_owned()),
+                media_type: "text/markdown".to_owned(),
+                source: AttachmentSource::Path("/w/notes.md".into()),
+            }],
+            item: None,
+            origin: Default::default(),
+        },
+        None,
+        None,
+    )
+    .await
     .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(
         with_file
@@ -84,17 +106,87 @@ fn the_user_frames_block_order_puts_the_text_last() {
 
     // An unsupported inline media type is a request error: the turn never starts.
     assert!(
-        user_frame(&UserInput {
-            text: String::new(),
-            attachments: vec![Attachment {
-                name: None,
-                media_type: "image/tiff".to_owned(),
-                source: AttachmentSource::Base64("AAAA".to_owned()),
-            }],
-            item: None,
-            origin: Default::default(),
-        })
+        user_frame(
+            &UserInput {
+                text: String::new(),
+                attachments: vec![Attachment {
+                    name: None,
+                    media_type: "image/tiff".to_owned(),
+                    source: AttachmentSource::Base64("AAAA".to_owned()),
+                }],
+                item: None,
+                origin: Default::default(),
+            },
+            None,
+            None,
+        )
+        .await
         .is_err()
+    );
+}
+
+#[tokio::test]
+async fn staged_path_images_are_inline_only_inside_the_thread_leaf() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let leaf = temp.path().join("attachments/thread");
+    std::fs::create_dir_all(&leaf).expect("leaf");
+    let files: Arc<dyn crate::adapters::files::Files> =
+        Arc::new(crate::adapters::files::RealFiles::new(
+            temp.path().join("trash"),
+            Vec::<std::path::PathBuf>::new(),
+        ));
+    let inside = leaf.join("inside.png");
+    std::fs::write(&inside, [1_u8, 2, 3]).expect("inside image");
+    let outside = temp.path().join("outside.png");
+    std::fs::write(&outside, [4_u8, 5, 6]).expect("outside image");
+
+    let frame_for = |path: std::path::PathBuf| UserInput {
+        text: "/skill inspect".to_owned(),
+        attachments: vec![Attachment {
+            name: Some("image.png".to_owned()),
+            media_type: "image/png".to_owned(),
+            source: AttachmentSource::Path(path),
+        }],
+        item: None,
+        origin: Default::default(),
+    };
+
+    let inside_frame = user_frame(&frame_for(inside), Some(&leaf), Some(Arc::clone(&files)))
+        .await
+        .expect("inside image frame");
+    let blocks = inside_frame["message"]["content"]
+        .as_array()
+        .expect("block content");
+    assert_eq!(blocks[0]["type"], "image");
+    assert_eq!(blocks[0]["source"]["data"], "AQID");
+    assert_eq!(
+        blocks.last().and_then(|block| block["type"].as_str()),
+        Some("text")
+    );
+
+    let dotdot = leaf.join("../outside.png");
+    let escaped = user_frame(
+        &frame_for(dotdot.clone()),
+        Some(&leaf),
+        Some(Arc::clone(&files)),
+    )
+    .await
+    .expect("dot-dot escape stays text");
+    assert_eq!(
+        escaped["message"]["content"].as_str(),
+        Some(format!("/skill inspect\n{}", dotdot.display()).as_str())
+    );
+
+    let link = leaf.join("linked.png");
+    symlink(&outside, &link).expect("symlink");
+    let linked = user_frame(&frame_for(link.clone()), Some(&leaf), Some(files))
+        .await
+        .expect("symlink escape stays text");
+    assert_eq!(
+        linked["message"]["content"].as_str(),
+        Some(format!("/skill inspect\n{}", link.display()).as_str())
     );
 }
 

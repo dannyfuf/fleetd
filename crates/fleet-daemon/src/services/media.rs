@@ -111,7 +111,7 @@ impl Media {
     #[must_use]
     pub(crate) fn new(home: &FleetHome, files: Arc<dyn Files>, clock: Arc<dyn Clock>) -> Self {
         let downloads = selected_downloads_root(home);
-        let attachments = canonical_fleet_root(home).join("agents/attachments");
+        let attachments = home.agents_attachments_path();
         tracing::info!(
             path = %downloads.display(),
             "selected the media staging directory"
@@ -907,6 +907,8 @@ fn directory_is_writable(path: &Path) -> bool {
     unsafe { libc::access(path.as_ptr(), libc::W_OK | libc::X_OK) == 0 }
 }
 
+mod attachments;
+pub(crate) use attachments::decoded_size;
 mod sweep;
 #[cfg(test)]
 mod tests;

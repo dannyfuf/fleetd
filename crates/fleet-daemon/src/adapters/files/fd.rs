@@ -41,6 +41,8 @@ pub(super) fn metadata_at(parent: &File, name: &CStr) -> std::io::Result<FileMet
     };
     Ok(FileMetadata {
         kind,
+        len: u64::try_from(stat.st_size).unwrap_or_default(),
+        modified_millis: modified_millis(&stat),
         identity: FileIdentity {
             // `st_dev` is `u64` on Linux and `i32` on macOS; the cast is load-bearing there.
             #[allow(clippy::unnecessary_cast)]
@@ -48,6 +50,21 @@ pub(super) fn metadata_at(parent: &File, name: &CStr) -> std::io::Result<FileMet
             inode: stat.st_ino,
         },
     })
+}
+
+#[cfg(target_os = "macos")]
+fn modified_millis(stat: &libc::stat) -> i64 {
+    stat.st_mtimespec
+        .tv_sec
+        .saturating_mul(1_000)
+        .saturating_add(stat.st_mtimespec.tv_nsec / 1_000_000)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn modified_millis(stat: &libc::stat) -> i64 {
+    stat.st_mtime
+        .saturating_mul(1_000)
+        .saturating_add(stat.st_mtime_nsec / 1_000_000)
 }
 
 pub(super) fn unlink_file_at(parent: &File, name: &CStr, path: &Path) -> DaemonResult<()> {

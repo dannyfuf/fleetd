@@ -74,11 +74,12 @@ impl Services {
             Arc::clone(&adapters.files),
             Arc::clone(&adapters.clock),
         );
-        let agents = agents::AgentSessionManager::new(
+        let agents = agents::AgentSessionManager::new_with_media(
             fleet_home.agents_db_path(),
             events.clone(),
             worktrees.clone(),
             Arc::clone(&config),
+            media.clone(),
         );
         // Checkpoints are Git-only: the ref namespace is their whole store, so the service needs
         // the process boundary and nothing else — no database handle, no event bus, no state.

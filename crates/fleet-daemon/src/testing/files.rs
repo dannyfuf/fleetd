@@ -67,6 +67,7 @@ impl FakeFilesCall {
 struct Tree {
     files: BTreeMap<PathBuf, Vec<u8>>,
     file_identities: BTreeMap<PathBuf, u64>,
+    modified_millis: BTreeMap<PathBuf, i64>,
     directories: BTreeSet<PathBuf>,
     others: BTreeSet<PathBuf>,
     calls: Vec<FakeFilesCall>,
@@ -98,11 +99,16 @@ impl Tree {
 
     fn metadata(&self, path: &Path) -> DaemonResult<FileMetadata> {
         if let Some(identity) = self.file_identities.get(path) {
-            Ok(FileMetadata::fake(FileKind::File, *identity))
+            Ok(FileMetadata::fake(
+                FileKind::File,
+                *identity,
+                self.files.get(path).map_or(0, |bytes| bytes.len() as u64),
+                self.modified_millis.get(path).copied().unwrap_or_default(),
+            ))
         } else if self.directories.contains(path) {
-            Ok(FileMetadata::fake(FileKind::Directory, 0))
+            Ok(FileMetadata::fake(FileKind::Directory, 0, 0, 0))
         } else if self.others.contains(path) {
-            Ok(FileMetadata::fake(FileKind::Other, 0))
+            Ok(FileMetadata::fake(FileKind::Other, 0, 0, 0))
         } else {
             Err(failure(path, io::ErrorKind::NotFound))
         }
@@ -119,9 +125,15 @@ impl Tree {
     }
 
     fn insert_file(&mut self, path: PathBuf, bytes: Vec<u8>) {
+        self.insert_file_at(path, bytes, 0);
+    }
+
+    fn insert_file_at(&mut self, path: PathBuf, bytes: Vec<u8>, modified_millis: i64) {
         self.next_identity = self.next_identity.saturating_add(1);
         self.files.insert(path.clone(), bytes);
-        self.file_identities.insert(path, self.next_identity);
+        self.file_identities
+            .insert(path.clone(), self.next_identity);
+        self.modified_millis.insert(path, modified_millis);
     }
 
     fn create_dirs(&mut self, path: &Path) -> DaemonResult<()> {
@@ -158,6 +170,7 @@ impl Tree {
                         destination.join(suffix),
                         bytes.clone(),
                         self.file_identities.get(path).copied().unwrap_or_default(),
+                        self.modified_millis.get(path).copied().unwrap_or_default(),
                     )
                 })
             })
@@ -171,12 +184,13 @@ impl Tree {
                     .map(|suffix| destination.join(suffix))
             })
             .collect::<Vec<_>>();
-        for (path, bytes, identity) in files {
+        for (path, bytes, identity, modified_millis) in files {
             if preserve_identity {
                 self.files.insert(path.clone(), bytes);
-                self.file_identities.insert(path, identity);
+                self.file_identities.insert(path.clone(), identity);
+                self.modified_millis.insert(path, modified_millis);
             } else {
-                self.insert_file(path, bytes);
+                self.insert_file_at(path, bytes, modified_millis);
             }
         }
         self.directories.extend(directories);
@@ -186,6 +200,8 @@ impl Tree {
         self.files
             .retain(|candidate, _| !candidate.starts_with(path));
         self.file_identities
+            .retain(|candidate, _| !candidate.starts_with(path));
+        self.modified_millis
             .retain(|candidate, _| !candidate.starts_with(path));
         self.directories
             .retain(|candidate| !candidate.starts_with(path));
@@ -214,13 +230,23 @@ impl FakeFiles {
 
     /// Seeds a file and its ancestor directories without recording a call.
     pub fn insert_text(&self, path: impl Into<PathBuf>, text: impl Into<String>) {
+        self.insert_text_at(path, text, 0);
+    }
+
+    /// Seeds a file with an explicit Unix epoch modification time in milliseconds.
+    pub fn insert_text_at(
+        &self,
+        path: impl Into<PathBuf>,
+        text: impl Into<String>,
+        modified_millis: i64,
+    ) {
         let path = path.into();
         let mut tree = lock(&self.tree);
         if let Some(parent) = path.parent() {
             tree.directories
                 .extend(parent.ancestors().map(Path::to_path_buf));
         }
-        tree.insert_file(path, text.into().into_bytes());
+        tree.insert_file_at(path, text.into().into_bytes(), modified_millis);
     }
 
     /// Seeds a symlink or special filesystem entry without recording a call.
@@ -289,6 +315,32 @@ impl Files for FakeFiles {
             })
             .transpose()?
             .ok_or_else(|| failure(path, io::ErrorKind::NotFound))
+    }
+
+    fn canonicalize(&self, path: &Path) -> DaemonResult<PathBuf> {
+        let path = crate::adapters::files::absolute_lexical(path);
+        if lock(&self.tree).exists(&path) {
+            Ok(path)
+        } else {
+            Err(failure(&path, io::ErrorKind::NotFound))
+        }
+    }
+
+    fn read_bytes_bounded(&self, path: &Path, maximum: u64) -> DaemonResult<Vec<u8>> {
+        let mut tree = lock(&self.tree);
+        tree.record(FakeFilesCall::Read(path.to_path_buf()))?;
+        let bytes = tree
+            .files
+            .get(path)
+            .cloned()
+            .ok_or_else(|| failure(path, io::ErrorKind::NotFound))?;
+        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > maximum {
+            return Err(DaemonError::Validation(format!(
+                "file is larger than {maximum} bytes: {}",
+                path.display()
+            )));
+        }
+        Ok(bytes)
     }
 
     fn create_dir_all(&self, path: &Path) -> DaemonResult<()> {
@@ -492,6 +544,7 @@ impl Files for FakeFiles {
         }
         tree.files.remove(path);
         tree.file_identities.remove(path);
+        tree.modified_millis.remove(path);
         Ok(())
     }
 
@@ -516,6 +569,7 @@ impl Files for FakeFiles {
         tree.record(FakeFilesCall::Remove(path.to_path_buf()))?;
         tree.files.remove(path);
         tree.file_identities.remove(path);
+        tree.modified_millis.remove(path);
         Ok(true)
     }
 

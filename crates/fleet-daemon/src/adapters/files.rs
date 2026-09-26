@@ -49,14 +49,20 @@ struct FileIdentity {
 pub struct FileMetadata {
     /// The observed entry type without following symlinks.
     pub kind: FileKind,
+    /// Length in bytes for a regular file, zero for other entry kinds.
+    pub len: u64,
+    /// Last modification time as Unix epoch milliseconds.
+    pub modified_millis: i64,
     identity: FileIdentity,
 }
 
 impl FileMetadata {
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn fake(kind: FileKind, identity: u64) -> Self {
+    pub(crate) fn fake(kind: FileKind, identity: u64, len: u64, modified_millis: i64) -> Self {
         Self {
             kind,
+            len,
+            modified_millis,
             identity: FileIdentity {
                 device: 0,
                 inode: identity,
@@ -92,6 +98,20 @@ impl FileRevision {
 pub trait Files: Send + Sync {
     /// Reads an entire UTF-8 text file.
     fn read_text(&self, path: &Path) -> DaemonResult<String>;
+    /// Resolves every symlink in a path.
+    fn canonicalize(&self, path: &Path) -> DaemonResult<PathBuf> {
+        Err(DaemonError::Validation(format!(
+            "path canonicalization is unsupported for {}",
+            path.display()
+        )))
+    }
+    /// Reads one regular file without following its final component, capped before allocation.
+    fn read_bytes_bounded(&self, path: &Path, maximum: u64) -> DaemonResult<Vec<u8>> {
+        Err(DaemonError::Validation(format!(
+            "bounded file reads are unsupported for {} (maximum {maximum} bytes)",
+            path.display()
+        )))
+    }
     /// Creates a directory and all missing ancestors.
     fn create_dir_all(&self, path: &Path) -> DaemonResult<()>;
     /// Copies a directory using the platform's copy-on-write strategy when available.
@@ -356,6 +376,36 @@ impl RealFiles {
 impl Files for RealFiles {
     fn read_text(&self, path: &Path) -> DaemonResult<String> {
         fs::read_to_string(path).map_err(|error| DaemonError::fs(path, error))
+    }
+
+    fn canonicalize(&self, path: &Path) -> DaemonResult<PathBuf> {
+        fs::canonicalize(path)
+            .map(|path| absolute_lexical(&path))
+            .map_err(|error| DaemonError::fs(path, error))
+    }
+
+    fn read_bytes_bounded(&self, path: &Path, maximum: u64) -> DaemonResult<Vec<u8>> {
+        let (parent, name) = open_path_parent(path)?;
+        let mut file = open_file_at(
+            &parent,
+            &name,
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0,
+            path,
+        )?;
+        let capacity = usize::try_from(maximum.min(64 * 1024)).unwrap_or(64 * 1024);
+        let mut bytes = Vec::with_capacity(capacity);
+        std::io::Read::by_ref(&mut file)
+            .take(maximum.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(|error| DaemonError::fs(path, error))?;
+        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > maximum {
+            return Err(DaemonError::Validation(format!(
+                "file is larger than {maximum} bytes: {}",
+                path.display()
+            )));
+        }
+        Ok(bytes)
     }
 
     fn create_dir_all(&self, path: &Path) -> DaemonResult<()> {
@@ -742,6 +792,11 @@ fn file_metadata(metadata: &fs::Metadata) -> FileMetadata {
     };
     FileMetadata {
         kind,
+        len: metadata.len(),
+        modified_millis: metadata
+            .mtime()
+            .saturating_mul(1_000)
+            .saturating_add(metadata.mtime_nsec() / 1_000_000),
         identity: FileIdentity {
             device: metadata.dev(),
             inode: metadata.ino(),

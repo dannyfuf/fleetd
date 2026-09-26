@@ -309,6 +309,186 @@ async fn steering_a_running_turn_records_a_user_message_in_that_turn() {
 }
 
 #[tokio::test]
+async fn every_composer_limit_is_a_validation_error_that_names_the_limit() {
+    use crate::services::agents::manager::attachments::{
+        MAX_ATTACHMENTS, MAX_FILE_BYTES, MAX_IMAGE_BYTES, MAX_INPUT_CHARS,
+    };
+
+    let harness = Harness::start(full()).await;
+    let thread = ThreadId::new();
+    let error = harness
+        .manager
+        .prepare_input(
+            thread,
+            UserInput {
+                text: "x".repeat(MAX_INPUT_CHARS + 1),
+                ..UserInput::default()
+            },
+        )
+        .await
+        .expect_err("oversized text");
+    assert_eq!(error.kind, ErrorKind::Validation);
+    assert_eq!(
+        error.message,
+        "The message is longer than 120000 characters."
+    );
+
+    let attachment = fleet_core::agents::Attachment {
+        name: None,
+        media_type: "application/octet-stream".to_owned(),
+        source: fleet_core::agents::AttachmentSource::Url(
+            "https://example.invalid/file".to_owned(),
+        ),
+    };
+    let error = harness
+        .manager
+        .prepare_input(
+            thread,
+            UserInput {
+                attachments: vec![attachment; MAX_ATTACHMENTS + 1],
+                ..UserInput::default()
+            },
+        )
+        .await
+        .expect_err("too many attachments");
+    assert_eq!(error.kind, ErrorKind::Validation);
+    assert_eq!(error.message, "A message may carry at most 8 attachments.");
+
+    for (media_type, bytes, message) in [
+        (
+            "image/png",
+            MAX_IMAGE_BYTES + 1,
+            "An image attachment is larger than 10 MiB.",
+        ),
+        (
+            "application/octet-stream",
+            MAX_FILE_BYTES + 1,
+            "A file attachment is larger than 50 MiB.",
+        ),
+    ] {
+        let path = harness.home.join(format!("oversized-{}", bytes));
+        let file = std::fs::File::create(&path).expect("create sparse attachment");
+        file.set_len(bytes).expect("size sparse attachment");
+        file.sync_all().expect("sync sparse attachment");
+        let error = harness
+            .manager
+            .prepare_input(
+                thread,
+                UserInput {
+                    attachments: vec![fleet_core::agents::Attachment {
+                        name: None,
+                        media_type: media_type.to_owned(),
+                        source: fleet_core::agents::AttachmentSource::Path(path),
+                    }],
+                    ..UserInput::default()
+                },
+            )
+            .await
+            .expect_err("oversized attachment");
+        assert_eq!(error.kind, ErrorKind::Validation);
+        assert_eq!(error.message, message);
+    }
+}
+
+#[tokio::test]
+async fn base64_is_materialized_before_provider_dispatch_and_recorded_as_a_path() {
+    let harness = Harness::start(full()).await;
+    let thread = harness.create(None).await.thread;
+    let turn = TurnId::new();
+    harness
+        .script
+        .emit(AgentEvent::TurnStarted {
+            turn,
+            user_item: ItemId::new(),
+        })
+        .await;
+    harness
+        .settle(thread, "a running turn", |projection| {
+            projection.turn == TurnState::Running(turn)
+        })
+        .await;
+
+    harness
+        .manager
+        .send(
+            thread,
+            UserInput {
+                text: "inspect".to_owned(),
+                attachments: vec![fleet_core::agents::Attachment {
+                    name: Some("shot.png".to_owned()),
+                    media_type: "image/png".to_owned(),
+                    source: fleet_core::agents::AttachmentSource::Base64("aGVsbG8=".to_owned()),
+                }],
+                item: None,
+                origin: Default::default(),
+            },
+        )
+        .await
+        .expect("send inline image");
+
+    let projection = harness.projection(thread).await;
+    let attachment = projection
+        .items
+        .iter()
+        .filter_map(|item| match &item.kind {
+            ItemKind::UserMessage { attachments, .. } if !attachments.is_empty() => {
+                attachments.first()
+            }
+            _ => None,
+        })
+        .next()
+        .expect("recorded attachment");
+    let fleet_core::agents::AttachmentSource::Path(path) = &attachment.source else {
+        panic!("recorded attachment must not contain base64");
+    };
+    let leaf = harness
+        .manager
+        .inner
+        .media
+        .attachments_root()
+        .join(thread.to_string());
+    assert!(path.starts_with(&leaf));
+    assert_eq!(std::fs::read(path).expect("materialized bytes"), b"hello");
+    let referenced = harness
+        .manager
+        .inner
+        .store()
+        .expect("store")
+        .referenced_attachment_paths()
+        .await
+        .expect("attachment rows");
+    assert_eq!(referenced, std::collections::HashSet::from([path.clone()]));
+}
+
+#[tokio::test]
+async fn an_unknown_thread_is_refused_before_base64_is_materialized() {
+    let harness = Harness::start(full()).await;
+    let thread = ThreadId::new();
+    let leaf = harness.manager.inner.media.thread_leaf(thread);
+
+    let error = harness
+        .manager
+        .send(
+            thread,
+            UserInput {
+                text: "inspect".to_owned(),
+                attachments: vec![fleet_core::agents::Attachment {
+                    name: Some("shot.png".to_owned()),
+                    media_type: "image/png".to_owned(),
+                    source: fleet_core::agents::AttachmentSource::Base64("aGVsbG8=".to_owned()),
+                }],
+                item: None,
+                origin: Default::default(),
+            },
+        )
+        .await
+        .expect_err("an unknown thread is refused");
+
+    assert_eq!(error.kind, ErrorKind::NotFound);
+    assert!(!leaf.exists(), "the refused send must not create a leaf");
+}
+
+#[tokio::test]
 async fn queued_submission_while_a_turn_runs_waits_for_its_own_start() {
     let harness = Harness::start(full()).await;
     let thread = harness.create(None).await.thread;
@@ -521,7 +701,11 @@ async fn stop_exits_the_session_and_refuses_later_sends() {
             thread,
             UserInput {
                 text: "hello".to_owned(),
-                attachments: Vec::new(),
+                attachments: vec![fleet_core::agents::Attachment {
+                    name: Some("shot.png".to_owned()),
+                    media_type: "image/png".to_owned(),
+                    source: fleet_core::agents::AttachmentSource::Base64("aGVsbG8=".to_owned()),
+                }],
                 item: None,
                 origin: Default::default(),
             },
@@ -532,6 +716,12 @@ async fn stop_exits_the_session_and_refuses_later_sends() {
     assert_eq!(
         harness.manager.summaries().await[0].session,
         SessionState::Stopped
+    );
+    let leaf = harness.manager.inner.media.thread_leaf(thread);
+    assert_eq!(
+        std::fs::read_dir(&leaf).expect("attachment leaf").count(),
+        0,
+        "the stopped-thread refusal must precede base64 materialization"
     );
     let runtime = harness
         .manager

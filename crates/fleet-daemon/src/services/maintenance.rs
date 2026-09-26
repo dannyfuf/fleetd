@@ -91,6 +91,7 @@ impl Services {
         let handles = vec![
             tokio::spawn(self.media.clone().run_expiry(shutdown.clone())),
             tokio::spawn(self.media.clone().run_sweep(shutdown.clone())),
+            tokio::spawn(self.agents.clone().run_attachment_sweep(shutdown.clone())),
             tokio::spawn(self.watches.clone().run(shutdown.clone())),
             tokio::spawn(self.watch_discovery.clone().run(shutdown.clone())),
             tokio::spawn(run_status_refresh(
