@@ -15,17 +15,19 @@ use std::{
 
 use fleet_core::{ids::TerminalId, paths::FleetHome};
 use fleet_proto::{
-    PROTOCOL_VERSION, TERMINAL_CLIPBOARD_CAPABILITY,
+    MEDIA_STAGE_CAPABILITY, PROTOCOL_VERSION, TERMINAL_CLIPBOARD_CAPABILITY,
     codec::FleetCodec,
     error::{ErrorKind, ProtoError},
     event::{Event, EventKind, ToastLevel},
-    request::{Request, RequestBody},
+    request::{Request, RequestBody, StageOp},
     response::{
         BOARD_AUTOMATION_CAPABILITY, BOARD_REVIEWS_CAPABILITY, BOARD_WORKTREE_CAPABILITY,
         DaemonIdentity, HelloResponse, PongResponse, Response, ResponseBody, SCHEDULES_CAPABILITY,
         StampedResponse,
     },
 };
+#[cfg(test)]
+use futures_util::FutureExt as _;
 use futures_util::{SinkExt, StreamExt, stream::SplitSink, stream::SplitStream};
 use serde_json::Value;
 use thiserror::Error;
@@ -679,6 +681,30 @@ impl ConnectionEffect {
 
 fn request_timeout(body: &RequestBody) -> Option<Duration> {
     match body {
+        // Begin allocates and validates a manifest on the target filesystem. Remote disks may be
+        // slow, but the operation is bounded and must not remain pending across a dead link.
+        RequestBody::StageMedia {
+            op: StageOp::Begin { .. },
+            ..
+        } => Some(Duration::from_secs(30)),
+        // A chunk is one bounded 128 KiB write. Thirty seconds leaves ample transport and disk
+        // slack while still letting the resumable upload react promptly to a lost peer.
+        RequestBody::StageMedia {
+            op: StageOp::Chunk { .. },
+            ..
+        } => Some(Duration::from_secs(30)),
+        // Finish may hash the full 1 GiB upload before publishing it, so it owns a longer bound
+        // than the transfer operations without becoming an unbounded wire await.
+        RequestBody::StageMedia {
+            op: StageOp::Finish { .. },
+            ..
+        } => Some(Duration::from_secs(120)),
+        // Cancel only removes bounded partial state and intentionally keeps the ordinary RPC
+        // deadline; expiry remains the cleanup fallback if the link is already gone.
+        RequestBody::StageMedia {
+            op: StageOp::Cancel,
+            ..
+        } => Some(REQUEST_TIMEOUT),
         RequestBody::DelegationWait { timeout_ms, .. } => {
             Some(Duration::from_millis(*timeout_ms) + Duration::from_secs(15))
         }
@@ -1217,6 +1243,7 @@ fn required_capability(body: &RequestBody) -> Option<&'static str> {
         | RequestBody::UpdateSchedule { .. }
         | RequestBody::DeleteSchedule { .. }
         | RequestBody::RunScheduleNow { .. } => Some(SCHEDULES_CAPABILITY),
+        RequestBody::StageMedia { .. } => Some(MEDIA_STAGE_CAPABILITY),
         _ => None,
     }
 }
@@ -1230,6 +1257,7 @@ fn capability_error(capability: &str) -> ProtoError {
         BOARD_AUTOMATION_CAPABILITY => board_automation_capability_error(),
         BOARD_REVIEWS_CAPABILITY => board_reviews_capability_error(),
         SCHEDULES_CAPABILITY => schedules_capability_error(),
+        MEDIA_STAGE_CAPABILITY => media_stage_capability_error(),
         _ => worktree_board_capability_error(),
     }
 }
@@ -1262,6 +1290,13 @@ pub(crate) fn schedules_capability_error() -> ProtoError {
     ProtoError {
         kind: ErrorKind::Validation,
         message: "this daemon does not support schedules; run `fleet daemon restart`".to_owned(),
+    }
+}
+
+pub(crate) fn media_stage_capability_error() -> ProtoError {
+    ProtoError {
+        kind: ErrorKind::Unsupported,
+        message: "media staging is unavailable; update fleetd on this machine".to_owned(),
     }
 }
 
@@ -1463,6 +1498,46 @@ mod tests {
         );
         assert_eq!(
             request_timeout(&RequestBody::DaemonPing),
+            Some(REQUEST_TIMEOUT)
+        );
+    }
+
+    #[test]
+    fn every_media_stage_operation_has_its_deliberate_deadline() {
+        use fleet_proto::request::{MediaAnchor, StageEntry, UploadId};
+
+        let upload = "00000000-0000-4000-8000-000000000001"
+            .parse::<UploadId>()
+            .expect("upload id");
+        let request = |op| RequestBody::StageMedia {
+            anchor: MediaAnchor::Local,
+            upload,
+            op,
+        };
+
+        assert_eq!(
+            request_timeout(&request(StageOp::Begin {
+                entry: StageEntry::File {
+                    name: "image.png".to_owned(),
+                    size: 0,
+                },
+            })),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(
+            request_timeout(&request(StageOp::Chunk {
+                file: 0,
+                offset: 0,
+                data: String::new(),
+            })),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(
+            request_timeout(&request(StageOp::Finish { sha256: Vec::new() })),
+            Some(Duration::from_secs(120))
+        );
+        assert_eq!(
+            request_timeout(&request(StageOp::Cancel)),
             Some(REQUEST_TIMEOUT)
         );
     }
@@ -1919,10 +1994,63 @@ mod tests {
             .expect_err("an incapable connection cannot dispatch the request");
         assert_eq!(error, worktree_board_capability_error());
         assert!(
-            tokio::time::timeout(Duration::from_millis(10), peer.next())
-                .await
-                .is_err(),
+            peer.next().now_or_never().is_none(),
             "the unsupported request must not reach the reconnected daemon"
+        );
+    }
+
+    #[tokio::test]
+    async fn media_stage_request_is_rechecked_after_an_incapable_reconnect() {
+        use fleet_proto::request::{MediaAnchor, UploadId};
+
+        let (client, peer) = UnixStream::pair().expect("socket pair");
+        let transport = protocol_transport(client);
+        let (mut writer, mut reader) = transport.split();
+        let mut peer = protocol_transport(peer);
+        let (response, receiver) = oneshot::channel();
+        let command = Command {
+            request: Request {
+                id: 8,
+                body: RequestBody::StageMedia {
+                    anchor: MediaAnchor::Local,
+                    upload: UploadId::new(),
+                    op: StageOp::Cancel,
+                },
+            },
+            response: Some(response),
+            expires_at: Some(Instant::now() + REQUEST_TIMEOUT),
+        };
+        let mut pending = HashMap::new();
+        // The request was admitted by the typed caller on generation 1. `send_command` sees the
+        // newly negotiated, incapable generation 2 and must re-check before writing the frame.
+        let mut state = ConnectionState {
+            generation: 2,
+            ..ConnectionState::default()
+        };
+        let events = broadcast::Sender::new(16);
+        let metadata = RwLock::new(ConnectionMetadata::default());
+
+        let outcome = send_command(
+            &mut writer,
+            &mut reader,
+            command,
+            &mut pending,
+            &mut state,
+            &events,
+            &metadata,
+        )
+        .await;
+
+        assert_eq!(outcome, DispatchOutcome::Sent);
+        assert!(pending.is_empty());
+        let error = receiver
+            .await
+            .expect("capability refusal reaches the request caller")
+            .expect_err("an incapable connection cannot dispatch media staging");
+        assert_eq!(error, media_stage_capability_error());
+        assert!(
+            peer.next().now_or_never().is_none(),
+            "the unsupported media request must not reach the reconnected daemon"
         );
     }
 
@@ -2142,6 +2270,22 @@ mod tests {
         assert_eq!(
             capability_error(SCHEDULES_CAPABILITY).message,
             "this daemon does not support schedules; run `fleet daemon restart`"
+        );
+    }
+
+    #[test]
+    fn media_stage_requests_need_the_media_capability() {
+        use fleet_proto::request::{MediaAnchor, UploadId};
+
+        let body = RequestBody::StageMedia {
+            anchor: MediaAnchor::Local,
+            upload: UploadId::new(),
+            op: StageOp::Cancel,
+        };
+        assert_eq!(required_capability(&body), Some(MEDIA_STAGE_CAPABILITY));
+        assert_eq!(
+            capability_error(MEDIA_STAGE_CAPABILITY),
+            media_stage_capability_error()
         );
     }
 
