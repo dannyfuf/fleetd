@@ -634,7 +634,7 @@ exception: its query is a filter that never contains a space, so it always publi
 | New / Edit context | `Tab` / `S-Tab` move between name and owners · `ctrl-shift-d` delete this context (routes to the expanded `Y` confirm); plain `ctrl-d` belongs to the focused editor |
 | Repository hooks (`e`) | one editor per command row, `Tab` / `S-Tab` between them; a filled trailing row grows the next blank one · `Enter` saves |
 | Assign repo to context (`m`) | this dialog has **no** text field, so `j` / `k` move the selection as well as `↓` / `↑` and `ctrl-n` / `ctrl-p` |
-| Settings (`,`) | browsing is `Dialog > Settings`: `Tab` / `S-Tab` move between sections · `Space` toggles · `h` / `l` or `←` / `→` cycle a choice · `j` / `k` move · `E` opens `config.json` · `D` runs doctor · `/` searches every section · `Enter` on a text or number row opens it for editing, and saves on every other row. That row's editor publishes `Dialog > SettingsEditing`, where every printable key types and `Enter` saves; `ctrl-n` / `ctrl-p` or `↓` / `↑` move to the next row and close it, and `Esc` discards in either word. The search field publishes `Dialog > SettingsSearch`, where every printable key types, `ctrl-n` / `ctrl-p` or `↓` / `↑` move over the matching settings, `Enter` opens the selected one's section with the cursor on it, and `Esc` clears the search and gives the keys back to the rows (a second `Esc` discards). Every key has a pointer twin: the rail, a row, a switch, a segment or dropdown option, a text or number box (`Enter`), Open config.json (`E`), Run doctor (`D`), Cancel (`Esc`) and Save (`Enter`). |
+| Settings (`,`) | browsing is `Dialog > Settings`: `Tab` / `S-Tab` move between sections · `Space` toggles · `h` / `l` or `←` / `→` cycle a choice · `j` / `k` move · `E` opens `config.json` · `D` runs doctor · `/` searches every section · `Enter` on a text or number row opens its box for editing in place, and saves on every other row. That row's editor publishes `Dialog > SettingsEditing`, where every printable key types and `Enter` keeps the value and closes the box; `ctrl-n` / `ctrl-p` or `↓` / `↑` move to the next row and close it, and `Esc` reverts the row and closes the box, leaving the dialog open. The search field publishes `Dialog > SettingsSearch`, where every printable key types, `ctrl-n` / `ctrl-p` or `↓` / `↑` move over the matching settings, `Enter` opens the selected one's section with the cursor on it, and `Esc` clears the search and gives the keys back to the rows. Browsing, `Esc` goes one level back, then asks once: on a clean draft it closes; on a dirty one the first `Esc` paints `Unsaved changes. Press Esc again to discard them.` and the second discards and closes. Any edit, a click on a row or a section change disarms it. Every key has a pointer twin: `Tab` / `S-Tab` a rail section, `j` / `k` a click anywhere on a row (it moves the cursor and opens nothing), `Space` the row's switch, `h` / `l` a segment or a dropdown option, `Enter` a click on the text or number box, `/` the search field and its ✕ for the search's `Esc`, `E` Open config.json, `D` Run doctor, `Esc` Cancel, the ✕ or the scrim (the same ladder), and `Enter` Save. |
 | Help (`?`) | `Esc` / `?` close · typing goes to its search field · `↓` / `↑` or `ctrl-n` / `ctrl-p` move in its list · `Enter` runs the row (or opens a guide a search found) on the surface Help was opened over · `ctrl-tab` / `ctrl-shift-tab` switch Guides ⇄ All shortcuts |
 | Quit (`ctrl-q`) | `y` quit · `n` / `Esc` cancel · `J` open the jobs panel · `W` never warn again (writes `jobs.warnBeforeQuit=false`) and quit [A23] |
 | Quit and stop daemon (`ctrl-shift-q`) | `Y` stop and quit · `n` / `Esc` cancel |
@@ -917,13 +917,29 @@ otherwise suggest, because those are the board's sync and full sync. `B` and `y`
 card's pull request — open it in the browser, copy its URL — on the Review board and in the card
 detail; they are not `b`, which is *blocked by* on every board surface.
 
+**Board settings.** The dialog walks the Settings ladder with `esc`: an open editor reverts its
+row and closes in place, then `esc` leaves a column's or a schedule's form for its list, then
+disarms an armed delete, and at the top with unsaved edits the first `esc` paints `Unsaved
+changes. Press Esc again to discard them.` and the second discards and closes. In a multi-line box
+(a column's Instructions or Env, a schedule's Prompt) `⏎` keeps the text and closes the box; `⇧⏎`
+inserts a new line. Every key has a pointer twin, and none lives only behind hover. The rail's sections are `tab` / `shift-tab`; a
+click on a row is `j` / `k`, a double-click on a column or a schedule is `⏎`, and a form's
+breadcrumb `‹ Columns` / `‹ Schedules` is its `esc`. On the Columns list the footer carries
+`New column` (`n`) and `Apply preset` (`P`); `K`, `J` and `d` are the cursor row's hover actions
+*Move up*, *Move down* and *Delete column*, not footer buttons, and a right-click on a column opens
+the same verbs as a menu — *Open* (`⏎`), *Move up*, *Move down*, *Delete column* — each showing its
+key.
+
 **Board settings › Schedules.** The section reuses the dialog's keys, each meaning its schedule
 twin while the Schedules list is showing: `n` adds a schedule (on a Reviews board, pre-filled with
 the GitHub starter), `⏎` opens the focused schedule's form, `space` enables or disables it (sent at
-once), `r` runs it now, `d` arms a delete and a second `d` confirms it (`esc`, `j`/`k`, a click, `space` or `r` disarm
+once; the row's leading switch is its click), `r` runs it now (the cursor row's hover *Run now*),
+`d` arms a delete and a second `d` confirms it (`esc`, `j`/`k`, a click, `space` or `r` disarm
 it; the Confirm dialog is not used, as dialogs do not stack), `j`/`k` move, and `ctrl-s` saves the
-form. On a form with unsaved edits the first `tab`, `shift-tab` or rail click asks, as `esc` does,
-and stays on the section; the next one leaves and discards the form.
+form. The footer carries `New schedule` (`n`) and `Delete` (`d`), and a right-click on a schedule
+opens *Open*, *Run now* and *Delete*. On a form with unsaved edits the first `esc`, `tab`,
+`shift-tab` or rail click asks — `Unsaved schedule. Press Esc again to discard it.` — and stays on
+the section; the next one leaves and discards the form.
 Inside the form `h`/`l` cycle a closed choice (provider, mode, cadence), `space` toggles Enabled,
 and `⏎` opens a field's editor. `J`, `K` and `P` do nothing on this section.
 

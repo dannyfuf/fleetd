@@ -36,6 +36,32 @@ impl BoardSection {
             Self::Schedules => "Schedules",
         }
     }
+
+    /// The rail glyph (§3.8.6).
+    #[must_use]
+    pub(crate) const fn icon(self) -> Icon {
+        match self {
+            Self::General => Icon::Settings2,
+            Self::Backend => Icon::Server,
+            Self::Columns => Icon::SquareKanban,
+            Self::Schedules => Icon::Clock,
+        }
+    }
+
+    /// The caption the pane ends with, stated once under its cards; `None` where there is
+    /// nothing a card does not already say.
+    #[must_use]
+    pub(crate) const fn caption(self) -> Option<&'static str> {
+        match self {
+            Self::General | Self::Backend => None,
+            Self::Columns => Some(
+                "Open a column to name it, pick its category, and set what runs when a card enters it.",
+            ),
+            Self::Schedules => Some(
+                "A schedule runs headless in fleetd and feeds this board. Runs show in the Jobs panel.",
+            ),
+        }
+    }
 }
 
 impl Default for BoardSection {
@@ -283,6 +309,28 @@ pub(super) enum SettingRow {
     NoRow,
 }
 
+/// The General pane's cards, each a title and the cursor rows it holds (§3.8.6). `Runs` also
+/// ends with the read-only `Runs in` row, which the cursor never lands on.
+pub(super) const GENERAL_CARDS: [(&str, &[SettingRow]); 3] = [
+    (
+        "Board",
+        &[
+            SettingRow::Name,
+            SettingRow::Prefix,
+            SettingRow::DefaultRepo,
+        ],
+    ),
+    (
+        "Cards",
+        &[
+            SettingRow::StartOnWorktree,
+            SettingRow::PushNewCards,
+            SettingRow::ConflictPolicy,
+        ],
+    ),
+    ("Runs", &[SettingRow::MaxLiveRuns]),
+];
+
 /// The General pane's rows, in order.
 ///
 /// `Max live runs` sits last because it is the only one of them that is about *runs* rather
@@ -324,6 +372,40 @@ impl SettingRow {
 
 /// The label of General's read-only `Runs in` fact (BOARD §11.10).
 pub(super) const RUNS_IN_LABEL: &str = "Runs in";
+/// Why `Runs in` is read-only, under its label.
+pub(super) const RUNS_IN_HELPER: &str = "Not editable while a run could be live.";
+
+impl SettingRow {
+    /// The sentence under a General row's label, from the Board-General artboard (§3.8.6).
+    ///
+    /// The two rows whose sentence depends on the board — `Prefix` names the prefix, `Push new
+    /// cards` says when there is no backend — are completed by the view.
+    #[must_use]
+    pub(super) const fn helper(self) -> Option<&'static str> {
+        Some(match self {
+            Self::Name => "Shown in the board tab and the breadcrumb.",
+            Self::DefaultRepo => "Where a worktree started from a card is created.",
+            Self::StartOnWorktree => {
+                "Creating a worktree from a backlog card moves it to the first started column."
+            }
+            Self::PushNewCards => "Files a card made here as an issue on the backend.",
+            Self::ConflictPolicy => "Who wins when the backend and this board disagree.",
+            _ => return None,
+        })
+    }
+}
+
+/// What `Push new cards` adds on a board with no backend to push to.
+pub(super) const NO_BACKEND: &str = "This board has none.";
+
+/// What `Max live runs` says about the checkout its runs share, or do not.
+#[must_use]
+pub(super) const fn live_runs_helper(location: RunLocation) -> &'static str {
+    match location {
+        RunLocation::BoardWorktree => "Runs on this board share one checkout, so keep it small.",
+        RunLocation::CardWorktree => "Each run works in its card's worktree.",
+    }
+}
 
 /// Where a board's runs execute, as General's `Runs in` fact states it.
 #[must_use]

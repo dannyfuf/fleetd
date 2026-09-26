@@ -1,5 +1,6 @@
-//! §3.8.6 Settings (`,`) — a section rail beside a pane of real controls, a search in the header
-//! and a footer that says whether anything is unsaved.
+//! §3.8.6 Settings (`,`) — a section rail beside a pane of cards of setting rows, a search in
+//! the header, and a footer that says whether anything is unsaved and asks once before `Esc`
+//! discards it.
 
 use fleet_core::{
     agents::AgentKind,
@@ -21,13 +22,6 @@ use crate::{
     state::{AppState, Screen},
     views::workspace_tabs,
 };
-
-/// The section rail's width (§3.8.6).
-const RAIL_WIDTH: f32 = 196.0;
-
-/// The label column of a text row and of a read-only fact, wide enough for the longest label the
-/// pane carries (`Binary for threads`); anything longer ellipsizes rather than breaking the grid.
-const LABEL_WIDTH: f32 = 170.0;
 
 mod choice;
 mod draft;

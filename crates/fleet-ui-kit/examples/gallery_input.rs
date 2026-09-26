@@ -1,8 +1,12 @@
 //! The visual and behavioural test bench for the **input** group of `fleet-ui-kit`.
 //!
-//! `TextInput` · `FuzzyList` · `FilterBar` · `Cycler` · `Toggle` · `NumberField` · `ValueField` ·
-//! `Switch` · `Checkbox` · `SegmentedControl` · `SegmentedTabs` · `Select` · `Callout` ·
-//! `ConfirmDialog` · `Palette`.
+//! `TextInput` · `FuzzyList` · `FilterBar` · `Cycler` · `Switch` · `Checkbox` · `SettingsRow` ·
+//! `SettingsCard` · `ValueBox` · `SearchField` · `Breadcrumb` · `SegmentedControl` ·
+//! `SegmentedTabs` · `Select` · `Callout` · `ConfirmDialog` · `Palette`.
+//!
+//! The settings grammar (`SettingsRow`, `SettingsCard`, `ValueBox`, `SearchField`,
+//! `Breadcrumb`, the inline `Cycler`) lives in `gallery_input/settings.rs` and ends with the
+//! acceptance panel: the Settings · Agents pane drawn as its artboard draws it.
 //!
 //! Every component appears in every state it can be in, in both themes, and the interactive
 //! ones are *live*: the inputs really edit, the palette really filters and highlights, the
@@ -22,9 +26,11 @@
 //! | `ctrl-n` `ctrl-p` `↓` `↑` | move the fuzzy / palette cursor (also while typing) |
 //! | `h` `l` | previous / next tab |
 //! | `←` `→` | cycle the host value |
-//! | `space` | toggle the focused switch |
+//! | `space` | flip the settings switches |
 //! | `o` | open / close the select |
-//! | `+` `-` | change the focused number field |
+//! | `+` `-` | step the `Grace` box by 500 ms (past its clamp the rule replaces the helper) |
+//! | `ctrl-e` | open the editing row's box (the focus ring) · `esc` leaves it |
+//! | `ctrl-f` | focus the live search field · `esc` leaves it |
 //! | `ctrl-q` / `cmd-q` | quit |
 //!
 //! Bare-letter keys are bound only in the `GalleryNormal` context. While a field owns the
@@ -32,6 +38,9 @@
 //! instead of fired — the same rule §3.10 states for the real Hub.
 
 pub mod support;
+// The example root resolves modules beside it, so name the settings panels' file explicitly.
+#[path = "gallery_input/settings.rs"]
+mod settings;
 const LAYOUT: support::layout::GalleryLayout = support::layout::GalleryLayout {
     label_width: 170.0,
     column: true,
@@ -70,6 +79,8 @@ actions!(
         ToggleSelect,
         Increment,
         Decrement,
+        FocusValueBox,
+        FocusSearch,
     ]
 );
 
@@ -166,10 +177,26 @@ struct InputGallery {
     live_invalid: Entity<TextInput>,
     live_read_only: Entity<TextInput>,
     live_numeric: Entity<TextInput>,
-    /// The editor a settings number row hands to `NumberField` while it is being typed into.
+    /// The editor a number `ValueBox` draws in place of its value while it is being typed into.
     number_row_editor: Entity<TextInput>,
-    /// The editor a settings text row hands to `ValueField` while it is being typed into.
+    /// The editor the editing `SettingsRow` hands its `ValueBox` (`ctrl-e`).
     value_row_editor: Entity<TextInput>,
+    /// The editor the tall row's multi-line `ValueBox` grows to eight rows with.
+    multiline_row_editor: Entity<TextInput>,
+    /// The editor of the stand-alone multi-line `ValueBox` panel.
+    multiline_box_editor: Entity<TextInput>,
+    /// An editor handed to a box but not focused: a hooks row at rest.
+    hooks_row_editor: Entity<TextInput>,
+    /// The `SearchField` queries: empty, live (`ctrl-f`), and one matching nothing.
+    search_empty: Entity<TextInput>,
+    search_live: Entity<TextInput>,
+    search_no_match: Entity<TextInput>,
+    /// The Agents pane's cursor row, and the values its controls choose.
+    settings_cursor: usize,
+    agent: usize,
+    access: usize,
+    model: usize,
+    effort: usize,
     live_labeled: Entity<TextInput>,
     live_multiline_min: Entity<TextInput>,
     live_multiline_grown: Entity<TextInput>,
@@ -271,9 +298,52 @@ impl InputGallery {
             input.set_mono(true, cx);
             input.set_hide_status_line(true, cx);
             input.set_embedded(true, cx);
-            input.set_text("claude --resume", cx);
+            input.set_text("claude-opus-5", cx);
             input
         });
+        let multiline_editor = |text: &str, mono: bool, cx: &mut Context<TextInput>| {
+            let mut input = TextInput::new(
+                InputMode::Multiline {
+                    min_rows: 3,
+                    max_rows: VALUE_BOX_MAX_ROWS,
+                },
+                cx,
+            );
+            input.set_mono(mono, cx);
+            input.set_hide_status_line(true, cx);
+            input.set_embedded(true, cx);
+            input.set_text(text, cx);
+            input
+        };
+        let multiline_row_editor = cx.new(|cx| {
+            multiline_editor(
+                "Review pull request {pr_url} for correctness and test coverage. Leave one \
+                 summary comment; do not push.",
+                false,
+                cx,
+            )
+        });
+        let multiline_box_editor =
+            cx.new(|cx| multiline_editor("PORT=3001\nRUST_LOG=info", true, cx));
+        let hooks_row_editor = cx.new(|cx| {
+            let mut input = TextInput::new(InputMode::SingleLine, cx);
+            input.set_mono(true, cx);
+            input.set_hide_status_line(true, cx);
+            input.set_embedded(true, cx);
+            input.set_placeholder("Type the next command\u{2026}", cx);
+            input
+        });
+        let search_editor = |text: &str, cx: &mut Context<TextInput>| {
+            let mut input = TextInput::new(InputMode::SingleLine, cx);
+            // The field is the chrome; the editor is only the line and its caret.
+            input.set_embedded(true, cx);
+            input.set_placeholder("Search settings", cx);
+            input.set_text(text, cx);
+            input
+        };
+        let search_empty = cx.new(|cx| search_editor("", cx));
+        let search_live = cx.new(|cx| search_editor("refresh", cx));
+        let search_no_match = cx.new(|cx| search_editor("zzz", cx));
         let live_labeled = cx.new(|cx| {
             let mut input = TextInput::new(InputMode::SingleLine, cx);
             input.set_label(Some("branch".into()), cx);
@@ -353,6 +423,12 @@ impl InputGallery {
                     cx.notify();
                 }
             }),
+            // The live search's count is derived from its query.
+            cx.subscribe(&search_live, |_, _, event, cx| {
+                if *event == TextInputEvent::Changed {
+                    cx.notify();
+                }
+            }),
         ];
         let mut gallery = Self {
             focus_handle: cx.focus_handle(),
@@ -370,6 +446,17 @@ impl InputGallery {
             live_multiline_grown,
             number_row_editor,
             value_row_editor,
+            multiline_row_editor,
+            multiline_box_editor,
+            hooks_row_editor,
+            search_empty,
+            search_live,
+            search_no_match,
+            settings_cursor: 4,
+            agent: 0,
+            access: 0,
+            model: 1,
+            effort: 0,
             filter,
             filter_no_match,
             palette_query,
@@ -435,6 +522,18 @@ impl InputGallery {
                 .read(cx)
                 .focus_handle()
                 .is_focused(window)
+            || [
+                &self.number_row_editor,
+                &self.value_row_editor,
+                &self.multiline_row_editor,
+                &self.multiline_box_editor,
+                &self.hooks_row_editor,
+                &self.search_empty,
+                &self.search_live,
+                &self.search_no_match,
+            ]
+            .into_iter()
+            .any(|editor| editor.read(cx).focus_handle().is_focused(window))
     }
 
     /// The rows the fuzzy list shows for the current filter query.
@@ -544,6 +643,18 @@ impl InputGallery {
     fn focus_editor(&mut self, _: &FocusEditor, window: &mut Window, cx: &mut Context<Self>) {
         self.capture = Capture::None;
         self.branch.update(cx, |input, cx| input.focus(window, cx));
+        cx.notify();
+    }
+
+    fn focus_value_box(&mut self, _: &FocusValueBox, window: &mut Window, cx: &mut Context<Self>) {
+        self.value_row_editor
+            .update(cx, |input, cx| input.focus(window, cx));
+        cx.notify();
+    }
+
+    fn focus_search(&mut self, _: &FocusSearch, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_live
+            .update(cx, |input, cx| input.focus(window, cx));
         cx.notify();
     }
 
@@ -1006,9 +1117,8 @@ fn choice_section(
     };
     let set_host = set(|gallery, ix| gallery.host = ix);
     let set_step = set(|gallery, ix| gallery.step = ix);
-    let set_checked = set(|gallery, on| gallery.checked = on == 1);
     LAYOUT.section(
-        "cycler \u{b7} toggle \u{b7} number field",
+        "cycler \u{b7} switch \u{b7} checkbox \u{b7} callout",
         theme,
         vec![
             LAYOUT.labeled(
@@ -1061,38 +1171,6 @@ fn choice_section(
                                 .off_grid(true)
                                 .has_prev(false)
                                 .has_next(false),
-                        ),
-                ),
-            ),
-            LAYOUT.labeled(
-                "toggles (space, click)",
-                theme,
-                card(
-                    theme,
-                    px(460.0),
-                    div()
-                        .flex()
-                        .flex_col()
-                        .child(
-                            Toggle::labeled("Sleep on switch", gallery.checked)
-                                .label_width(px(200.0))
-                                .on_toggle(move |on, window, cx| {
-                                    set_checked(usize::from(on), window, cx)
-                                })
-                                .focused(true),
-                        )
-                        .child(
-                            Toggle::labeled("Warn before quitting", false).label_width(px(200.0)),
-                        )
-                        .child(
-                            Toggle::labeled("Claude keep-alive", true)
-                                .label_width(px(200.0))
-                                .detail("matching 2 processes now"),
-                        )
-                        .child(
-                            Toggle::labeled("Managed by config.json", true)
-                                .label_width(px(200.0))
-                                .disabled(true),
                         ),
                 ),
             ),
@@ -1151,99 +1229,6 @@ fn choice_section(
                         )
                         .actions(Button::new("callout-settings", "Board settings").size(ButtonSize::Compact)),
                     ),
-            ),
-            LAYOUT.labeled(
-                "number fields (+ \u{2212})",
-                theme,
-                card(
-                    theme,
-                    px(460.0),
-                    div()
-                        .flex()
-                        .flex_col()
-                        .child(
-                            NumberField::labeled("grace", gallery.grace)
-                                .label_width(px(150.0))
-                                .unit("ms")
-                                .range(0, 60_000)
-                                .focused(true),
-                        )
-                        .child(
-                            NumberField::labeled("status refresh", 200)
-                                .label_width(px(150.0))
-                                .unit("ms")
-                                .min(500),
-                        )
-                        .child(
-                            NumberField::labeled("pool size", 3)
-                                .label_width(px(150.0))
-                                .range(1, 8),
-                        )
-                        .child(
-                            NumberField::labeled("pr ttl", 90)
-                                .label_width(px(150.0))
-                                .unit("s")
-                                .invalid("the daemon refused this value"),
-                        )
-                        // Editing: the row hands the field its live editor, and the label,
-                        // the unit and the row chrome stay exactly where they were.
-                        .child(
-                            NumberField::labeled("grace", 2_000)
-                                .label_width(px(150.0))
-                                .unit("ms")
-                                .min(0)
-                                .editor(gallery.number_row_editor.clone()),
-                        )
-                        // End-aligned: the box sits where a cycler's or a switch's control does,
-                        // and the label reads at full contrast, as theirs do.
-                        .child(
-                            NumberField::labeled("Freshness", 60_000)
-                                .unit("ms")
-                                .min(0)
-                                .end_aligned(true),
-                        ),
-                ),
-            ),
-            LAYOUT.labeled(
-                "value fields (text settings)",
-                theme,
-                card(
-                    theme,
-                    px(460.0),
-                    div()
-                        .flex()
-                        .flex_col()
-                        .child(
-                            ValueField::new("value-default", "claude")
-                                .label("Terminal command")
-                                .label_width(px(150.0))
-                                .mono(true)
-                                .on_click(|_, _| {}),
-                        )
-                        .child(
-                            ValueField::new("value-focused", "claude")
-                                .label("Binary for threads")
-                                .label_width(px(150.0))
-                                .mono(true)
-                                .focused(true),
-                        )
-                        .child(
-                            ValueField::new("value-placeholder", "")
-                                .label("Default model")
-                                .label_width(px(150.0))
-                                .placeholder("Harness default"),
-                        )
-                        // Editing: the row hands the field its embedded editor, drawn inside the
-                        // same box with the focus-ring border.
-                        .child(
-                            ValueField::new("value-editing", "claude")
-                                .label("Terminal command")
-                                .label_width(px(150.0))
-                                .mono(true)
-                                .focused(true)
-                                .editor(gallery.value_row_editor.clone()),
-                        ),
-                ),
             ),
         ],
     )
@@ -1512,6 +1497,13 @@ impl Render for InputGallery {
             fuzzy_section(self, cx.entity().downgrade(), &theme, cx),
             filter_section(self, &theme, cx),
             choice_section(self, cx.entity().downgrade(), &theme),
+            settings::row_section(self, cx.entity().downgrade(), &theme),
+            settings::card_section(&theme),
+            settings::value_box_section(self, &theme),
+            settings::search_section(self, cx.entity().downgrade(), &theme, cx),
+            settings::breadcrumb_section(&theme),
+            settings::inline_cycler_section(self, cx.entity().downgrade(), &theme),
+            settings::agents_pane_section(self, cx.entity().downgrade(), &theme),
             tabs_and_select_section(self, cx.entity().downgrade(), &theme),
             confirm_hint_section(self, &theme),
         ];
@@ -1533,6 +1525,8 @@ impl Render for InputGallery {
             .on_action(cx.listener(Self::quit))
             .on_action(cx.listener(Self::focus_editor))
             .on_action(cx.listener(Self::focus_filter))
+            .on_action(cx.listener(Self::focus_value_box))
+            .on_action(cx.listener(Self::focus_search))
             .on_action(cx.listener(Self::open_palette))
             .on_action(cx.listener(Self::escape))
             .on_action(cx.listener(Self::accept))
@@ -1659,6 +1653,8 @@ fn main() {
                 KeyBinding::new("ctrl-q", Quit, None),
                 KeyBinding::new("cmd-q", Quit, None),
                 KeyBinding::new("ctrl-i", FocusEditor, None),
+                KeyBinding::new("ctrl-e", FocusValueBox, None),
+                KeyBinding::new("ctrl-f", FocusSearch, None),
                 KeyBinding::new("escape", Escape, None),
                 KeyBinding::new("enter", Accept, None),
                 KeyBinding::new("ctrl-n", CursorNext, None),

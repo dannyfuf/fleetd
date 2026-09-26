@@ -71,10 +71,16 @@ impl Section {
         }
     }
 
-    /// Whether the section holds anything editable, which decides the `config.json` trailer.
+    /// The one sentence the pane ends with, stated once under the section's cards.
     #[must_use]
-    pub const fn editable(self) -> bool {
-        !matches!(self, Self::General | Self::Hosts | Self::About)
+    pub const fn caption(self) -> Option<&'static str> {
+        match self {
+            Self::General | Self::Hosts => Some("Change these in config.json."),
+            Self::Sleep => Some(
+                "Rules are defined in config.json. Open it from the footer to add or change one.",
+            ),
+            _ => None,
+        }
     }
 
     /// The section's position in [`Self::ALL`].
@@ -174,8 +180,60 @@ pub enum RowKind {
     },
     /// Free text: printable keys type into it.
     Text(String),
+    /// A harness's default model: a dropdown over the models it reported, or a text box when it
+    /// has reported none. `⏎` opens the text box either way, for a model id the list lacks.
+    Model {
+        /// The configured model id; empty leaves the choice to the harness.
+        value: String,
+        /// What the dropdown reads: the model's name, the raw id, or `Harness default`.
+        shown: String,
+        /// The models the harness reported, in its order. Empty draws the text box.
+        options: Vec<ModelOption>,
+        /// The harness, as the helper and the menu name it (`claude`).
+        harness: &'static str,
+    },
+    /// A keep-alive rule: its switch leads the row, and the live match count ends it.
+    Rule {
+        /// Whether the rule takes part in matching.
+        on: bool,
+        /// What the rule inspects, as its badge reads (`command`, `port`).
+        badge: &'static str,
+        /// The command pattern; empty for a port rule, which ignores it.
+        pattern: String,
+        /// How many running processes match now; `None` while that is still loading.
+        running: Option<u64>,
+        /// The pattern failed to compile, so the daemon skips the rule.
+        broken: bool,
+    },
     /// A fact with no input chrome.
     Fact(String),
+}
+
+/// One model a harness reported, as the Default model dropdown lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelOption {
+    /// The id written to the configuration.
+    pub id: String,
+    /// The harness's own name for it; the id when the harness gave none.
+    pub name: String,
+}
+
+impl RowKind {
+    /// Whether a Default model row draws its dropdown: the harness reported models and no id is
+    /// being typed. Otherwise the row draws the text box every text row draws.
+    #[must_use]
+    pub fn draws_model_dropdown(&self, editing: bool) -> bool {
+        matches!(self, Self::Model { options, .. } if !options.is_empty()) && !editing
+    }
+
+    /// Whether `⏎` (or a click on its box) opens an editor on the row.
+    #[must_use]
+    pub const fn opens_editor(&self) -> bool {
+        matches!(
+            self,
+            Self::Text(_) | Self::Number { .. } | Self::Model { .. }
+        )
+    }
 }
 
 /// One row of the settings pane.
@@ -187,9 +245,9 @@ pub struct SettingRow {
     pub(crate) label: String,
     /// What it draws.
     pub(crate) kind: RowKind,
-    /// The muted trailer, e.g. a live keep-alive match count.
+    /// The helper sentence under the label.
     pub(crate) detail: Option<String>,
-    /// A validation problem, e.g. an invalid keep-alive pattern.
+    /// A validation problem. A keep-alive rule's is the sentence its card ends with.
     pub(crate) invalid: Option<String>,
     /// The card the row sits in, named by its heading (`Claude`); consecutive rows sharing one
     /// are drawn together.
@@ -198,6 +256,8 @@ pub struct SettingRow {
     pub(crate) placeholder: Option<&'static str>,
     /// The text a copy button beside a read-only value puts on the clipboard.
     pub(crate) copy: Option<String>,
+    /// A read-only value that is a path, an id or a version, drawn in the data face.
+    pub(crate) mono: bool,
 }
 
 impl SettingRow {
@@ -211,6 +271,7 @@ impl SettingRow {
             card: None,
             placeholder: None,
             copy: None,
+            mono: false,
         }
     }
 
@@ -234,7 +295,30 @@ impl SettingRow {
         self.copy = Some(copy);
         self
     }
+
+    fn mono(mut self) -> Self {
+        self.mono = true;
+        self
+    }
 }
+
+/// The muted note a card's header ends with, by the card's heading.
+#[must_use]
+pub fn card_note(card: &str) -> Option<&'static str> {
+    (card == KEEP_AWAKE).then_some("matched against running processes now")
+}
+
+/// The sentences a card ends with: one per keep-alive rule in it whose pattern does not compile.
+#[must_use]
+pub fn card_captions(rows: &[SettingRow]) -> Vec<String> {
+    rows.iter()
+        .filter(|row| matches!(row.kind, RowKind::Rule { broken: true, .. }))
+        .filter_map(|row| row.invalid.clone())
+        .collect()
+}
+
+/// The heading of the Sleep section's keep-alive card.
+pub(super) const KEEP_AWAKE: &str = "Keep awake while running";
 
 /// Builds the rows of the section the rail highlights.
 #[must_use]
@@ -250,8 +334,8 @@ pub fn section_rows(section: Section, state: &SettingsState, app: &AppState) -> 
     };
     match section {
         Section::General => window_rows(config),
-        Section::Agents => agent_rows(config, &state.efforts),
-        Section::Sleep => sleep_rows(config, &state.matches),
+        Section::Agents => agent_rows(config, &state.efforts, &state.models),
+        Section::Sleep => sleep_rows(config, &state.matches, state.matches_loading),
         Section::Jobs => jobs_rows(config),
         Section::Pool => pool_rows(config, app),
         Section::Github => github_rows(config),
@@ -269,7 +353,7 @@ fn choice_row(config: &Config, id: RowId, label: &str, efforts: &Efforts) -> Set
 }
 
 /// The Agents section: the default agent, then one card per harness.
-fn agent_rows(config: &Config, efforts: &Efforts) -> Vec<SettingRow> {
+fn agent_rows(config: &Config, efforts: &Efforts, models: &Models) -> Vec<SettingRow> {
     let mut rows = vec![
         choice_row(config, RowId::Agent, "Default agent", efforts)
             .detail("Used by the Agent buttons and by a new thread."),
@@ -281,10 +365,7 @@ fn agent_rows(config: &Config, efforts: &Efforts) -> Vec<SettingRow> {
                 (RowId::ClaudeCommand, &config.agent_commands.claude),
                 (RowId::ClaudeBinary, &config.agent_binaries.claude),
                 RowId::ClaudeDefaultMode,
-                (
-                    RowId::ClaudeDefaultModel,
-                    &config.native_agents.claude.model,
-                ),
+                RowId::ClaudeDefaultModel,
                 RowId::ClaudeDefaultEffort,
             ),
             AgentKind::Codex => (
@@ -292,10 +373,23 @@ fn agent_rows(config: &Config, efforts: &Efforts) -> Vec<SettingRow> {
                 (RowId::CodexCommand, &config.agent_commands.codex),
                 (RowId::CodexBinary, &config.agent_binaries.codex),
                 RowId::CodexDefaultMode,
-                (RowId::CodexDefaultModel, &config.native_agents.codex.model),
+                RowId::CodexDefaultModel,
                 RowId::CodexDefaultEffort,
             ),
         };
+        let model_kind = model_of(config, kind, models);
+        let model_helper = match &model_kind {
+            RowKind::Model {
+                options, harness, ..
+            } if !options.is_empty() => {
+                format!("The models {harness} reported. Harness default lets {harness} pick.")
+            }
+            _ => "Empty means the harness picks.".to_owned(),
+        };
+        let mut model_row = SettingRow::new(model, "Default model", model_kind)
+            .placeholder("Harness default")
+            .card(card);
+        model_row.detail = Some(model_helper);
         rows.extend([
             text_row(command.0, "Terminal command", command.1)
                 .detail("Typed into a terminal tab. Aliases work.")
@@ -306,9 +400,7 @@ fn agent_rows(config: &Config, efforts: &Efforts) -> Vec<SettingRow> {
             choice_row(config, mode, "Default access", efforts)
                 .detail("New threads start with it. Each thread can change it.")
                 .card(card),
-            text_row(model.0, "Default model", model.1.as_deref().unwrap_or(""))
-                .placeholder("Harness default")
-                .card(card),
+            model_row,
             choice_row(config, effort, "Effort", efforts)
                 .detail("Used with the default model.")
                 .card(card),
@@ -317,14 +409,19 @@ fn agent_rows(config: &Config, efforts: &Efforts) -> Vec<SettingRow> {
     rows
 }
 
-fn sleep_rows(config: &Config, matches: &[KeepAliveRuleMatch]) -> Vec<SettingRow> {
+fn sleep_rows(config: &Config, matches: &[KeepAliveRuleMatch], loading: bool) -> Vec<SettingRow> {
     let mut list = vec![
         toggle_row(
             RowId::SleepOnSwitch,
             "Sleep on switch",
             config.sleep.enabled,
+        )
+        .detail(
+            "Opening another worktree sleeps the one you leave. Agents, servers and unsaved \
+             editors stay.",
         ),
-        number_row(RowId::GraceMs, "Grace", config.sleep.grace_ms, 0, "ms"),
+        number_row(RowId::GraceMs, "Grace", config.sleep.grace_ms, 0, "ms")
+            .detail("How long a terminal gets to finish before sleep closes it."),
     ];
     list.extend(
         config
@@ -334,25 +431,35 @@ fn sleep_rows(config: &Config, matches: &[KeepAliveRuleMatch]) -> Vec<SettingRow
             .enumerate()
             .map(|(index, rule)| {
                 let live = matches.iter().find(|entry| entry.rule_id == rule.id);
-                let kind = match rule.kind {
-                    KeepAliveKind::Process => "process",
-                    KeepAliveKind::ListeningPort => "listening-port",
+                let broken = live.is_some_and(|entry| entry.error.is_some());
+                let (badge, pattern) = match rule.kind {
+                    KeepAliveKind::Process => ("command", rule.pattern.clone()),
+                    // A port rule ignores its pattern (`KeepAliveRule::pattern`).
+                    KeepAliveKind::ListeningPort => ("port", String::new()),
                 };
                 let mut row = SettingRow::new(
                     RowId::KeepAliveRule(index),
-                    &format!("{}  {kind}  {}", rule.label, rule.pattern),
-                    RowKind::Toggle(rule.enabled),
+                    &rule.label,
+                    RowKind::Rule {
+                        on: rule.enabled,
+                        badge,
+                        pattern,
+                        running: live
+                            .filter(|entry| entry.error.is_none() && !loading)
+                            .map(|entry| entry.count),
+                        broken,
+                    },
                 );
-                row.detail = live.map(|entry| {
+                if rule.kind == KeepAliveKind::ListeningPort {
+                    row.detail = Some("Any process listening on a port.".to_owned());
+                }
+                row.invalid = broken.then(|| {
                     format!(
-                        "{} \u{2014} matching {} processes now",
-                        rule.label, entry.count
+                        "{}: the pattern does not compile, so the rule is skipped.",
+                        rule.label
                     )
                 });
-                row.invalid = live
-                    .and_then(|entry| entry.error.as_ref())
-                    .map(|_| "invalid pattern \u{2014} rule is skipped".to_owned());
-                row.card("Keep awake while running")
+                row.card(KEEP_AWAKE)
             }),
     );
     list
@@ -372,8 +479,10 @@ fn jobs_rows(config: &Config) -> Vec<SettingRow> {
             RowId::KeepFinishedFor,
             "Keep finished jobs for",
             &efforts,
-        ),
-        choice_row(config, RowId::TrashRetention, "Trash retention", &efforts),
+        )
+        .detail("How long a finished job stays in the jobs list."),
+        choice_row(config, RowId::TrashRetention, "Trash retention", &efforts)
+            .detail("How long something deleted can still be restored."),
     ]
 }
 
@@ -389,21 +498,24 @@ fn pool_rows(config: &Config, app: &AppState) -> Vec<SettingRow> {
             RowId::HotPoolSize,
             "Hot pool size",
             &Efforts::default(),
-        ),
+        )
+        .detail("How many prepared copies each repository keeps ready."),
         number_row(
             RowId::HotFreshnessMs,
             "Freshness",
             i64::try_from(config.hot_freshness_ms).unwrap_or(i64::MAX),
             0,
             "ms",
-        ),
+        )
+        .detail("How old a prepared copy may be and still count as fresh."),
         number_row(
             RowId::HotRefreshIntervalMs,
             "Refresh interval",
             i64::try_from(config.hot_refresh_interval_ms).unwrap_or(i64::MAX),
             0,
             "ms",
-        ),
+        )
+        .detail("How often a prepared copy is brought up to date with its base branch."),
         fact("prepared copies", format!("{ready}/{size} ready")),
     ]
 }
@@ -415,21 +527,24 @@ fn github_rows(config: &Config) -> Vec<SettingRow> {
             RowId::CloneProtocol,
             "Clone protocol",
             &Efforts::default(),
-        ),
+        )
+        .detail("Which URL a clone is made from."),
         number_row(
             RowId::RepoCacheSeconds,
             "Repo cache",
             config.github.cache_ttl_seconds,
             0,
             "s",
-        ),
+        )
+        .detail("How long the list of discovered repositories is kept."),
         number_row(
             RowId::PrCacheSeconds,
             "PR cache",
             config.github.pr_ttl_seconds,
             0,
             "s",
-        ),
+        )
+        .detail("How long pull requests are kept before they are fetched again."),
     ]
 }
 
@@ -441,14 +556,16 @@ fn status_rows(config: &Config) -> Vec<SettingRow> {
             config.ui.status_refresh_ms,
             500,
             "ms",
-        ),
+        )
+        .detail("How often local sessions and worktrees are polled."),
         number_row(
             RowId::RemoteStatusRefreshMs,
             "Remote status refresh",
             config.ui.remote_status_refresh_ms,
             500,
             "ms",
-        ),
+        )
+        .detail("How often hosts on other machines are polled."),
     ]
 }
 
@@ -470,6 +587,7 @@ fn window_rows(config: &Config) -> Vec<SettingRow> {
                 &format!("{}", index + 1),
                 format!("{} \u{2014} {command}", window.name),
             )
+            .mono()
             .card("Terminal tabs a new worktree opens")
         })
         .collect()
@@ -482,7 +600,7 @@ fn window_rows(config: &Config) -> Vec<SettingRow> {
 /// reason this section exists. A legacy entry is named as such: it is probe-only and cannot
 /// carry worktrees, so it needs migrating rather than debugging.
 pub(super) fn host_rows(config: &Config, app: &AppState) -> Vec<SettingRow> {
-    let mut rows = vec![fact("default", config.default_host.clone())];
+    let mut rows = vec![fact("default", config.default_host.clone()).mono()];
     if config.hosts.is_empty() {
         rows.push(fact("hosts", "none configured".to_owned()));
         return rows;
@@ -553,10 +671,13 @@ fn host_link(host: &fleet_core::model::HostConfigEntry, status: Option<&HostStat
 /// The About section: versions and the daemon. The two escape hatches, `config.json` and doctor,
 /// are the footer's buttons.
 pub(super) fn about_rows(app: &AppState) -> Vec<SettingRow> {
-    let mut list = vec![fact(
-        "Fleet",
-        crate::presentation::bare_version(env!("CARGO_PKG_VERSION")).to_owned(),
-    )];
+    let mut list = vec![
+        fact(
+            "Fleet",
+            crate::presentation::bare_version(env!("CARGO_PKG_VERSION")).to_owned(),
+        )
+        .mono(),
+    ];
     let now = now_unix();
     if let Some(snapshot) = app.snapshot.as_ref().filter(|_| app.daemon.is_connected()) {
         let uptime = age_secs(&snapshot.daemon.started_at, now)
@@ -569,23 +690,21 @@ pub(super) fn about_rows(app: &AppState) -> Vec<SettingRow> {
                     snapshot.daemon.pid
                 ),
             )
+            .mono()
             .copy(snapshot.daemon.pid.to_string()),
         );
     } else {
         list.push(fact("fleetd", "not connected".to_owned()));
     }
     let home = app.home.display().to_string();
-    list.push(fact("FLEET_HOME", home.clone()).copy(home));
+    list.push(fact("FLEET_HOME", home.clone()).mono().copy(home));
     if let Some(version) = app.update_version.as_ref() {
         list.push(fact(
             "Update",
             format!("Fleet {version} available \u{00b7} U"),
         ));
     }
-    list.push(fact(
-        "protocol",
-        crate::dialogs::help::protocol().to_string(),
-    ));
+    list.push(fact("protocol", crate::dialogs::help::protocol().to_string()).mono());
     list
 }
 
@@ -659,7 +778,11 @@ pub(super) fn number_row(id: RowId, label: &str, value: i64, min: i64, unit: &st
 /// Rebuilds the pane's rows, and the search hits when a search is typed.
 pub(crate) fn refresh_rows(state: &Entity<AppState>, cx: &mut App) {
     let efforts = Efforts::declared(state.read(cx));
-    with_host(state, cx, |host| host.settings.efforts = efforts);
+    let models = Models::declared(state.read(cx));
+    with_host(state, cx, |host| {
+        host.settings.efforts = efforts;
+        host.settings.models = models;
+    });
     let (prepared, hits) = read_host(state, cx, |host, cx| {
         let app = state.read(cx);
         let prepared: std::rc::Rc<[SettingRow]> = rows(&host.settings, app).into();
@@ -667,28 +790,39 @@ pub(crate) fn refresh_rows(state: &Entity<AppState>, cx: &mut App) {
             .settings
             .search
             .as_ref()
-            .map(|search| search_hits(&search.query, &host.settings, app));
+            .map(|typed| search(&typed.query, &host.settings, app));
         (prepared, hits)
     });
     with_host(state, cx, |host| {
         host.settings.prepared = prepared;
-        if let (Some(search), Some(hits)) = (host.settings.search.as_mut(), hits) {
+        if let (Some(search), Some((hits, total))) = (host.settings.search.as_mut(), hits) {
             search.set_hits(hits);
+            search.total = total;
         }
     });
 }
 
 /// Every row of every section whose label or helper sentence contains each word of `query`,
 /// ignoring case, in rail order. An empty query matches nothing: the pane shows the section.
+#[cfg(test)]
 #[must_use]
 pub fn search_hits(query: &str, state: &SettingsState, app: &AppState) -> Vec<SearchHit> {
+    search(query, state, app).0
+}
+
+/// [`search_hits`], and how many rows every section holds, which the field's count divides by.
+#[must_use]
+pub fn search(query: &str, state: &SettingsState, app: &AppState) -> (Vec<SearchHit>, usize) {
     let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
-    if words.is_empty() {
-        return Vec::new();
-    }
     let mut hits = Vec::new();
+    let mut total = 0;
     for section in Section::ALL {
-        for (row, entry) in section_rows(*section, state, app).into_iter().enumerate() {
+        let rows = section_rows(*section, state, app);
+        total += rows.len();
+        if words.is_empty() {
+            continue;
+        }
+        for (row, entry) in rows.into_iter().enumerate() {
             let haystack = format!(
                 "{} {} {} {}",
                 section.title(),
@@ -698,19 +832,21 @@ pub fn search_hits(query: &str, state: &SettingsState, app: &AppState) -> Vec<Se
             )
             .to_lowercase();
             if words.iter().all(|word| haystack.contains(word.as_str())) {
+                let label = match entry.card {
+                    Some(card) => format!("{card} \u{203a} {}", entry.label),
+                    None => entry.label,
+                };
                 hits.push(SearchHit {
                     section: *section,
                     row,
-                    label: match entry.card {
-                        Some(card) => format!("{card} \u{203a} {}", entry.label),
-                        None => entry.label,
-                    },
+                    spans: label_spans(&label, &words),
+                    label,
                     detail: entry.detail,
                 });
             }
         }
     }
-    hits
+    (hits, total)
 }
 
 /// One row a search found.
@@ -722,6 +858,48 @@ pub struct SearchHit {
     pub row: usize,
     /// Its label, led by its card's heading when it sits in one (`Claude › Effort`).
     pub label: String,
+    /// The label cut into spans, `true` marking a typed word's occurrence, which the row draws in
+    /// the strong face. Joined, they are `label`.
+    pub spans: Vec<(String, bool)>,
     /// Its helper sentence.
     pub detail: Option<String>,
+}
+
+/// `label` cut where the typed `words` (already lowercased) occur in it, case-insensitively:
+/// `true` spans are matches, merged where they touch or overlap. The spans concatenate back to
+/// exactly `label`; a label nothing matches is one plain span.
+#[must_use]
+pub fn label_spans(label: &str, words: &[String]) -> Vec<(String, bool)> {
+    // Lowercasing can change a character's byte length, so the search runs over a lowercase
+    // copy and maps every match back through each original character's offset in it.
+    let chars: Vec<char> = label.chars().collect();
+    let mut lowered = String::with_capacity(label.len());
+    let mut starts = Vec::with_capacity(chars.len());
+    for c in &chars {
+        starts.push(lowered.len());
+        lowered.extend(c.to_lowercase());
+    }
+    starts.push(lowered.len());
+    let mut strong = vec![false; chars.len()];
+    for word in words.iter().filter(|word| !word.is_empty()) {
+        for (at, found) in lowered.match_indices(word.as_str()) {
+            let end = at + found.len();
+            for (index, flag) in strong.iter_mut().enumerate() {
+                if starts[index] < end && starts[index + 1] > at {
+                    *flag = true;
+                }
+            }
+        }
+    }
+    let mut spans: Vec<(String, bool)> = Vec::new();
+    for (c, is_strong) in chars.iter().zip(strong) {
+        match spans.last_mut() {
+            Some((text, last)) if *last == is_strong => text.push(*c),
+            _ => spans.push((c.to_string(), is_strong)),
+        }
+    }
+    if spans.is_empty() {
+        spans.push((String::new(), false));
+    }
+    spans
 }

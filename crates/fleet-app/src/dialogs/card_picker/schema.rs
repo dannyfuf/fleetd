@@ -333,7 +333,7 @@ fn resolved_prefs(
 /// thread it runs in, and there is no board-wide catalogue — read across the threads this
 /// client has opened instead of the one thread the composer sits in. A provider the app has
 /// never opened a thread for offers nothing, which is why the typed row exists.
-fn declared_models(
+pub(crate) fn declared_models(
     state: &AppState,
     provider: Option<AgentKind>,
 ) -> Vec<fleet_core::agents::ModelDescriptor> {

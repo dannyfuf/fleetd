@@ -2,9 +2,9 @@
 //!
 //! Every verb here is the keyboard's own, reached from where the pointer landed: a click on a
 //! row is the `j` / `k` that would put the cursor there, a click on an option is the `h` / `l`
-//! that would reach it, a switch is `space`, a column's double-click is `⏎`. So the draft moves
-//! through exactly the states the keys move it through, and nothing a key refuses (a locked
-//! automation row, a save in flight) is reachable by clicking instead.
+//! that would reach it, a switch is `space`, and a double-click (or a click on a row's box) is
+//! `⏎`. So the draft moves through exactly the states the keys move it through, and nothing a
+//! key refuses (a folded automation row, a save in flight) is reachable by clicking instead.
 
 use super::*;
 
@@ -108,8 +108,12 @@ pub(super) fn switch(
     cycle(state, if on { 1 } else { -1 }, cx);
 }
 
-/// A double-click on a column in the list: `⏎`, which drills into it.
-pub(super) fn open_column(
+/// A click on a row's box, or a double-click on a row: `⏎` on that row, reached by pointer.
+///
+/// It drills into a column or a schedule, or opens a text or number box in place — never the
+/// save that `⏎` means on a row with nothing to open, because a click on a box is about that
+/// box.
+pub(super) fn open_row(
     state: &Entity<AppState>,
     row: usize,
     focus: &FocusHandle,
@@ -117,7 +121,9 @@ pub(super) fn open_column(
     cx: &mut App,
 ) {
     select_row(state, row, focus, window, cx);
-    confirm_column(state, window, focus, cx);
+    if !confirm_column(state, window, focus, cx) && !confirm_schedule(state, window, focus, cx) {
+        confirm_row(state, window, focus, cx);
+    }
 }
 
 /// A click on a column while a delete waits for a target: the cards move there, as `⏎` on that

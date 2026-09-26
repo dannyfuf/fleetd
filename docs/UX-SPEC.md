@@ -1275,6 +1275,7 @@ Their lists and controls answer a click as the keys would.
 | New / Edit context | 460 × 260 | `boxes` |
 | Assign repo to context | 460 × 340 | `arrow-right-left` |
 | Settings | 760 × 600 | `settings-2` |
+| Board settings | 760 × 600, the same 196 px section rail as Settings | `square-kanban` |
 | Help | 1040 × 720, the whole window less the scrim margin when narrower | — (the search field takes the title's place) |
 | Quit (`ctrl-q`) | 520 × auto | `circle-question` |
 | Quit + stop daemon | 560 × auto | `power` |
@@ -1612,63 +1613,123 @@ The footer sentence is mandatory: the action *sounds* destructive and is not.
 
 #### 3.8.6 Settings (`,`)
 
-760 × 600: a header, a 196 px section rail beside a pane of controls, and a button footer.
-**Board settings** (§Board, "The other three dialogs") is the older shape, 720 × 560 with a 180 px
-rail, and borrows this section's rules for browsing, editing and cycling a row; where the two
-differ is stated there — its four sections are the board's own, it remembers the section it was
-left on for the app session, and `^s` rather than `⏎` is its save, because `⏎` inside its Columns
-pane has a level to drill into.
+760 × 600: a header, a 196 px section rail beside a pane of cards, and a button footer.
+**Board settings** (§Board, "The other three dialogs") is the same shell — the same size, rail,
+cards, row grammar, footer strip and `Esc` ladder — around the board's own four sections; where
+the two differ is stated there: it remembers the section it was left on for the app session, it
+drills into a column or a schedule, and `^s` rather than `⏎` is its save, because `⏎` inside its
+Columns and Schedules panes has a level to drill into.
 
-**Header.** `⚙ Settings`, then a **Search settings** field with its `/` chip, then the close ✕
-(`Esc`'s action, ADR 0023).
+**Header.** `⚙ Settings`, then a 240 px **Search settings** field with its `/` chip, then the close
+✕ (`Esc`'s action, ADR 0023).
 
-**Rail.** One row per section, its glyph and its name; the shown section is selected. A click
-opens it, as `Tab` / `S-Tab` step through them.
+**Rail.** One 30 px row per section, its glyph and its name. The shown section is selected (the
+selected fill, primary text); the others read secondary and light under the pointer. A click
+opens a section, as `Tab` / `S-Tab` step through them.
 
-**Pane.** One row per setting, drawn with the real control its kind calls for, each clickable and
-each keeping its key:
+**Pane.** A scrolling column of cards, each a raised surface with a hairline border, 12 px apart.
+A card may have a 36 px title bar — its title and, at its end, a muted note where one fact belongs
+to the whole card (`matched against running processes now`) — and its rows are separated by
+hairlines, never by gaps. Rows that belong together share a titled card (`Claude`, `Codex`,
+*Keep awake while running*, *Terminal tabs a new worktree opens*); rows that stand alone sit in an
+untitled one (`Default agent`; `Sleep on switch` with its `Grace`). A pane may end with one muted
+caption line, stated once rather than per row — *Change these in config.json.* under a section
+that cannot be edited here.
 
-| Kind | Control | Key | Pointer |
+**Row.** Every setting is one 44 px row: its label and, under it in the caption face, one helper
+sentence in plain words on the left, and its control at the row's end. There is one grammar and
+six kinds of control, and every kind keeps its key:
+
+| Kind | Control at the row's end | Key | Pointer |
 | --- | --- | --- | --- |
-| On / off | a switch at the row's end | `Space` | a click on the switch |
-| Closed choice | a segmented control when its options are short (≤ 4, ≤ 32 characters), otherwise a dropdown | `h`/`l`, `←`/`→` | a segment, or an option of the dropdown's list |
-| Number | a box at the row's end, the unit after the number | `Enter` opens it | a click on the row |
-| Text | a box filling the row after its label; an empty value reads as what it means (`Harness default`) | `Enter` opens it | a click on the box or the row |
-| Read-only | a plain `label  value` line, with a copy button where a value is worth pasting (`FLEET_HOME`, the fleetd pid) | — | the copy button |
+| On / off | a switch | `Space` | a click on the switch |
+| Closed choice, at most 4 short options (≤ 32 characters) | a segmented control | `h`/`l`, `←`/`→` | a click on a segment |
+| Closed choice, a longer set | a compact dropdown | `h`/`l`, `←`/`→` | an option of its list |
+| Number with a unit and a clamp | a 96 px box, the unit after the number | `Enter` opens it | a click on the box |
+| Text | a 300 px box, in the mono face for a command, a path or an id; an empty value reads as what it means (`Harness default`) | `Enter` opens it | a click on the box |
+| Multi-line | a 300 px box showing the value wrapped; it grows to 8 rows while editing, and its row is the one that grows with it | `Enter` opens it | a click on the box |
+| Read-only | the value as text (mono for a path, an id or a version), with a copy button where a value is worth pasting (`FLEET_HOME`, the fleetd pid) | — | the copy button |
 
-A click on a row puts the cursor on it first, so the keyboard carries on from where the pointer
-left it. A value is in a live editor **only while it is being edited**: `Enter` (or a click on a
-text or number box) opens the editor inside the same box, so the row never moves. A helper
-sentence sits under the row in the caption face — plain words, e.g. *Typed into a terminal tab.
-Aliases work.* Rows that belong together sit in a titled card (`Claude`, `Codex`, the keep-alive
-rules, the terminal tabs). A section that cannot be edited here ends with a faint *Change these in
-config.json.* once, not per row.
+**States.** A row is at rest; **hovered**, lit under the pointer; the **cursor**, the row the
+keyboard is on, drawn with the selected fill and the 2 px bar on its leading edge that every list
+uses; **editing**, the cursor row whose box holds the live editor inside a focus-ring border drawn
+inset, so the box never grows; **invalid**, where the broken rule replaces the helper in red
+(`Must be at least 500 ms.`), the box's border turns red and Save waits; or **disabled**, the
+whole row dimmed, no hover, and the helper saying why. A click anywhere on a row puts the cursor
+there, so the keyboard carries on from where the pointer left it; a click on a control does the
+control's thing and lands the cursor too. Landing on a row never opens its editor. A value is in
+a live editor **only while it is being edited**: `Enter` (or a click on its box) opens the editor
+inside the same box, so the row never changes height between rest and editing and the box never
+moves.
 
 | Section | Rows |
 | --- | --- |
-| **General** | read-only, in a *Terminal tabs a new worktree opens* card: `1 nvim — nvim .` / `2 cc — {agent}` / `3 lg — fleet://lazygit (built in)` |
-| **Agents** | `Default agent [ Claude │ Codex ]` (*Used by the Agent buttons and by a new thread.*), then one card per harness: `Terminal command [claude]` (*Typed into a terminal tab. Aliases work.*) · `Binary for threads [claude]` (*Run directly for an agent thread, without a shell.*) · `Default access [full access ⌄]` (that harness's supported modes only; *New threads start with it. Each thread can change it.*) · `Default model [Harness default]` · `Effort [ Default │ Low │ Medium │ High ]` (*Used with the default model.*). Effort offers `low`/`medium`/`high` plus whatever that harness has declared on a thread this app opened; a configured value outside them is shown as it is until the row is moved. Both access defaults start at `full access`; new-thread requests omit mode/model and the daemon resolves them. No health chip: doctor does not check the agent binaries, and the dialog does not invent a check. |
-| **Sleep** | `Sleep on switch` switch · `Grace [2000 ms]` (clamped ≥ 0) · a *Keep awake while running* card with one switch per rule, `<label>  <kind>  <pattern>`, **plus a live match count** `claude — matching 2 processes now` · invalid regex → red `invalid pattern — rule is skipped` |
-| **Jobs & warnings** | `Warn before quitting with running jobs` switch (*They keep running in fleetd either way.*) · `Keep finished jobs for [10 min ⌄]` · `Trash retention [10 min ⌄]` |
-| **Pool** | `Hot pool size [ 0 │ 1 │ 2 │ 3 ]` · `Freshness [60000 ms]` · `Refresh interval [300000 ms]` · read-only `prepared copies: 1/1 ready` |
-| **GitHub** | `Clone protocol [ ssh │ https ]` · `Repo cache [3600 s]` · `PR cache [90 s]` |
-| **Status** | `Local status refresh [2000 ms]` (min 500) · `Remote status refresh [10000 ms]` (min 500) |
-| **Hosts** | read-only per host `devbox — tailscale · node devbox — ready · fleetd 0.2.0` |
-| **About** | `Fleet 0.1.0+<sha>` · `fleetd running · pid 4211 · up 3h` (copy: the pid) · `FLEET_HOME ~/.fleet` (copy: the path) · update row `Fleet 0.2.0 available · U` (§2.3) · `protocol 4` |
+| **General** | read-only, in a *Terminal tabs a new worktree opens* card, labelled `1` / `2` / `3` and reading `nvim — nvim .` (a built-in command says `(built in)`); the pane ends *Change these in config.json.* |
+| **Agents** | an untitled card: `Default agent` — *Used by the Agent buttons and by a new thread.* — `[ Claude │ Codex ]`. Then one card per harness, `Claude` and `Codex`: `Terminal command` — *Typed into a terminal tab. Aliases work.* — a mono box · `Binary for threads` — *Run directly for an agent thread, without a shell.* — a mono box · `Default access` — *New threads start with it. Each thread can change it.* — a dropdown of that harness's supported modes only · `Default model` — *The models claude reported. Harness default lets claude pick.* (*codex* on the Codex card) — the model choice (below) · `Effort` — *Used with the default model.* — `[ Default │ Low │ Medium │ High ]`. Effort offers `low`/`medium`/`high` plus whatever that harness has declared on a thread this app opened; a configured value outside them is shown as it is until the row is moved. Both access defaults start at `full access`; new-thread requests omit mode/model and the daemon resolves them. No health chip: doctor does not check the agent binaries, and the dialog does not invent a check. |
+| **Sleep** | an untitled card: `Sleep on switch` — *Opening another worktree sleeps the one you leave. Agents, servers and unsaved editors stay.* — a switch · `Grace` — *How long a terminal gets to finish before sleep closes it.* — `[2000] ms`, clamped ≥ 0. Then the *Keep awake while running* card, noted *matched against running processes now*, one rule row per rule (below). The pane ends *Rules are defined in config.json. Open it from the footer to add or change one.* |
+| **Jobs & warnings** | an untitled card: `Warn before quitting with running jobs` — *They keep running in fleetd either way.* — a switch · `Keep finished jobs for [10 min ⌄]` · `Trash retention [10 min ⌄]` |
+| **Pool** | `Hot pool size [ 0 │ 1 │ 2 │ 3 ]` · `Freshness [60000] ms` · `Refresh interval` — *How often a prepared copy is brought up to date with its base branch.* — `[300000] ms` · read-only `prepared copies  1/1 ready` |
+| **GitHub** | `Clone protocol [ ssh │ https ]` · `Repo cache [3600] s` · `PR cache [90] s` |
+| **Status** | `Local status refresh` — *How often local sessions and worktrees are polled.* — `[2000] ms`, min 500 · `Remote status refresh` — *How often hosts on other machines are polled.* — `[10000] ms`, min 500 |
+| **Hosts** | read-only: `default`, then one row per host with its link state (`devbox — tailscale · node devbox — ready · fleetd 0.2.0`); the pane ends *Change these in config.json.* |
+| **About** | read-only: `Fleet 0.1.0+<sha>` · `fleetd  running · pid 4211 · up 3h` (copy: the pid) · `FLEET_HOME  ~/.fleet`, mono (copy: the path) · `Update` (`Fleet 0.2.0 available · U`, §2.3) · `protocol 4`; no *Change these* caption |
 
-**Search.** `/` (or a click) puts the keyboard in the header's field. Typing replaces the pane with
-every row, across all sections, whose section, card, label or helper sentence holds each typed
-word — its label (led by its card, `Claude › Effort`), its helper sentence and its section's name.
-`↓`/`↑` move over them, `Enter` or a click opens that row's section with the cursor on it and
-clears the search, and `Esc` clears the search and gives the keys back to the rows. Nothing
-matching says so.
+Every editable row carries its helper sentence. Where the table gives none, the sentence is the
+field's own documentation in `fleet_core::config`, in one line, and never claims what the code
+does not do.
 
-**Footer.** Left: *Open config.json* (`E`) and *Run doctor* (`D`), each a button showing its key.
-Right: *Unsaved* in amber, with an amber dot, while the draft differs from what was loaded (one
-word, so it keeps the footer's gap from Cancel at the dialog's width, and ellipsised on a narrower
-one), then *Cancel*
-(`Esc`) and the primary *Save* (`⏎`), disabled until there is something to save; while the
-configuration failed to load, the primary reads *Retry* and is enabled, because `⏎` retries.
+**Model choice.** `Default model` offers the models that harness has declared on a thread this
+app opened. With a catalogue it is a compact dropdown: `Harness default` (*whatever claude starts
+with*), then one item per declared model — its display name where the catalogue carries one, else
+its id, with the id beside it when the two differ, and a check on the current one — then
+`Other model id…` (*type it*), which opens the editor in place. `h`/`l` and `←`/`→` step from
+Harness default through the models in order. `Enter` opens the editor, and the row then draws the
+300 px text box, placeholder `Harness default`, where the dropdown was. A configured value the
+catalogue does not know reads as the dropdown's text. With no catalogue the row is the text box.
+
+**Keep-alive rules.** Each rule is a row led by its own switch (`Space` or a click flips
+`enabled`), labelled with the rule's label and a `command` or `port` badge, with its pattern as
+the helper in the mono face (`^claude(\s|$)`; a port rule's helper is the sentence *Any process
+listening on a port.*). At its end is the live match count: a
+green `⚡ 2 running` while something matches, a muted `none running` when nothing does, and nothing
+while the first count is still loading. A rule whose pattern does not compile is drawn disabled,
+and the card ends with one red line, `{label}: the pattern does not compile, so the rule is
+skipped.` Rules are not edited here.
+
+**Search.** `/` (or a click) puts the keyboard in the header's field. While it is empty the field
+shows its `/` chip; once typed, the chip gives way to the count of rows shown out of every row of
+every section (`3/41`) and a ✕ that clears the search, as `Esc` in the field does. Typing replaces
+the pane with every row, across all sections, whose section, card, label or helper sentence holds
+each typed word, grouped under a heading per section in rail order. Each hit shows its section's
+glyph, its label with the matched words in the strong face (led by its card, `Claude › Effort`),
+its helper sentence, and its section's name at its end. `↓`/`↑` move over them, `Enter` or a click
+opens that row's section with the cursor on it and clears the search, and `Esc` clears the search
+and gives the keys back to the rows. While a search is typed the rail selects nothing and dims to
+`dimmed_opacity`: `⏎` and `Esc` act on the hits, not on a section. Nothing matching says `No
+setting matches “{q}”.` The pane
+ends with one caption line, `↑ ↓ move · ⏎ open the row · esc back to the sections`, whose key
+chips are read from the key table, never typed.
+
+**Footer.** Left: *Open config.json* (`E`) and *Run doctor* (`D`), compact buttons each showing its
+key. Right: *Unsaved* in amber, with an amber dot, while the draft differs from what was loaded
+(one word, so it keeps the footer's gap from Cancel at the dialog's width, and ellipsised on a
+narrower one), then *Cancel* (`Esc`) and the primary *Save* (`⏎`), disabled until there is
+something to save; while the configuration failed to load, the primary reads *Retry* and is
+enabled, because `⏎` retries.
+
+**The footer strip.** The one line above the buttons is painted **only** when it has something to
+say: a failed write or a validation error, in red and verbatim; or, after the first `Esc` on a
+dirty draft, amber `Unsaved changes. Press Esc again to discard them.` Nothing is painted while
+the draft is clean or merely dirty — the footer's *Unsaved* already says that — and no line warns
+ahead of time that `Esc` discards. An error takes the amber line's place.
+
+**`Esc` — one level back, then one question, once.** In an open editor `Esc` reverts that
+row to its committed value and closes the box in place; the dialog stays. With a search typed, it
+clears the search. On a clean draft it closes the dialog at once. On a dirty draft the first
+`Esc` closes nothing: it arms and paints the amber line, and the second discards the draft and
+closes. Cancel, the ✕ and a click on the scrim run the same `Esc` and walk the same ladder. Any
+edit — a toggle, a cycled choice, a committed value, a click on a row, a move to another section —
+disarms it, so the question is only ever about the draft as it stands.
 
 **[D-13]** The editable set closes §9's *"Settings cannot edit grace/rule definitions/windows/
 hosts/protocol/pool/timers/status intervals; many require JSON"* for everything a user changes
@@ -1677,23 +1738,20 @@ structures whose editor is a whole screen; `E` (open `config.json` in a terminal
 escape hatch and is one key. The **`Warn before quitting with running jobs`** switch is the
 mechanism that makes KEYMAP's `ctrl-q` clause implementable at all (§3.8.9).
 
-**States:** saving is synchronous and silent (never a toast, §2.7); a failed write shows a red
-footer line with the exact error and keeps the dialog open. While the draft is dirty the footer
-says *Unsaved*, Save is enabled, and the amber strip above the buttons says *Esc or Cancel
-discards the unsaved changes* — `Esc` discards, as it always has, and the strip says so before it
-happens. An error takes that strip's place.
+**States:** saving is synchronous and silent (never a toast, §2.7); a failed write paints its red
+line with the exact error and keeps the dialog open.
 
 **Keyboard:** while browsing, `j`/`k`, `↓`/`↑`, `ctrl-n`/`ctrl-p` move · `Tab`/`S-Tab` change
 section · `Space` toggles · `h`/`l` and `←`/`→` cycle a choice · `Enter` **opens** the focused text
 or number row for editing, and saves on every other row · `/` searches · `E` config.json · `D`
-doctor · `Esc` discards.
+doctor · `Esc` goes one level back, then asks once.
 
 Landing on a row deliberately does not open it: a row that grabbed the keyboard on arrival would
 make the next `j` type into the value instead of moving on. `Enter` is the gesture that opens it,
 and the row then materializes a live `TextInput` inside its own box — a number row filters to ASCII
 digits, so `j` can never become part of a number. While that editor owns the keyboard every
-printable key types, `Enter` saves, and `↓`/`↑` or `ctrl-n`/`ctrl-p` move to the next row and
-close it.
+printable key types, `Enter` keeps the value and closes the box, `Esc` reverts it, and `↓`/`↑` or
+`ctrl-n`/`ctrl-p` move to the next row and close it.
 
 ---
 
@@ -1840,12 +1898,18 @@ alternative instead of only threatening, with the key drawn as a chip from the l
 `Rename ⏎`; while the request is in flight the primary reads `Renaming…` and is disabled, and a
 refusal is the dialog's error line.
 
-**Repository hooks** (`e`, 560 px, `file-pen`) is two lists, *Prepare* and *After a worktree is
-created*, each a column of command fields ending in a blank one where the next command is typed
-(typing into it grows the next). Every filled row has a remove ✕ at its end; the trailing blank has
-none to offer and draws it disabled. *Add command* under each list puts the keyboard in that
-blank row. The footer is `Cancel` and `Save ⏎`; `Tab` / `S-Tab` still walk every row of both lists
-in order.
+**Repository hooks** (`e`, 560 px, `file-pen`, the repository's id as its subtitle) is two cards
+of numbered command boxes. Each card carries its sentence under its title: *Prepare* — *Runs on
+the prepared copy, once, before any worktree is made from it.* — and *After a worktree is
+created* — *Runs inside each new worktree, in the background. A failure marks the worktree, not
+the repository.* Every command is a 44 px row: its number, then the command in a full-width mono
+box that is always a live editor, then a remove ✕. Each list ends in a blank row whose box reads
+*Type the next command…*; typing into it grows the next blank under it and renumbers the rows
+below, and its ✕ is drawn disabled, having nothing to remove. The row whose editor has the
+keyboard is the cursor row. There is no *Add command* button: the blank row is where the next
+command goes. The pane ends with *Tab walks every command in order. A filled last row grows a
+blank one under it.* The footer is `Cancel` and `Save ⏎`; `Tab` / `S-Tab` walk every row of both
+lists in order.
 
 ---
 
@@ -2129,7 +2193,8 @@ Median for the four highest-frequency tasks (open, switch session, switch tab, c
 ## 5. Cross-screen invariants (implementation checklist)
 
 1. One row height (30 px), one glyph vocabulary (§2.5), one color law (§1.4), one dialog frame
-   (§3.8) across every screen.
+   (§3.8) across every screen. The one stated exception is the settings row (§3.8.6): 44 px,
+   because it carries a helper sentence under its label.
 2. Blue is used **only** for cursor, focus and the one primary button's fill. Nothing else, ever.
 3. `unknown` never renders like `none`; `none` never renders like an empty cell.
 4. A nullable inspection fact renders `—` and its verbatim warning; it never renders `0`.
@@ -2286,10 +2351,13 @@ each component's full API. `Modal` is an alias of `Dialog` and `TabBar` an alias
 | `TextInput` | The one editor (ADR 0020): the whole editing vocabulary, selection, undo, IME and clipboard, in single-line and multi-line modes | every text surface — Create, Clone, Context, Rename, Hooks, Settings, board dialogs, Filter, Palette, agent composer, lazygit prompt |
 | `FuzzyList` | Debounced query → ranked rows, capped, `ctrl-n`/`ctrl-p` + arrows (and `j`/`k` **only** when no text input is present) | Clone results, Create base list, Palette, Assign |
 | `FilterBar` | In-place pane-header replacement with live `shown/total`, two-stage `Esc`, retained chip | every list (§3.10) |
-| `Cycler` | A closed choice, `←`/`→`; drawn as a `SegmentedControl` up to four options, a `Dropdown` field past that | host selector, Settings choices |
-| `Toggle` | A labelled row ending in a `Switch`, `Space` | Settings |
+| `Cycler` | A closed choice, `←`/`→`; drawn as a `SegmentedControl` up to four options, a `Dropdown` field past that; `inline` draws only the control, for a `SettingsRow` | host selector, Settings and Board settings choices |
+| `SettingsCard` | A titled `surface_raised` card of hairline-separated `SettingsRow`s, with an optional note, subtitle and caption line | Settings, Board settings, Repository hooks |
+| `SettingsRow` | The one 44 px setting row: label, badge and helper (or its rule in red) on the left, the control at its end, `leading` glyph or switch, hover actions, cursor / hover / editing / invalid / disabled states, click, double-click and right-click | Settings, Board settings, Repository hooks |
+| `ValueBox` | A text, number or multi-line value in a 26 px box that becomes its editor in place; `mono`, a unit, `invalid`, four widths | Settings, Board settings, Repository hooks |
+| `SearchField` | The header search: glyph, embedded input, the `/` chip while empty, `shown/total` and a ✕ once typed | Settings |
+| `Breadcrumb` | `‹ Parent  Current` with an optional badge and trailing caption, the back button dispatching the surface's cancel | Board settings column and schedule forms |
 | `SegmentedControl` | Two to four options side by side, the chosen one raised; a click runs the surface's own action | Hub screens, agent popup provider, Help's Guides / All shortcuts switch, Settings choices |
-| `NumberField` | Integer with a unit suffix and a clamp | Settings (grace, TTLs, intervals, pool) |
 | `SegmentedTabs` | Underlined tabs with counts, `Tab`/`S-Tab`/`h`/`l` | PR Mine/Review |
 | `ConfirmDialog` | Compact/expanded switch driven by `FactList`; binds only `y`/`Y`/`Enter`/`n`/`Esc`/`q` (+ `I`, + `s` for prune) | §3.8.3, §3.8.8, §3.8.9 |
 | `Palette` | One ranked, scrolling result list with section headings, icon tiles, match highlight and each row's key chip; a scope chip and prefix legend in the query row, the selected row and `Run ⏎` in the footer; seeded agent mode is one `Agents` section whose rows carry attention, provider/title, worktree, child/caller status, and the strip key | §3.9 |
@@ -2759,98 +2827,158 @@ for the centred Card property dialog, which returns to the sheet when it closes.
   as a row of its own**: the catalogue is only what the app has met, and a model it has not met yet
   still has to be settable. Each of the three replaces its one field and sends the card's whole
   `agent` block, last writer wins, exactly as labels do.
-* **Board settings** (720 × 560) — the same two-column shape as the global Settings dialog
-  (§3.8.6): a section rail and a pane. Four sections, `Tab` between them — **General**,
-  **Backend**, **Columns** and, on a daemon that advertises `schedules` and stores the board (not a remote worktree's), **Schedules**. `,` opens it on the section last used in this app session (General on
-  the first open of a session) and `C` opens it on Columns. While it is open the status bar's
-  breadcrumb drops its row: the dialog edits the board, and the focused card is the one thing it
-  cannot change. The rail's sections and every row take a click that puts the cursor there, a
-  closed choice draws its options (side by side, or a dropdown when they are many or long) and
-  a click on one lands where `h` / `l` would, and a flag's switch flips as `space` does.
+* **Board settings** (760 × 600) — the shell of the global Settings dialog (§3.8.6): the same
+  196 px rail, the same cards, row grammar, row states, footer strip and `Esc` ladder. The header
+  reads `Board settings` with the subtitle `{name} · {PREFIX} · {runs in}` (`Fleet board · FLT ·
+  this worktree`, `Reviews · buk · each card's worktree`, `Context · CTX · the context` on a context
+  board with no worktree). Four sections, `Tab` between them, each
+  with its glyph — **General**, **Backend**, **Columns** and, on a daemon that advertises
+  `schedules` and stores the board (not a remote worktree's), **Schedules**. `,` opens it on the
+  section last used in this app session (General on the first open of a session) and `C` opens it
+  on Columns. While it is open the status bar's breadcrumb drops its row: the dialog edits the
+  board, and the focused card is the one thing it cannot change. The rail's sections and every row
+  take a click that puts the cursor there, a closed choice draws its options (side by side, or a
+  dropdown when they are many or long) and a click on one lands where `h` / `l` would, and a
+  flag's switch flips as `space` does. Nothing lives only behind hover: every verb a row shows
+  under the pointer is also on its key and in its right-click menu.
 
-  **General** — name, prefix, default repository, start-on-worktree, push-new-cards, conflict
-  policy, then `Max live runs` with the hint `runs share one checkout` and the read-only fact
-  `Runs in   each card's worktree` (a Reviews board) or `Runs in   this worktree`, last because
-  they are the only rows about *runs* rather than about the board's identity. Where runs execute
-  is not editable here: changing it under live runs would strand them. **Push new cards** is drawn
-  disabled on a local board, where there is no backend to file anything with; it defaults to
-  **off**, so on a linked board it is the row that says why a card made here has not become a
-  remote issue. **Backend** is the kind cycler and that backend's own schema rows, generically
-  (below).
+  **General** is three cards. *Board*: `Name` — *Shown in the board tab and the breadcrumb.* — a
+  text box · `Prefix` — *Up to 8 letters or digits. Cards read {PREFIX}-12.* — a short mono box ·
+  `Default repository` — *Where a worktree started from a card is created.* — a dropdown, `none`
+  first. *Cards*: `Start card on worktree` — *Creating a worktree from a backlog card moves it to
+  the first started column.* — a switch · `Push new cards` — *Files a card made here as an issue on
+  the backend.* — a switch · `Conflict policy` — *Who wins when the backend and this board
+  disagree.* — `[ manual │ remote wins │ local wins ]`. *Runs*: `Max live runs` — *Runs on this
+  board share one checkout, so keep it small.* (on a Reviews board, *Each run works in its card's
+  worktree.*) — `[2] of 8`, 1 to 8, which `⏎` opens for digits and `h` / `l` still step · `Runs
+  in` — *Not editable while a run could be live.* — the read-only fact `this worktree`, `each
+  card's worktree` or, on a context board with no worktree, `the context`. The runs card comes last because its rows are the only ones about *runs*
+  rather than about the board's identity; where runs execute is not editable here, because
+  changing it under live runs would strand them. On a local board, where there is no backend to
+  file anything with, **Push new cards** and **Conflict policy** are disabled, and Push new cards'
+  helper adds *This board has none.* Push new cards defaults to **off**, so on a linked board it
+  is the row that says why a card made here has not become a remote issue. **Backend** is an
+  untitled card holding the kind choice, then one card titled with that backend's label holding
+  its own schema rows, generically (below).
 
-  **Columns** is the board's `statuses` vector as a draft. The list shows one row per column with
-  a muted `⚡` when entering it runs something, and its keys are `n new · d delete · J/K reorder ·
-  P preset · ⏎ open`. The footer carries `New column n`, `Delete d` and `Apply preset P` while
-  the list is showing, and each row shows ↑ / ↓ buttons on hover (`K` / `J`); a click selects a
-  column and a double-click opens it. Inside a column the footer offers `Columns` to go back. `⏎` drills into a column and the pane becomes that column's form, in this
-  order: Name, Category, On enter, then — only while On enter is not `none` — Provider, Model,
-  Effort, Mode, Instructions, Expect, Env, then On success and When unblocked. `On enter` is
-  spelled exactly as `fleet board columns edit --on-enter` spells it (`none`, `prompt`,
-  `skill:<name>[:<args>]`); it is drawn as a choice of the three (a click picks one), `⏎` opens
-  it for typing a skill name, and it refuses
-  anything else with `on enter must be none, prompt, or skill:<name>[:<args>]`. `P` adds the
-  workflow preset's **missing** columns by id and never rewrites one the board already has,
-  reporting which of the two happened on the notice line. `d` on a column holding cards does not
-  delete it: it arms, naming the count (`In review holds 3 cards — choose the column they move
-  to`), marks the column `deleting`, and the next `⏎` on — or click on — another column is where
-  those cards go — one `MoveCard` each in column order, and a refusal stops the sequence there, keeps the
-  column and leaves the cards already moved where they are. A board needs at least one column, and
-  says so.
+  **Columns** is the board's `statuses` vector as a draft: one card titled `Columns`, noted *in
+  board order · a card can only route forward*. Each column is a row led by its category's glyph
+  (a dot for backlog, a circle for unstarted, a dotted circle for started, a check for completed,
+  a slash for canceled), its name as the label, a chevron at its end, and a helper that reads the
+  category, then what entering it runs, then where the card goes after — `started · ⚡ codex runs
+  the prompt · then → In review`. Hovering the row, or putting the cursor on it, shows its
+  actions — *Move up* (`K`), *Move down* (`J`) and *Delete column* (`d`) — and a right-click opens
+  the same verbs as a menu, *Open* (`⏎`), *Move up*, *Move down*, *Delete column*, each showing its
+  key. A click selects a column and a double-click opens it. The list's keys are `n new · d delete
+  · J/K reorder · P preset · ⏎ open`; the footer carries `New column n` and `Apply preset P` while
+  the list is showing, and delete is the row's own verb, not the footer's. The pane ends with
+  *Open a column to name it, pick its category, and set what runs when a card enters it.*
+
+  `⏎` drills into a column and the pane becomes that column's form under a breadcrumb —
+  `‹ Columns  In review  started  4 of 6` — whose `‹ Columns` goes back as `esc` does. The form is
+  an untitled card with Name and Category (*Decides where the column sits in the board's flow.*),
+  then a *When a card enters* card: On enter (*A prompt runs the brief below as a native subagent
+  in this worktree.*) and — only while On enter is not `none` — Provider (*A card's own choice wins
+  over the column's.*), Model (*The models the provider reported. Column default follows Settings ›
+  Agents.*), Effort, Mode (*Permission policy for every run from this column. Nobody is there to
+  answer a prompt.*), Instructions (*Prepended to the card's brief. Markdown. {key}, {title} and,
+  with a pull request, {pr_url} are filled in.*), Expect (*Printed in the run's footer as “The card
+  expects: …”.*) and Env (*One KEY=VALUE per line. PATH and FLEET_ keys are refused.*); then an
+  *After the run* card with On success (*Where the card goes when the run reports success.*) and
+  When unblocked (*What happens when every card blocking this one is done.*). Instructions and Env
+  are multi-line boxes that grow to eight rows while edited, Env in the mono face with the
+  placeholder `KEY=VALUE, one per line`; in both, `⏎` keeps the text and closes the box and `⇧⏎`
+  inserts a new line. Model is a dropdown of the provider's declared models, or
+  a text box when there are none, as Settings' model row is. `On enter` is spelled exactly as
+  `fleet board columns edit --on-enter` spells it (`none`, `prompt`, `skill:<name>[:<args>]`); it
+  is drawn as `[ none │ prompt │ skill ]` (a click picks one), `⏎` opens it for typing a skill
+  name, and it refuses anything else with `on enter must be none, prompt, or
+  skill:<name>[:<args>]`. `P` adds the workflow preset's **missing** columns by id and never
+  rewrites one the board already has, reporting which of the two happened on the notice line.
+  `d` on a column holding cards does not delete it: it arms, naming the count (`In review holds 3
+  cards — choose the column they move to`), draws the column dimmed with a `deleting` badge while
+  every other row offers `Move cards here` under the pointer, and the next `⏎` on — or click on —
+  another column is where those cards go — one `MoveCard` each in column order, and a refusal
+  stops the sequence there, keeps the column and leaves the cards already moved where they are. A
+  board needs at least one column, and says so.
 
   Nothing is sent until `^s`, which is the primary button (`Save ⌃S`, disabled until something
-  changed) beside `Cancel`, and saves from any section;
-  `⏎` still saves from General and Backend, as §3.8.6's dialog does, and inside a column it opens
-  the focused row's editor and commits it. A save is
-  one `UpdateBoard` carrying the whole vector, so reordering three columns, renaming one and
-  routing another is one request rather than five. The setting the dialog does not show
-  (`branchTemplate`) is carried through unchanged. `esc` goes back a level — out of an editor, out
-  of a column, out of an armed delete — and at the top level with unsaved edits it asks **once**,
-  on the dialog's own error line (`unsaved changes — esc again to discard them`), rather than
-  opening a second dialog over the one it is asking about. On a context board that runs in its
-  own worktree, or a Jira board, every automation row is disabled and the pane says why, once,
-  under the rows: `Automation is available on worktree boards`. A Reviews board runs each card in
-  its own worktree, so its columns and actions are edited like a worktree board's.
+  changed) beside `Cancel`, and saves from any section; `⏎` still saves from General and Backend,
+  as §3.8.6's dialog does, and inside a column it opens the focused row's editor. A save is one
+  `UpdateBoard` carrying the whole vector, so reordering three columns, renaming one and routing
+  another is one request rather than five. The setting the dialog does not show
+  (`branchTemplate`) is carried through unchanged. `esc` goes back one level — an open editor
+  reverts its row and closes in place, then out of a column or a schedule's form, then out of an
+  armed delete — and at the top level with unsaved edits it asks **once**, in amber on the footer
+  line (`Unsaved changes. Press Esc again to discard them.`), rather than opening a second dialog
+  over the one it is asking about; the next `esc` discards and closes. On a context board that
+  runs in its own worktree, or a board whose backend is not local, a column's form folds its
+  automation away: the *When a card enters* and *After the run* cards give way to one amber
+  callout — on the context board `Automation is available on worktree boards.` with *This board
+  runs in the context, so its columns only name and order cards.* under it; on a linked board
+  `Automation is available on local boards.` with *This board's columns follow its backend, so
+  they only name and order cards.* The rows are folded away rather than greyed one by one, and the list itself
+  carries no notice. A Reviews board runs each card in its own worktree, so its columns and
+  actions are edited like a worktree board's.
 
   **Schedules** lists the board's schedules and is shaped like Columns: a list, `⏎` into a form,
-  `^s` to save. A row reads `● GitHub reviews   every 15m   next 14:05   last ✓ 3 created, 5
-  existing` — `●` enabled, `○` disabled, then the last run's glyph and tone (`✓` succeeded, `✗`
-  failed or timed out, `⤼` skipped) and its summary, cut at 40 columns with `…`. Keys on the list: `n` new, `⏎` edit, `space`
-  enable or disable (sent at once, `UpdateSchedule`), `r` run now (`RunScheduleNow`; the notice
-  reads `running {name} now`, or `skipped {name}: {summary}` when the daemon skipped the fire
-  because the previous run is still going), `d` delete
-  after an inline confirm: the first `d` arms the row and the notice reads `delete {name} and its
-  run logs? d again to delete, esc to keep it`; a second `d` on it deletes (`DeleteSchedule`),
-  and `esc`, a move, a click, or `space` or `r` (whose own answer takes the notice's place)
-  disarms it. Inline rather than the Confirm dialog of §3.8.3, because dialogs do not stack. The form's rows: `Name`; `Provider ◂ claude ▸` (changing it clears
-  `Model` and `Effort`, which name the old provider's options, as `fleet schedule edit
-  --provider` does); `Model` (free
-  text against the suggested list, as a column's); `Effort`; `Mode` (the provider's supported
-  modes, `full access` by default — nobody is there to answer a prompt); `Cadence ◂ every ▸` with
-  `Every [15] minutes` or `Once at [2026-09-23 09:00]`; `Timeout [20] minutes`; `Prompt` (the
-  multi-line editor a column's Instructions use); `Enabled`; and a read-only `Last runs` with the
-  last five runs' outcome, summary and log path, which follows the mirror while the form is open
-  (a run it started, a fire, a run that finished) and leaves the typed fields alone. `^s` sends `CreateSchedule` or `UpdateSchedule`; a
-  refusal — `every must be between 5 and 1440 minutes`, say — is the red footer line and the dialog
-  stays open. A form with unsaved edits holds `esc`, `tab`, `shift-tab` and a rail click once:
-  the red line reads `unsaved schedule — esc again to discard it`, and the next one leaves and
-  drops the form (§5.4: one question, once). A request's answer that lands after the user left
-  the section updates the list and moves neither the cursor nor the notice of the section now
-  shown; a refusal still reaches the red line. `n` on a Reviews board pre-fills the starter: `GitHub reviews`, every 15 minutes, and
-  the prompt that lists every open pull request requesting your review with `gh`. The empty Review
-  tab's `⏎ add the GitHub review schedule` (its key or a click on it) opens the dialog here, in
-  that state. The list is read
-  from the app's schedules mirror, refreshed on `SchedulesChanged`.
+  `^s` to save. One card titled `Schedules`, noted `{n} · next {HH:MM}` (without `next` when
+  nothing is due). Each schedule is a row led by its enabled switch, with its name as the label,
+  `{cadence} · {provider} · {mode}` as the helper (`every 15 min · claude · full access`, `once ·
+  Sep 26 09:00 · claude · full access`), then two lines at its end — when it runs next (`next
+  14:05`, `running · 2 min` or `disabled`) and the last run's glyph and tone (a check succeeded, a
+  cross failed or timed out, a slash skipped) with its summary, cut at 40 columns with `…` — and a
+  chevron. A disabled schedule's row is dimmed. Hovering the row, or putting the cursor on it,
+  shows *Run now* (`r`); a right-click opens *Open*, *Run now* and *Delete*. The footer carries
+  *New schedule* (`n`) and *Delete* (`d`), and the pane ends with *A schedule runs headless in
+  fleetd and feeds this board. Runs show in the Jobs panel.* Keys on the list: `n` new, `⏎` edit,
+  `space` enable or disable (sent at once, `UpdateSchedule`; the switch is its click), `r` run now
+  (`RunScheduleNow`; the notice reads `running {name} now`, or `skipped {name}: {summary}` when the
+  daemon skipped the fire because the previous run is still going), `d` delete after an inline
+  confirm: the first `d` arms the row and the notice — the amber footer line — reads `delete {name}
+  and its run logs? d again to delete, esc to keep it`; a second `d` on it deletes
+  (`DeleteSchedule`), and `esc`, a move, a click, or `space` or `r` (whose own answer takes the
+  notice's place) disarms it. Inline rather than the Confirm dialog of §3.8.3, because dialogs do
+  not stack.
 
-  The backend rows are **generic**: the dialog knows no backend by name. `Backend` is a cycler
+  The form opens under a breadcrumb — `‹ Schedules  GitHub reviews  next 14:05`, or `New schedule`
+  for a new one — and its cards are: an untitled one with `Name` and `Enabled` (*A disabled
+  schedule keeps its history and never fires.*); *Cadence*, with `Repeat` (*Once runs a single time
+  at the given moment, then stays for its history.*) `[ every │ once ]`, then `Every` (*Between 5
+  minutes and 24 hours. Each run costs a model call.*) `[15] min` or `Once at [2026-09-23 09:00]`,
+  and `Timeout` (*A run past this is stopped and recorded as timed out. Up to 120.*) `[20] min`;
+  *Agent*, with `Provider` (*Changing it clears the model and effort below.*, as `fleet schedule
+  edit --provider` does, because they name the old provider's options), `Model` (*The models the
+  provider reported. Provider default follows Settings › Agents.*; a dropdown, or free text as a
+  column's), `Effort`, and `Mode` (*Nobody is there to answer a prompt, so full access is the
+  default.*; the provider's supported modes); an untitled one with `Prompt` (*What the agent does on
+  every run. Markdown. fleetd appends how to report back.*; the multi-line box a column's
+  Instructions use, `⇧⏎` for a new line); and *Last runs*, noted `{shown} kept here, {kept} in fleetd`, one 30 px line
+  per run with its outcome glyph, its time (`13:50 today`), its summary, its log path and a copy
+  button for the path. Last runs follows the mirror while the form is open (a run it started, a
+  fire, a run that finished) and leaves the typed fields alone. `^s` sends `CreateSchedule` or
+  `UpdateSchedule`; a refusal — `every must be between 5 and 1440 minutes`, say — is the red footer
+  line and the dialog stays open. A form with unsaved edits holds `esc`, `tab`, `shift-tab` and a
+  rail click once: the amber line reads `Unsaved schedule. Press Esc again to discard it.`, and the
+  next one leaves and drops the form (one question, once). A request's answer that lands
+  after the user left the section updates the list and moves neither the cursor nor the notice of
+  the section now shown; a refusal still reaches the red line. `n` on a Reviews board pre-fills
+  the starter: `GitHub reviews`, every 15 minutes, and the prompt that lists every open pull
+  request requesting your review with `gh`. The empty Review tab's `⏎ add the GitHub review
+  schedule` (its key or a click on it) opens the dialog here, in that state. The list is read from
+  the app's schedules mirror, refreshed on `SchedulesChanged`.
+
+  The backend rows are **generic**: the dialog knows no backend by name. `Backend` is a choice
   over the kinds the daemon registers, drawn by their labels, and every row under it is one entry
   of that backend's `settings_schema` — the schema's `name` is the row label, its `key` is the
   JSON key written into `BackendRef.settings`, and its `PropertyKind` decides the control: a text
-  field, a toggle, a number field that takes digits only, a cycler over a closed set, or a
-  comma-separated list for a multi-select. A schema name ending in `(required)` marks the row `∗`
-  and refuses an empty save before the request goes out; every other empty row **removes** its
-  key rather than writing `""`, because an absent optional key is `None` to a backend and an
-  empty string is a setting it has to honour. Keys the schema never names — the ones only
-  `fleet board set` writes — survive a pass through this dialog untouched.
+  box, a switch, a number box that takes digits only, a closed choice, or a text box of
+  comma-separated values (placeholder `comma, separated, values`) for a multi-select. A schema
+  name ending in `(required)` marks the row `∗` and refuses an empty save before the request goes
+  out; every other empty row **removes** its key rather than writing `""`, because an absent
+  optional key is `None` to a backend and an empty string is a setting it has to honour. Keys the
+  schema never names — the ones only `fleet board set` writes — survive a pass through this dialog
+  untouched.
 
   Changing the kind starts from empty settings, exactly as the daemon does, and cycling back to
   the board's own kind restores the settings it was opened with. A refusal keeps the dialog open

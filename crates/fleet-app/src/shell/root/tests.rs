@@ -763,6 +763,8 @@ fn real_shell_board_settings_text_row_accepts_platform_text(cx: &mut gpui::TestA
     let mut fixture = root_input_fixture(cx, "board-settings");
 
     dispatch_root_key(&mut fixture, ",");
+    // Opening the dialog lands the cursor on Name without opening its box; `⏎` does that.
+    dispatch_root_key(&mut fixture, "enter");
     assert_dialog_input_focused(&mut fixture);
     let before = dialog_input_text(&mut fixture);
     fixture.visual.simulate_input(" revised");

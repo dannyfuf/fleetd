@@ -2257,24 +2257,32 @@ folds at eight lines, the fold a delivered child result gets in the transcript. 
 Board settings gained a **Columns** section beside General and Backend (`,` opens the dialog where
 it was last left, `C` opens it on Columns, and a column's automation pill on the board opens it
 drilled into that column). It is the same read-modify-write of the whole
-`statuses` vector that `fleet board columns` performs, with the same rules: a column list showing
-`⚡` where a column runs something, `n` new, `d` delete, `J`/`K` reorder, `P` for the missing
-preset columns (§11.6, never rewriting one the board already has), and `⏎` to drill into a column
-whose rows are Name, Category, On enter, the seven action rows while On enter is not `none`, then
-On success and When unblocked. `on enter` is spelled as `--on-enter` spells it.
+`statuses` vector that `fleet board columns` performs, with the same rules. The list is one card
+of rows, each led by its category's glyph, whose helper names the category, what entering the
+column runs (`⚡ codex runs the prompt`) and where the card goes after (`then → In review`): `n`
+new, `d` delete, `J`/`K` reorder, `P` for the missing preset columns (§11.6, never rewriting one
+the board already has), and `⏎` to drill into a column. The footer carries *New column* and
+*Apply preset*; Move up, Move down and Delete column are the row's hover actions and its
+right-click menu, not footer buttons. A column opens under a breadcrumb (`‹ Columns  In review`)
+as three cards: Name and Category; *When a card enters*, holding On enter and, while it is not
+`none`, the seven action rows; and *After the run*, holding On success and When unblocked. `on
+enter` is spelled as `--on-enter` spells it.
 
 Nothing is sent until `^s`, which is one `UpdateBoard` carrying the whole vector — so a reorder, a
 rename and a routing change are one request, and every refusal of §11.4 arrives against the board
 the user actually means to save. Deleting a column that holds cards asks where they go and moves
 them first, one `MoveCard` each in column order, stopping at the first refusal and leaving what
-already moved where it is. On a board automation is not available for, the automation rows are
-disabled and the pane says so once, in the words §11.4 fixes. That is a board with no worktree
+already moved where it is. On a board automation is not available for, a column's form folds
+the *When a card enters* and *After the run* cards away behind one callout — `Automation is
+available on worktree boards.` on a context board with no worktree, `Automation is available on
+local boards.` on a board whose backend is not local — and the list shows no notice. That is a board with no worktree
 that runs in the board's worktree, or a board whose backend is not local:
 `(worktree_id.is_none() && run_location.is_board_worktree()) || backend.kind != LOCAL`. A Reviews
 board — a context board that runs in each card's worktree — therefore edits its columns and actions
-like a worktree board does. General carries `Max live runs` with the hint `runs share one
-checkout`, and a read-only fact row `Runs in` reading `each card's worktree` or `this worktree`
-from `settings.run_location`. It is not editable in v1: changing it on a board with live runs would
+like a worktree board does. General's *Runs* card carries `Max live runs` with the helper *Runs
+on this board share one checkout, so keep it small.* (*Each run works in its card's worktree.* on
+a Reviews board), and a read-only row `Runs in` reading `each card's worktree` or `this worktree`
+from `settings.run_location`, which the dialog's subtitle repeats. It is not editable in v1: changing it on a board with live runs would
 strand them.
 
 Board settings has a fourth section, **Schedules**, shown only when the daemon advertises
@@ -2601,18 +2609,22 @@ $ fleet board --reviews show
 
 Board settings has a fourth section, **Schedules**, shown only when the daemon advertises
 `schedules`. It is shaped like Columns (§11.10): a list level and a form level, `⏎` drills in, `^s`
-saves. The list shows one row per schedule —
-`● GitHub reviews   every 15m   next 14:05   last ✓ 3 created, 5 existing` — with `●` enabled and
-`○` disabled, and the last result's glyph and tone (`✓` success, `✗` failed or timed out, `⤼`
-skipped) before its summary. `n` new, `⏎` edit, `space` toggles enabled (`UpdateSchedule`), `r` runs
-it now (`RunScheduleNow`), `d` asks on the section's notice line (`delete {name} and its run logs? d again to delete, esc to
-keep it`) and a second `d` deletes. The form's rows are Name,
-Provider, Model (free text, as a column's is), Effort, Mode (the
-provider's supported modes, full access by default), Cadence (`every` / `once`) with `Every [15]
-minutes` or `Once at [2026-09-23 09:00]`, Timeout, Prompt (the multi-line editor a column's
-Instructions row uses), Enabled, and a read-only Last runs row with the last five runs' outcome,
-summary and log path. `^s` sends `CreateSchedule` or `UpdateSchedule`; a daemon refusal appears in
-the dialog's red footer line and keeps it open. `n` on a Reviews board pre-fills the starter —
+saves. The list is one card of rows, one per schedule, each led by its enabled switch: the name,
+the helper `every 15 min · claude · full access`, and at its end when it runs next (`next 14:05`,
+`running · 2 min` or `disabled`) over the last result's glyph and tone (a check success, a cross
+failed or timed out, a slash skipped) and its summary. `n` new, `⏎` edit, `space` or the switch
+toggles enabled (`UpdateSchedule`), `r` or the row's hover *Run now* runs it now
+(`RunScheduleNow`), `d` asks on the dialog's amber footer line (`delete {name} and its run logs? d
+again to delete, esc to keep it`) and a second `d` deletes; the footer carries *New schedule* and
+*Delete*, and a right-click on a row opens *Open*, *Run now* and *Delete*. The form opens under a
+breadcrumb (`‹ Schedules  GitHub reviews  next 14:05`) as cards: Name and Enabled; *Cadence*,
+`Repeat` (`every` / `once`) with `Every [15] min` or `Once at [2026-09-23 09:00]`, and Timeout;
+*Agent*, Provider, Model (a dropdown of the reported models, or free text as a column's is),
+Effort and Mode (the provider's supported modes, full access by default); Prompt (the multi-line
+box a column's Instructions row uses); and a read-only *Last runs* card with the last five runs'
+outcome, time, summary and log path. `^s` sends `CreateSchedule` or `UpdateSchedule`; a daemon
+refusal appears in the dialog's red footer line and keeps it open, and leaving a form with unsaved
+edits asks once, in amber (`Unsaved schedule. Press Esc again to discard it.`). `n` on a Reviews board pre-fills the starter —
 name `GitHub reviews`, every 15 minutes, `STARTER_PROMPT_GITHUB_REVIEWS` — and on any other board
 leaves the prompt empty. The empty Review tab's `⏎ add the GitHub review schedule` opens here in
 that state. The list is the schedules mirror (§8), refreshed on `SchedulesChanged`; nothing is read

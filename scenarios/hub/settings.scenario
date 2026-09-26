@@ -1,5 +1,6 @@
-# KEYMAP.md §Dialogs and text inputs — Settings (`,`): "`Enter` saves · `Esc` discards";
-# UX-SPEC §3.8.6 — every control is clickable and keeps its key, and the save state is visible.
+# KEYMAP.md §Dialogs and text inputs — Settings (`,`): `Enter` saves, and `Esc` goes one level
+# back, then asks once; UX-SPEC §3.8.6 — every control is clickable and keeps its key, and the
+# save state is visible.
 #
 # Settings takes the whole keyboard under `Dialog > Settings` and gives it back on `Esc`. Its
 # draft is read across as three fields (`docs/TESTING-HARNESS.md` §3): `section`, the shown
@@ -32,11 +33,15 @@ shot settings-agents
 click dialog.button[1]
 assert overlay == Dialog && dialog.name == Settings
 
-# By pointer: the Codex segment of the row under the cursor, then Claude's default model box,
-# which opens its editor as `Enter` would.
+# By pointer: the Codex segment of the row under the cursor, then Claude's default model row. A
+# click on a row lands the cursor on it, and a click on its box — the control at the row's end,
+# which is also where a click on this row's centre falls — opens the editor as `Enter` would.
 click settings.option[1]
 await dialog.fields[1].value == "Default agent = Codex" 5000
 click settings.row[4]
+await dialog.fields[1].value ~= "^Default model = " 5000
+await targets["settings.box"] exists 5000
+click settings.box
 await key_contexts[1] == SettingsEditing 5000
 type opus
 await dialog.fields[1].value == "Default model = opus" 5000
@@ -80,7 +85,13 @@ await dialog.fields[1].value == "Sleep on switch = off" 5000
 click settings.switch
 await dialog.fields[1].value == "Sleep on switch = on" 5000
 
-# `Esc` discards and restores the Hub exactly as it was.
+# `Esc` on a dirty draft asks once — the amber `Unsaved changes. Press Esc again to discard
+# them.` strip, with the dialog still open — and the second `Esc` discards and restores the Hub
+# exactly as it was.
+key escape
+await idle 5000
+assert overlay == Dialog && dialog.name == Settings
+shot settings-unsaved
 key escape
 await overlay absent
 assert screen == Hub && mode == Normal && focused == worktrees.row[0] && dialog absent

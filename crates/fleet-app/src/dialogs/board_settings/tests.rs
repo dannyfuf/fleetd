@@ -1,7 +1,10 @@
 use super::*;
 
+/// §3.8.6: landing on a text row never opens its editor, so `j` moves off it like any other
+/// row; `⏎` opens the box in place, and only then does a bare `j` type. `esc` puts the value
+/// the box opened with back.
 #[gpui::test]
-fn j_types_on_a_text_row_and_moves_on_a_non_text_row(cx: &mut gpui::TestAppContext) {
+fn j_moves_off_a_text_row_until_enter_opens_its_box(cx: &mut gpui::TestAppContext) {
     struct SettingsInputHarness {
         state: Entity<AppState>,
         focus: FocusHandle,
@@ -38,6 +41,12 @@ fn j_types_on_a_text_row_and_moves_on_a_non_text_row(cx: &mut gpui::TestAppConte
     cx.update(|cx| {
         with_host(&state, cx, |host| host.board_settings = draft());
         materialize_input(&state, None, None, cx);
+        read_host(&state, cx, |host, _| {
+            assert!(
+                host.board_settings_input.is_none(),
+                "arriving on Name opens nothing"
+            );
+        });
     });
     let window = cx.add_window(|_, cx| SettingsInputHarness {
         state: state.clone(),
@@ -46,42 +55,47 @@ fn j_types_on_a_text_row_and_moves_on_a_non_text_row(cx: &mut gpui::TestAppConte
     let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
     let root = window.root(&mut visual).expect("settings input harness");
     let root_focus = root.read_with(&visual, |view, _| view.focus.clone());
-    let input = visual.update(|_, cx| {
-        read_host(&state, cx, |host, _| {
-            host.board_settings_input
-                .clone()
-                .unwrap_or_else(|| panic!("name input"))
-        })
-    });
-    visual.update(|window, cx| input.update(cx, |input, cx| input.focus(window, cx)));
+    visual.update(|window, cx| window.focus(&root_focus, cx));
+
     visual.simulate_keystrokes("j");
     visual.update(|_, cx| {
         read_host(&state, cx, |host, _| {
-            assert_eq!(host.board_settings.name, "Fleetj");
+            assert_eq!(host.board_settings.name, "Fleet", "nothing was typed");
+            assert_eq!(host.board_settings.row, 1, "`j` moved off the text row");
+        });
+    });
+
+    visual.update(|window, cx| {
+        with_host(&state, cx, |host| host.board_settings.row = 0);
+        assert!(
+            confirm_row(&state, window, &root_focus, cx),
+            "`⏎` is Name's"
+        );
+    });
+    visual.simulate_keystrokes("j");
+    visual.update(|_, cx| {
+        read_host(&state, cx, |host, _| {
+            assert_eq!(host.board_settings.name, "Fleetj", "the open box types");
             assert_eq!(host.board_settings.row, 0);
         });
     });
 
-    let non_text_row = GENERAL_ROWS
-        .iter()
-        .position(|row| *row == SettingRow::DefaultRepo)
-        .unwrap_or_else(|| panic!("default repository row"));
     visual.update(|window, cx| {
-        with_host(&state, cx, |host| {
-            host.board_settings.row = non_text_row;
-            host.board_settings_input = None;
-            host.board_settings_input_subscription = None;
-        });
-        window.focus(&root_focus, cx);
-        window.refresh();
-    });
-    visual.simulate_keystrokes("j");
-    visual.update(|_, cx| {
+        assert!(
+            cancel(&state, window, &root_focus, cx),
+            "`esc` stays in the dialog"
+        );
         read_host(&state, cx, |host, _| {
-            assert_eq!(host.board_settings.row, non_text_row + 1)
+            assert_eq!(host.board_settings.name, "Fleet", "`esc` reverted the row");
+            assert!(!host.board_settings.editing);
+            assert!(
+                host.board_settings_input.is_none(),
+                "the box closed in place"
+            );
         });
     });
 }
+
 use fleet_core::board::PropertySource;
 
 fn draft() -> BoardSettingsState {
@@ -364,19 +378,69 @@ fn the_backend_rows_follow_the_kind_cycler() {
 }
 
 #[test]
-fn only_the_typing_rows_materialize_text() {
+fn only_the_typing_rows_open_an_editor_and_only_on_enter() {
     let mut state = draft();
     state.select_backend("other", &schema());
-    assert!(state.focused_text().is_some(), "name");
+    assert!(
+        state.focused_text().is_none(),
+        "arriving on Name opens nothing"
+    );
+    state.open_editor();
+    assert_eq!(
+        state.focused_text().as_deref(),
+        Some("Fleet"),
+        "`⏎` on Name"
+    );
+    state.editing = false;
     state.row = 2;
-    assert!(state.focused_text().is_none(), "the repo cycler");
+    state.open_editor();
+    assert!(!state.editing, "the repo cycler has no box");
+    let runs = GENERAL_ROWS
+        .iter()
+        .position(|row| *row == SettingRow::MaxLiveRuns)
+        .unwrap_or_else(|| panic!("max live runs row"));
+    state.row = runs;
+    state.open_editor();
+    assert_eq!(state.focused_text().as_deref(), Some("1"), "a number box");
+    state.editing = false;
     state.section = BoardSection::Backend;
     state.row = 1;
+    state.open_editor();
     assert!(state.focused_text().is_some(), "a text setting");
+    state.editing = false;
     state.row = 1 + 4;
+    state.open_editor();
     assert!(state.focused_text().is_none(), "a flag");
     assert!(state.rows[3].is_text(), "a number is typed into");
     assert!(!state.rows[4].is_text());
+}
+
+/// `Max live runs` is a number box now: typed digits land in the draft, and a number outside
+/// 1–8 is kept so the row can state the rule it breaks, in the kit's words.
+#[test]
+fn a_typed_throttle_outside_the_range_states_its_rule_on_the_row() {
+    let mut state = draft();
+    state.row = GENERAL_ROWS
+        .iter()
+        .position(|row| *row == SettingRow::MaxLiveRuns)
+        .unwrap_or_else(|| panic!("max live runs row"));
+    state.open_editor();
+    state.set_focused_text("3");
+    assert_eq!(state.live_run_limit(), 3);
+    assert_eq!(state.live_runs_rule(), None);
+    state.set_focused_text("12");
+    assert_eq!(
+        state.live_runs_rule().as_deref(),
+        Some("Must be between 1 and 8.")
+    );
+    state.set_focused_text("");
+    assert_eq!(
+        state.live_run_limit(),
+        12,
+        "an emptied box keeps the last number"
+    );
+    assert_eq!(state.escape(), EscapeStep::Editor);
+    assert_eq!(state.live_run_limit(), 1, "`esc` put the opened value back");
 }
 
 #[test]
@@ -737,7 +801,8 @@ fn the_on_enter_row_cycles_the_three_spellings_and_keeps_the_name() {
             0,
             ColumnField::OnEnter,
             delta,
-            false
+            false,
+            &Catalogue::default(),
         ));
         columns[0].on_enter.clone()
     };
@@ -750,39 +815,49 @@ fn the_on_enter_row_cycles_the_three_spellings_and_keeps_the_name() {
 }
 
 /// A context or Jira board keeps its order and its names; everything that describes a run is
-/// drawn disabled rather than hidden, under one trailer (§5.4).
+/// folded away under one callout rather than drawn disabled row by row (§5.4), so the cursor
+/// only ever lands on the two rows the board can change.
 #[test]
-fn a_board_that_cannot_run_anything_disables_exactly_the_automation_rows() {
+fn a_board_that_cannot_run_anything_folds_the_automation_rows_away() {
     let mut columns = vec![column("review", "In review")];
     columns[0].on_enter = "prompt".to_owned();
-    let rows = prepare(&columns, Some(0), true);
-    let disabled: Vec<(&str, bool)> = rows
-        .iter()
-        .map(|row| (row.label.as_str(), row.disabled))
-        .collect();
+    let labels = |locked| -> Vec<String> {
+        prepare(&columns, Some(0), locked, &Catalogue::default())
+            .into_iter()
+            .map(|row| row.label)
+            .collect()
+    };
     assert_eq!(
-        disabled,
-        [
-            ("Name", false),
-            ("Category", false),
-            ("On enter", true),
-            ("Provider", true),
-            ("Model", true),
-            ("Effort", true),
-            ("Mode", true),
-            ("Instructions", true),
-            ("Expect", true),
-            ("Env", true),
-            ("On success", true),
-            ("When unblocked", true),
+        labels(true),
+        ["Name", "Category"],
+        "the seven rows are folded"
+    );
+    assert_eq!(
+        labels(false).len(),
+        12,
+        "a worktree board draws every row of a column that runs something"
+    );
+}
+
+/// The folded rows are the callout's, not the cursor's: `j` stops at Category and `⏎` opens
+/// nothing there, whatever the column runs.
+#[test]
+fn the_cursor_never_reaches_a_folded_automation_row() {
+    let mut state = columns_draft();
+    state.automation_locked = true;
+    state.columns[0].on_enter = "prompt".to_owned();
+    state.opened_column = Some(0);
+    state.prepare();
+    assert_eq!(
+        state.rows(),
+        vec![
+            SettingRow::ColumnField(ColumnField::Name),
+            SettingRow::ColumnField(ColumnField::Category)
         ]
     );
-    assert!(
-        prepare(&columns, Some(0), false)
-            .iter()
-            .all(|row| !row.disabled),
-        "a worktree board disables nothing"
-    );
+    state.row = 1;
+    state.open_editor();
+    assert!(!state.editing, "Category is a choice, not a box");
 }
 
 /// A locked row refuses the arrows and the keyboard, not just the styling.
@@ -795,7 +870,8 @@ fn a_locked_automation_row_cannot_be_cycled_or_typed_into() {
         0,
         ColumnField::Provider,
         1,
-        true
+        true,
+        &Catalogue::default(),
     ));
     set_field_text(&mut columns, 0, ColumnField::Expect, "anything", true);
     assert_eq!(
@@ -858,7 +934,14 @@ fn every_action_refusal_is_stated_in_the_contract_s_words() {
 
     columns[0].on_enter = "skill:deep-review".to_owned();
     set_field_text(&mut columns, 0, ColumnField::Expect, "reviewed", false);
-    cycle_field(&mut columns, 0, ColumnField::Provider, 2, false);
+    cycle_field(
+        &mut columns,
+        0,
+        ColumnField::Provider,
+        2,
+        false,
+        &Catalogue::default(),
+    );
     assert_eq!(
         validate(&board(), &columns, 1).as_deref(),
         Some(
@@ -961,15 +1044,97 @@ fn a_column_round_trips_through_the_status_the_patch_carries() {
 fn escape_leaves_the_editor_then_the_column_then_asks_once() {
     let mut state = columns_draft();
     state.opened_column = Some(1);
-    state.editing = true;
     state.columns[1].status.name = "Doing".to_owned();
     state.prepare();
+    state.open_editor();
     assert_eq!(state.escape(), EscapeStep::Editor);
     assert_eq!(state.escape(), EscapeStep::Column);
     assert_eq!(state.row, 1, "the cursor lands back on the column it left");
     assert_eq!(state.escape(), EscapeStep::Ask);
-    assert!(state.error.is_some(), "the question is on the error line");
+    assert_eq!(
+        state.footer_strip(),
+        Some(FooterStrip::Warning(UNSAVED_DRAFT.to_owned())),
+        "the question is the amber strip"
+    );
+    assert_eq!(state.error, None, "and nothing went red");
     assert_eq!(state.escape(), EscapeStep::Close, "asked once, not twice");
+}
+
+/// Regression (§3.8.6): `esc` in an open editor reverts that row and stays in the column form;
+/// before, it closed the editor keeping what was typed, and a second `esc` left the column.
+#[test]
+fn esc_in_an_open_editor_reverts_the_row_and_stays_in_the_column() {
+    let mut state = columns_draft();
+    state.opened_column = Some(1);
+    state.prepare();
+    state.row = 0;
+    state.open_editor();
+    state.set_focused_text("Doing");
+    assert_eq!(
+        state.columns[1].status.name, "Doing",
+        "the box mirrors each keystroke"
+    );
+    assert_eq!(state.escape(), EscapeStep::Editor);
+    assert_eq!(
+        state.columns[1].status.name, "In Progress",
+        "the row is reverted"
+    );
+    assert_eq!(state.opened_column, Some(1), "still in the column's form");
+    assert!(!state.editing);
+    assert!(!state.dirty(), "a reverted row leaves nothing unsaved");
+    assert_eq!(state.escape(), EscapeStep::Column);
+}
+
+/// `⏎` keeps what was typed: the box closes in place over the new value, and only the draft's
+/// own `esc` question stands between it and a discard.
+#[test]
+fn enter_in_an_open_editor_keeps_the_value() {
+    let mut state = columns_draft();
+    state.opened_column = Some(1);
+    state.prepare();
+    state.open_editor();
+    state.set_focused_text("Doing");
+    state.editing = false;
+    assert_eq!(state.columns[1].status.name, "Doing");
+    assert!(state.dirty());
+}
+
+/// Regression (§3.8.6): the permanent amber `Esc discards` line is gone. A dirty draft paints
+/// no strip until the first `esc`, which asks in amber in these words; any edit takes it back.
+#[test]
+fn the_amber_strip_asks_only_after_the_first_esc_on_a_dirty_draft() {
+    let mut state = columns_draft();
+    assert_eq!(state.footer_strip(), None, "clean");
+    state.columns[0].status.name = "Doing".to_owned();
+    state.prepare();
+    assert!(state.dirty());
+    assert_eq!(state.footer_strip(), None, "merely dirty paints nothing");
+    assert_eq!(state.escape(), EscapeStep::Ask);
+    assert_eq!(
+        state.footer_strip(),
+        Some(FooterStrip::Warning(
+            "Unsaved changes. Press Esc again to discard them.".to_owned()
+        ))
+    );
+    state.opened_column = Some(0);
+    state.prepare();
+    state.row = 0;
+    state.open_editor();
+    state.set_focused_text("Later");
+    assert_eq!(state.footer_strip(), None, "an edit disarmed the question");
+}
+
+/// A refusal outranks the question: the strip is red and says the rule verbatim.
+#[test]
+fn a_broken_rule_paints_the_strip_red_before_any_question() {
+    let mut state = columns_draft();
+    state.prefix = "fl t".to_owned();
+    assert_eq!(
+        state.footer_strip(),
+        Some(FooterStrip::Error(
+            "prefix must be A\u{2013}Z and 0\u{2013}9 only".to_owned()
+        ))
+    );
 }
 
 #[test]
@@ -1256,7 +1421,7 @@ fn a_click_on_an_option_lands_where_the_arrows_would(cx: &mut gpui::TestAppConte
 fn a_column_opens_on_double_click_and_its_choices_take_a_click(cx: &mut gpui::TestAppContext) {
     let (state, focus, mut visual) = pointer_harness(cx, columns_draft());
 
-    visual.update(|window, cx| open_column(&state, 1, &focus, window, cx));
+    visual.update(|window, cx| open_row(&state, 1, &focus, window, cx));
     visual.update(|_, cx| {
         read_host(&state, cx, |host, _| {
             assert_eq!(host.board_settings.opened_column, Some(1));
@@ -1291,6 +1456,13 @@ fn seeded_over(
     cx: &mut gpui::TestAppContext,
     shape: impl FnOnce(&mut Board),
 ) -> BoardSettingsState {
+    let state = seeded_state(cx, shape);
+    cx.update(|cx| read_host(&state, cx, |host, _| host.board_settings.clone()))
+}
+
+/// The app the dialog is seeded in, over a board shaped by `shape`, opened on the first
+/// column's form: for the key functions, which act on the app rather than on a draft.
+fn seeded_state(cx: &mut gpui::TestAppContext, shape: impl FnOnce(&mut Board)) -> Entity<AppState> {
     let mut shaped = board();
     let mut status = column("review", "Review").status;
     status.automation = Some(ColumnAutomation {
@@ -1325,17 +1497,139 @@ fn seeded_over(
             draft.opened_column = Some(0);
             draft.prepare();
         });
-        read_host(&state, cx, |host, _| host.board_settings.clone())
-    })
+    });
+    state
 }
 
-/// Whether every automation row of the open column is drawn disabled.
-fn automation_disabled(draft: &BoardSettingsState) -> bool {
-    draft
+/// Regression (§3.8.6, "a revert asks nothing"): on a board stored with no run limit the editor
+/// opens on `1`, and `esc` wrote that `1` back as `Some(1)` — a value that means the same as the
+/// stored `None` and read as unsaved, so the next `esc` asked and a save wrote a no-op.
+#[gpui::test]
+fn esc_in_the_max_live_runs_editor_leaves_an_unset_limit_clean(cx: &mut gpui::TestAppContext) {
+    let mut state = seeded_over(cx, |board| board.settings.max_live_runs = None);
+    state.section = BoardSection::General;
+    state.opened_column = None;
+    state.prepare();
+    assert!(!state.dirty(), "opened clean");
+    state.row = GENERAL_ROWS
+        .iter()
+        .position(|row| *row == SettingRow::MaxLiveRuns)
+        .unwrap_or_else(|| panic!("max live runs row"));
+    state.open_editor();
+    state.set_focused_text("3");
+    assert!(state.dirty(), "a typed limit is an edit");
+    assert_eq!(state.escape(), EscapeStep::Editor);
+    assert_eq!(state.live_run_limit(), 1, "`esc` put the opened value back");
+    assert!(!state.dirty(), "a reverted row leaves nothing unsaved");
+    assert!(!state.step_live_runs(-1), "`h` at one run changes nothing");
+    assert!(
+        !state.dirty(),
+        "a step that lands where it started writes nothing"
+    );
+    assert!(state.step_live_runs(1));
+    assert!(state.dirty());
+}
+
+/// Regression (§3.8.6): `h` / `l` cleared the question `esc` asked before knowing whether the
+/// row could change, so a stray `l` on a column's Name made the second `esc` ask again instead of
+/// discarding. Only a branch that changed the draft disarms it.
+#[gpui::test]
+fn a_stray_cycle_on_a_row_it_cannot_change_keeps_the_esc_question_armed(
+    cx: &mut gpui::TestAppContext,
+) {
+    let state = seeded_state(cx, |_| {});
+    let row_of = |draft: &BoardSettingsState, field: ColumnField| {
+        draft
+            .rows()
+            .iter()
+            .position(|row| *row == SettingRow::ColumnField(field))
+            .unwrap_or_else(|| panic!("{field:?} row"))
+    };
+    cx.update(|cx| {
+        with_host(&state, cx, |host| {
+            let draft = &mut host.board_settings;
+            draft.columns[0].status.name = "Reviewing".to_owned();
+            draft.prepare();
+            assert!(draft.dirty());
+            draft.discard_armed = true;
+            draft.row = row_of(draft, ColumnField::Name);
+        });
+        cycle(&state, 1, cx);
+        read_host(&state, cx, |host, _| {
+            assert!(
+                host.board_settings.discard_armed,
+                "a row `l` cannot change is not an edit"
+            );
+        });
+        with_host(&state, cx, |host| {
+            let draft = &mut host.board_settings;
+            draft.row = row_of(draft, ColumnField::Category);
+        });
+        cycle(&state, 1, cx);
+        read_host(&state, cx, |host, _| {
+            assert!(
+                !host.board_settings.discard_armed,
+                "a cycled category is an edit and takes the question back"
+            );
+        });
+    });
+}
+
+/// A context board with no worktree runs in the context, and its header says so: `this
+/// worktree` above a callout saying the board runs in the context contradicted itself.
+#[gpui::test]
+fn a_context_board_with_no_worktree_says_it_runs_in_the_context(cx: &mut gpui::TestAppContext) {
+    let plain = seeded_over(cx, |_| {});
+    assert_eq!(plain.runs_in(), "the context");
+    assert_eq!(plain.subtitle(), "Fleet \u{b7} FLT \u{b7} the context");
+    let reviews = seeded_over(cx, |board| {
+        board.settings.run_location = RunLocation::CardWorktree;
+    });
+    assert_eq!(reviews.runs_in(), "each card's worktree");
+}
+
+/// The reveal scrolls the pane the least that shows the cursor's row, and it is the row it
+/// shows: a card taller than the pane (a column's *When a card enters*) is "revealed" at its top
+/// with its last rows still hidden, which is where `j` used to leave the cursor.
+#[test]
+fn the_reveal_moves_the_least_that_shows_the_row() {
+    // Test geometry, not dialog geometry: the named-const rule (`dialogs::tests`) reads `px(`.
+    let pixels = |value: f32| gpui::px(value);
+    let rect = |top: f32, height: f32| {
+        gpui::Bounds::new(
+            gpui::point(gpui::Pixels::ZERO, pixels(top)),
+            gpui::size(pixels(500.0), pixels(height)),
+        )
+    };
+    let viewport = rect(100.0, 400.0);
+    assert_eq!(
+        reveal_delta(viewport, rect(200.0, 44.0)),
+        gpui::Pixels::ZERO,
+        "in view"
+    );
+    assert_eq!(
+        reveal_delta(viewport, rect(480.0, 44.0)),
+        pixels(-24.0),
+        "below: up by what is hidden"
+    );
+    assert_eq!(
+        reveal_delta(viewport, rect(80.0, 44.0)),
+        pixels(20.0),
+        "above: down by what is hidden"
+    );
+    assert_eq!(
+        reveal_delta(viewport, rect(300.0, 600.0)),
+        pixels(-200.0),
+        "taller than the pane: its top shows"
+    );
+}
+
+/// Whether the open column's automation rows are folded away (§5.4).
+fn automation_folded(draft: &BoardSettingsState) -> bool {
+    !draft
         .prepared
         .iter()
-        .filter(|row| matches!(row.row, SettingRow::ColumnField(field) if field.is_automation()))
-        .all(|row| row.disabled)
+        .any(|row| matches!(row.row, SettingRow::ColumnField(field) if field.is_automation()))
 }
 
 /// BOARD §11.10: a Reviews board has no worktree of its own, but each of its runs executes in
@@ -1347,7 +1641,7 @@ fn the_columns_pane_is_editable_on_a_reviews_board(cx: &mut gpui::TestAppContext
         board.settings.run_location = RunLocation::CardWorktree;
     });
     assert!(!draft.automation_locked);
-    assert!(!automation_disabled(&draft));
+    assert!(!automation_folded(&draft));
     assert!(
         draft.prepared.len() > 3,
         "a column that runs a prompt draws its action rows"
@@ -1359,7 +1653,7 @@ fn the_columns_pane_is_editable_on_a_reviews_board(cx: &mut gpui::TestAppContext
 fn the_columns_pane_is_locked_on_a_plain_context_board(cx: &mut gpui::TestAppContext) {
     let draft = seeded_over(cx, |_| {});
     assert!(draft.automation_locked);
-    assert!(automation_disabled(&draft));
+    assert!(automation_folded(&draft));
 }
 
 /// General states where runs execute, read-only, from `settings.run_location`.
@@ -1379,4 +1673,148 @@ fn the_general_pane_says_where_runs_execute(cx: &mut gpui::TestAppContext) {
         !GENERAL_ROWS.contains(&SettingRow::NoRow),
         "the fact is not a cursor row: nothing on it can change"
     );
+}
+
+/// Regression (§3.8.6): the Columns list's footer is *New column* and *Apply preset*; Delete left
+/// it for each row's hover action and menu item, and a drill-in's footer offers no verb at all.
+#[test]
+fn the_columns_footer_offers_new_column_and_apply_preset_only() {
+    let mut state = columns_draft();
+    let labels = |state: &BoardSettingsState| -> Vec<&'static str> {
+        view::footer_verbs(state)
+            .iter()
+            .map(|verb| verb.label)
+            .collect()
+    };
+    assert_eq!(labels(&state), ["New column", "Apply preset"]);
+    assert!(
+        view::COLUMN_VERBS
+            .iter()
+            .any(|verb| verb.label == "Delete column" && verb.harness.is_some()),
+        "Delete is the row's hover action, and so its menu item"
+    );
+    state.opened_column = Some(0);
+    state.prepare();
+    assert!(
+        labels(&state).is_empty(),
+        "the breadcrumb is a form's way back"
+    );
+    state.opened_column = None;
+    state.section = BoardSection::General;
+    assert!(labels(&state).is_empty());
+}
+
+/// Every column verb that is a hover action is also a menu item, so nothing lives only behind
+/// hover (ADR 0023); `Open` is the menu's twin of the double-click.
+#[test]
+fn a_column_row_s_hover_actions_are_all_in_its_menu() {
+    let menu: Vec<&str> = view::COLUMN_VERBS.iter().map(|verb| verb.label).collect();
+    assert_eq!(menu, ["Open", "Move up", "Move down", "Delete column"]);
+    let hover: Vec<&str> = view::COLUMN_VERBS
+        .iter()
+        .filter(|verb| verb.harness.is_some())
+        .map(|verb| verb.label)
+        .collect();
+    assert_eq!(hover, ["Move up", "Move down", "Delete column"]);
+}
+
+/// Regression (§5.4): the column form's breadcrumb replaces the mono `Columns › name` hint, and
+/// its trailing caption says where the column sits in the board.
+#[test]
+fn the_column_breadcrumb_says_where_the_column_sits() {
+    let state = columns_draft();
+    let crumb = view::column_breadcrumb(&state.columns[1], 1, state.columns.len());
+    assert_eq!(crumb.parent().as_ref(), "Columns");
+    assert_eq!(
+        crumb.shown_trailing().map(|trailing| trailing.as_ref()),
+        Some("2 of 3")
+    );
+    assert!(crumb.goes_back(), "the crumb is the way back");
+}
+
+/// The list row says what entering the column runs and where a success sends the card, in
+/// the helper under its name.
+#[test]
+fn a_column_list_row_states_its_category_its_run_and_its_route() {
+    let mut state = columns_draft();
+    state.columns[1].on_enter = "skill:deep-review".to_owned();
+    state.columns[1].status.automation = Some(ColumnAutomation {
+        on_success: Some(
+            StatusId::try_from("done".to_owned()).unwrap_or_else(|error| panic!("{error}")),
+        ),
+        ..ColumnAutomation::default()
+    });
+    state.prepare();
+    let helpers: Vec<String> = state
+        .prepared
+        .iter()
+        .filter_map(|row| match &row.value {
+            ColumnValue::Column { helper, .. } => Some(helper.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        helpers,
+        [
+            "unstarted",
+            "unstarted \u{b7} \u{26a1} agent runs skill deep-review \u{b7} then \u{2192} Done",
+            "unstarted",
+        ]
+    );
+}
+
+/// With a catalogue the Model row is a dropdown ending in `Other model id…`, and `h` / `l` walk
+/// the declared models; without one it stays a text box, as before.
+#[test]
+fn the_model_row_offers_the_catalogue_and_types_what_it_lacks() {
+    let catalogue =
+        Catalogue::with_models(AgentKind::Claude, &[("opus", "Opus"), ("sonnet", "sonnet")]);
+    let mut columns = vec![column("review", "In review")];
+    columns[0].on_enter = "prompt".to_owned();
+    cycle_field(&mut columns, 0, ColumnField::Provider, 1, false, &catalogue);
+    let model = |columns: &[ColumnDraft], catalogue: &Catalogue| {
+        prepare(columns, Some(0), false, catalogue)
+            .into_iter()
+            .find(|row| row.row == SettingRow::ColumnField(ColumnField::Model))
+            .map(|row| row.value)
+    };
+    match model(&columns, &catalogue) {
+        Some(ColumnValue::Choice {
+            options,
+            details,
+            at,
+            other,
+            ..
+        }) => {
+            assert_eq!(
+                options,
+                ["column default", "Opus", "sonnet", catalogue::OTHER_MODEL]
+            );
+            assert_eq!(details[1], "opus", "a name shows its id beside it");
+            assert_eq!(at, Some(0));
+            assert!(other);
+        }
+        other => panic!("a dropdown, not {other:?}"),
+    }
+    assert!(cycle_field(
+        &mut columns,
+        0,
+        ColumnField::Model,
+        1,
+        false,
+        &catalogue
+    ));
+    assert!(matches!(
+        model(&columns, &catalogue),
+        Some(ColumnValue::Choice { at: Some(1), .. })
+    ));
+    set_field_text(&mut columns, 0, ColumnField::Model, "opus-next", false);
+    assert!(matches!(
+        model(&columns, &catalogue),
+        Some(ColumnValue::Choice { at: None, ref value, .. }) if value == "opus-next"
+    ));
+    assert!(matches!(
+        model(&columns, &Catalogue::default()),
+        Some(ColumnValue::Text { .. })
+    ));
 }

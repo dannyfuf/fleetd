@@ -157,29 +157,33 @@ fn the_list_states_each_schedule_s_facts() {
         log_path: None,
     });
 
-    let rows = prepare_list(&[first, second], now);
-    assert_eq!(rows[0].dot, "\u{25cf}");
-    assert_eq!(rows[0].cadence, "every 15m");
+    let rows = prepare_list(&[first.clone(), second.clone()], now);
+    let agent = ScheduleAgent::default();
+    let who = format!(
+        "{} \u{b7} {}",
+        provider_word(agent.provider),
+        mode_label(agent.mode)
+    );
+    assert_eq!(rows[0].helper, format!("every 15 min \u{b7} {who}"));
+    let next_line = format!("next {}", next.with_timezone(&Local).format("%H:%M"));
+    assert_eq!(rows[0].next.as_deref(), Some(next_line.as_str()));
     assert_eq!(
-        rows[0].next,
-        Some(format!(
-            "next {}",
-            next.with_timezone(&Local).format("%H:%M")
-        ))
+        rows[0].status, next_line,
+        "an enabled schedule says when it fires"
     );
     let (outcome, summary) = rows[0].last.clone().unwrap_or_else(|| panic!("a last run"));
-    assert_eq!(outcome.glyph, "\u{2713}");
+    assert_eq!(outcome.icon, Icon::CircleCheck);
     assert_eq!(outcome.tone, Tone::Success);
     assert_eq!(summary, "3 created, 5 existing");
 
+    assert_eq!(rows[1].helper, format!("every 2 h \u{b7} {who}"));
     assert_eq!(
-        rows[1].dot, "\u{25cb}",
-        "a disabled schedule's dot is hollow"
+        rows[1].status, "disabled",
+        "a disabled schedule says so first"
     );
-    assert_eq!(rows[1].cadence, "every 2h");
     assert_eq!(rows[1].next, None);
     let (outcome, summary) = rows[1].last.clone().unwrap_or_else(|| panic!("a last run"));
-    assert_eq!(outcome.glyph, "\u{2717}");
+    assert_eq!(outcome.icon, Icon::CircleX);
     assert_eq!(outcome.tone, Tone::Danger);
     assert_eq!(
         summary, "timed out",
@@ -187,7 +191,166 @@ fn the_list_states_each_schedule_s_facts() {
     );
 
     let skipped = Outcome::of(Some(ScheduleOutcome::Skipped));
-    assert_eq!(skipped.glyph, "\u{293c}");
+    assert_eq!(skipped.icon, Icon::CircleSlash);
+
+    assert_eq!(
+        list_note(&[first, second], now),
+        format!("2 \u{b7} {next_line}"),
+        "the card's note counts them and names the soonest enabled fire"
+    );
+    assert_eq!(list_note(&[], now), "0");
+}
+
+/// A live run takes the status line; the outcome line keeps the last run that finished.
+#[test]
+fn a_running_schedule_says_for_how_long() {
+    let now = Local::now();
+    let mut live = schedule("sch-00000001", "Nightly triage");
+    live.runs
+        .push(run(ScheduleOutcome::Skipped, "previous run was still live"));
+    live.runs.push(ScheduleRun {
+        job_id: None,
+        started_at: (now - chrono::Duration::minutes(2))
+            .with_timezone(&Utc)
+            .to_rfc3339(),
+        ended_at: None,
+        outcome: None,
+        summary: None,
+        cost_usd: None,
+        log_path: None,
+    });
+    let rows = prepare_list(&[live], now);
+    assert_eq!(rows[0].status, "running \u{b7} 2 min");
+    let (outcome, summary) = rows[0]
+        .last
+        .clone()
+        .unwrap_or_else(|| panic!("a finished run"));
+    assert_eq!(outcome.icon, Icon::CircleSlash);
+    assert_eq!(summary, "previous run was still live");
+}
+
+#[test]
+fn a_one_off_cadence_reads_as_its_moment() {
+    let now = Local
+        .with_ymd_and_hms(2026, 9, 25, 12, 0, 0)
+        .earliest()
+        .unwrap_or_else(|| panic!("a local time"));
+    let at = Local
+        .with_ymd_and_hms(2026, 9, 26, 9, 0, 0)
+        .earliest()
+        .unwrap_or_else(|| panic!("a local time"))
+        .with_timezone(&Utc)
+        .to_rfc3339();
+    assert_eq!(
+        cadence_text(&Cadence::Once { at: at.clone() }, now),
+        "once \u{b7} Sep 26 09:00"
+    );
+    assert_eq!(run_time(&at, now).as_deref(), Some("Sep 26 09:00"));
+    let earlier = now - chrono::Duration::minutes(10);
+    assert_eq!(
+        run_time(&earlier.with_timezone(&Utc).to_rfc3339(), now).as_deref(),
+        Some("11:50 today")
+    );
+}
+
+/// Regression (§5.4): *Run now* left the footer for each schedule row, where it is both the
+/// hover action and a menu item; the footer keeps *New schedule* and *Delete*.
+#[gpui::test]
+fn a_schedule_row_offers_run_now_as_a_hover_action_and_a_menu_item(cx: &mut gpui::TestAppContext) {
+    let hover: Vec<&str> = SCHEDULE_VERBS
+        .iter()
+        .filter(|verb| verb.harness.is_some())
+        .map(|verb| verb.label)
+        .collect();
+    assert_eq!(hover, ["Run now"]);
+    let menu: Vec<&str> = SCHEDULE_VERBS.iter().map(|verb| verb.label).collect();
+    assert_eq!(menu, ["Open", "Run now", "Delete"]);
+    assert_eq!(
+        SCHEDULE_VERBS[1].harness,
+        Some("board_settings.run"),
+        "the cursor row's hover action is the harness's `board_settings.run`"
+    );
+
+    let state = open(
+        cx,
+        app(
+            BoardKind::Reviews,
+            true,
+            vec![schedule("sch-00000001", "GitHub reviews")],
+        ),
+    );
+    let seeded = draft(&state, cx);
+    let footer: Vec<&str> = crate::dialogs::board_settings::view::footer_verbs(&seeded)
+        .iter()
+        .map(|verb| verb.label)
+        .collect();
+    assert_eq!(footer, ["New schedule", "Delete"]);
+    cx.update(|cx| open_on_section(&state, BoardSection::General, cx));
+}
+
+/// The form groups its rows card by card: name and switch, cadence, agent, prompt (§5.4).
+#[test]
+fn the_schedule_form_draws_its_rows_in_card_order() {
+    let fields = ScheduleFields::new(true, Local::now());
+    let form = ScheduleForm {
+        id: None,
+        baseline: fields.clone(),
+        fields,
+        runs: Vec::new(),
+        kept: 0,
+    };
+    let rows = prepare_form(&form, &Catalogue::default());
+    let order: Vec<(&str, ScheduleCard)> = rows
+        .iter()
+        .map(|row| (row.field.label(), row.field.card()))
+        .collect();
+    assert_eq!(
+        order,
+        [
+            ("Name", ScheduleCard::Identity),
+            ("Enabled", ScheduleCard::Identity),
+            ("Repeat", ScheduleCard::Cadence),
+            ("Every", ScheduleCard::Cadence),
+            ("Timeout", ScheduleCard::Cadence),
+            ("Provider", ScheduleCard::Agent),
+            ("Model", ScheduleCard::Agent),
+            ("Effort", ScheduleCard::Agent),
+            ("Mode", ScheduleCard::Agent),
+            ("Prompt", ScheduleCard::Prompt),
+        ]
+    );
+    assert!(
+        matches!(
+            rows.iter()
+                .find(|row| row.field == ScheduleField::Effort)
+                .map(|row| &row.value),
+            Some(ScheduleValue::Choice { at: Some(0), .. })
+        ),
+        "effort is segmented, `default` first"
+    );
+}
+
+/// The amber strip asks about an unsaved schedule in the form's own words.
+#[gpui::test]
+fn esc_on_a_dirty_schedule_asks_in_amber(cx: &mut gpui::TestAppContext) {
+    let state = open(cx, app(BoardKind::Reviews, true, Vec::new()));
+    cx.update(|cx| {
+        assert!(new_schedule(&state, cx));
+        with_host(&state, cx, |host| {
+            let draft = &mut host.board_settings;
+            draft.set_schedule_text(ScheduleField::Name, "Chat");
+            assert_eq!(draft.footer_strip(), None, "dirty, not yet asked");
+            assert_eq!(draft.escape(), EscapeStep::Ask);
+            assert_eq!(
+                draft.footer_strip(),
+                Some(FooterStrip::Warning(
+                    "Unsaved schedule. Press Esc again to discard it.".to_owned()
+                ))
+            );
+            assert_eq!(draft.error, None);
+        });
+        open_on_section(&state, BoardSection::General, cx);
+    });
 }
 
 #[gpui::test]
@@ -399,8 +562,9 @@ fn tab_asks_before_leaving_an_unsaved_schedule(cx: &mut gpui::TestAppContext) {
         "the unsaved form is still there"
     );
     assert_eq!(
-        asked.error.as_deref(),
-        Some("unsaved schedule \u{2014} esc again to discard it")
+        asked.footer_strip(),
+        Some(FooterStrip::Warning(UNSAVED_SCHEDULE.to_owned())),
+        "the question is the amber strip, not a red error"
     );
     cx.update(|cx| {
         assert!(
@@ -793,7 +957,7 @@ fn a_typed_local_time_goes_out_as_rfc_3339() {
 fn switching_provider_keeps_a_mode_it_accepts() {
     let mut fields = ScheduleFields::new(false, Local::now());
     fields.mode = PermissionMode::Auto;
-    assert!(fields.cycle(ScheduleField::Provider, 1));
+    assert!(fields.cycle(ScheduleField::Provider, 1, &Catalogue::default()));
     assert_eq!(fields.provider, AgentKind::Codex);
     assert_eq!(fields.mode, PermissionMode::FullAccess);
 }
@@ -803,14 +967,14 @@ fn switching_provider_clears_the_old_providers_model_and_effort() {
     let mut fields = ScheduleFields::new(false, Local::now());
     fields.model = "claude-opus".to_owned();
     fields.effort = "high".to_owned();
-    assert!(fields.cycle(ScheduleField::Provider, 1));
+    assert!(fields.cycle(ScheduleField::Provider, 1, &Catalogue::default()));
     assert_eq!(fields.provider, AgentKind::Codex);
     assert_eq!(fields.agent().model, None);
     assert_eq!(fields.agent().effort, None);
 
     // A cycle that lands on the same provider changes nothing.
     fields.model = "gpt-5".to_owned();
-    assert!(!fields.cycle(ScheduleField::Provider, 1));
+    assert!(!fields.cycle(ScheduleField::Provider, 1, &Catalogue::default()));
     assert_eq!(fields.model, "gpt-5");
 }
 
@@ -904,11 +1068,8 @@ fn an_open_forms_last_runs_follow_the_mirror(cx: &mut gpui::TestAppContext) {
         .form
         .unwrap_or_else(|| panic!("the form stays open"));
     assert_eq!(form.runs.len(), 1);
-    assert!(
-        form.runs[0].text.ends_with("filed 2 reviews"),
-        "{:?}",
-        form.runs
-    );
+    assert_eq!(form.runs[0].summary, "filed 2 reviews", "{:?}", form.runs);
+    assert_eq!(form.kept, 1, "the card's note counts what fleetd keeps");
     assert_eq!(form.fields.name, "Edited", "what was typed survives");
     assert_eq!(form.baseline.name, "GitHub reviews");
     cx.update(|cx| open_on_section(&state, BoardSection::General, cx));

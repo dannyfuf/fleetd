@@ -82,16 +82,18 @@ pub(super) const PROVIDERS: [AgentKind; 2] = [AgentKind::Claude, AgentKind::Code
 
 /// What a row with no opinion of its own reads as.
 const INHERITED: &str = "column default";
+/// What an unset effort reads as, on the segmented control where every word counts.
+const EFFORT_INHERITED: &str = "default";
 /// What an unset routing row reads as.
 const ROUTE_OFF: &str = "off";
-/// What an empty list reads as.
-const EMPTY: &str = "\u{2014}";
 /// What `on enter` says when the column runs nothing.
 const ON_ENTER_NONE: &str = "none";
 /// What `on enter` says when the column runs the card itself.
 const ON_ENTER_PROMPT: &str = "prompt";
 /// The prefix a skill action is spelled with, as `--on-enter` spells it.
 const ON_ENTER_SKILL: &str = "skill:";
+/// How the third `on enter` segment reads while no skill has been named yet.
+const ON_ENTER_SKILL_WORD: &str = "skill";
 
 /// The refusal an `on enter` spelling that is none of the three earns.
 ///
@@ -163,6 +165,65 @@ impl ColumnField {
             _ => "",
         }
     }
+
+    /// The sentence under the row's label, from the column form's artboard (§5.4).
+    #[must_use]
+    pub(super) const fn helper(self) -> Option<&'static str> {
+        Some(match self {
+            Self::Category => "Decides where the column sits in the board's flow.",
+            Self::OnEnter => "A prompt runs the brief below as a native subagent in this worktree.",
+            Self::Provider => "A card's own choice wins over the column's.",
+            Self::Model => {
+                "The models the provider reported. Column default follows Settings \u{203a} Agents."
+            }
+            Self::Mode => {
+                "Permission policy for every run from this column. Nobody is there to answer a prompt."
+            }
+            Self::Instructions => {
+                "Prepended to the card's brief. Markdown. {key}, {title} and, with a pull request, {pr_url} are filled in."
+            }
+            Self::Expect => {
+                "Printed in the run's footer as \u{201c}The card expects: \u{2026}\u{201d}."
+            }
+            Self::Env => "One KEY=VALUE per line. PATH and FLEET_ keys are refused.",
+            Self::OnSuccess => "Where the card goes when the run reports success.",
+            Self::WhenUnblocked => "What happens when every card blocking this one is done.",
+            Self::Name | Self::Effort => return None,
+        })
+    }
+
+    /// The card of the column form this row sits in.
+    #[must_use]
+    pub(super) const fn card(self) -> ColumnCard {
+        match self {
+            Self::Name | Self::Category => ColumnCard::Identity,
+            Self::OnSuccess | Self::WhenUnblocked => ColumnCard::After,
+            _ => ColumnCard::Enters,
+        }
+    }
+}
+
+/// The cards the column form groups its rows into (§5.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ColumnCard {
+    /// The untitled card: the column's name and category.
+    Identity,
+    /// *When a card enters*: what runs, and how.
+    Enters,
+    /// *After the run*: where the card goes next.
+    After,
+}
+
+impl ColumnCard {
+    /// The card's title; the identity card has none.
+    #[must_use]
+    pub(super) const fn title(self) -> Option<&'static str> {
+        match self {
+            Self::Identity => None,
+            Self::Enters => Some("When a card enters"),
+            Self::After => Some("After the run"),
+        }
+    }
 }
 
 /// One column being edited, with the two rows whose text cannot live in a [`Status`].
@@ -226,14 +287,14 @@ impl ColumnDraft {
 
     /// The row's value, ready to draw.
     #[must_use]
-    fn value(&self, field: ColumnField, columns: &[Self]) -> ColumnValue {
+    fn value(&self, field: ColumnField, columns: &[Self], catalogue: &Catalogue) -> ColumnValue {
         let action = action_of(&self.status);
         let agent = action.map(|action| &action.agent);
+        let provider = agent.and_then(|agent| agent.provider);
         match field {
-            ColumnField::Name => ColumnValue::text(self.status.name.clone(), false),
+            ColumnField::Name => ColumnValue::text(self.status.name.clone(), false, false),
             ColumnField::Category => choice(
-                category_word(self.status.category).to_owned(),
-                position_of(&CATEGORIES, self.status.category),
+                Some(position_of(&CATEGORIES, self.status.category)),
                 CATEGORIES
                     .iter()
                     .map(|category| category_word(*category).to_owned()),
@@ -241,61 +302,90 @@ impl ColumnDraft {
             ColumnField::OnEnter => {
                 let skill = self
                     .kept_skill()
-                    .unwrap_or_else(|| ON_ENTER_SKILL.to_owned());
-                ColumnValue::Action {
-                    value: self.on_enter.clone(),
-                    at: on_enter_position(&self.on_enter),
-                    options: vec![ON_ENTER_NONE.to_owned(), ON_ENTER_PROMPT.to_owned(), skill],
+                    .filter(|skill| skill.as_str() != ON_ENTER_SKILL)
+                    .unwrap_or_else(|| ON_ENTER_SKILL_WORD.to_owned());
+                let at = parse_spelling(&self.on_enter)
+                    .ok()
+                    .map(|_| on_enter_position(&self.on_enter));
+                let mut value = choice(
+                    at,
+                    [ON_ENTER_NONE.to_owned(), ON_ENTER_PROMPT.to_owned(), skill],
+                );
+                // A spelling none of the three names is shown as typed, off the grid.
+                if at.is_none()
+                    && let ColumnValue::Choice { value, .. } = &mut value
+                {
+                    value.clone_from(&self.on_enter);
                 }
+                value
             }
-            ColumnField::Provider => {
-                let provider = agent.and_then(|agent| agent.provider);
-                choice(
-                    provider.map_or_else(
-                        || INHERITED.to_owned(),
-                        |kind| provider_word(kind).to_owned(),
-                    ),
-                    provider.map_or(0, |kind| position_of(&PROVIDERS, kind) + 1),
-                    std::iter::once(INHERITED.to_owned())
-                        .chain(PROVIDERS.iter().map(|kind| provider_word(*kind).to_owned())),
+            ColumnField::Provider => choice(
+                Some(provider.map_or(0, |kind| position_of(&PROVIDERS, kind) + 1)),
+                std::iter::once(INHERITED.to_owned())
+                    .chain(PROVIDERS.iter().map(|kind| provider_word(*kind).to_owned())),
+            ),
+            ColumnField::Model => {
+                let model = agent.and_then(|agent| agent.model.as_deref());
+                CatalogueChoice::model(catalogue, provider, model, INHERITED).map_or_else(
+                    || ColumnValue::text(model.unwrap_or_default().to_owned(), false, false),
+                    ColumnValue::catalogue,
                 )
             }
-            ColumnField::Model => ColumnValue::text(
-                agent
-                    .and_then(|agent| agent.model.clone())
-                    .unwrap_or_default(),
-                false,
-            ),
-            ColumnField::Effort => ColumnValue::text(
-                agent
-                    .and_then(|agent| agent.effort.clone())
-                    .unwrap_or_default(),
-                false,
-            ),
+            ColumnField::Effort => ColumnValue::catalogue(CatalogueChoice::effort(
+                catalogue,
+                provider,
+                agent.and_then(|agent| agent.effort.as_deref()),
+                EFFORT_INHERITED,
+            )),
             ColumnField::Mode => {
                 let mode = agent.and_then(|agent| agent.mode);
                 choice(
-                    mode.map_or_else(|| INHERITED.to_owned(), |mode| mode_word(mode).to_owned()),
-                    mode.map_or(0, |mode| position_of(&MODES, mode) + 1),
+                    Some(mode.map_or(0, |mode| position_of(&MODES, mode) + 1)),
                     std::iter::once(INHERITED.to_owned())
-                        .chain(MODES.iter().map(|mode| mode_word(*mode).to_owned())),
+                        .chain(MODES.iter().map(|mode| mode_label(*mode).to_owned())),
                 )
             }
-            // The row states the first line only: an instruction block is paragraphs long and
-            // the form is a list of one-line facts.
+            // The whole block: the box wraps it and grows to eight lines while editing.
             ColumnField::Instructions => ColumnValue::text(
-                first_line(action.map_or("", |action| action.instructions.as_str())),
+                action.map_or(String::new(), |action| action.instructions.clone()),
                 false,
+                true,
             ),
             ColumnField::Expect => ColumnValue::text(
                 action.map_or(String::new(), |action| action.expect.clone()),
                 false,
+                false,
             ),
-            ColumnField::Env => ColumnValue::text(one_line_env(&self.env), false),
+            ColumnField::Env => ColumnValue::text(env_entries(&self.env).join("\n"), true, true),
             ColumnField::OnSuccess | ColumnField::WhenUnblocked => {
                 route_value(self.route(field), columns)
             }
         }
+    }
+
+    /// What the list row says under the column's name: its category, what entering it runs,
+    /// and where a success sends the card (§5.4).
+    #[must_use]
+    fn list_helper(&self, columns: &[Self]) -> String {
+        let mut helper = category_word(self.status.category).to_owned();
+        if let Ok(Some(kind)) = parse_spelling(&self.on_enter) {
+            let who = action_of(&self.status)
+                .and_then(|action| action.agent.provider)
+                .map_or("agent", provider_word);
+            let what = match kind {
+                ActionKind::Prompt => "runs the prompt".to_owned(),
+                ActionKind::Skill { name, .. } => format!("runs skill {name}"),
+            };
+            helper.push_str(&format!(" \u{b7} \u{26a1} {who} {what}"));
+        }
+        if let Some(target) = self.route(ColumnField::OnSuccess) {
+            let name = columns
+                .iter()
+                .find(|column| column.status.id == *target)
+                .map_or_else(|| target.to_string(), |column| column.status.name.clone());
+            helper.push_str(&format!(" \u{b7} then \u{2192} {name}"));
+        }
+        helper
     }
 
     /// The skill spelling `on enter` returns to when cycled onto its third value: the one typed
@@ -340,57 +430,68 @@ pub(super) fn column_fields(column: &ColumnDraft) -> Vec<ColumnField> {
 /// What one prepared row of the Columns pane draws.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ColumnValue {
-    /// A list row: the column's name, and whether it runs anything.
+    /// A list row: the column's category glyph, the sentence under its name, and whether it
+    /// runs anything.
     Column {
-        /// The column's name.
-        name: String,
-        /// Whether the `⚡` mark is drawn after it.
+        /// Which glyph leads the row.
+        category: StatusCategory,
+        /// `started · ⚡ claude runs the prompt · then → Done`.
+        helper: String,
+        /// Whether entering the column runs something.
         has_action: bool,
     },
     /// A closed list: `h` / `l` cycle it, and a click picks one of its options.
     Choice {
-        /// The value shown.
+        /// The value shown: an option, or a typed value off the grid.
         value: String,
-        /// Every value the row can take, in cycle order, as the row reads them.
+        /// Every option, in cycle order, as the control reads them.
         options: Vec<String>,
-        /// Where the value sits among the options.
-        at: usize,
-        /// Whether a previous value exists.
-        has_prev: bool,
-        /// Whether a next value exists.
-        has_next: bool,
+        /// Each option's detail (a model id beside its name), aligned with `options`.
+        details: Vec<String>,
+        /// Where the value sits among the steppable options; `None` off the grid.
+        at: Option<usize>,
+        /// Whether the last option is `Other model id…`, which opens the editor instead.
+        other: bool,
     },
-    /// `on enter`: a closed choice the pointer picks from a dropdown, whose third option carries
-    /// a skill name typed after `⏎` opens its editor.
-    Action {
-        /// The row's spelling, as typed.
-        value: String,
-        /// `none`, `prompt`, and the skill spelling the row would return to.
-        options: Vec<String>,
-        /// Where the value sits among the options.
-        at: usize,
-    },
-    /// Free text: `⏎` opens an editor over it.
+    /// Free text in a box; `⏎` opens the editor in its place.
     Text {
-        /// The value shown, already cut to one line.
+        /// The value, whole: a multi-line box wraps it.
         value: String,
         /// Whether it is drawn in the mono face.
         mono: bool,
+        /// Whether the box is a multi-line one.
+        multiline: bool,
     },
 }
 
 impl ColumnValue {
-    /// A text value, with `—` standing in for nothing at all.
+    /// A text value.
     #[must_use]
-    fn text(value: String, mono: bool) -> Self {
-        Self::Text { value, mono }
+    fn text(value: String, mono: bool, multiline: bool) -> Self {
+        Self::Text {
+            value,
+            mono,
+            multiline,
+        }
+    }
+
+    /// A choice over the model and effort catalogue.
+    #[must_use]
+    fn catalogue(choice: CatalogueChoice) -> Self {
+        Self::Choice {
+            value: choice.value,
+            options: choice.options,
+            details: choice.details,
+            at: choice.at,
+            other: choice.other,
+        }
     }
 }
 
 /// One prepared row of the Columns pane.
 ///
-/// Every label, value and disabled flag is computed here, when the draft changes, so `render`
-/// only picks a control (`docs/APP-CONTRACTS.md`: render prepares nothing).
+/// Every label and value is computed here, when the draft changes, so `render` only picks a
+/// control (`docs/APP-CONTRACTS.md`: render prepares nothing).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ColumnRow {
     /// Which row this is, for the cursor and the key handlers.
@@ -399,16 +500,19 @@ pub(super) struct ColumnRow {
     pub(super) label: String,
     /// What it draws.
     pub(super) value: ColumnValue,
-    /// Whether the board may not carry this row at all.
-    pub(super) disabled: bool,
 }
 
 /// Prepares the Columns pane: the list, or the drilled-into column's form.
+///
+/// On a board that may not carry automation the form is its name and category only: the
+/// automation rows are folded away under one callout rather than drawn disabled one by one
+/// (§5.4), so the cursor never lands on a row nothing can change.
 #[must_use]
 pub(super) fn prepare(
     columns: &[ColumnDraft],
     opened: Option<usize>,
     locked: bool,
+    catalogue: &Catalogue,
 ) -> Vec<ColumnRow> {
     let Some(index) = opened.filter(|index| *index < columns.len()) else {
         return columns
@@ -418,21 +522,21 @@ pub(super) fn prepare(
                 row: SettingRow::Column(index),
                 label: column.status.name.clone(),
                 value: ColumnValue::Column {
-                    name: column.status.name.clone(),
+                    category: column.status.category,
+                    helper: column.list_helper(columns),
                     has_action: column.has_action(),
                 },
-                disabled: false,
             })
             .collect();
     };
     let column = &columns[index];
     column_fields(column)
         .into_iter()
+        .filter(|field| !(locked && field.is_automation()))
         .map(|field| ColumnRow {
             row: SettingRow::ColumnField(field),
             label: field.label().to_owned(),
-            value: column.value(field, columns),
-            disabled: locked && field.is_automation(),
+            value: column.value(field, columns, catalogue),
         })
         .collect()
 }
@@ -580,22 +684,6 @@ fn env_entries(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// How a multi-line `env` row reads on one line.
-#[must_use]
-fn one_line_env(text: &str) -> String {
-    let entries = env_entries(text);
-    if entries.is_empty() {
-        return EMPTY.to_owned();
-    }
-    entries.join(", ")
-}
-
-/// The first line of a block, which is all a one-line row can state.
-#[must_use]
-fn first_line(text: &str) -> String {
-    text.lines().next().unwrap_or_default().trim().to_owned()
-}
-
 /// A routing row: `off`, or the column it points at.
 #[must_use]
 fn route_value(target: Option<&StatusId>, columns: &[ColumnDraft]) -> ColumnValue {
@@ -604,38 +692,37 @@ fn route_value(target: Option<&StatusId>, columns: &[ColumnDraft]) -> ColumnValu
             .iter()
             .position(|column| column.status.id == *target)
     });
-    let value = at.map_or_else(
-        || {
-            target.map_or_else(
-                || ROUTE_OFF.to_owned(),
-                // A target the vector no longer holds — the column it named was deleted in this
-                // same draft — is shown as the id it still is, never silently as `off`.
-                |target| format!("\u{2192} {target}"),
-            )
-        },
-        |at| format!("\u{2192} {}", columns[at].status.name),
-    );
-    choice(
-        value,
-        at.map_or(0, |at| at + 1),
+    let mut value = choice(
+        Some(at.map_or(0, |at| at + 1)),
         std::iter::once(ROUTE_OFF.to_owned()).chain(
             columns
                 .iter()
                 .map(|column| format!("\u{2192} {}", column.status.name)),
         ),
-    )
+    );
+    // A target the vector no longer holds — the column it named was deleted in this same
+    // draft — is shown as the id it still is, off the grid, never silently as `off`.
+    if let (Some(target), None) = (target, at)
+        && let ColumnValue::Choice { value, at, .. } = &mut value
+    {
+        *value = format!("\u{2192} {target}");
+        *at = None;
+    }
+    value
 }
 
-/// A cycler value with its options and the arrows its position earns.
+/// A closed choice over `options`, the value being option `at` (`None`: off the grid).
 #[must_use]
-fn choice(value: String, at: usize, options: impl IntoIterator<Item = String>) -> ColumnValue {
+fn choice(at: Option<usize>, options: impl IntoIterator<Item = String>) -> ColumnValue {
     let options: Vec<String> = options.into_iter().collect();
     ColumnValue::Choice {
-        value,
-        has_prev: at > 0,
-        has_next: at + 1 < options.len(),
+        value: at
+            .and_then(|at| options.get(at).cloned())
+            .unwrap_or_default(),
+        details: vec![String::new(); options.len()],
         options,
         at,
+        other: false,
     }
 }
 
@@ -676,19 +763,6 @@ pub(super) const fn provider_word(kind: AgentKind) -> &'static str {
     }
 }
 
-/// The word `--mode` takes.
-#[must_use]
-pub(super) const fn mode_word(mode: PermissionMode) -> &'static str {
-    match mode {
-        PermissionMode::Ask => "ask",
-        PermissionMode::AcceptEdits => "accept-edits",
-        PermissionMode::Plan => "plan",
-        PermissionMode::Auto => "auto",
-        PermissionMode::DontAsk => "dont-ask",
-        PermissionMode::FullAccess => "full-access",
-    }
-}
-
 /// `h` / `l` on a column row: step whatever closed choice it holds.
 ///
 /// A locked row is refused here rather than at the key, so every path into it — the arrows,
@@ -699,6 +773,7 @@ pub(super) fn cycle_field(
     field: ColumnField,
     delta: isize,
     locked: bool,
+    catalogue: &Catalogue,
 ) -> bool {
     if locked && field.is_automation() {
         return false;
@@ -740,6 +815,37 @@ pub(super) fn cycle_field(
             agent.provider = next
                 .checked_sub(1)
                 .and_then(|at| PROVIDERS.get(at).copied());
+        }
+        // Model and Effort type as well as step: `h` / `l` walk the catalogue, `⏎` opens the box
+        // for a value it does not hold. A model row with no catalogue only types.
+        ColumnField::Model | ColumnField::Effort => {
+            let agent = agent_mut(column);
+            let provider = agent.provider;
+            let choice = if field == ColumnField::Model {
+                let Some(choice) =
+                    CatalogueChoice::model(catalogue, provider, agent.model.as_deref(), INHERITED)
+                else {
+                    return false;
+                };
+                choice
+            } else {
+                CatalogueChoice::effort(
+                    catalogue,
+                    provider,
+                    agent.effort.as_deref(),
+                    EFFORT_INHERITED,
+                )
+            };
+            let next = choice.stepped(delta);
+            let slot = if field == ColumnField::Model {
+                &mut agent.model
+            } else {
+                &mut agent.effort
+            };
+            if *slot == next {
+                return false;
+            }
+            *slot = next;
         }
         ColumnField::Mode => {
             let agent = agent_mut(column);

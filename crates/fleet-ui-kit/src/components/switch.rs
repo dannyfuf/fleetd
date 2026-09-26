@@ -1,9 +1,11 @@
 //! `Switch` — a pill track with a knob: on is the accent fill with the knob at the end, off is a
 //! muted track with the knob at the start.
 //!
-//! A boolean setting draws one through [`super::Toggle`], which keeps the settings row, its
-//! label and its keyboard (`Space`); use a bare `Switch` only where a boolean sits outside such a
-//! list. A choice between named options is a [`super::SegmentedControl`], not two switches.
+//! Usage rule: a boolean setting puts one inside a [`super::SettingsRow`] as its `control`, at
+//! the row's end; a rule row whose switch enables what the row describes puts it in the row's
+//! `leading` slot instead. The row keeps the label, the helper, the cursor and the keyboard
+//! (`Space`). A choice between named options is a [`super::SegmentedControl`] (through
+//! [`super::Cycler::inline`]), not two switches.
 //!
 //! Like a button, a switch is not focusable (ADR 0023): the row it sits in carries the cursor and
 //! the key.

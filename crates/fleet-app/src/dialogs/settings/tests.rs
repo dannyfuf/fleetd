@@ -283,14 +283,21 @@ fn durations_read_as_one_unit() {
 }
 
 #[test]
-fn every_section_has_a_title_and_only_data_sections_are_editable() {
+fn every_section_has_a_title_and_only_config_file_sections_end_with_a_caption() {
     for section in Section::ALL {
         assert!(!section.title().is_empty());
     }
-    assert!(Section::Agents.editable());
-    assert!(!Section::General.editable());
-    assert!(!Section::Hosts.editable());
-    assert!(!Section::About.editable());
+    assert_eq!(
+        Section::General.caption(),
+        Some("Change these in config.json.")
+    );
+    assert_eq!(Section::Hosts.caption(), Section::General.caption());
+    assert_eq!(
+        Section::Sleep.caption(),
+        Some("Rules are defined in config.json. Open it from the footer to add or change one.")
+    );
+    assert!(Section::About.caption().is_none());
+    assert!(Section::Agents.caption().is_none());
 }
 
 #[test]
@@ -363,18 +370,13 @@ fn stable_addresses_match_rendered_editable_rows() {
             draft.row = index;
             let focused = draft.focused_row().expect("loaded row");
             assert_eq!(focused.id, row.id);
-            if matches!(row.kind, RowKind::Text(_) | RowKind::Number { .. }) {
-                let rendered_value = match row.kind {
-                    RowKind::Text(value) => value,
+            if row.kind.opens_editor() {
+                let value_of = |kind: RowKind| match kind {
+                    RowKind::Text(value) | RowKind::Model { value, .. } => value,
                     RowKind::Number { value, .. } => value.to_string(),
-                    _ => unreachable!(),
+                    other => panic!("not an editable value: {other:?}"),
                 };
-                let focused_value = match focused.kind {
-                    RowKind::Text(value) => value,
-                    RowKind::Number { value, .. } => value.to_string(),
-                    _ => unreachable!(),
-                };
-                assert_eq!(focused_value, rendered_value);
+                assert_eq!(value_of(focused.kind), value_of(row.kind));
             }
         }
     }
@@ -387,6 +389,7 @@ struct SettingsInput {
 impl gpui::Render for SettingsInput {
     fn render(&mut self, _: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
         let state = self.state.clone();
+        let focus = self.focus.clone();
         // The shell publishes `Settings` while browsing and `SettingsEditing` while a row
         // editor exists, and mounts that editor inside the dialog's focus subtree. The fixture
         // reproduces both, because that pair is exactly what this test is about.
@@ -406,10 +409,10 @@ impl gpui::Render for SettingsInput {
                 &self.state,
                 &self.focus,
             )
-            // The dialog's own `Enter` saves after this; the fixture drives only the half
-            // that opens a row, which is what the keys below are about.
+            // The dialog's own `Enter` saves after this on a row that opens nothing; the
+            // fixture drives only the half that opens and closes a row's editor.
             .on_action(move |_: &dialog::Confirm, window, cx| {
-                confirm_opens_editing(&state, window, cx);
+                confirm_opens_editing(&state, &focus, window, cx);
             }),
         )
     }
@@ -468,6 +471,83 @@ fn dispatched_edits_update_the_selected_setting_and_keep_navigation_available(
             assert_eq!(host.settings.row, 2);
             assert!(host.settings.editing.is_none());
             assert!(host.settings_input.is_none());
+        })
+    });
+}
+
+/// §3.8.6: `Enter` in an open editor keeps what was typed and closes the box in place, leaving
+/// the dialog open on the same row; a value that breaks its rule keeps the box open instead.
+#[gpui::test]
+fn enter_in_an_open_editor_keeps_the_value_and_closes_the_box(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| {
+        cx.set_global(fleet_ui_kit::Theme::dark());
+        crate::keymap::init(cx);
+    });
+    let state = cx.new(|_| AppState::new("/tmp/settings-enter", std::time::Instant::now()));
+    cx.update(|cx| {
+        with_host(&state, cx, |host| {
+            host.settings = draft();
+            host.settings.section = Section::Agents.index();
+            host.settings.row = 1;
+        });
+        refresh_rows(&state, cx);
+    });
+    let window = cx.add_window(|_, cx| SettingsInput {
+        state: state.clone(),
+        focus: cx.focus_handle(),
+    });
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    window
+        .update(&mut visual, |view, window, cx| {
+            window.focus(&view.focus, cx)
+        })
+        .expect("focus settings");
+    visual.simulate_keystrokes("enter");
+    visual.simulate_input("-x");
+    visual.simulate_keystrokes("enter");
+    visual.update(|_, cx| {
+        with_host(&state, cx, |host| {
+            assert_eq!(
+                host.settings.config.as_ref().unwrap().agent_commands.claude,
+                "claude-x"
+            );
+            assert_eq!(host.settings.row, 1, "the cursor stays on the row");
+            assert!(host.settings.editing.is_none(), "the box closed");
+            assert!(host.settings_input.is_none());
+        });
+    });
+    window
+        .update(&mut visual, |view, window, _| {
+            assert!(
+                view.focus.is_focused(window),
+                "the keys went back to the dialog"
+            );
+        })
+        .expect("settings window");
+
+    // Status › Local status refresh has a floor of 500 ms: a value under it keeps its box open.
+    cx.update(|cx| {
+        with_host(&state, cx, |host| {
+            host.settings.section = Section::Status.index();
+            host.settings.row = 0;
+        });
+        refresh_rows(&state, cx);
+    });
+    visual.simulate_keystrokes("enter");
+    // The default is four digits; a few spare backspaces on an empty buffer are harmless.
+    visual.simulate_keystrokes("backspace backspace backspace backspace backspace backspace");
+    visual.simulate_input("9");
+    visual.simulate_keystrokes("enter");
+    visual.update(|_, cx| {
+        read_host(&state, cx, |host, _| {
+            assert!(
+                host.settings.edit_rule.is_some(),
+                "9 ms breaks the 500 ms floor"
+            );
+            assert!(
+                host.settings_input.is_some(),
+                "the box stays open on a broken rule"
+            );
         })
     });
 }
@@ -763,6 +843,73 @@ fn search_finds_rows_across_sections_by_every_word() {
     let retention = schema::search_hits("RETENTION", &state, &app);
     assert_eq!(retention.len(), 1);
     assert_eq!(retention[0].section, Section::Jobs);
+    // A hit's spans are its label with the typed words marked strong; a word matched only in
+    // the helper or the section leaves the label plain.
+    assert_eq!(
+        retention[0].spans,
+        vec![("Trash ".to_owned(), false), ("retention".to_owned(), true)]
+    );
+    // `model` matched Effort's helper, so only `claude` — the card prefix — is strong there.
+    assert_eq!(
+        hits[1].spans,
+        vec![
+            ("Claude".to_owned(), true),
+            (" \u{203a} Effort".to_owned(), false)
+        ]
+    );
+}
+
+#[test]
+fn label_spans_mark_every_typed_word_and_join_back_to_the_label() {
+    let words =
+        |query: &str| -> Vec<String> { query.split_whitespace().map(str::to_lowercase).collect() };
+    let joined = |spans: &[(String, bool)]| -> String {
+        spans.iter().map(|(text, _)| text.as_str()).collect()
+    };
+    // No match: one plain span.
+    assert_eq!(
+        schema::label_spans("Grace", &words("zzz")),
+        vec![("Grace".to_owned(), false)]
+    );
+    assert_eq!(
+        schema::label_spans("", &words("a")),
+        vec![(String::new(), false)]
+    );
+    // A word in the middle, case-insensitively, with the card prefix kept plain.
+    let spans = schema::label_spans("Claude \u{203a} Effort", &words("EFFORT"));
+    assert_eq!(
+        spans,
+        vec![
+            ("Claude \u{203a} ".to_owned(), false),
+            ("Effort".to_owned(), true)
+        ]
+    );
+    assert_eq!(joined(&spans), "Claude \u{203a} Effort");
+    // Two words, and a word that occurs twice; overlapping matches merge.
+    let spans = schema::label_spans("Keep finished jobs for", &words("keep jobs"));
+    assert_eq!(
+        spans,
+        vec![
+            ("Keep".to_owned(), true),
+            (" finished ".to_owned(), false),
+            ("jobs".to_owned(), true),
+            (" for".to_owned(), false)
+        ]
+    );
+    let spans = schema::label_spans("Repo cache · PR cache", &words("cache ca"));
+    assert_eq!(
+        spans,
+        vec![
+            ("Repo ".to_owned(), false),
+            ("cache".to_owned(), true),
+            (" \u{b7} PR ".to_owned(), false),
+            ("cache".to_owned(), true)
+        ]
+    );
+    // A character whose lowercase form is longer in bytes never splits a span mid-character.
+    let spans = schema::label_spans("İstanbul host", &words("host"));
+    assert_eq!(joined(&spans), "İstanbul host");
+    assert_eq!(spans[1], ("host".to_owned(), true));
 }
 
 #[test]
@@ -788,4 +935,389 @@ fn the_cursor_row_reads_as_its_label_and_value() {
     assert_eq!(state.cursor_summary(), "Default agent = Claude");
     state.row = 4;
     assert_eq!(state.cursor_summary(), "Default model = ");
+}
+
+/// A fixture dialog root that, like the shell, closes the overlay on a `dialog::Cancel` the
+/// settings handler lets through, so a test can tell "kept" from "closed".
+struct SettingsEscape {
+    state: Entity<AppState>,
+    focus: FocusHandle,
+    closed: Rc<std::cell::Cell<bool>>,
+}
+
+impl gpui::Render for SettingsEscape {
+    fn render(&mut self, _: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        let editing = read_host(&self.state, cx, |host, _| host.settings_input.clone());
+        let word = if editing.is_some() {
+            "SettingsEditing"
+        } else {
+            "Settings"
+        };
+        let state = self.state.clone();
+        let focus = self.focus.clone();
+        let closed = self.closed.clone();
+        div()
+            .key_context("Dialog")
+            .size_full()
+            .on_action(move |_: &dialog::Cancel, _, _| closed.set(true))
+            .child(
+                super::view::input_actions(
+                    div()
+                        .key_context(word)
+                        .track_focus(&self.focus)
+                        .size_full()
+                        .children(editing),
+                    &self.state,
+                    &self.focus,
+                )
+                .on_action({
+                    let state = state.clone();
+                    let focus = focus.clone();
+                    move |_: &dialog::Confirm, window, cx| {
+                        confirm_opens_editing(&state, &focus, window, cx);
+                    }
+                })
+                .on_action(move |_: &dialog::Cancel, window, cx| {
+                    if cancel(&state, &focus, window, cx) {
+                        cx.stop_propagation();
+                    } else {
+                        cx.propagate();
+                    }
+                }),
+            )
+    }
+}
+
+fn open_escape_fixture(
+    cx: &mut gpui::TestAppContext,
+    section: Section,
+    row: usize,
+) -> (
+    Entity<AppState>,
+    Rc<std::cell::Cell<bool>>,
+    gpui::VisualTestContext,
+) {
+    cx.update(|cx| {
+        cx.set_global(fleet_ui_kit::Theme::dark());
+        crate::keymap::init(cx);
+    });
+    let state = cx.new(|_| AppState::new("/tmp/settings-escape", std::time::Instant::now()));
+    cx.update(|cx| {
+        with_host(&state, cx, |host| {
+            host.settings = draft();
+            host.settings.section = section.index();
+            host.settings.row = row;
+        });
+        refresh_rows(&state, cx);
+    });
+    let closed = Rc::new(std::cell::Cell::new(false));
+    let window = cx.add_window({
+        let state = state.clone();
+        let closed = closed.clone();
+        move |_, cx| SettingsEscape {
+            state,
+            focus: cx.focus_handle(),
+            closed,
+        }
+    });
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    window
+        .update(&mut visual, |view, window, cx| {
+            window.focus(&view.focus, cx)
+        })
+        .expect("focus settings");
+    (state, closed, visual)
+}
+
+/// §1 Esc ladder: `Esc` in an open editor puts the row's value back, closes the box in place and
+/// keeps the dialog; it no longer discards the whole draft.
+#[gpui::test]
+fn esc_reverts_an_open_editor_and_keeps_the_dialog(cx: &mut gpui::TestAppContext) {
+    // Agents › Claude › Terminal command.
+    let (state, closed, mut visual) = open_escape_fixture(cx, Section::Agents, 1);
+    visual.simulate_keystrokes("enter");
+    visual.simulate_input("-typed");
+    visual.update(|_, cx| {
+        with_host(&state, cx, |host| {
+            let config = host.settings.config.as_ref().expect("loaded");
+            assert_eq!(config.agent_commands.claude, "claude-typed");
+            assert!(host.settings.dirty());
+        })
+    });
+    visual.simulate_keystrokes("escape");
+    visual.update(|_, cx| {
+        with_host(&state, cx, |host| {
+            let config = host.settings.config.as_ref().expect("loaded");
+            assert_eq!(
+                config.agent_commands.claude, "claude",
+                "the edit is reverted"
+            );
+            assert!(host.settings_input.is_none(), "the editor closed in place");
+            assert!(host.settings.editing.is_none());
+            assert!(!host.settings.dirty());
+            assert!(!host.settings.discard_armed, "a revert asks nothing");
+            assert_eq!(host.settings.cursor_summary(), "Terminal command = claude");
+        })
+    });
+    assert!(!closed.get(), "the dialog stays open");
+}
+
+/// §1 Esc ladder: the first `Esc` on a dirty draft arms and paints the amber strip; the second
+/// discards, which is the shell closing the overlay.
+#[gpui::test]
+fn the_first_esc_on_a_dirty_draft_asks_and_the_second_discards(cx: &mut gpui::TestAppContext) {
+    let (state, closed, mut visual) = open_escape_fixture(cx, Section::Sleep, 0);
+    visual.simulate_keystrokes("space");
+    visual.update(|_, cx| {
+        with_host(&state, cx, |host| {
+            assert!(host.settings.dirty());
+            assert!(
+                host.settings.discard_warning().is_none(),
+                "dirty paints nothing"
+            );
+        })
+    });
+    visual.simulate_keystrokes("escape");
+    visual.update(|_, cx| {
+        with_host(&state, cx, |host| {
+            assert!(host.settings.discard_armed);
+            assert_eq!(
+                host.settings.discard_warning(),
+                Some("Unsaved changes. Press Esc again to discard them.")
+            );
+        })
+    });
+    assert!(!closed.get(), "the first Esc only asks");
+    visual.simulate_keystrokes("escape");
+    assert!(
+        closed.get(),
+        "the second Esc reaches the shell and discards"
+    );
+}
+
+/// A clean draft closes at once: there is nothing to ask about.
+#[test]
+fn esc_on_a_clean_draft_closes_at_once() {
+    let mut clean = draft();
+    assert_eq!(clean.escape(), EscapeStep::Close);
+    assert!(!clean.discard_armed);
+}
+
+/// Any edit after the question disarms it, so the next `Esc` asks about the draft as it now is.
+#[test]
+fn an_edit_disarms_the_discard_question() {
+    let mut state = draft();
+    state.section = Section::Jobs.index();
+    let app = AppState::new("/tmp/fleet", std::time::Instant::now());
+    state.prepared = rows(&state, &app).into();
+    let config = state.config.as_mut().expect("loaded");
+    toggle(config, &RowId::WarnBeforeQuit);
+    assert_eq!(state.escape(), EscapeStep::Ask);
+    assert!(state.discard_warning().is_some());
+
+    let config = state.config.as_mut().expect("loaded");
+    cycle(config, &RowId::KeepFinishedFor, 1, &Efforts::default());
+    state.row = 1;
+    state.update_selected();
+    assert!(!state.discard_armed, "an edit disarms");
+    assert!(state.discard_warning().is_none(), "the strip is gone again");
+    assert_eq!(state.escape(), EscapeStep::Ask, "the next Esc asks again");
+    assert_eq!(state.escape(), EscapeStep::Close);
+}
+
+fn catalogue() -> Models {
+    Models::from_lists(
+        vec![
+            ModelOption {
+                id: "claude-opus-5-5".to_owned(),
+                name: "Opus 5.5".to_owned(),
+            },
+            ModelOption {
+                id: "claude-sonnet-5".to_owned(),
+                name: "Sonnet 5".to_owned(),
+            },
+        ],
+        Vec::new(),
+    )
+}
+
+/// §3 Model choice: a harness that reported models gets a dropdown (Harness default, then its
+/// models by name); one that reported none keeps the text box, as does a row being typed into.
+#[test]
+fn the_model_row_draws_a_dropdown_only_when_the_harness_reported_models() {
+    let mut state = draft();
+    state.models = catalogue();
+    state.section = Section::Agents.index();
+    let app = AppState::new("/tmp/fleet", std::time::Instant::now());
+    let list = rows(&state, &app);
+    let claude = list
+        .iter()
+        .find(|row| row.id == RowId::ClaudeDefaultModel)
+        .expect("claude's model row");
+    let codex = list
+        .iter()
+        .find(|row| row.id == RowId::CodexDefaultModel)
+        .expect("codex's model row");
+    assert!(claude.kind.draws_model_dropdown(false));
+    assert!(
+        !claude.kind.draws_model_dropdown(true),
+        "an id being typed draws the text box in place of the dropdown"
+    );
+    assert!(
+        !codex.kind.draws_model_dropdown(false),
+        "no catalogue: a text box"
+    );
+    assert_eq!(
+        claude.detail.as_deref(),
+        Some("The models claude reported. Harness default lets claude pick.")
+    );
+    assert_eq!(
+        codex.detail.as_deref(),
+        Some("Empty means the harness picks.")
+    );
+    assert!(matches!(&claude.kind, RowKind::Model { shown, .. } if shown == "Harness default"));
+
+    // `→` steps Harness default → the models in order, never wrapping; the dropdown then reads
+    // the model's name, and a typed id the catalogue lacks reads as itself.
+    let models = catalogue();
+    let config = state.config.as_mut().expect("loaded");
+    cycle_model(config, AgentKind::Claude, 1, &models);
+    assert_eq!(
+        config.native_agents.claude.model.as_deref(),
+        Some("claude-opus-5-5")
+    );
+    cycle_model(config, AgentKind::Claude, 1, &models);
+    cycle_model(config, AgentKind::Claude, 1, &models);
+    assert_eq!(
+        config.native_agents.claude.model.as_deref(),
+        Some("claude-sonnet-5")
+    );
+    assert!(matches!(
+        model_of(config, AgentKind::Claude, &models),
+        RowKind::Model { shown, .. } if shown == "Sonnet 5"
+    ));
+    select_model(config, AgentKind::Claude, None, &models);
+    assert!(config.native_agents.claude.model.is_none());
+    assert!(commit_value(
+        config,
+        &RowId::ClaudeDefaultModel,
+        "claude-next"
+    ));
+    assert!(matches!(
+        model_of(config, AgentKind::Claude, &models),
+        RowKind::Model { shown, value, .. } if shown == "claude-next" && value == "claude-next"
+    ));
+}
+
+/// §3 Keep-alive rule row: a rule whose pattern does not compile is drawn disabled, and its card
+/// ends with the one danger sentence saying so.
+#[test]
+fn a_keep_alive_rule_with_a_broken_pattern_is_disabled_and_captioned() {
+    let mut state = draft();
+    state.section = Section::Sleep.index();
+    let rules = state
+        .config
+        .as_ref()
+        .map(|config| config.sleep.keep_alive.clone())
+        .expect("loaded");
+    let broken = rules
+        .iter()
+        .find(|rule| rule.kind == KeepAliveKind::Process)
+        .expect("a process rule");
+    state.matches = rules
+        .iter()
+        .map(|rule| KeepAliveRuleMatch {
+            rule_id: rule.id.clone(),
+            count: 2,
+            error: (rule.id == broken.id).then(|| "regex parse error".to_owned()),
+        })
+        .collect();
+    let app = AppState::new("/tmp/fleet", std::time::Instant::now());
+    let list = rows(&state, &app);
+    let rule_rows: Vec<&SettingRow> = list
+        .iter()
+        .filter(|row| matches!(row.id, RowId::KeepAliveRule(_)))
+        .collect();
+    assert_eq!(rule_rows.len(), rules.len());
+    let broken_row = rule_rows
+        .iter()
+        .find(|row| row.label == broken.label)
+        .expect("the broken rule's row");
+    assert!(matches!(
+        &broken_row.kind,
+        RowKind::Rule {
+            broken: true,
+            running: None,
+            badge: "command",
+            ..
+        }
+    ));
+    assert!(rule_rows.iter().all(|row| row.card == Some(KEEP_AWAKE)));
+    assert_eq!(
+        card_note(KEEP_AWAKE),
+        Some("matched against running processes now")
+    );
+    let card: Vec<SettingRow> = list
+        .iter()
+        .filter(|row| row.card == Some(KEEP_AWAKE))
+        .cloned()
+        .collect();
+    assert_eq!(
+        card_captions(&card),
+        vec![format!(
+            "{}: the pattern does not compile, so the rule is skipped.",
+            broken.label
+        )]
+    );
+    // A healthy rule reads its live count; its switch is still the row's `Space`.
+    assert!(rule_rows.iter().any(|row| matches!(
+        &row.kind,
+        RowKind::Rule {
+            broken: false,
+            running: Some(2),
+            ..
+        }
+    )));
+}
+
+/// The search field's `shown/total` count divides by every row of every section.
+#[test]
+fn the_search_count_is_out_of_every_row_across_sections() {
+    let state = draft();
+    let app = AppState::new("/tmp/fleet", std::time::Instant::now());
+    let every: usize = Section::ALL
+        .iter()
+        .map(|section| schema::section_rows(*section, &state, &app).len())
+        .sum();
+    let (hits, total) = schema::search("refresh", &state, &app);
+    assert_eq!(total, every);
+    assert_eq!(
+        hits.iter()
+            .map(|hit| (hit.section, hit.label.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            (Section::Pool, "Refresh interval"),
+            (Section::Status, "Local status refresh"),
+            (Section::Status, "Remote status refresh"),
+        ]
+    );
+}
+
+/// Every editable row states one helper sentence (§3: "Every editable row carries a helper").
+#[test]
+fn every_editable_row_carries_a_helper_sentence() {
+    let state = draft();
+    let app = AppState::new("/tmp/fleet", std::time::Instant::now());
+    for section in Section::ALL {
+        for row in schema::section_rows(*section, &state, &app) {
+            if row.id == RowId::ReadOnly || matches!(row.id, RowId::KeepAliveRule(_)) {
+                continue;
+            }
+            let helper = row
+                .detail
+                .as_deref()
+                .unwrap_or_else(|| panic!("{} has no helper", row.label));
+            assert!(helper.ends_with('.'), "{helper:?} is a sentence");
+        }
+    }
 }

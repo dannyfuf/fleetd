@@ -950,7 +950,7 @@ Escape. `DialogHost` owns these public fields:
 | `card_detail` + `card_detail_input` | `card_detail::CardDetailState` + `Option<Entity<TextInput>>` | `card_id`, `property_row`, `edit: Option<CardEdit>`, revision, saving and error; one input is created at edit start and dropped at save/cancel |
 | `card_create` + `card_create_title` / `card_create_description` | `card_create::CardCreateState` + two `Option<Entity<TextInput>>` fields | board id, focused field, save generation and error; submit reads both live inputs |
 | `card_picker` + `card_picker_input` | `card_picker::CardPickerState` + `Option<Entity<TextInput>>` | kind, card id, row cursor, selected values, return flags and error; `Changed` prepares filtered rows |
-| `board_settings` + `board_settings_input` | `board_settings::BoardSettingsState` + `Option<Entity<TextInput>>` | serializable board values, backend rows, focused row and error; a text-row input is materialized on focus and mirrors through `Changed` |
+| `board_settings` + `board_settings_input` | `board_settings::BoardSettingsState` + `Option<Entity<TextInput>>` | serializable board values, backend rows, cursor row and error; a text or number row's input is opened by `⏎` or a click on its box — never by landing on the row — and mirrors through `Changed` |
 
 The §3.8 dialogs own their editors the same way. Each is created by that dialog's `seed` and
 dropped by `close_with`, and every one of them is reported by `dialogs::focused_input`, so the
@@ -981,7 +981,8 @@ fields keep their names and meanings. `DialogHost.card_detail_input` is the **on
 used by the three text surfaces (title, description, comment), because at most one is open.
 `Dialogs::CardDetail.width()` is `sheet_w_detail` (736 px): the detail is a right-side `Sheet`
 the shell places in `AppFrame::body_overlay`, as it does the Jobs panel, so the board stays
-visible beside it. The other three board dialogs are 560 px.
+visible beside it. New card and Card property are 560 px; Board settings shares Settings'
+760 × 600 shell (`SETTINGS_W` × `SETTINGS_H`, rail `SETTINGS_RAIL_W`, UX-SPEC §3.8.6).
 
 `card_picker::PickerKind` is `Status | Priority | Assignee | Labels | Estimate |
 DueDate | Repo | Property(String)`. Set `host.card_picker.kind` before opening
@@ -1006,8 +1007,8 @@ Three additions outside the skeleton's list:
   that dialog.
 * `Dialog > CardPicker` always binds `space` to `settings::Toggle` (multi-select); its
   always-focused query is a filter that intentionally never contains a space. Browsing
-  `Dialog > BoardSettings` binds `j`/`k`/`h`/`l`/`space` to the `settings::*` actions, and a
-  focused text or number row publishes `Dialog > BoardSettingsEditing`. Everything else these
+  `Dialog > BoardSettings` binds `j`/`k`/`h`/`l`/`space` to the `settings::*` actions, and an
+  open text or number editor publishes `Dialog > BoardSettingsEditing`. Everything else these
   dialogs answer is inherited from the generic `Dialog` context.
 * `ConfirmRequest::DeleteCard { card, key, title }` routes `d` on the board through
   §3.8.3, like every other destructive key. A card with a `remote` link never reaches the
@@ -1037,11 +1038,12 @@ land on a different fleetd) but keeps the descriptors, so the header's label nev
   `backend_rows(schema, settings)` → `Vec<BackendRow>`, `rows_to_settings(base, rows)` →
   settings JSON (keeping keys the schema never names, removing the ones a row emptied, writing
   numbers as numbers), and `rows_error(rows)` for the required and numeric rules.
-  `PropertyKind` picks the browsing control: `Bool` → `Toggle`, `Select` → `Cycler` over the
-  schema's options, `Number` → `NumberField`, everything else → a read-only `FactRow` (an empty
-  value reads `—`, never a blank box). A focused free-text or number row materializes a
-  single-line `TextInput` (numbers filter to ASCII digits), and `MultiSelect` is typed
-  comma-separated. `PropertySchema` has
+  Each row is a kit `SettingsRow`, and `PropertyKind` picks its control: `Bool` → `Switch`,
+  `Select` → an inline `Cycler` over the schema's options, `Number` → a number `ValueBox`
+  (`invalid` from the row's error), everything else → a text `ValueBox` showing the schema's
+  placeholder when empty, and `MultiSelect` a text `ValueBox` typed comma-separated (placeholder
+  `comma, separated, values`). The box's editor is a single-line `TextInput` drawn inside it in
+  place (numbers filter to ASCII digits), so the row never changes height. `PropertySchema` has
   no `required` flag, so a name ending in `fleet_core::board::REQUIRED_MARKER` (`(required)`,
   re-exported as `board_settings::REQUIRED_MARKER`) is the signal; the marker is stripped from
   the label and shown as `∗`. It lives in the core because the daemon reads it the same way: a
