@@ -382,11 +382,13 @@ fn stable_addresses_match_rendered_editable_rows() {
 
 struct SettingsInput {
     state: Entity<AppState>,
+    bridge: Bridge,
     focus: FocusHandle,
 }
 impl gpui::Render for SettingsInput {
     fn render(&mut self, _: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
         let state = self.state.clone();
+        let bridge = self.bridge.clone();
         // The shell publishes `Settings` while browsing and `SettingsEditing` while a row
         // editor exists, and mounts that editor inside the dialog's focus subtree. The fixture
         // reproduces both, because that pair is exactly what this test is about.
@@ -409,7 +411,7 @@ impl gpui::Render for SettingsInput {
             // The dialog's own `Enter` saves after this; the fixture drives only the half
             // that opens a row, which is what the keys below are about.
             .on_action(move |_: &dialog::Confirm, window, cx| {
-                confirm_opens_editing(&state, window, cx);
+                confirm_opens_editing(&state, &bridge, window, cx);
             }),
         )
     }
@@ -433,6 +435,7 @@ fn dispatched_edits_update_the_selected_setting_and_keep_navigation_available(
     });
     let window = cx.add_window(|_, cx| SettingsInput {
         state: state.clone(),
+        bridge: Bridge::closed(),
         focus: cx.focus_handle(),
     });
     let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
@@ -492,6 +495,7 @@ fn a_number_row_refuses_every_non_digit(cx: &mut gpui::TestAppContext) {
     });
     let window = cx.add_window(|_, cx| SettingsInput {
         state: state.clone(),
+        bridge: Bridge::closed(),
         focus: cx.focus_handle(),
     });
     let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);

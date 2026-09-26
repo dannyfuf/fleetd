@@ -13,13 +13,14 @@ use super::*;
 /// A click on row `row`: the cursor moves there, and a text or number row opens its editor.
 pub(super) fn click_row(
     state: &Entity<AppState>,
+    bridge: &Bridge,
     row: usize,
     focus: &FocusHandle,
     window: &mut Window,
     cx: &mut App,
 ) {
     put_cursor(state, row, focus, window, cx);
-    begin_editing(state, window, cx);
+    begin_editing(state, bridge, window, cx);
 }
 
 /// Moves the cursor to `row` of the shown section, closing any editor and leaving the search
@@ -132,6 +133,7 @@ pub(super) fn seed_search(state: &Entity<AppState>, cx: &mut App) {
                     // A row editor the click took the keyboard from is closed, as `j` would.
                     host.settings.editing = None;
                     host.settings_input_subscription = None;
+                    host.settings_input_media_subscription = None;
                     host.settings_input = None;
                     changed
                 });

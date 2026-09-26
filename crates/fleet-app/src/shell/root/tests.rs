@@ -13,8 +13,12 @@ use fleet_core::{
     model::{Context as FleetContext, Repo, RepoHooks, Worktree},
 };
 use fleet_proto::snapshot::{DaemonInfo, Snapshot};
-use gpui::{Action, Entity, FocusHandle, KeyDownEvent, Keystroke, VisualTestContext};
-use std::{cell::RefCell, rc::Rc, time::Instant};
+use fleet_ui_kit::TextInputMedia;
+use gpui::{
+    Action, ClipboardItem, Entity, ExternalPaths, FocusHandle, Image, ImageFormat, KeyDownEvent,
+    Keystroke, VisualTestContext,
+};
+use std::{cell::RefCell, path::PathBuf, rc::Rc, time::Instant};
 
 fn key_down(keys: &str) -> KeyDownEvent {
     KeyDownEvent {
@@ -1029,6 +1033,63 @@ fn real_shell_repository_hooks_grow_a_row_as_they_are_filled(cx: &mut gpui::Test
     assert_eq!(dialog_input_text(&mut fixture), "");
 }
 
+#[gpui::test]
+fn repository_hook_media_inserts_shell_quoted_paths_at_the_caret(cx: &mut gpui::TestAppContext) {
+    let mut fixture = root_repos_fixture(cx, "hook-media");
+    dispatch_root_key(&mut fixture, "j");
+    dispatch_root_key(&mut fixture, "e");
+    let state = fixture.state.clone();
+    fixture.visual.update(|_, cx| {
+        assert!(crate::dialogs::emit_focused_input_media(
+            &state,
+            "run ",
+            TextInputMedia::Dropped(ExternalPaths(
+                [
+                    PathBuf::from("/tmp/fleet one"),
+                    PathBuf::from("/tmp/fleet-two"),
+                ]
+                .into_iter()
+                .collect(),
+            )),
+            cx,
+        ));
+    });
+    settle(&mut fixture);
+
+    assert_eq!(
+        dialog_input_text(&mut fixture),
+        "run '/tmp/fleet one' /tmp/fleet-two"
+    );
+}
+
+#[gpui::test]
+fn a_failed_dialog_media_stage_is_sticky_and_inserts_nothing(cx: &mut gpui::TestAppContext) {
+    let mut fixture = root_repos_fixture(cx, "hook-media-failure");
+    dispatch_root_key(&mut fixture, "j");
+    dispatch_root_key(&mut fixture, "e");
+    let state = fixture.state.clone();
+    fixture.visual.update(|_, cx| {
+        assert!(crate::dialogs::emit_focused_input_media(
+            &state,
+            "unchanged",
+            TextInputMedia::Pasted(ClipboardItem::new_image(&Image::from_bytes(
+                ImageFormat::Png,
+                vec![137, 80, 78, 71],
+            ))),
+            cx,
+        ));
+    });
+    settle(&mut fixture);
+
+    assert_eq!(dialog_input_text(&mut fixture), "unchanged");
+    fixture.state.read_with(&fixture.visual, |app, _| {
+        assert_eq!(
+            app.sticky_error.as_ref().map(|error| error.text.as_str()),
+            Some("clipboard.png: the Fleet daemon bridge is closed")
+        );
+    });
+}
+
 /// The settings dialog with a configuration already loaded: the fixture's bridge is closed, so
 /// the daemon's `GetConfig` is refused and the rows are planted directly.
 fn open_loaded_settings(fixture: &mut RootInputFixture) {
@@ -1089,6 +1150,61 @@ fn real_shell_settings_text_row_opens_on_enter_and_then_types(cx: &mut gpui::Tes
             })
         ),
         (1, Some("claudej-code".to_owned()))
+    );
+}
+
+#[gpui::test]
+fn settings_terminal_command_media_inserts_a_shell_quoted_path(cx: &mut gpui::TestAppContext) {
+    let mut fixture = root_hub_fixture(cx, "settings-command-media");
+    open_loaded_settings(&mut fixture);
+    dispatch_root_key(&mut fixture, "tab");
+    dispatch_root_key(&mut fixture, "j");
+    dispatch_root_key(&mut fixture, "enter");
+    let state = fixture.state.clone();
+    fixture.visual.update(|_, cx| {
+        assert!(crate::dialogs::emit_focused_input_media(
+            &state,
+            "run ",
+            TextInputMedia::Dropped(ExternalPaths(
+                [PathBuf::from("/tmp/Fleet Tool")].into_iter().collect(),
+            )),
+            cx,
+        ));
+    });
+    settle(&mut fixture);
+
+    assert_eq!(dialog_input_text(&mut fixture), "run '/tmp/Fleet Tool'");
+}
+
+#[gpui::test]
+fn settings_thread_binary_media_inserts_bare_paths(cx: &mut gpui::TestAppContext) {
+    let mut fixture = root_hub_fixture(cx, "settings-binary-media");
+    open_loaded_settings(&mut fixture);
+    dispatch_root_key(&mut fixture, "tab");
+    dispatch_root_key(&mut fixture, "j");
+    dispatch_root_key(&mut fixture, "j");
+    dispatch_root_key(&mut fixture, "enter");
+    let state = fixture.state.clone();
+    fixture.visual.update(|_, cx| {
+        assert!(crate::dialogs::emit_focused_input_media(
+            &state,
+            "",
+            TextInputMedia::Dropped(ExternalPaths(
+                [
+                    PathBuf::from("/opt/Fleet Tool"),
+                    PathBuf::from("/tmp/fleet-two"),
+                ]
+                .into_iter()
+                .collect(),
+            )),
+            cx,
+        ));
+    });
+    settle(&mut fixture);
+
+    assert_eq!(
+        dialog_input_text(&mut fixture),
+        "/opt/Fleet Tool /tmp/fleet-two"
     );
 }
 

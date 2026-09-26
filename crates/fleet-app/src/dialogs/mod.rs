@@ -15,6 +15,7 @@ pub mod filter;
 mod footer;
 mod help;
 mod host;
+mod media;
 mod palette;
 mod quit;
 mod rename_terminal;
@@ -47,7 +48,7 @@ pub(crate) use host::{
     read_host, retain_task, with_host,
 };
 #[cfg(test)]
-pub(crate) use host::{focused_input_text, hook_row_count};
+pub(crate) use host::{emit_focused_input_media, focused_input_text, hook_row_count};
 pub use palette::PalettePr;
 pub(crate) use palette::{Run as PaletteRun, session_rows};
 pub(crate) use settings::editor_command;
@@ -272,7 +273,7 @@ pub(crate) fn seed(dialog: &Dialogs, state: &Entity<AppState>, bridge: &Bridge, 
         Dialogs::NewContext => context::seed(state, cx, false),
         Dialogs::EditContext => context::seed(state, cx, true),
         Dialogs::AssignRepo => assign_repo::seed(state, cx),
-        Dialogs::EditHooks => edit_hooks::seed(state, cx),
+        Dialogs::EditHooks => edit_hooks::seed(state, bridge, cx),
         Dialogs::Settings => settings::seed(state, bridge, cx),
         Dialogs::RenameTerminal => rename_terminal::seed(state, cx),
         Dialogs::Help => help::seed(state, cx),

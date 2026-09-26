@@ -1331,6 +1331,17 @@ and undo. Lists **under a text field** use `ctrl-n`/`ctrl-p` or `↓`/`↑` and 
 **A dialog row with no editor open (Assign, the Settings list while browsing, Confirm) does bind
 `j`/`k`.**
 
+Only a field whose value can be a local filesystem path accepts a pasted image or pasted/dropped
+file. The repository-hooks dialog's Prepare and Post-create command rows and Settings' Claude and
+Codex *Terminal command* rows insert each staged path as a separately shell-quoted word. Settings'
+Claude and Codex *Binary for threads* rows run without a shell and insert bare paths. Several
+successful paths keep source order and are joined by one space; insertion is at the caret as one
+undoable edit. Existing local files and folders keep their own path (`MediaAnchor::Local`, no
+copy), while a clipboard image is staged into the local Fleet downloads directory first. A
+staging failure inserts nothing for that item and uses the sticky error slot. Branches, titles,
+descriptions, comments, model/effort values, board automation and schedules, search/filter fields,
+pickers, the phase-2 composer and every read-only value deliberately remain text-only.
+
 ---
 
 #### 3.8.1 Create worktree (`n` in the worktrees pane)

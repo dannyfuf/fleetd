@@ -19,6 +19,7 @@ const UNSAVED: &str = "Unsaved";
 #[derive(Clone)]
 struct Handlers {
     state: Entity<AppState>,
+    bridge: Bridge,
     focus: FocusHandle,
 }
 
@@ -33,6 +34,7 @@ pub(crate) fn render(
 ) -> AnyElement {
     let handlers = Handlers {
         state: state.clone(),
+        bridge: bridge.clone(),
         focus: focus.clone(),
     };
     let cx: &App = cx;
@@ -175,7 +177,7 @@ pub(crate) fn render(
                 // §3.8.6: a text or number row is opened for editing by `Enter`; once its
                 // editor owns the keyboard the dialog publishes `SettingsEditing`, whose own
                 // `Enter` row reaches this handler again and saves. Every other row saves.
-                if confirm_opens_editing(&save_state, window, cx) {
+                if confirm_opens_editing(&save_state, &save_bridge, window, cx) {
                     return;
                 }
                 save(&save_state, &save_bridge, cx);
@@ -419,7 +421,14 @@ fn row_element(
                 .mono(true)
                 .focused(focused)
                 .on_click(move |window, cx| {
-                    click_row(&handlers.state, index, &handlers.focus, window, cx);
+                    click_row(
+                        &handlers.state,
+                        &handlers.bridge,
+                        index,
+                        &handlers.focus,
+                        window,
+                        cx,
+                    );
                 });
             if let Some(placeholder) = row.placeholder {
                 field = field.placeholder(placeholder);
@@ -463,7 +472,14 @@ fn row_element(
         .rounded(theme.radii.sm)
         .when(focused, |el| el.bg(theme.colors.row_selected))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-            click_row(&handlers.state, index, &handlers.focus, window, cx);
+            click_row(
+                &handlers.state,
+                &handlers.bridge,
+                index,
+                &handlers.focus,
+                window,
+                cx,
+            );
         })
         .child(control)
         .children(helper.map(|helper| {
