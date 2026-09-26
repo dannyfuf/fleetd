@@ -114,6 +114,8 @@ impl AgentThreadView {
     /// Replaces the daemon projection wholesale, which a thread switch does.
     pub fn set_projection(&mut self, projection: ThreadProjection, cx: &mut Context<Self>) {
         self.flush_reveal(cx);
+        self.cancel_pending_attachments(cx);
+        self.dispatched_attachments.clear();
         self.thread = projection.thread;
         self.projection = projection;
         self.rows_key = None;
@@ -636,6 +638,7 @@ impl AgentThreadView {
             ),
         };
         let enabled = mode.editor_enabled(choice_only) && !unreachable;
+        let accepts_media = mode.attachments_enabled(!choice_only) && !unreachable;
         // A question's free-text draft is per question and keyed by it, so stepping the wizard
         // brings back whatever was typed for the question it steps onto: pressing `[p]` must
         // never lose a typed answer.
@@ -644,6 +647,7 @@ impl AgentThreadView {
         self.input.update(cx, |input, cx| {
             input.set_placeholder(placeholder, cx);
             input.set_read_only(!enabled, cx);
+            input.set_accepts_media(accepts_media, cx);
             input.set_focus_visible(enabled, cx);
             if let Some(answer) = answer
                 && input.text(cx) != answer
@@ -792,6 +796,13 @@ impl AgentThreadView {
             let echoes = count_user_items(projection, &pending.text);
             echoes <= pending.echoes
         });
+        let still_pending = self
+            .pending
+            .iter()
+            .map(|pending| pending.id)
+            .collect::<std::collections::HashSet<_>>();
+        self.dispatched_attachments
+            .retain(|item, _| still_pending.contains(item));
         if self.pending.len() != before {
             self.pending_rev = self.pending_rev.wrapping_add(1);
         }

@@ -61,13 +61,6 @@ impl ComposerMode {
     ///
     /// Not under an approval: the approval sends no attachment, and a staged image would be
     /// silently dropped. Under a question only where the question accepts a custom answer.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the §B5.2 capability table is the         specification and is pinned by its own test; attachments themselves are not built yet,         and removing the row would let the table drift from the spec it encodes"
-        )
-    )]
     pub(crate) const fn attachments_enabled(self, allows_custom: bool) -> bool {
         match self {
             ComposerMode::Approval(_) => false,

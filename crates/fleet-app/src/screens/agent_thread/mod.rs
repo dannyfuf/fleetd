@@ -20,18 +20,20 @@
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
+    path::PathBuf,
     rc::Rc,
     time::Instant,
 };
 
 use fleet_core::agents::{
-    AgentThreadSummary, Delegation, DelegationId, GateId, ItemId, ItemKind, PermissionMode, Seq,
-    ThreadId, ThreadProjection, TurnId, UserInput,
+    AgentThreadSummary, Attachment, Delegation, DelegationId, GateId, ItemId, ItemKind,
+    PermissionMode, Seq, ThreadId, ThreadProjection, TurnId, UserInput,
 };
 use fleet_lazygit::diff_view::DiffView;
 use fleet_ui_kit::{
     Decision, DecisionKind, MetadataFit, MetadataSegment, MultilineInput, MultilineInputEvent,
-    RowAction, TranscriptEvent, TranscriptList, TranscriptRow, TranscriptRowKind,
+    PendingAttachmentState, RowAction, TextInputMedia, TranscriptEvent, TranscriptList,
+    TranscriptRow, TranscriptRowKind,
 };
 use gpui::{
     App, Context, Entity, EventEmitter, FocusHandle, Focusable, SharedString, Subscription, Task,
@@ -39,12 +41,14 @@ use gpui::{
 };
 
 use fleet_proto::agents::{CheckpointId, CheckpointScope, TurnCheckpoint};
+use fleet_proto::request::UploadId;
 
 use crate::bridge::BridgeCommand;
 
 pub(crate) mod actions;
 pub(crate) mod composer;
 pub(crate) mod decisions;
+pub(crate) mod media;
 pub(crate) mod picker;
 pub(crate) mod presentation;
 mod reveal;
@@ -79,6 +83,10 @@ pub(crate) enum AgentThreadEvent {
     SelectCard(fleet_core::ids::CardId),
     /// Say something short to the user, as a transient toast.
     Notice(SharedString),
+    /// Stage an opted-in image paste or file drop through the Workspace's bridge and app state.
+    StageMedia(TextInputMedia),
+    /// Cancel a removed chip's still-live registry upload.
+    CancelMedia(UploadId),
     /// The reader reached the oldest row this client holds: load the page behind it.
     ///
     /// Emitted whatever the mirror holds, because the view does not know: the workspace asks the
@@ -105,6 +113,24 @@ pub(crate) struct ThreadHost {
     pub(crate) name: SharedString,
     /// Whether the daemon reports the link to that machine as down.
     pub(crate) unreachable: bool,
+}
+
+/// One image or file being prepared for the next native-agent send.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct PendingAttachment {
+    pub(crate) id: usize,
+    pub(crate) upload: UploadId,
+    pub(crate) name: String,
+    pub(crate) media_type: String,
+    pub(crate) state: PendingAttachmentState,
+    pub(crate) path: Option<PathBuf>,
+}
+
+/// One background metadata check reserving attachment slots before any upload is started.
+struct PendingAttachmentPreflight {
+    id: usize,
+    count: usize,
+    name: String,
 }
 
 /// The harness-visible facts prepared from the same decision the drawer renders.
@@ -214,6 +240,14 @@ pub struct AgentThreadView {
     answering: Option<GateId>,
     /// Optimistic user bubbles the daemon has not reflected back yet.
     pending: Vec<PendingSend>,
+    /// Attachments being staged for the next send. Upload tasks stay in `AppState`'s registry.
+    pending_attachments: Vec<PendingAttachment>,
+    /// Ready chips moved into an in-flight send, retained only so a refusal can restore them.
+    dispatched_attachments: HashMap<ItemId, Vec<PendingAttachment>>,
+    /// Named slot reservations held while path metadata is inspected off the foreground thread.
+    attachment_preflights: Vec<PendingAttachmentPreflight>,
+    /// Stable chip identity within this view.
+    next_attachment_id: usize,
     /// Tier one of §B6.4: what the next send will carry.
     controls: ControlDraft,
     /// The open completion surface.
@@ -346,6 +380,10 @@ impl AgentThreadView {
             gate_draft: None,
             answering: None,
             pending: Vec::new(),
+            pending_attachments: Vec::new(),
+            dispatched_attachments: HashMap::new(),
+            attachment_preflights: Vec::new(),
+            next_attachment_id: 0,
             controls: ControlDraft::default(),
             picker: None,
             commands: Vec::new(),
@@ -707,8 +745,13 @@ impl AgentThreadView {
             // instead of the keymap consuming the key.
             MultilineInputEvent::Changed => self.on_composer_changed(cx),
             MultilineInputEvent::Escape => self.stop(cx),
-            // The composer does not opt into media yet, so the kit never emits this here.
-            MultilineInputEvent::Media(_) => {}
+            MultilineInputEvent::Media(media) => {
+                if let Some(host) = self.host.as_ref().filter(|host| host.unreachable) {
+                    self.notice(presentation::unreachable_placeholder(&host.name), cx);
+                } else {
+                    cx.emit(AgentThreadEvent::StageMedia(media.clone()));
+                }
+            }
         }
     }
 }
@@ -726,10 +769,10 @@ impl Focusable for AgentThreadView {
 /// `item` is the identity the optimistic bubble was already drawn under, and it travels with the
 /// message: the adapter adopts it, so the daemon's copy of the row **is** the client's row rather
 /// than one the client has to re-join by text (§9.4, §13).
-pub(crate) fn user_input(text: String, item: ItemId) -> UserInput {
+pub(crate) fn user_input(text: String, item: ItemId, attachments: Vec<Attachment>) -> UserInput {
     UserInput {
         text,
-        attachments: Vec::new(),
+        attachments,
         item: Some(item),
         origin: Default::default(),
     }

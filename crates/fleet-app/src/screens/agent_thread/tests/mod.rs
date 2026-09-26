@@ -7,6 +7,7 @@
 mod composer;
 mod decisions;
 mod fixtures;
+mod media;
 mod rows;
 mod streaming;
 mod view;

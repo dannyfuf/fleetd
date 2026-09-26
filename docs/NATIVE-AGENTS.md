@@ -1159,6 +1159,24 @@ over 120 000 characters, more than 8 attachments, images over 10 MiB, and other 
 50 MiB before provider dispatch. Wire `Base64` sources are decoded into the leaf and rewritten to
 `Path` before the user item is recorded; `Url` sources remain unchanged.
 
+The native composer opts its multiline input into media only when its current mode accepts
+attachments and the thread link is up. A paste becomes the shared media module's clipboard
+attachment and a drop becomes its path attachment; folders are refused with `Folders cannot be
+attached; drop the files instead.`. Before staging, the app enforces the daemon's 8-item and size
+limits using the same three refusal sentences. Clipboard images retain their `ImageFormat` MIME
+type; dropped files use the fixed `png` / `jpg` / `jpeg` / `gif` / `webp` table and otherwise
+`application/octet-stream`. Every accepted object is force-copied with
+`MediaAnchor::Thread { thread }`; a remote copy says `Copying <name> to <host>…`.
+
+The composer owns only prepared chip state. Upload tasks and byte progress stay in the shared
+media registry, and the Workspace snapshots that progress into waiting, copying, ready or failed
+chips during its update path, never during render. Removing a live chip cancels its upload, and a
+late completion is ignored by looking the chip up by its local id. Send waits while any copy is
+live, admits a ready attachment without text, omits and names failed chips, and carries each ready
+chip as `AttachmentSource::Path`. The optimistic user bubble shows its attachment names. Dispatch
+clears the chips; a raced refusal restores them together with the draft. A link-down paste or drop
+stages nothing and repeats the composer's unreachable-placeholder wording.
+
 The user bubble shows **what the user typed**. Attachment manifests, `@file` expansions and
 Fleet's own prompt prefixes are stripped for display and for `↑` recall, and kept verbatim for
 copy.
@@ -1169,7 +1187,8 @@ the daemon stored. When the `AgentSend` request comes back an error — the thre
 harness would not take the prompt, the transport deadline passed — the bubble turns failed, the
 daemon's sentence is said once as a notice, and the composer is free: a failed bubble counts as
 neither work nor an unacknowledged send, so it blocks nothing and spins nothing. There is no retry
-key; the text is one `↑` away.
+key; the draft and any dispatched attachment chips are restored unless the user has already typed
+a newer draft.
 
 The composer wraps every logical line to its resolved value-column width, breaking an unbroken
 token at a character boundary rather than widening the panel. Its caret, pointer hit-testing,

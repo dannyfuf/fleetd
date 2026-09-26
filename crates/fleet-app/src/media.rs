@@ -69,6 +69,41 @@ pub fn from_external_paths(paths: &ExternalPaths) -> Attachment {
     Attachment::Paths(paths.paths().to_vec())
 }
 
+/// MIME type reported for an image supplied directly by the platform clipboard.
+#[must_use]
+pub const fn media_type_for_image(format: ImageFormat) -> &'static str {
+    format.mime_type()
+}
+
+/// MIME type inferred from a file extension for native-agent attachments.
+///
+/// The table is intentionally the four image types both providers agree on. Everything else is
+/// an opaque file, which also selects the daemon's 50 MiB non-image limit.
+#[must_use]
+pub fn media_type_for_path(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("gif") => "image/gif",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("png") => "image/png",
+        Some("webp") => "image/webp",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Whether the daemon treats this MIME type as an image attachment.
+#[must_use]
+pub const fn is_agent_image_type(media_type: &str) -> bool {
+    matches!(
+        media_type.as_bytes(),
+        b"image/gif" | b"image/jpeg" | b"image/png" | b"image/webp"
+    )
+}
+
 /// Builds the protocol manifest for one file or directory.
 ///
 /// This performs blocking filesystem work and must be called on GPUI's background executor.
@@ -333,6 +368,20 @@ mod tests {
             from_external_paths(&paths),
             Attachment::Paths(vec![PathBuf::from("second"), PathBuf::from("first")])
         );
+    }
+
+    #[test]
+    fn agent_media_types_use_the_fixed_provider_table() {
+        assert_eq!(media_type_for_image(ImageFormat::Png), "image/png");
+        assert_eq!(media_type_for_image(ImageFormat::Tiff), "image/tiff");
+        assert_eq!(media_type_for_path(Path::new("photo.PNG")), "image/png");
+        assert_eq!(media_type_for_path(Path::new("photo.jpeg")), "image/jpeg");
+        assert_eq!(
+            media_type_for_path(Path::new("archive.zip")),
+            "application/octet-stream"
+        );
+        assert!(is_agent_image_type("image/webp"));
+        assert!(!is_agent_image_type("image/tiff"));
     }
 
     #[test]
