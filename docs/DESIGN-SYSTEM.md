@@ -805,19 +805,20 @@ no dismiss: its card hides it on a scrim press itself, as `ctrl-q` does. The pal
 scrim click through `palette::Close`.
 
 #### `Toast` / `ToastStack`
-**Purpose.** Bottom-right transient acknowledgements, max 3.
+**Purpose.** Bottom-right transient acknowledgements, max 3, plus pinned live-progress rows.
 **API.** `Toast::new(text).icon(Icon).tone(Tone).short().raised_at(ms).action(label)`;
 `ToastStack::new(toasts).max(usize).bottom_inset(Pixels).action_keys(iter of Option<Kbd>)
+.action_only(iter of bool)
 .on_activate(Fn(usize, ..)).on_dismiss(Fn(usize, ..)).on_hover(Fn(usize, bool, ..))`;
 `ToastStack::{MAX, is_visible}`, `COALESCE_WINDOW_MS`, and
 `ToastStack::{push, push_at}` apply the coalescing law.
 **Anatomy.** icon · one line · a compact ghost `View` button carrying the key that goes to the
 same place (only on a toast with an `action`) · a compact ✕ (only with `on_dismiss`). The line,
 the button and the ✕ are siblings, so one click never runs two of them; the line itself is
-clickable on a toast with an `action`. Handlers receive the toast's index in the list the stack
-was given.
-**Variants.** 1.6 s short · 3.2 s normal · coalesced (`×n`) · pointing somewhere (`View`) ·
-display only (no handlers).
+clickable on a toast with an action unless its row is `action_only`; destructive actions such as
+media `Cancel` are button-only. Handlers receive the toast's index in the list the stack was given.
+**Variants.** 1.6 s short · 3.2 s normal · long-lived progress (`Cancel`) · coalesced (`×n`) ·
+pointing somewhere (`View`) · action-only · display only (no handlers).
 **Usage rule.** The dwell is the caller's timer: `on_hover(true)` asks it to hold the toast and
 `on_hover(false)` to resume, so a toast never vanishes under the pointer.
 **Usage rule — the toast law.** *A toast is allowed only when there is no row and no pill that
