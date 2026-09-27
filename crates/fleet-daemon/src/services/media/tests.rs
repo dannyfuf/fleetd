@@ -744,8 +744,10 @@ fn manifest_limits_are_rejected_before_disk_allocation() {
 #[test]
 fn download_selection_falls_back_when_the_home_downloads_directory_is_absent() {
     let temp = tempfile::tempdir().expect("temp home");
-    let fleet_home = FleetHome::new(temp.path().join("fleet-home"));
-    let os_home = temp.path().join("missing-home");
+    // The selection canonicalizes; macOS temp directories live under the `/var` symlink.
+    let temp_root = temp.path().canonicalize().expect("canonical temp home");
+    let fleet_home = FleetHome::new(temp_root.join("fleet-home"));
+    let os_home = temp_root.join("missing-home");
     assert!(!os_home.join("Downloads").exists());
     assert_eq!(
         selected_downloads_root_from(&fleet_home, Some(os_home.clone())),
@@ -764,23 +766,25 @@ fn download_selection_canonicalizes_symlinked_home_and_downloads() {
     use std::os::unix::fs::symlink;
 
     let temp = tempfile::tempdir().expect("temp home");
-    let real_home = temp.path().join("real-home");
-    let external_downloads = temp.path().join("external-downloads");
+    // The selection canonicalizes; macOS temp directories live under the `/var` symlink.
+    let temp_root = temp.path().canonicalize().expect("canonical temp home");
+    let real_home = temp_root.join("real-home");
+    let external_downloads = temp_root.join("external-downloads");
     std::fs::create_dir_all(&real_home).expect("real home");
     std::fs::create_dir_all(&external_downloads).expect("external downloads");
     symlink(&external_downloads, real_home.join("Downloads")).expect("downloads symlink");
-    let linked_home = temp.path().join("linked-home");
+    let linked_home = temp_root.join("linked-home");
     symlink(&real_home, &linked_home).expect("home symlink");
-    let fleet_home = FleetHome::new(temp.path().join("fleet-home"));
+    let fleet_home = FleetHome::new(temp_root.join("fleet-home"));
 
     assert_eq!(
         selected_downloads_root_from(&fleet_home, Some(linked_home)),
         external_downloads.join("fleet")
     );
 
-    let real_fleet_home = temp.path().join("real-fleet-home");
+    let real_fleet_home = temp_root.join("real-fleet-home");
     std::fs::create_dir_all(&real_fleet_home).expect("real Fleet home");
-    let linked_fleet_home = temp.path().join("linked-fleet-home");
+    let linked_fleet_home = temp_root.join("linked-fleet-home");
     symlink(&real_fleet_home, &linked_fleet_home).expect("Fleet home symlink");
     let fleet_home = FleetHome::new(linked_fleet_home);
     assert_eq!(

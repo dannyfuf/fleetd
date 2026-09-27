@@ -76,8 +76,10 @@ impl World {
     /// no window to seed in. Everything else is `IsolatedDaemon`'s own code path: the same
     /// `HarnessEnv::rooted`, the same `Daemon`, the same temporary root.
     async fn boot(label: &str) -> anyhow::Result<Self> {
+        // Keep the prefix short: `<root>/home/fleetd.sock` must fit a Unix socket address, and
+        // macOS caps `sun_path` at 104 bytes with `$TMPDIR` already using about half of them.
         let root = tempfile::Builder::new()
-            .prefix(&format!("fleet-boards-automation-{label}-"))
+            .prefix(&format!("boards-{label}-"))
             .tempdir()?;
         let mut environment = HarnessEnv::rooted(root.path())?;
         // The `fleetd` under test, not whichever one happens to be on the developer's PATH or in
