@@ -2,7 +2,7 @@
 //!
 //! "Open after creating" beside a dialog's Create button is the model: the box changes what the
 //! primary action does, rather than standing as a setting of its own. A boolean *setting* is a
-//! [`super::Toggle`] row (a [`super::Switch`] in a settings list), not a checkbox.
+//! [`super::Switch`] in a [`super::SettingsRow`], not a checkbox.
 //!
 //! Like a button, a checkbox is not focusable (ADR 0023). The whole box-and-label reads as one
 //! control and a click anywhere on it asks for the other value; the surface keeps whatever key

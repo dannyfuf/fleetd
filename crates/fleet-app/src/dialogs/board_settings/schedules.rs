@@ -36,16 +36,22 @@ mod view;
 pub(super) use form::*;
 pub(super) use requests::*;
 pub(super) use time::*;
+#[cfg(test)]
+use view::SCHEDULE_VERBS;
 pub(super) use view::schedules_pane;
 
 /// The cadence a new schedule starts with, and the starter's.
 const DEFAULT_EVERY_MINUTES: u32 = 15;
 /// The GitHub review starter's name.
 const STARTER_NAME: &str = "GitHub reviews";
-/// How a one-off time is typed and shown, in local time.
+/// How a one-off time is typed, in local time.
 const ONCE_FORMAT: &str = "%Y-%m-%d %H:%M";
-/// How many runs the form's read-only `Last runs` block lists.
-const LAST_RUNS_SHOWN: usize = 5;
+/// How a time on another day is shown: `Sep 26 09:00`.
+const DAY_FORMAT: &str = "%b %-d %H:%M";
+/// How many runs the form's read-only `Last runs` card lists.
+pub(super) const LAST_RUNS_SHOWN: usize = 5;
+/// What the status column says of an enabled schedule with no next run (a `once` that fired).
+const NO_NEXT_RUN: &str = "no next run";
 /// The client's refusal sentence for a daemon without `schedules` (contracts C6).
 pub(crate) const SCHEDULES_UNSUPPORTED: &str =
     "this daemon does not support schedules; run `fleet daemon restart`";
@@ -60,13 +66,15 @@ thread_local! {
     static PENDING_OPEN: Cell<Option<bool>> = const { Cell::new(None) };
 }
 
-/// One line of the form's `Last runs` block.
+/// One line of the form's `Last runs` card.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct RunLine {
     /// The outcome glyph and its tone.
     pub(super) outcome: Outcome,
-    /// When it started, local time, then its summary.
-    pub(super) text: String,
+    /// When it started, local time: `13:50 today`.
+    pub(super) when: String,
+    /// Its summary, or the outcome's word when it wrote none.
+    pub(super) summary: String,
     /// Where its log is, when it wrote one.
     pub(super) log_path: Option<String>,
 }
@@ -74,8 +82,8 @@ pub(super) struct RunLine {
 /// An outcome as the list and the form draw it: a glyph, a tone and a word.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Outcome {
-    /// `✓`, `✗`, `⤼`, or `…` while the run is live.
-    pub(super) glyph: &'static str,
+    /// `circle-check`, `circle-x`, `circle-slash`, or a spinner's glyph while the run is live.
+    pub(super) icon: Icon,
     /// The glyph's tone.
     pub(super) tone: Tone,
     /// What the run is called when it wrote no summary.
@@ -86,27 +94,30 @@ impl Outcome {
     /// The glyph, tone and word of a run's outcome; `None` is a run still going.
     #[must_use]
     pub(super) const fn of(outcome: Option<ScheduleOutcome>) -> Self {
-        let (glyph, tone, word) = match outcome {
-            Some(ScheduleOutcome::Succeeded) => ("\u{2713}", Tone::Success, "succeeded"),
-            Some(ScheduleOutcome::Failed) => ("\u{2717}", Tone::Danger, "failed"),
-            Some(ScheduleOutcome::TimedOut) => ("\u{2717}", Tone::Danger, "timed out"),
-            Some(ScheduleOutcome::Skipped) => ("\u{293c}", Tone::Muted, "skipped"),
-            None => ("\u{2026}", Tone::Muted, "running"),
+        let (icon, tone, word) = match outcome {
+            Some(ScheduleOutcome::Succeeded) => (Icon::CircleCheck, Tone::Success, "succeeded"),
+            Some(ScheduleOutcome::Failed) => (Icon::CircleX, Tone::Danger, "failed"),
+            Some(ScheduleOutcome::TimedOut) => (Icon::CircleX, Tone::Danger, "timed out"),
+            Some(ScheduleOutcome::Skipped) => (Icon::CircleSlash, Tone::Muted, "skipped"),
+            None => (Icon::LoaderCircle, Tone::Muted, "running"),
         };
-        Self { glyph, tone, word }
+        Self { icon, tone, word }
     }
 }
 
-/// One prepared row of the Schedules list: `● name   every 15m   next 14:05   last ✓ …`.
+/// One prepared row of the Schedules list (§5.4).
+///
+/// `GitHub reviews` / `every 15 min · claude · full access`, then the two-line status column:
+/// `next 14:05` over the last run's glyph and summary.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct ScheduleListRow {
     /// The schedule itself, for the keys that act on the row.
     pub(super) schedule: Schedule,
-    /// `●` when enabled, `○` when not.
-    pub(super) dot: &'static str,
-    /// `every 15m` or `once 2026-09-23 09:00`.
-    pub(super) cadence: String,
-    /// `next 14:05`, when the daemon has a next run for it.
+    /// `every 15 min · claude · full access`.
+    pub(super) helper: String,
+    /// The status column's first line: `next 14:05`, `running · 2 min` or `disabled`.
+    pub(super) status: String,
+    /// `next 14:05`, when the daemon has a next run for it; the form's breadcrumb says it too.
     pub(super) next: Option<String>,
     /// The last run's outcome and its summary, when it has run.
     pub(super) last: Option<(Outcome, String)>,
@@ -126,16 +137,20 @@ pub(super) struct ScheduleFormRow {
 pub(super) enum ScheduleValue {
     /// A closed choice: `h` / `l` step it and a click picks an option.
     Choice {
-        /// The value shown.
+        /// The value shown: an option, or a typed value off the grid.
         value: String,
         /// Every option, in cycle order.
         options: Vec<String>,
-        /// Where the value sits.
-        at: usize,
+        /// Each option's detail (a model id beside its name), aligned with `options`.
+        details: Vec<String>,
+        /// Where the value sits among the steppable options; `None` off the grid.
+        at: Option<usize>,
+        /// Whether the last option is `Other model id…`, which opens the editor instead.
+        other: bool,
     },
-    /// Free text; `⏎` opens an editor over it.
+    /// Free text or a number in a box; `⏎` opens the editor in its place.
     Text {
-        /// The value, cut to one line.
+        /// The value, whole: the prompt's box wraps it.
         value: String,
     },
     /// A flag.
@@ -163,6 +178,8 @@ pub(super) struct SchedulesPane {
     pub(super) busy: bool,
     /// Whether `esc` has already asked about the unsaved form.
     pub(super) discard_armed: bool,
+    /// The list card's note: `3 · next 14:05`.
+    pub(super) note: String,
 }
 
 impl SchedulesPane {
@@ -180,8 +197,11 @@ impl SchedulesPane {
     }
 
     /// Recomputes the form's rows (`docs/APP-CONTRACTS.md`: render prepares nothing).
-    pub(super) fn prepare(&mut self) {
-        self.prepared = self.form.as_ref().map_or_else(Vec::new, prepare_form);
+    pub(super) fn prepare(&mut self, catalogue: &Catalogue) {
+        self.prepared = self
+            .form
+            .as_ref()
+            .map_or_else(Vec::new, |form| prepare_form(form, catalogue));
     }
 
     /// Leaves the form and forgets an armed delete, for a section change.
@@ -248,7 +268,9 @@ impl BoardSettingsState {
         let entry = mirror.entry(board);
         self.schedules.loading = entry.is_some_and(|entry| entry.loading);
         self.schedules.load_error = entry.and_then(|entry| entry.error.clone());
-        self.schedules.list = Rc::new(prepare_list(mirror.for_board(board), now));
+        let schedules = mirror.for_board(board);
+        self.schedules.list = Rc::new(prepare_list(schedules, now));
+        self.schedules.note = list_note(schedules, now);
         // An open form's read-only `Last runs` follows the mirror too — a run it started, a
         // scheduled fire or a run that finished — while its fields and baseline stay as typed.
         if let Some(form) = self.schedules.form.as_mut()
@@ -259,9 +281,10 @@ impl BoardSettingsState {
                 .find(|schedule| &schedule.id == id)
         {
             let runs = run_lines(schedule, now);
-            if form.runs != runs {
+            if form.runs != runs || form.kept != schedule.runs.len() {
                 form.runs = runs;
-                self.schedules.prepare();
+                form.kept = schedule.runs.len();
+                self.schedules.prepare(&self.catalogue);
             }
         }
         if self.in_schedule_list() {
@@ -309,6 +332,7 @@ impl BoardSettingsState {
             baseline: fields.clone(),
             fields,
             runs: Vec::new(),
+            kept: 0,
         });
     }
 
@@ -320,6 +344,7 @@ impl BoardSettingsState {
             baseline: fields.clone(),
             fields,
             runs: run_lines(schedule, now),
+            kept: schedule.runs.len(),
         });
     }
 
@@ -327,7 +352,7 @@ impl BoardSettingsState {
         self.schedules.form = Some(form);
         self.schedules.pending_delete = None;
         self.schedules.discard_armed = false;
-        self.schedules.prepare();
+        self.schedules.prepare(&self.catalogue);
         self.row = 0;
         self.editing = false;
         self.notice = None;
@@ -345,9 +370,9 @@ impl BoardSettingsState {
             return Some(EscapeStep::Delete);
         }
         let form = self.schedules.form.as_ref()?;
+        // The amber strip states the question ([`BoardSettingsState::footer_strip`]).
         if form.dirty() && !self.schedules.discard_armed {
             self.schedules.discard_armed = true;
-            self.error = Some("unsaved schedule \u{2014} esc again to discard it".to_owned());
             return Some(EscapeStep::Ask);
         }
         let id = form.id.clone();
@@ -385,7 +410,6 @@ impl BoardSettingsState {
             return false;
         }
         self.schedules.discard_armed = true;
-        self.error = Some("unsaved schedule \u{2014} esc again to discard it".to_owned());
         true
     }
 
@@ -405,7 +429,7 @@ impl BoardSettingsState {
         };
         form.fields.set_text(field, text);
         self.schedules.discard_armed = false;
-        self.schedules.prepare();
+        self.schedules.prepare(&self.catalogue);
     }
 
     /// `h` / `l` on a form row. Returns whether anything changed.
@@ -416,11 +440,11 @@ impl BoardSettingsState {
         let Some(form) = self.schedules.form.as_mut() else {
             return false;
         };
-        if !form.fields.cycle(field, delta) {
+        if !form.fields.cycle(field, delta, &self.catalogue) {
             return false;
         }
         self.schedules.discard_armed = false;
-        self.schedules.prepare();
+        self.schedules.prepare(&self.catalogue);
         // The cadence cycler swaps the row under it, so the cursor is kept on the cycler.
         self.row = self
             .row
@@ -438,7 +462,7 @@ impl BoardSettingsState {
         }
         form.fields.enabled = !form.fields.enabled;
         self.schedules.discard_armed = false;
-        self.schedules.prepare();
+        self.schedules.prepare(&self.catalogue);
         true
     }
 }
@@ -448,42 +472,95 @@ impl BoardSettingsState {
 pub(super) fn prepare_list(schedules: &[Schedule], now: DateTime<Local>) -> Vec<ScheduleListRow> {
     schedules
         .iter()
-        .map(|schedule| ScheduleListRow {
-            dot: if schedule.enabled {
-                "\u{25cf}"
-            } else {
-                "\u{25cb}"
-            },
-            cadence: cadence_text(&schedule.cadence, now),
-            next: schedule
+        .map(|schedule| {
+            let next = schedule
                 .next_run_at
                 .as_deref()
                 .and_then(|at| local_time(at, now))
-                .map(|at| format!("next {at}")),
-            last: schedule.runs.last().map(|run| {
-                let outcome = Outcome::of(run.outcome);
-                // Capped as the header strip's clause is: a run with no `SUMMARY:` line
-                // carries its last output line, and the row keeps its name column readable.
-                let text = run
-                    .summary
-                    .as_deref()
-                    .filter(|summary| !summary.trim().is_empty())
-                    .map_or_else(
-                        || outcome.word.to_owned(),
-                        |summary| {
-                            fleet_ui_kit::truncate(
-                                summary.trim(),
-                                crate::views::board_screen::SCHEDULE_SUMMARY_BUDGET,
-                                fleet_ui_kit::Truncate::Tail,
-                            )
-                            .to_string()
-                        },
-                    );
-                (outcome, text)
-            }),
-            schedule: schedule.clone(),
+                .map(|at| format!("next {at}"));
+            let live = schedule.runs.last().filter(|run| run.outcome.is_none());
+            let status = if !schedule.enabled {
+                "disabled".to_owned()
+            } else if let Some(run) = live {
+                running_for(&run.started_at, now)
+            } else {
+                next.clone().unwrap_or_else(|| NO_NEXT_RUN.to_owned())
+            };
+            ScheduleListRow {
+                helper: format!(
+                    "{} \u{b7} {} \u{b7} {}",
+                    cadence_text(&schedule.cadence, now),
+                    provider_word(schedule.agent.provider),
+                    mode_label(schedule.agent.mode),
+                ),
+                status,
+                next,
+                last: schedule
+                    .runs
+                    .iter()
+                    .rev()
+                    .find(|run| run.outcome.is_some())
+                    .map(|run| {
+                        let outcome = Outcome::of(run.outcome);
+                        // Capped as the header strip's clause is: a run with no `SUMMARY:` line
+                        // carries its last output line, and the row keeps its name readable.
+                        let text = run
+                            .summary
+                            .as_deref()
+                            .filter(|summary| !summary.trim().is_empty())
+                            .map_or_else(
+                                || outcome.word.to_owned(),
+                                |summary| {
+                                    fleet_ui_kit::truncate(
+                                        summary.trim(),
+                                        crate::views::board_screen::SCHEDULE_SUMMARY_BUDGET,
+                                        fleet_ui_kit::Truncate::Tail,
+                                    )
+                                    .to_string()
+                                },
+                            );
+                        (outcome, text)
+                    }),
+                schedule: schedule.clone(),
+            }
         })
         .collect()
+}
+
+/// What the status column says while a run is live: `running · 2 min`.
+#[must_use]
+fn running_for(started_at: &str, now: DateTime<Local>) -> String {
+    let minutes = parse_time(started_at)
+        .map(|started| {
+            now.with_timezone(&Utc)
+                .signed_duration_since(started)
+                .num_minutes()
+        })
+        .unwrap_or(0);
+    if minutes < 1 {
+        "running".to_owned()
+    } else {
+        format!("running \u{b7} {minutes} min")
+    }
+}
+
+/// The list card's note: how many schedules there are, and the soonest next run among the
+/// enabled ones — `3 · next 14:05`, or `3` when none is due.
+#[must_use]
+pub(super) fn list_note(schedules: &[Schedule], now: DateTime<Local>) -> String {
+    let soonest = schedules
+        .iter()
+        .filter(|schedule| schedule.enabled)
+        .filter_map(|schedule| {
+            let at = schedule.next_run_at.as_deref()?;
+            Some((parse_time(at)?, at))
+        })
+        .min_by_key(|(time, _)| *time)
+        .and_then(|(_, at)| local_time(at, now));
+    match soonest {
+        Some(at) => format!("{} \u{b7} next {at}", schedules.len()),
+        None => schedules.len().to_string(),
+    }
 }
 
 /// What a run-now answer says when the daemon recorded the fire as `Skipped` because the
@@ -502,7 +579,7 @@ pub(crate) fn skipped_run_notice(schedule: &Schedule) -> Option<String> {
     })
 }
 
-/// The `Last runs` block of a schedule: its last five runs, newest first.
+/// The `Last runs` card of a schedule: its last five runs, newest first.
 #[must_use]
 fn run_lines(schedule: &Schedule, now: DateTime<Local>) -> Vec<RunLine> {
     schedule
@@ -512,16 +589,14 @@ fn run_lines(schedule: &Schedule, now: DateTime<Local>) -> Vec<RunLine> {
         .take(LAST_RUNS_SHOWN)
         .map(|run| {
             let outcome = Outcome::of(run.outcome);
-            let started =
-                local_time(&run.started_at, now).unwrap_or_else(|| run.started_at.clone());
-            let summary = run
-                .summary
-                .clone()
-                .filter(|summary| !summary.trim().is_empty())
-                .unwrap_or_else(|| outcome.word.to_owned());
             RunLine {
                 outcome,
-                text: format!("{started}  {summary}"),
+                when: run_time(&run.started_at, now).unwrap_or_else(|| run.started_at.clone()),
+                summary: run
+                    .summary
+                    .clone()
+                    .filter(|summary| !summary.trim().is_empty())
+                    .unwrap_or_else(|| outcome.word.to_owned()),
                 log_path: run.log_path.clone(),
             }
         })

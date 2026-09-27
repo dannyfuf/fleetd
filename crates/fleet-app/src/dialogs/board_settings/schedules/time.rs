@@ -3,7 +3,7 @@
 
 use super::*;
 
-/// `every 15m`, `every 2h`, or `once 2026-09-23 09:00`.
+/// `every 15 min`, `every 2 h`, or `once · Sep 26 09:00`.
 #[must_use]
 pub(in crate::dialogs::board_settings) fn cadence_text(
     cadence: &Cadence,
@@ -11,16 +11,17 @@ pub(in crate::dialogs::board_settings) fn cadence_text(
 ) -> String {
     match cadence {
         Cadence::Every { minutes } if *minutes >= 60 && minutes % 60 == 0 => {
-            format!("every {}h", minutes / 60)
+            format!("every {} h", minutes / 60)
         }
-        Cadence::Every { minutes } => format!("every {minutes}m"),
-        Cadence::Once { at } => {
-            format!("once {}", local_time(at, now).unwrap_or_else(|| at.clone()))
-        }
+        Cadence::Every { minutes } => format!("every {minutes} min"),
+        Cadence::Once { at } => format!(
+            "once \u{b7} {}",
+            local_time(at, now).unwrap_or_else(|| at.clone())
+        ),
     }
 }
 
-/// An RFC 3339 time in local time: `14:05` today, `2026-09-23 09:00` any other day.
+/// An RFC 3339 time in local time: `14:05` today, `Sep 26 09:00` any other day.
 #[must_use]
 pub(in crate::dialogs::board_settings) fn local_time(
     at: &str,
@@ -30,7 +31,25 @@ pub(in crate::dialogs::board_settings) fn local_time(
     Some(if local.date_naive() == now.date_naive() {
         local.format("%H:%M").to_string()
     } else {
-        local.format(ONCE_FORMAT).to_string()
+        local.format(DAY_FORMAT).to_string()
+    })
+}
+
+/// When a run started, as the `Last runs` card says it: `13:50 today`, `09:00 yesterday`, or
+/// `Sep 26 09:00`.
+#[must_use]
+pub(in crate::dialogs::board_settings) fn run_time(
+    at: &str,
+    now: DateTime<Local>,
+) -> Option<String> {
+    let local = parse_time(at)?.with_timezone(&Local);
+    let today = now.date_naive();
+    Some(if local.date_naive() == today {
+        format!("{} today", local.format("%H:%M"))
+    } else if today.pred_opt() == Some(local.date_naive()) {
+        format!("{} yesterday", local.format("%H:%M"))
+    } else {
+        local.format(DAY_FORMAT).to_string()
     })
 }
 

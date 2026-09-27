@@ -102,19 +102,24 @@ pub(super) fn cycle(state: &Entity<AppState>, delta: isize, cx: &mut App) {
         .iter()
         .position(|kind| *kind == selected)
         .map(|index| kinds[step(index, delta, kinds.len())].clone())
-        .unwrap_or(selected);
+        .unwrap_or_else(|| selected.clone());
     let schema = schema_for(state.read(cx), &next_kind);
     with_host(state, cx, |host| {
         let draft = &mut host.board_settings;
         if draft.saving {
             return;
         }
+        // §3.8.6: any edit takes back the question `esc` asked. A row `h` / `l` cannot change
+        // — a text row, a clamped number at its bound, a choice locked on this board — is not
+        // an edit, so only a branch that changed the draft disarms it: a stray `l` after the
+        // first `esc` must not make the second `esc` ask again.
         match draft.focused() {
             SettingRow::DefaultRepo => {
                 // A value the list does not carry has no position to step from: wrapping out
                 // of an invented `0` sent `h` to the *last* repository. From off the grid the
                 // step lands on the neighbour it names — `l` on the first repository, `h` on
                 // "none" — and never anywhere the arrows did not point.
+                let before = draft.default_repo_id.clone();
                 if !repo_listed(&repos, draft.default_repo_id.as_ref()) {
                     draft.default_repo_id = (delta > 0).then(|| repos.first().cloned()).flatten();
                 } else {
@@ -122,6 +127,9 @@ pub(super) fn cycle(state: &Entity<AppState>, delta: isize, cx: &mut App) {
                     let next = step(index, delta, repos.len() + 1);
                     draft.default_repo_id =
                         next.checked_sub(1).and_then(|at| repos.get(at).cloned());
+                }
+                if draft.default_repo_id != before {
+                    draft.discard_armed = false;
                 }
             }
             SettingRow::ConflictPolicy => {
@@ -133,35 +141,62 @@ pub(super) fn cycle(state: &Entity<AppState>, delta: isize, cx: &mut App) {
                     .position(|policy| *policy == draft.conflict_policy)
                     .unwrap_or(0);
                 draft.conflict_policy = POLICIES[step(index, delta, POLICIES.len())];
+                draft.discard_armed = false;
                 return;
             }
             // `h` is off and `l` is on, never a flip: every other cycler row on this dialog
             // steps by `delta`, and a row that flipped on both made `h l` land somewhere other
             // than where it started.
-            SettingRow::StartOnWorktree => draft.start_on_worktree = delta > 0,
+            SettingRow::StartOnWorktree => {
+                let on = delta > 0;
+                if draft.start_on_worktree != on {
+                    draft.start_on_worktree = on;
+                    draft.discard_armed = false;
+                }
+            }
             SettingRow::PushNewCards => {
                 if draft.backend_kind == BackendRef::LOCAL {
                     return;
                 }
-                draft.push_new_cards = delta > 0;
+                let on = delta > 0;
+                if draft.push_new_cards != on {
+                    draft.push_new_cards = on;
+                    draft.discard_armed = false;
+                }
             }
             SettingRow::Backend => {
+                if next_kind != selected {
+                    draft.discard_armed = false;
+                }
                 draft.select_backend(&next_kind, &schema);
                 return;
             }
             SettingRow::BackendSetting(index) => {
-                cycle_backend_row(draft, index, delta);
+                if cycle_backend_row(draft, index, delta) {
+                    draft.discard_armed = false;
+                }
                 return;
             }
             // Clamped rather than wrapped: `h` on one run must not land on eight, which is the
             // difference between "one run at a time" and eight agents in one checkout.
-            SettingRow::MaxLiveRuns => draft.step_live_runs(delta),
+            SettingRow::MaxLiveRuns => {
+                if draft.step_live_runs(delta) {
+                    draft.discard_armed = false;
+                }
+            }
             SettingRow::ColumnField(field) => {
                 let Some(index) = draft.opened_column else {
                     return;
                 };
                 let locked = draft.automation_locked;
-                if cycle_field(&mut draft.columns, index, field, delta, locked) {
+                if cycle_field(
+                    &mut draft.columns,
+                    index,
+                    field,
+                    delta,
+                    locked,
+                    &draft.catalogue,
+                ) {
                     draft.error = None;
                     draft.notice = None;
                     draft.discard_armed = false;
@@ -173,11 +208,12 @@ pub(super) fn cycle(state: &Entity<AppState>, delta: isize, cx: &mut App) {
                 if draft.cycle_schedule(field, delta) {
                     draft.error = None;
                     draft.notice = None;
+                    draft.discard_armed = false;
                 }
                 return;
             }
-            // A column list row cycles nothing: `J` and `K` are what move one, and they say so
-            // in the hint row. A schedule row is acted on by `space`, `r` and `d`.
+            // A column list row cycles nothing: `J` and `K` are what move one, and its hover
+            // actions say so. A schedule row is acted on by `space`, `r` and `d`.
             SettingRow::Column(_)
             | SettingRow::Schedule(_)
             | SettingRow::NoRow
@@ -190,10 +226,15 @@ pub(super) fn cycle(state: &Entity<AppState>, delta: isize, cx: &mut App) {
     cx.stop_propagation();
 }
 
-/// `h` / `l` inside a backend row: step a number, cycle a select, flip a flag.
-pub(super) fn cycle_backend_row(draft: &mut BoardSettingsState, index: usize, delta: isize) {
+/// `h` / `l` inside a backend row: step a number, cycle a select, flip a flag. Whether the row
+/// changed.
+pub(super) fn cycle_backend_row(
+    draft: &mut BoardSettingsState,
+    index: usize,
+    delta: isize,
+) -> bool {
     let Some(row) = draft.rows.get_mut(index) else {
-        return;
+        return false;
     };
     match row.kind {
         // `h` is off and `l` is on, for the reason the fixed toggle rows are: a flip on both
@@ -208,7 +249,7 @@ pub(super) fn cycle_backend_row(draft: &mut BoardSettingsState, index: usize, de
             // of, and that on two of Jira's three number rows either fails the save or turns
             // every pull into a full one. An empty row has nothing below it.
             if row.value.trim().is_empty() && delta < 0 {
-                return;
+                return false;
             }
             let current: i64 = row.value.trim().parse().unwrap_or(0);
             row.value = current
@@ -226,9 +267,10 @@ pub(super) fn cycle_backend_row(draft: &mut BoardSettingsState, index: usize, de
                 .value
                 .clone();
         }
-        _ => return,
+        _ => return false,
     }
     draft.error = None;
+    true
 }
 
 /// `space`: toggle the focused flag row; anywhere else it is a space.
@@ -267,9 +309,44 @@ pub(super) fn toggle(state: &Entity<AppState>, cx: &mut App) {
         }
     });
     if changed {
+        with_host(state, cx, |host| host.board_settings.discard_armed = false);
         notify(state, cx);
     }
     cx.stop_propagation();
+}
+
+/// `\u{23ce}` on a General or Backend row: open the text or number box in place, or keep what
+/// was typed and close it.
+///
+/// Returns whether the key was the row's; on a switch or a choice `\u{23ce}` keeps §3.8.6's
+/// meaning, which is to save.
+pub(super) fn confirm_row(
+    state: &Entity<AppState>,
+    window: &mut Window,
+    focus: &FocusHandle,
+    cx: &mut App,
+) -> bool {
+    let handled = with_host(state, cx, |host| {
+        let draft = &mut host.board_settings;
+        if !matches!(draft.section, BoardSection::General | BoardSection::Backend)
+            || draft.saving
+            || !draft.focused_is_typed()
+        {
+            return false;
+        }
+        draft.discard_armed = false;
+        if draft.editing {
+            draft.editing = false;
+        } else {
+            draft.open_editor();
+        }
+        true
+    });
+    if handled {
+        materialize_input(state, Some(window), Some(focus), cx);
+        notify(state, cx);
+    }
+    handled
 }
 
 /// `\u{23ce}` in the Columns pane: drill into a column, or open and commit a row's editor.
@@ -302,9 +379,12 @@ pub(super) fn confirm_column(
                 draft.prepare();
                 true
             }
-            SettingRow::ColumnField(field) => {
-                let locked = draft.automation_locked && field.is_automation();
-                draft.editing = !draft.editing && field.is_text() && !locked;
+            SettingRow::ColumnField(_) => {
+                if draft.editing {
+                    draft.editing = false;
+                } else if draft.focused_is_typed() {
+                    draft.open_editor();
+                }
                 true
             }
             _ => false,
@@ -449,9 +529,9 @@ struct InputSpec {
     row: SettingRow,
     /// The text it opens with.
     text: String,
-    /// Its label.
+    /// Its accessible label: the row's.
     label: String,
-    /// Its placeholder.
+    /// Its placeholder, which says what empty means.
     placeholder: String,
     /// Whether it is drawn in the mono face.
     mono: bool,
@@ -481,6 +561,7 @@ pub(super) fn materialize_input(
                 false,
             ),
             SettingRow::Prefix => (row.label().to_owned(), "FLT".to_owned(), true, false, false),
+            SettingRow::MaxLiveRuns => (row.label().to_owned(), "1".to_owned(), false, true, false),
             SettingRow::BackendSetting(index) => {
                 let backend = draft.rows.get(index)?;
                 let label = if backend.required {
@@ -537,18 +618,26 @@ pub(super) fn materialize_input(
     let input = cx.new(|cx| {
         let mut input = TextInput::new(
             if spec.multiline {
-                // The same eight rows the card's description opens in
-                // (`card_detail/draft.rs`): an instruction block is prose, and a four-row box
-                // hides the end of every one of them.
+                // The box it sits in rests at three lines and grows to eight while editing
+                // (§3.8.6): an instruction block is prose, and the end of it stays reachable.
                 InputMode::Multiline {
-                    min_rows: MULTILINE_ROWS,
-                    max_rows: MULTILINE_ROWS,
+                    min_rows: MULTILINE_MIN_ROWS,
+                    max_rows: VALUE_BOX_MAX_ROWS,
                 }
             } else {
                 InputMode::SingleLine
             },
             cx,
         );
+        // The row's `ValueBox` is the chrome: the editor draws only its text and caret, inside
+        // the same box, so the row never changes height when it opens.
+        input.set_embedded(true, cx);
+        // `⏎` keeps what was typed and `esc` reverts it, in a multi-line box as in any other
+        // (§3.8.6), so a new line is `⇧⏎` here: a `⏎` that only ever inserted one would leave
+        // `esc` — which now throws the text away — as the one key out of the box.
+        if spec.multiline {
+            input.set_enter_inserts_newline(false, cx);
+        }
         input.set_text(spec.text, cx);
         input.set_label(Some(spec.label.into()), cx);
         input.set_placeholder(spec.placeholder, cx);

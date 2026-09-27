@@ -3,9 +3,9 @@
 # (`settings.columns`) and §11 (the `section` and row-editor fields) — the same `C`, the same
 # dialog, on a board that may not carry automation at all.
 #
-# A context board has no checkout to run anything in, so `board_settings::draft` locks the
-# automation rows rather than hiding them: the order and the names of the columns are still this
-# board's to change, and only what describes a *run* is refused. This scenario is the pair to
+# A context board has no checkout to run anything in, so the column form folds its automation
+# rows away behind one callout: the order and the names of the columns are still this board's to
+# change, and only what describes a *run* is refused. This scenario is the pair to
 # `workflow-columns.scenario`, which drives the same dialog on `acme/api#agent`'s worktree board
 # and edits the rows this one cannot.
 #
@@ -13,12 +13,14 @@
 #   `settings.columns`  marks every column `disabled`, which is the board's own condition — no
 #                       worktree, or a backend that owns the columns — and not a per-row one
 #                       (`state/harness/projection.rs`). It is the *board's* answer.
-#   the row editor      is the per-row answer, and the only one that distinguishes Name from On
-#                       enter: `⏎` on Name mounts an editor, so `dialog.fields[1]` is `name` and
-#                       the key context becomes `BoardSettingsEditing`; `⏎` on On enter mounts
-#                       nothing, so the field is absent and the list keeps the keyboard. A
-#                       scenario that only read the list could not tell those two rows apart
-#                       (phase-8 tracker, 2026-09-21).
+#   the row editor      is the per-row answer, and the only one that says which rows the form
+#                       still offers: `⏎` on Name mounts an editor, so `dialog.fields[1]` is
+#                       `name` and the key context becomes `BoardSettingsEditing`; below Category
+#                       there is no row to reach, because the automation rows are folded into the
+#                       callout rather than greyed one by one, so `j j` stops on Category, whose
+#                       `⏎` mounts nothing: the field is absent and the list keeps the keyboard.
+#                       A scenario that only read the list could not tell those apart (phase-8
+#                       tracker, 2026-09-21).
 #
 # Nothing here is saved: the dialog is left dirty on `quit`, because what is being pinned is
 # what the dialog refuses to *offer*, and an `^s` would only prove `UpdateBoard` again.
@@ -55,8 +57,8 @@ assert lists["settings.columns"].rows[2].label == "In Progress" && lists["settin
 assert lists["settings.columns"].rows[3].label == "Done" && lists["settings.columns"].rows[3].marks[0] == "disabled"
 assert lists["settings.columns"].rows[4].label == "Canceled" && lists["settings.columns"].rows[4].marks[0] == "disabled"
 
-# Into Backlog's form. A column that runs nothing draws five rows: Name, Category, On enter,
-# On success, When unblocked.
+# Into Backlog's form. On this board it draws Name and Category, then the callout in place of
+# the *When a card enters* and *After the run* cards.
 key enter
 
 # The name row is this board's to change, lock or no lock: `⏎` mounts its editor, the key
@@ -67,12 +69,12 @@ assert dialog.fields[1].name == "name" && dialog.fields[1].value == "Backlog"
 type X
 assert dialog.fields[1].value == "BacklogX"
 
-# `esc` leaves the editor without leaving the form.
+# `esc` reverts the name and leaves the editor without leaving the form.
 key escape
 assert key_contexts[1] == "BoardSettings"
 
-# `On enter` is the first automation row, and on this board `⏎` opens nothing over it: no
-# editor, so no field beside the section, and the list still owns the keyboard.
+# `j j` can only reach Category — the automation rows are folded away, not offered — and `⏎`
+# on a choice opens no editor: no field beside the section, and the list still owns the keyboard.
 key j j
 key enter
 assert key_contexts[1] == "BoardSettings"

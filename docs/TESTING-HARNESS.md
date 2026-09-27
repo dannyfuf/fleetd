@@ -314,7 +314,9 @@ The names Fleet paints today, by surface:
 | Filter and palette | `filter.input`, `filter.clear` (the query's clear ✕, only while it holds text), `filter.empty.clear` (the `Clear filter` button of a Hub list the filter left empty), `palette.input`, `palette.row[N]` (one flat numbering down the ranked list, across its sections; `palette.row[0]` is the top match) |
 | Dialogs | `dialog.field[N]`, `dialog.row[N]`, `dialog.close`, `dialog.button[N]`, `dialog.checkbox`, `dialog.segment[N]` |
 | Help | `help.search` (also `dialog.field[0]`), `help.tab[N]` (0 Guides, 1 All shortcuts), `help.here[N]` (the *Here in …* rows), `help.guide[N]` (by the guide's position in the full list, searched or not), `help.step[N].action[M]` (the shown guide's step `N`, button `M`, both from 0), `help.shortcut[N]` (the table's rows, or the actions a Guides-tab search lists), `help.place[N]` (0 All places, then the catalogue places in order), `help.run`, `help.related` |
-| Settings | `settings.search`, `settings.section[N]` (the rail, `0` General, `1` Agents, `2` Sleep, `3` Jobs & warnings, `4` Pool, `5` GitHub, `6` Status, `7` Hosts, `8` About), `settings.row[N]` (the shown section's rows, `0` first), `settings.switch`, `settings.option[N]`, `settings.dropdown`, `settings.copy[N]`, `settings.hit[N]`, `settings.config`, `settings.doctor`; its footer is `dialog.button[0]` Cancel and `dialog.button[1]` Save |
+| Settings | `settings.search`, `settings.section[N]` (the rail, `0` General, `1` Agents, `2` Sleep, `3` Jobs & warnings, `4` Pool, `5` GitHub, `6` Status, `7` Hosts, `8` About), `settings.row[N]` (the shown section's rows, `0` first), `settings.switch`, `settings.option[N]`, `settings.dropdown`, `settings.box` (the cursor row's value box), `settings.copy[N]`, `settings.hit[N]`, `settings.clear` (the search field's ✕, only while it holds text), `settings.config`, `settings.doctor`; its footer is `dialog.button[0]` Cancel and `dialog.button[1]` Save |
+| Board settings | `board_settings.section[N]` (the rail, `0` General, `1` Backend, `2` Columns, `3` Schedules when shown), `board_settings.row[N]` (the shown pane's rows, `0` first), `board_settings.back` (a form's breadcrumb `‹ Columns` / `‹ Schedules`), the cursor row's controls `board_settings.switch`, `board_settings.option[N]`, `board_settings.dropdown` and `board_settings.box`, the cursor row's hover actions `board_settings.up`, `board_settings.down`, `board_settings.delete` (a column's Move up, Move down, Delete column) and `board_settings.run` (a schedule's Run now), and the footer's `board_settings.new` (New column or New schedule) and `board_settings.preset` (Apply preset); its footer is also `dialog.button[0]` Cancel and `dialog.button[1]` Save |
+| Repository hooks | `hooks.remove[N]` (the ✕ of the command row whose editor is `dialog.field[N]`, disabled on each list's trailing blank row) |
 | Sheets | `sheet.close` |
 | Card detail | `card_detail.close` (the sheet's ✕, also `sheet.close`), `card_detail.title` (a click edits the title, as `i`), `card_detail.menu` (the header's ⋯), `card_detail.property[N]` (the property column's rows, `0` Status, numbered as `card.properties`), `card_detail.comment` (the composer's *Add a comment…*, as `c`), `card_detail.edit.save` and `card_detail.edit.cancel` (an open title, description or comment edit's *Save* / *Comment* and *Cancel*, as `ctrl-enter` and `esc`, painted only while that edit is open), and on the run card `card_detail.run.attach`, `card_detail.run.rerun` and `card_detail.run.cancel`, each painted only while its action can work on the card |
 | Jobs panel | `jobs.row[N].retry`, `jobs.row[N].cancel`, `jobs.row[N].log`, `jobs.filter[N]`, `jobs.clear`, `jobs.more`, `jobs.log.back`, `jobs.log.follow`, `jobs.log.end` |
@@ -448,15 +450,31 @@ clear), `jobs.more` the ⋯ holding Cancel all (absent with nothing cancellable)
 open the header is the log's toolbar: `jobs.log.back`, `jobs.log.follow`, `jobs.log.end`.
 
 Settings names its controls by the row they sit in. `settings.row[N]` is the whole row: a click
-puts the cursor on it and, on a text or number row, opens its editor, as `⏎` would. The control
-of the row **under the cursor** carries its own name, so a scenario clicks a row first and its
-control second: `settings.switch` is its switch, `settings.option[N]` a segment of its choice
-(`N` from `0`, left to right), and `settings.dropdown` its dropdown field when the choice has too
-many or too long options to sit side by side — the open list's options are then `menu.item[N]`.
-Only one of the three is painted, the one the row draws. `settings.copy[N]` is the copy button
-beside read-only row `N` (About's fleetd and `FLEET_HOME`). While a search is typed the pane lists
-its matches instead, `settings.hit[N]`, and a click on one opens its section with the cursor on
-it. `settings.config` and `settings.doctor` are the footer's Open config.json and Run doctor.
+puts the cursor on it and opens nothing — a scenario that means to edit follows it with `key
+enter` or a click on the box. The control of the row **under the cursor** carries its own name,
+so a scenario clicks a row first and its control second: `settings.switch` is its switch,
+`settings.option[N]` a segment of its choice (`N` from `0`, left to right), `settings.dropdown` its
+dropdown field when the choice has too many or too long options to sit side by side — the open
+list's options are then `menu.item[N]` — and `settings.box` its text or number box, whose click
+opens the editor in place, as `⏎` does. Only one of them is painted, the one the row draws.
+`settings.copy[N]` is the copy button beside read-only row `N` (About's fleetd and `FLEET_HOME`).
+While a search is typed the pane lists its matches instead, `settings.hit[N]`, and a click on one
+opens its section with the cursor on it; `settings.clear` is the field's ✕, painted only while the
+query holds text, and a click on it does what `Esc` does in the field. `settings.config` and
+`settings.doctor` are the footer's Open config.json and Run doctor.
+
+Board settings names its controls the same way. `board_settings.section[N]` is the rail and
+`board_settings.row[N]` the shown pane's rows in order — the General, Backend or form fields, or
+the Columns and Schedules lists' rows; a click puts the cursor on a row and a double-click on a
+list row opens it, as `⏎` does. The cursor row's control is `board_settings.switch`,
+`board_settings.option[N]`, `board_settings.dropdown` or `board_settings.box`, one of them, as in
+Settings. Its hover actions — drawn only while the row is hovered or under the cursor, so a
+scenario clicks the row first — are `board_settings.up`, `board_settings.down` and
+`board_settings.delete` on a column and `board_settings.run` on a schedule; a right-click on the
+row opens the same verbs as a menu, whose entries are `menu.item[N]`. `board_settings.back` is a
+form's breadcrumb button, which runs what `esc` runs there. `board_settings.new` is the footer's
+New column or New schedule and `board_settings.preset` its Apply preset, each painted only on the
+list it belongs to.
 
 `dialog.button[N]` is a button in a dialog's footer, `0`
 leftmost, painted by `Dialog::actions`: a dialog still on the legacy footer, whose `Dialog::primary`
@@ -488,8 +506,10 @@ chip names, so it is the key under the pointer. `0` is always `Cancel`, which ru
 | Board settings | `0` Cancel · `1` Save |
 
 The buttons on the left of a footer — Edit context's *Delete context*, Quit's *Show jobs* and
-*Never warn again*, the Board settings Columns list's *New column*, *Delete* and *Apply preset* —
-and the rows' own controls (a hook row's ✕, a column's ↑ / ↓) carry no names of their own.
+*Never warn again*, the Board settings Schedules list's *Delete* — carry no names of their own;
+Board settings' *New column*, *New schedule* and *Apply preset* are `board_settings.new` and
+`board_settings.preset`, a column's Move up / Move down / Delete column are its hover actions
+above, and a hook row's ✕ is `hooks.remove[N]`.
 
 ## 4. Lanes and fixtures
 
@@ -740,6 +760,13 @@ seeded pull-request card's tile shows `owner/name#1` and that its detail shows t
 row; `board/schedules-section` opens Board settings on the Reviews board, goes to Schedules, presses
 `n` and asserts the starter's name and prompt in the form (with one `shot`). They read the board's
 existing targets.
+The configuration dialogs' scenarios pin the shared settings shell (UX-SPEC §3.8.6). A click on
+a row only moves the cursor, so `hub/settings` opens an editor with `key enter` after the click
+(a pointer journey clicks `settings.box` instead), and closing a dirty draft takes two `key
+escape` — or two clicks on Cancel, ✕ or the scrim: the first paints the amber question, the
+second discards. `board/workflow-columns-context` no longer checks automation rows drawn disabled: on a
+board that cannot carry automation a column's form folds them behind one callout, so the scenario
+pins their absence and the callout.
 The agent corpus includes a headless two-turn wheel regression and a structured Codex
 file-approval assertion; the latter reads `agents.threads[0].decision.paths` and `has_diff` to
 prove the named item supplied the rendered diff rather than merely observing that a gate opened.
@@ -927,8 +954,8 @@ still short of it, so no other document has to claim a capability that does not 
   (`name`, `prefix`, `effort`, `on enter`, or a backend row's own name), which is the only place a
   value *typed* into this dialog can be read back, since every other row is a cycler whose value
   `settings.columns` or `AppState` already carries. A row the cursor is merely on in the Columns
-  pane owns no editor until `⏎` opens one, and a locked automation row never does, so the second
-  field is absent in both cases. Board settings paints no `dialog.field[N]` target at all, so
+  pane owns no editor until `⏎` opens one, and a board that cannot carry automation folds those
+  rows away behind its callout, so the second field is absent in both cases. Board settings paints no `dialog.field[N]` target at all, so
   neither field can put the field↔target numbering out of step. Settings follows the same rule:
   a leading `section` field whose value is the shown section's title (`General`, `Agents`,
   `Sleep`, …), then `row`, the row under the cursor as `<label> = <value>` with the value the

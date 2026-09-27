@@ -31,8 +31,10 @@ Fill this in completely, including the deliberate noes.
 | `dialogs/board_settings/keys.rs` | Backend setting values | No | — | Provider configuration scalars, not local filesystem paths. |
 | `dialogs/board_settings/keys.rs` | Column: name, on-enter action, model, effort, instructions, expectation, env | No | — | Structured board automation or prose; none is a local path field or a shell command line. |
 | `dialogs/board_settings/keys.rs` | Schedule: name, model, effort, cadence values, prompt | No | — | Schedule configuration and prose, not local filesystem paths. |
-| `dialogs/board_settings/view.rs` | Board-settings editor consumer | No | — | Renders the row-scoped editor built and classified in `keys.rs`; owns no additional input. |
-| `dialogs/board_settings/schedules/view.rs` | Schedule editor consumer | No | — | Renders the same row-scoped editor; owns no additional input. |
+| `dialogs/board_settings/view.rs` | General board-settings editor consumer | No | — | Renders the row-scoped editor built and classified in `keys.rs`; owns no additional input. |
+| `dialogs/board_settings/view/column_pane.rs` | Column editor consumer | No | — | Receives the row-scoped editor from the shell and passes it to the shared row renderer; owns no input. |
+| `dialogs/board_settings/view/row.rs` | Shared board-settings `ValueBox` editor consumer | No | — | Draws a caller-owned editor inside the value box; construction and field meaning remain in `keys.rs`. |
+| `dialogs/board_settings/schedules/view.rs` | Schedule editor consumer | No | — | Renders the same row-scoped editor built and classified in `keys.rs`; owns no additional input. |
 | `dialogs/card_create.rs` | New-card title | No | — | Card title text. |
 | `dialogs/card_create.rs` | New-card description | No | — | Markdown prose, not a path field. |
 | `dialogs/card_detail/draft.rs` | Card title | No | — | Card title text. |
@@ -56,7 +58,12 @@ Fill this in completely, including the deliberate noes.
 | `dialogs/settings/draft.rs` | Claude/Codex binary for threads | Yes | Bare | Fleet executes the binary directly without a shell; the field's meaning includes an executable path. |
 | `dialogs/settings/draft.rs` | Claude/Codex default model | No | — | Provider model identifier, not a filesystem path. |
 | `dialogs/settings/draft.rs` | Numeric settings | No | — | Digit-filtered durations and intervals. |
-| `dialogs/settings/view.rs` | Settings row-editor consumer | No | — | Renders the editor classified in `draft.rs`; owns no additional input. |
+| `dialogs/settings/choice.rs` | Settings choices and custom model option | No | — | Defines model/effort choices; the custom model editor is built in `draft.rs` and is an identifier, not a path. |
+| `dialogs/settings/schema.rs` | Settings row schema | No | — | Defines semantic row ids and kinds but creates no input; path classification is applied when `draft.rs` materializes an editor. |
+| `dialogs/settings/view.rs` | Settings `SearchField` / `ValueBox` consumers | No | — | Renders caller-owned inputs built in `interaction.rs` and `draft.rs`; owns no additional input. |
+| `fleet-ui-kit/components/search_field.rs` | Caller-owned search input | No | — | The component retains and renders the input supplied by the app; it does not decide field semantics or enable media. |
+| `fleet-ui-kit/components/value_box.rs` | Caller-owned inline editor | No | — | The component optionally retains and renders an editor supplied by a settings shell; the app classifies that editor before passing it in. |
+| `fleet-ui-kit/components/settings_row.rs` | Settings-row layout | No | — | Owns row chrome and controls but no text input. |
 | `screens/agent_thread/mod.rs` | Native-agent composer | No | — | Phase 2 owns composer attachments; phase 3 must not rewire it as path text. |
 | `screens/agent_thread/actions.rs` | Composer editor actions | No | — | Operates the composer owned in `mod.rs`; owns no additional input. |
 | `screens/board.rs` | Board filter | No | — | Filter query. |
@@ -71,10 +78,12 @@ Fill this in completely, including the deliberate noes.
 - 2026-09-26 — Inventory found three path-bearing field kinds: hook commands and Settings terminal commands are shell-quoted; Settings thread binaries are bare. All stage locally with `force_copy = false`, preserve source order, and join several successful paths with one space.
 - 2026-09-26 — The plan's baseline and definition still name `make harness`; this task explicitly delegates harness/restart to the orchestrator, so the required four direct Cargo/fmt commands are recorded here instead and the kickoff baseline stays unchecked.
 - 2026-09-26 — Verification: `cargo test -p fleet-ui-kit` passed 415 unit and 2 doc tests (3 doc tests ignored); `cargo test -p fleet-app media` passed all 48 focused tests; workspace clippy with `-D warnings`, fmt-check, and `make lint` passed. The exact `cargo test -p fleet-app` and review-required `make test` each passed 1,251 tests before the sandbox denied Unix-domain socket binding in 13 bridge tests and one drive test (`Operation not permitted`); all new dialog-media tests passed. `zed-quality-review` found no diff finding; its gate remains environmentally incomplete for the same socket failures.
+- 2026-09-27 — Rebased the inventory onto PR #53's one-shell dialogs. The new `SearchField`, `SettingsRow` and `ValueBox` components only render caller-owned inputs; board-settings row consumers still receive editors created in `keys.rs`; Settings path semantics still live at editor materialization in `draft.rs`.
+- 2026-09-27 — Merge-resolution verification: ui-kit passed 435 unit tests plus 2 doc tests (3 ignored); the app dialog filter passed 312 tests; the media filter passed 48 tests, including all four dialog-media cases; workspace clippy and fmt-check passed. The review-only full `make test` reached 1,282 passing tests, then the sandbox denied Unix-socket binding in 13 bridge tests and the drive socket test (14 environmental failures, all outside this diff).
+- 2026-09-27 — This agent's filesystem sandbox exposes `.git` read-only. The five resolved files contain no conflict markers, but `git add` cannot create `.git/index.lock`; the orchestrator must stage them to clear the index's `UU` entries.
 
 ## Follow-ups
 - 2026-09-26 — Orchestrator gate on the integrated phase-3 tree: fmt + workspace clippy clean, `make test` 4371 green. `make harness` stopped at `scenarios/agents/thread-streaming.scenario:32`: the thread reached `idle` and the toast assert ran 88 ms later, before the "agent finished" toast was applied. Phase 3 touches no toast, thread or streaming code and the same corpus passed 104/104 one hour earlier on the phase-2 tree; the scenario asserts a toast right after a state `await` without awaiting the toast itself, so this is a pre-existing ordering race. Recorded as a follow-up; the scenario was rerun alone and the full corpus rerun to close the gate.
 
 ## Follow-ups (integration)
 - `scenarios/agents/thread-streaming.scenario:32` should `await toasts[0].text ~= "agent finished"` instead of asserting it immediately after the `idle` await; the toast and the state change are separate events and can arrive in either order.
-

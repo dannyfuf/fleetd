@@ -1883,43 +1883,87 @@ fn input_section(cx: &mut App, fields: &[(&'static str, Entity<TextInput>)]) -> 
                 ),
         ),
         LAYOUT.labeled(
-            "toggles",
+            "settings card + rows",
             &t,
             div()
                 .flex()
                 .flex_col()
-                .w(px(360.0))
-                .child(Toggle::labeled("Sleep on switch", true).focused(true))
-                .child(Toggle::labeled("Warn before quitting", false))
+                .w(px(564.0))
+                .p(t.space.lg)
+                .bg(t.colors.elevated)
                 .child(
-                    Toggle::labeled("Claude keep-alive", true)
-                        .detail("matching 2 processes now")
-                        .disabled(true),
+                    SettingsCard::new("kit-settings-card")
+                        .title("Sleep")
+                        .note("applies to the next switch")
+                        .row(
+                            SettingsRow::new("kit-settings-switch")
+                                .label("Sleep on switch")
+                                .helper("Opening another worktree sleeps the one you leave.")
+                                .control(Switch::new("kit-settings-switch-control", true)),
+                        )
+                        .row(
+                            SettingsRow::new("kit-settings-grace")
+                                .label("Grace")
+                                .helper(
+                                    "How long a terminal gets to finish before sleep closes it.",
+                                )
+                                .cursor(true)
+                                .control(
+                                    ValueBox::new("kit-settings-grace-box", "2000")
+                                        .mono(true)
+                                        .width(ValueBoxWidth::Number)
+                                        .unit("ms"),
+                                ),
+                        )
+                        .row(
+                            SettingsRow::new("kit-settings-refresh")
+                                .label("Local status refresh")
+                                .helper("How often local sessions and worktrees are polled.")
+                                .invalid("Must be at least 500 ms.")
+                                .control(
+                                    ValueBox::new("kit-settings-refresh-box", "200")
+                                        .mono(true)
+                                        .width(ValueBoxWidth::Number)
+                                        .unit("ms")
+                                        .invalid(true),
+                                ),
+                        )
+                        .row(
+                            SettingsRow::new("kit-settings-model")
+                                .label("Default model")
+                                .helper("Empty means the harness picks.")
+                                .control(
+                                    ValueBox::new("kit-settings-model-box", "")
+                                        .placeholder("Harness default"),
+                                ),
+                        )
+                        .row(
+                            SettingsRow::new("kit-settings-protocol")
+                                .label("Clone protocol")
+                                .control(
+                                    Cycler::new("ssh")
+                                        .id("kit-settings-protocol-cycler")
+                                        .inline(true)
+                                        .options(["ssh", "https"]),
+                                ),
+                        )
+                        .row(
+                            SettingsRow::new("kit-settings-push")
+                                .label("Push new cards")
+                                .helper("This board has no backend.")
+                                .disabled(true)
+                                .control(Switch::new("kit-settings-push-control", false)),
+                        ),
                 ),
         ),
         LAYOUT.labeled(
-            "number fields",
+            "breadcrumb",
             &t,
-            div()
-                .flex()
-                .flex_col()
-                .w(px(360.0))
-                .child(
-                    NumberField::labeled("grace", 2000)
-                        .unit("ms")
-                        .min(0)
-                        .focused(true),
-                )
-                .child(
-                    NumberField::labeled("local status refresh", 200)
-                        .unit("ms")
-                        .min(500),
-                )
-                .child(
-                    ValueField::new("kit-value", "")
-                        .label("Default model")
-                        .placeholder("Harness default"),
-                ),
+            div().w(px(564.0)).child(
+                Breadcrumb::new("kit-breadcrumb", "Columns", "In review")
+                    .badge(Badge::new("started").tone(Tone::Accent))
+                    .trailing("4 of 6"),
+            ),
         ),
         LAYOUT.labeled(
             "segmented tabs",

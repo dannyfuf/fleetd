@@ -39,6 +39,7 @@ pub(crate) fn seed(state: &Entity<AppState>, cx: &mut App) {
                 backend_kind: kind.clone(),
                 original_kind: kind.clone(),
                 original_settings: settings,
+                catalogue: std::rc::Rc::new(Catalogue::read(app)),
                 ..BoardSettingsState::default()
             };
             draft.rows = backend_rows(&schema_for(app, &kind), &draft.original_settings);

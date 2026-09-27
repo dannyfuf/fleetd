@@ -746,6 +746,16 @@ pub struct Metrics {
     pub palette_input_h: Pixels,
     /// 96 px minimum number-field value box.
     pub number_field_w: Pixels,
+    /// 36 px title row of a `SettingsCard`.
+    pub card_header_h: Pixels,
+    /// 300 px text or multi-line `ValueBox`.
+    pub value_box_w: Pixels,
+    /// 120 px `ValueBox` for a short identifier (a board prefix).
+    pub value_box_short_w: Pixels,
+    /// 54 px resting height of a multi-line `ValueBox`: three `ui` lines.
+    pub value_area_h: Pixels,
+    /// 196 px section rail of a settings dialog.
+    pub settings_rail_w: Pixels,
     /// Terminal-unavailable scrim opacity.
     pub veil_opacity: f32,
     /// Disabled and dimmed row opacity.
@@ -859,6 +869,11 @@ impl Default for Metrics {
             field_status_h: px(18.0),
             palette_input_h: px(44.0),
             number_field_w: px(96.0),
+            card_header_h: px(36.0),
+            value_box_w: px(300.0),
+            value_box_short_w: px(120.0),
+            value_area_h: px(54.0),
+            settings_rail_w: px(196.0),
             veil_opacity: 0.55,
             dimmed_opacity: 0.40,
             refreshing_opacity: 0.60,

@@ -61,6 +61,121 @@ impl Efforts {
     }
 }
 
+/// The models each harness reported on this client's threads, for the Default model rows.
+///
+/// A harness declares its models on the threads it runs; there is no catalogue beyond them, so a
+/// harness this app has not opened a thread for offers none and its row stays a text box.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Models {
+    claude: Vec<ModelOption>,
+    codex: Vec<ModelOption>,
+}
+
+impl Models {
+    /// Every model each harness has declared on this app's threads, first declaration first.
+    #[must_use]
+    pub fn declared(app: &AppState) -> Self {
+        let mut models = Self::default();
+        for (kind, list) in [
+            (AgentKind::Claude, &mut models.claude),
+            (AgentKind::Codex, &mut models.codex),
+        ] {
+            for model in crate::dialogs::card_picker::declared_models(app, Some(kind)) {
+                let name = if model.display_name.trim().is_empty() {
+                    model.id.clone()
+                } else {
+                    model.display_name
+                };
+                list.push(ModelOption { id: model.id, name });
+            }
+        }
+        models
+    }
+
+    /// A catalogue from explicit lists, for tests.
+    #[cfg(test)]
+    #[must_use]
+    pub fn from_lists(claude: Vec<ModelOption>, codex: Vec<ModelOption>) -> Self {
+        Self { claude, codex }
+    }
+
+    /// The models offered for `kind`.
+    #[must_use]
+    pub fn of(&self, kind: AgentKind) -> &[ModelOption] {
+        match kind {
+            AgentKind::Claude => &self.claude,
+            AgentKind::Codex => &self.codex,
+        }
+    }
+}
+
+/// The harness whose default model row `id` is, if it is one.
+#[must_use]
+pub const fn model_harness(id: &RowId) -> Option<AgentKind> {
+    match id {
+        RowId::ClaudeDefaultModel => Some(AgentKind::Claude),
+        RowId::CodexDefaultModel => Some(AgentKind::Codex),
+        _ => None,
+    }
+}
+
+/// The label of the model option that leaves the model to the harness.
+pub(super) const MODEL_DEFAULT: &str = "Harness default";
+
+/// The Default model row of `kind`, drawn from the draft and the catalogue.
+#[must_use]
+pub fn model_of(config: &Config, kind: AgentKind, models: &Models) -> RowKind {
+    let value = defaults_of(config, kind).model.clone().unwrap_or_default();
+    let options = models.of(kind).to_vec();
+    let shown = if value.is_empty() {
+        MODEL_DEFAULT.to_owned()
+    } else {
+        options
+            .iter()
+            .find(|option| option.id == value)
+            .map_or_else(|| value.clone(), |option| option.name.clone())
+    };
+    RowKind::Model {
+        value,
+        shown,
+        options,
+        harness: match kind {
+            AgentKind::Claude => "claude",
+            AgentKind::Codex => "codex",
+        },
+    }
+}
+
+/// Picks the default model of `kind`: `None` is Harness default, else option `index` of the
+/// catalogue. An index past the end is ignored.
+pub fn select_model(config: &mut Config, kind: AgentKind, index: Option<usize>, models: &Models) {
+    let model = match index {
+        None => None,
+        Some(index) => match models.of(kind).get(index) {
+            Some(option) => Some(option.id.clone()),
+            None => return,
+        },
+    };
+    defaults_of_mut(config, kind).model = model;
+}
+
+/// `←` / `→` on a Default model row: Harness default, then the catalogue in order, never
+/// wrapping. A typed id the catalogue lacks steps from Harness default.
+pub fn cycle_model(config: &mut Config, kind: AgentKind, delta: isize, models: &Models) {
+    let offered = models.of(kind);
+    if offered.is_empty() {
+        return;
+    }
+    // Position 0 is Harness default; the catalogue follows from 1.
+    let current = defaults_of(config, kind)
+        .model
+        .as_deref()
+        .and_then(|model| offered.iter().position(|option| option.id == model))
+        .map_or(0, |index| index + 1);
+    let next = step(current, delta, offered.len() + 1);
+    select_model(config, kind, next.checked_sub(1), models);
+}
+
 /// A closed choice as the row draws it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Choice {

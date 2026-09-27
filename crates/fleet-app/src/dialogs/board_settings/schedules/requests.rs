@@ -322,7 +322,7 @@ fn disarm_delete(state: &Entity<AppState>, cx: &mut App) {
 /// `d` on a Schedules list row: the first press asks, the second deletes.
 ///
 /// A schedule is not a draft row that `esc` can bring back: the delete is one request and its
-/// run logs go with it, so the key asks once on the line under the list, the way `esc` asks
+/// run logs go with it, so the key asks once in the amber footer strip, the way `esc` asks
 /// about an unsaved draft, and `esc` takes the question back. Returns whether the key was this
 /// section's.
 pub(in crate::dialogs::board_settings) fn delete_schedule(
