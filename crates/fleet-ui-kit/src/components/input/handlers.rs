@@ -5,7 +5,7 @@
 //! than that — `newline`'s propagation, the clipboard pair, undo's composition flush — says why
 //! inline.
 
-use gpui::{ClipboardItem, Context, Window};
+use gpui::{ClipboardEntry, ClipboardItem, Context, Window};
 
 use super::actions::*;
 use super::{InputBuffer, InputMode, TextInput};
@@ -255,7 +255,51 @@ impl TextInput {
         if self.read_only {
             return;
         }
-        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+        let Some(item) = cx.read_from_clipboard() else {
+            return;
+        };
+        if self.accepts_media
+            && item.entries().iter().any(|entry| {
+                matches!(
+                    entry,
+                    ClipboardEntry::Image(_) | ClipboardEntry::ExternalPaths(_)
+                )
+            })
+        {
+            cx.emit(super::TextInputMedia::Pasted(item));
+            return;
+        }
+        let text = item
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                ClipboardEntry::String(text) => Some(text.text()),
+                ClipboardEntry::Image(_) | ClipboardEntry::ExternalPaths(_) => None,
+            })
+            .fold(None, |text: Option<String>, entry| {
+                let mut text = text.unwrap_or_default();
+                text.push_str(entry);
+                Some(text)
+            })
+            .or_else(|| {
+                let separator = if matches!(self.mode(), InputMode::SingleLine) {
+                    " "
+                } else {
+                    "\n"
+                };
+                let paths = item
+                    .entries()
+                    .iter()
+                    .filter_map(|entry| match entry {
+                        ClipboardEntry::ExternalPaths(paths) => Some(paths.paths()),
+                        ClipboardEntry::String(_) | ClipboardEntry::Image(_) => None,
+                    })
+                    .flatten()
+                    .map(|path| path.to_string_lossy())
+                    .collect::<Vec<_>>();
+                (!paths.is_empty()).then(|| paths.join(separator))
+            });
+        let Some(text) = text else {
             return;
         };
         let text = self.filtered(&text);

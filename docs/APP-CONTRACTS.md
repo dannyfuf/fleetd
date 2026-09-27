@@ -44,7 +44,8 @@ The agent thread follows the same split:
 `screens/agent_thread/{rows/,decisions,composer,presentation,picker,actions}` prepare,
 `state/agents.rs` holds the per-worktree tab order and the client mirror, and the view itself
 issues no I/O — it emits `AgentThreadEvent`, which `screens/workspace/agent.rs` relays as
-`BridgeCommand`s. Three of those events are **not** fire-and-forget, because their answer is
+`BridgeCommand`s or routes into the shared media registry. Three of those events are **not**
+fire-and-forget, because their answer is
 state the surface reads rather than a mutation to forget: `LoadOlder` prepends a page,
 `RefreshCheckpoints` decides whether `[u]` is drawn at all, and `AccountLogin` carries the
 sign-in URL the workspace opens in a browser. `rows/` is the flat row projection
@@ -429,10 +430,16 @@ changed. `AgentThreads` is seeded before it re-reports any newer local overrides
 reads out of shared summary broadcasts preserves O(1) event fan-out.
 
 `AgentThreadView` sends nothing itself. Every mutation leaves it as an `AgentThreadEvent`
-(`Command(BridgeCommand)`, `OpenInEditor(String)`, `Notice(SharedString)`), and
-`screens/workspace/agent.rs` is the one place that relays those onto the bridge, opens an
-editor, or pushes a toast. The view therefore renders purely from state it already holds, which
-is the same render discipline §2 imposes on a screen.
+(`Command(BridgeCommand)`, `StageMedia(TextInputMedia)`, `CancelMedia(UploadId)`,
+`OpenInEditor(String)`, `Notice(SharedString)`), and `screens/workspace/agent.rs` is the one place
+that relays those onto the bridge, routes uploads through `media::stage` / `media::cancel`, opens
+an editor, or pushes a toast. A screen opting a kit input into media must consume its typed media
+event, convert it with the shared `media::{from_clipboard,from_external_paths}` helpers, do
+fallible metadata work on the background executor, and keep upload tasks in the shared registry
+rather than in a chip. The Workspace copies registry progress into prepared screen state during
+its ordinary sync update; render only composes those prepared chips and never queries the
+registry. The view therefore renders purely from state it already holds, which is the same render
+discipline §2 imposes on a screen.
 
 Two events arrive back: `BridgeEvent::Agent { thread, event }` carries one `SeqEvent` for a
 thread the window has opened, and `BridgeEvent::AgentSummary(summary)` carries the tab and

@@ -9,6 +9,7 @@ pub mod bridge;
 pub mod dialogs;
 pub(crate) mod drive;
 pub(crate) mod keymap;
+pub mod media;
 pub(crate) mod notify_sound;
 pub mod presentation;
 pub mod screens;

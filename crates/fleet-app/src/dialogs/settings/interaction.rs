@@ -26,13 +26,14 @@ pub(super) fn click_row(
 /// moves there and a text, number or model row opens its editor, as `Enter` does.
 pub(super) fn open_row(
     state: &Entity<AppState>,
+    bridge: &Bridge,
     row: usize,
     focus: &FocusHandle,
     window: &mut Window,
     cx: &mut App,
 ) {
     put_cursor(state, row, focus, window, cx);
-    begin_editing(state, window, cx);
+    begin_editing(state, bridge, window, cx);
 }
 
 /// A pick from row `row`'s Default model dropdown: `None` is Harness default, else option
@@ -172,6 +173,7 @@ pub(super) fn seed_search(state: &Entity<AppState>, cx: &mut App) {
                     // wrote, as a click outside its box does.
                     host.settings.close_editor();
                     host.settings_input_subscription = None;
+                    host.settings_input_media_subscription = None;
                     host.settings_input = None;
                     changed
                 });

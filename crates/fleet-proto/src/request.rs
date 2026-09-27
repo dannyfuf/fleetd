@@ -1,6 +1,6 @@
 //! Client-to-daemon request messages.
 
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{collections::BTreeMap, fmt, path::PathBuf, str::FromStr};
 
 use fleet_core::{
     agents::{
@@ -20,6 +20,7 @@ use fleet_core::{
     watches::{WatchId, WatchStream},
 };
 use serde::{Deserialize, Deserializer, Serialize};
+use uuid::Uuid;
 
 use crate::{
     agents::CheckpointId,
@@ -119,6 +120,145 @@ impl From<String> for HelloClient {
     fn from(_value: String) -> Self {
         Self::default()
     }
+}
+
+/// Client-generated identity of one resumable staged-media upload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct UploadId(Uuid);
+
+impl UploadId {
+    /// Generates a fresh upload identity.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    /// Wraps an existing UUID.
+    #[must_use]
+    pub const fn from_uuid(value: Uuid) -> Self {
+        Self(value)
+    }
+
+    /// Returns the wrapped UUID.
+    #[must_use]
+    pub const fn as_uuid(self) -> Uuid {
+        self.0
+    }
+}
+
+impl Default for UploadId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for UploadId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl FromStr for UploadId {
+    type Err = uuid::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value.parse().map(Self)
+    }
+}
+
+impl From<Uuid> for UploadId {
+    fn from(value: Uuid) -> Self {
+        Self(value)
+    }
+}
+
+impl From<UploadId> for Uuid {
+    fn from(value: UploadId) -> Self {
+        value.0
+    }
+}
+
+/// Daemon-owned target used to route every operation of a staged-media upload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum MediaAnchor {
+    /// Stage on the daemon receiving the request.
+    Local,
+    /// Stage on the daemon that owns a terminal.
+    Terminal {
+        /// Target terminal.
+        terminal: TerminalId,
+    },
+    /// Stage directly on a named remote host.
+    Host {
+        /// Target host.
+        host: HostId,
+    },
+    /// Stage in the attachment directory of a native-agent thread.
+    Thread {
+        /// Target thread.
+        thread: ThreadId,
+    },
+}
+
+/// One file within a staged directory manifest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StagedFile {
+    /// Slash-separated path relative to the manifest's top-level directory.
+    pub relative: String,
+    /// File length in bytes.
+    pub size: u64,
+}
+
+/// Top-level item staged by one upload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum StageEntry {
+    /// One regular file.
+    File {
+        /// Requested file name; the daemon sanitizes it before writing.
+        name: String,
+        /// File length in bytes.
+        size: u64,
+    },
+    /// One directory tree represented without following symlinks.
+    Directory {
+        /// Requested top-level directory name; the daemon sanitizes it before writing.
+        name: String,
+        /// Regular files in manifest order.
+        files: Vec<StagedFile>,
+        /// Slash-separated relative directories, including empty directories.
+        dirs: Vec<String>,
+    },
+}
+
+/// One idempotent operation in a staged-media upload lifecycle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum StageOp {
+    /// Declare and allocate the upload manifest.
+    Begin {
+        /// File or directory being staged.
+        entry: StageEntry,
+    },
+    /// Write one bounded file chunk.
+    Chunk {
+        /// Zero-based file index in manifest order.
+        file: u32,
+        /// Byte offset within the file; always aligned to the shared chunk size.
+        offset: u64,
+        /// Base64-encoded bytes, bounded by `fleet_proto::media::CHUNK_BYTES` after decoding.
+        data: String,
+    },
+    /// Verify all files and publish the completed upload.
+    Finish {
+        /// Lowercase hexadecimal SHA-256 digest per file, in manifest order.
+        sha256: Vec<String>,
+    },
+    /// Remove any partial data; success is idempotent for an unknown upload.
+    Cancel,
 }
 
 /// A correlated client request.
@@ -1044,6 +1184,15 @@ pub enum RequestBody {
         /// Text to paste.
         text: String,
     },
+    /// Stage a file or directory on the machine that owns `anchor`.
+    StageMedia {
+        /// Stateless routing target repeated on every operation.
+        anchor: MediaAnchor,
+        /// App-generated resumable upload identity.
+        upload: UploadId,
+        /// Upload lifecycle operation.
+        op: StageOp,
+    },
 
     /// List current and recently completed jobs.
     ListJobs,
@@ -1162,6 +1311,11 @@ impl RequestBody {
 /// `AgentRevert` is in the list for a stronger reason than ordering taste: it rewrites the very
 /// worktree the harness is editing, so a revert that interleaved with a send would restore files
 /// underneath a running turn.
+///
+/// `StageMedia` is deliberately absent even for a `Thread` anchor: it writes staging files but
+/// does not mutate transcript or harness state. Keeping its bounded chunks in the concurrent pool
+/// prevents an upload from holding a thread's ordered mutation lane; the later attachment send is
+/// a separate `AgentSend` and is serialized here in the ordinary way.
 #[must_use]
 pub const fn agent_request_is_serialized(body: &RequestBody) -> Option<ThreadId> {
     match body {

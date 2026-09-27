@@ -9,11 +9,18 @@ pub enum ToastTarget {
     Jobs,
     /// A native agent thread that wants the user.
     AgentThread(fleet_core::agents::ThreadId),
+    /// A staged-media upload whose retained task can be cancelled.
+    MediaUpload(fleet_proto::request::UploadId),
 }
 
 impl ToastTarget {
     /// The label of the toast's button.
-    const LABEL: &'static str = "View";
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Jobs | Self::AgentThread(_) => "View",
+            Self::MediaUpload(_) => "Cancel",
+        }
+    }
 }
 
 /// A toast plus the instants that govern its life.
@@ -39,7 +46,8 @@ pub struct LiveToast {
 static NEXT_TOAST_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Pushes a toast, applying the §2.7 law: identical text within one second coalesces into
-/// `×n`, and the stack never exceeds [`MAX_TOASTS`].
+/// `×n`. Completed/transient rows never exceed [`MAX_TOASTS`]; live media uploads are pinned so
+/// their progress and `Cancel` action cannot be evicted by unrelated feedback.
 ///
 /// Errors are never toasts (§1.8); a `Danger` tone is downgraded to `Warning` so a caller
 /// cannot smuggle one in.
@@ -47,7 +55,7 @@ pub fn push_toast(toasts: &mut Vec<LiveToast>, toast: Toast, now: Instant, dwell
     push_toast_to(toasts, toast, None, now, dwell);
 }
 
-/// [`push_toast`] for a toast that points somewhere: it gains a `View` button that goes there.
+/// [`push_toast`] for a toast with a target-specific action button.
 pub fn push_toast_to(
     toasts: &mut Vec<LiveToast>,
     toast: Toast,
@@ -56,16 +64,17 @@ pub fn push_toast_to(
     dwell: Duration,
 ) {
     let mut toast = match target {
-        Some(_) => toast.action(ToastTarget::LABEL),
+        Some(target) => toast.action(target.label()),
         None => toast,
     };
     if toast.tone == Tone::Danger {
         toast.tone = Tone::Warning;
     }
-    if let Some(existing) = toasts
-        .iter_mut()
-        .find(|live| live.toast.text == toast.text && now - live.shown_at <= TOAST_COALESCE_WINDOW)
-    {
+    if let Some(existing) = toasts.iter_mut().find(|live| {
+        live.toast.text == toast.text
+            && live.target == target
+            && now - live.shown_at <= TOAST_COALESCE_WINDOW
+    }) {
         existing.toast.count += 1;
         existing.expires_at = now + dwell;
         if existing.held.is_some() {
@@ -82,7 +91,13 @@ pub fn push_toast_to(
         held: None,
     });
     while toasts.len() > MAX_TOASTS {
-        toasts.remove(0);
+        let Some(index) = toasts
+            .iter()
+            .position(|live| !matches!(live.target, Some(ToastTarget::MediaUpload(_))))
+        else {
+            break;
+        };
+        toasts.remove(index);
     }
 }
 
@@ -333,8 +348,7 @@ impl AppState {
         push_toast(&mut self.toasts, toast, now, dwell);
     }
 
-    /// Records a toast that points at `target`: it gains a `View` button, and a click on it goes
-    /// there (§3.11).
+    /// Records a toast that points at `target`; the target-specific action routes or cancels it.
     pub fn toast_to(&mut self, toast: Toast, target: ToastTarget, now: Instant, dwell: Duration) {
         push_toast_to(&mut self.toasts, toast, Some(target), now, dwell);
     }

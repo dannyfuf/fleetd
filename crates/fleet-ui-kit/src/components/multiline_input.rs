@@ -34,6 +34,8 @@ pub enum MultilineInputEvent {
     Trigger(Trigger),
     /// The text changed. A picker re-filters from [`MultilineInput::active_trigger`] on this.
     Changed,
+    /// The inner editor received an opted-in image paste or external-path drop.
+    Media(super::TextInputMedia),
     /// Escape requested a cascade step.
     Escape,
 }

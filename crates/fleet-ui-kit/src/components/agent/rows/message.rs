@@ -4,7 +4,7 @@
 use gpui::{AnyElement, App, SharedString, div, prelude::*};
 
 use super::render::{RowContext, body_region, chevron, disclosure, header, separator};
-use super::{super::metrics, UserRowState};
+use super::{super::attachment_chip::AttachmentPill, super::metrics, UserRowState};
 use super::{
     AssistantMetaRow, AssistantRow, GateOutcome, GateRow, PlanRow, TranscriptRowId, UserRow,
 };
@@ -47,7 +47,7 @@ pub(super) fn user(row: &UserRow, id: &TranscriptRowId, ctx: &RowContext, cx: &A
                     .flex_wrap()
                     .items_center()
                     .gap(theme.space.xs)
-                    .children(row.attachments.iter().map(|name| attachment_pill(name, cx))),
+                    .children(row.attachments.iter().map(attachment_pill)),
             )
         })
         .child(
@@ -101,23 +101,8 @@ pub(super) fn user(row: &UserRow, id: &TranscriptRowId, ctx: &RowContext, cx: &A
 }
 
 /// A neutral attachment pill, drawn above the user text that carries it.
-pub(super) fn attachment_pill(name: &SharedString, cx: &App) -> AnyElement {
-    let theme = cx.theme();
-    div()
-        .flex_none()
-        .h(theme.metrics.chip_h)
-        .px(theme.space.sm)
-        .flex()
-        .items_center()
-        .gap(theme.space.xxs)
-        .rounded(theme.radii.sm)
-        .bg(theme
-            .colors
-            .text
-            .opacity(theme.metrics.neutral_fill_opacity))
-        .child(Icon::Paperclip.el().size(IconSize::Small).tone(Tone::Muted))
-        .child(Text::hint(name.clone()).tone(Tone::Secondary))
-        .into_any_element()
+pub(super) fn attachment_pill(name: &SharedString) -> AnyElement {
+    AttachmentPill::new(name.clone()).into_any_element()
 }
 
 /// Assistant prose: bare full-width Markdown on the app ground.

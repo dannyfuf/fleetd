@@ -268,14 +268,19 @@ that would drift. Consequences today:
 | Duplicate action suppressed | `Already running` | 1.6 s | `info` |
 | Mode no-op | `no scrollback in alt-screen` | 1.6 s | `chevrons-up` |
 | Agent attention | `<session>: needs permission` / `asks a question` / `proposed a plan` / `agent finished`; a native agent thread's adds `View`, which opens that thread | 3.2 s | `lock` / `circle-question-mark` / `clipboard-check` / `circle-check` |
+| Media copy in progress | `Copying <name> to <host>… <percent>%`, `Finishing <name>…`, or `Waiting for <host> to reconnect…` + button-only `Cancel` | refreshed while live, bounded by the 3 min receiver expiry | `cloud-upload` |
+| Terminal closed after copy | `Terminal closed. Copied file/files to <quoted-paths>` | 3.2 s | `cloud-upload` |
+| Completed copy skipped entries | `Skipped <n> symbolic link or special file entry/entries while copying <name>` | 3.2 s | `info` |
 
 **Never a toast:** job started, job succeeded when its row is on screen, worktree created,
 PR refreshed, context switched, session opened, settings saved, update available, **and any
 error** — errors are sticky (§1.8), never transient.
 
-Identical toast text within **1 s** coalesces into one toast with a `×2` suffix (this kills the
-duplicate spam §6 attributes to overlapping operations with no duplicate suppression). Max 3
-stacked; oldest evicted first.
+Identical toast text with the same target within **1 s** coalesces into one toast with a `×2`
+suffix (this kills the duplicate spam §6 attributes to overlapping operations with no duplicate
+suppression while keeping distinct actions distinct). Max 3 transient toasts are stacked; oldest
+transient first. A live media-progress toast is pinned until completion or cancellation, so later
+feedback cannot remove its progress and only cancel affordance.
 
 ### 2.8 Input modes (no mode word)
 
@@ -848,6 +853,44 @@ keys go to the PTY except `ctrl-s` and the standard `cmd-c` / `cmd-v` clipboard 
 bare-key hints (`r restart`, `l log`, `⏎ start now`) are forbidden anywhere in this screen; they
 are written `^s r`, `^s l`, `^s ⏎`.
 
+**Terminal media paste and drop.** Both the Workspace terminal and the floating agent terminal
+apply the same gesture contract:
+
+- `cmd-v` first recognizes GPUI external paths, then a platform image. External paths already on
+  the target's machine are inserted without a copy; a clipboard image, or any path targeting a
+  remote terminal, is staged on that terminal's owning machine first. A text-only clipboard item
+  follows the existing paste path byte-for-byte. In particular, Wayland file-manager copies that
+  GPUI exposes only as URI-list text remain text; Fleet does not reinterpret them as files.
+- Dropping operating-system files or folders over the Workspace shell targets its active terminal;
+  dropping over the floating agent card targets that card's terminal. While either root is a valid
+  drop target, it is veiled and centered copy reads `Drop to paste path` locally or
+  `Drop to copy to <host>` remotely. The affordance is pointer feedback only and never takes focus.
+- A finished gesture inserts absolute paths in source order, each shell-quoted when necessary and
+  separated by one space, with no trailing newline. Folder manifests preserve empty directories;
+  symlinks and special files inside one are skipped rather than followed. A completed copy with
+  skipped entries warns `Skipped <n> symbolic link or special file entry/entries while copying
+  <name>`.
+- Every copy has a cancellable toast: `Copying <name> to this machine… <percent>%` or
+  `Copying <name> to <host>… <percent>%`; hashing changes it to `Finishing <name>…`. A down link
+  changes it to `Waiting for <host> to reconnect…`. Pressing `Cancel` drops the retained task and
+  asks the receiver to remove its part; receiver expiry is the fallback if that request cannot
+  arrive. Progress is upload state, prepared outside render.
+- If the terminal closes while a copy is in flight, Fleet does not type into a replacement. It
+  shows `Terminal closed. Copied file to <quoted-path>` (or `files`) so the completed data remains
+  discoverable. If only some items in a multi-path gesture succeed, those successful paths are
+  still inserted in their original relative order. One deterministic sticky error names every
+  failed item in source order; later failures do not overwrite earlier ones from the gesture.
+
+Limits and remote failures are sticky errors, not transient toasts. A gesture that must stage
+bytes is refused before transfer with `This drop is larger than the 1 GiB limit`
+or `This drop has more than 10,000 files and folders`; a single-item failure may prefix
+that copy with `<name>: `. Local paths inserted without copying have no staging limit. A remote
+without the capability reports `host <host>: media staging is unavailable; update fleetd on this
+host`; a local outdated daemon reports `media staging is unavailable; update fleetd on this
+machine`. A host that disappears may report `host <host> is unreachable`, while exhausting the
+reconnect wait reports `Timed out waiting for <host> to reconnect`. Plain-text paste never shows
+staging UI.
+
 **Changes panel (`ctrl-s g`, the strip's *Changes*).** An optional 300 px column
 (`metrics.changes_w`) at the right of the Workspace body, beside whatever tab is showing — a
 terminal, a Fleet-drawn pane or an agent thread — answering *what has this worktree changed?*
@@ -1015,7 +1058,7 @@ toast; the URL is also a `Notice` row, so it stays reachable when the browser do
 | Tab mark | spinner · amber dot · neutral dot · `exited <code>` — **at most one** | inside the tab | §3.3 of `NATIVE-AGENTS.md`; amber wins over neutral because amber means *waiting on you* | `AgentThreadSummary.attention` |
 | Session header word | `working` · `needs you` · `failed` · `idle` | header, right | the same vocabulary as the tab and the chips, so three surfaces cannot disagree | idem |
 | Title-bar `needs you` | `<n> needs you`, including the current tab; a click opens the waiting thread | §2.3 | a blocked thread on another worktree is invisible otherwise | `AgentCounts` |
-| User turn | the message on `bg.panel`, radius 6, attachments as pills below | transcript | the **only** block with a background: it is the one thing the user wrote | `ItemKind::UserMessage` |
+| User turn | the message on `bg.panel`, radius 6, attachments as pills above the text | transcript | the **only** block with a background: it is the one thing the user wrote; putting the manifest first matches the transcript component's reading order and keeps it visible when prose wraps | `ItemKind::UserMessage` |
 | Assistant prose | Markdown on the ground — no bubble, no avatar, no header | transcript | the answer is the content; chrome around it is noise | `AssistantText` |
 | Thinking | one collapsed muted line, `thought 6s` + a faint `show` (`⏎` does the same); while it streams it **is** the live row | transcript | reasoning is available, never dominant | `ItemKind::Reasoning` |
 | Tool row | 30 px pointer-first row: state glyph · 60 px verb column (`Read`, `Edit`, `Run`) · one-line summary · result chip (`+1 −1`, `exit 1` in danger, `waiting for you` in amber) · duration · chevron; a click toggles it as `⏎` does; under the pointer **Copy** (`y`), **Diff** (`d`) and **Open in editor** (`o`) icon buttons, and the same verbs on a right-click menu; `agents.tool[N]` | transcript | one shape for every tool means the eye scans a column, not sentences; the verbs are reachable without scroll mode | `ItemKind::Tool` |
@@ -1033,7 +1076,7 @@ toast; the URL is also a `Notice` row, so it stays reachable when the browser do
 | Steered message | an ordinary user bubble with a leading `↳` | transcript, inside the running turn | a message sent while a turn runs is a steer, dispatched immediately — there is no queue and no queued row | `UserRow.steered` |
 | Delegation row | `↳` + provider glyph + title + `starting` / `working` / `blocked` / `done` / `incomplete` / `failed` / `cancelled`; one gray spinner, amber dot, `circle-check` or `circle-x`; optional headline on line two; elapsed time and `⏎ attach` trail; the line is a click target that attaches the child, as `⏎` does | at the caller item that launched the child | the durable row keeps a hidden child reachable and changes in place as `DelegationChanged` arrives, without rewriting the caller projection | `ItemKind::Delegation` joined to `Delegation` |
 | Delegation result card | `↳ <provider> finished · <word> · <elapsed> · <n> files` above the delivered Markdown; collapsed to eight lines with the ordinary `show` / `hide` fold word | the caller's delivered user-message origin | the answer reads as a result of the child rather than as text typed by the user; `Enter` expands the body without attaching the still-hidden child | `UserMessage.origin = Delegation { id }` |
-| Composer | one framed panel: the editor (placeholder `Message claude… @ files · $ skills · / commands`, grows one line at a time to eight; `⏎` sends, `⇧⏎` inserts a newline; `agents.composer`) over a settings strip | docked, bottom | what the next send carries is visible and clickable, not hidden behind `^s m` and `^s t` | `MultilineInput` |
+| Composer | one framed panel: the editor (placeholder `Message claude… @ files · $ skills · / commands`, grows one line at a time to eight; `⏎` sends, `⇧⏎` inserts a newline; paste an image or drop files to attach; `agents.composer`), then removable attachment chips, over a settings strip | docked, bottom | what the next send carries is visible and clickable, not hidden behind `^s m` and `^s t`; chips say waiting, copying progress, ready, or the failure | `MultilineInput`, `ComposerAttachmentRow`, `PendingAttachmentChip` |
 | Settings strip | left: the model chip `claude-opus-5 · high ⌄` (its menu lists the harness's models, then its efforts — `^s m`, `^s e`), the access chip `asks before edits ⌄` (the declared ladder — `^s t`), a **Build \| Plan** control (`⇧⇥`); right: the context meter `34%`, `$0.42 · 48m · dev@example.com`, and **Send** (`⏎`; **Steer** with a draft while the agent works, **Stop** `esc` without one; `agents.send`); **nothing the harness does not report is shown** | the composer's last line | each control calls what its key calls; a chip's tooltip names its key | `ThreadProjection`, `ComposerChip`, `SegmentedControl`, `ContextMeter` |
 | Child caller segment | pinned first segment of the link line `for [<n>] <provider> — <title>`; `[<n>]` is `·` while the caller is hidden; link tone and focus ring, target = caller thread | the muted link line above the composer, unmounted under an approval | activating it or `^s u` attaches the caller when needed, selects it and focuses its composer | `AgentThreadSummary.parent`, `MetadataSegment.target` |
 | Child composer | `Steering a subagent of [<n>]. It reports to its caller when it finishes.` | composer placeholder on a child only | makes the reporting boundary explicit before a human steers the child | caller strip index |
@@ -1064,6 +1107,9 @@ Only gray spinners and the text caret animate; attention is a static amber dot o
 | Turn settled | successful tool rows fold; a failed row stays; the footer appears once, complete |
 | Interrupted | footer reads `stopped · 12s · 3.1k tokens`; there is no error card — stopping is not failing |
 | Failed / exited | red `exited <code>` on the tab, header `failed`, an error card at the end of the transcript |
+| Attachment staging | a removable chip sits between the editor and settings strip: waiting before transfer, gray determinate copying progress while bytes move, ready when its thread-leaf path is available, or failed with the reason. A send waits with `still copying <name>` while any chip is waiting/copying; failed chips are omitted and named in a notice. Attachment-only sends are valid |
+| Attachment refused | the ninth attachment says `A message may carry at most 8 attachments.`; an oversized supported image says `An image attachment is larger than 10 MiB.`; an oversized other file says `A file attachment is larger than 50 MiB.`; a folder says `Folders cannot be attached; drop the files instead.`. These checks happen before staging |
+| Remote thread | accepting a local attachment says `Copying <name> to <host>…`; when the link is down, media input is disabled and a raced paste/drop repeats the composer's `<host> is unreachable — nothing can be sent yet` wording without staging anything |
 | Scroll mode (`^s [`) | the tail is frozen so new output cannot pull the viewport away, and the row nearest the bottom takes the focus ring — which is what makes `⏎`/`u`/`o`/`y`/`d` fire. `G` reaches the newest row **without** leaving the mode; only `q`/`i`/`esc` re-arms the follow |
 | Unread | a neutral dot on the tab only; the header stays `idle`, because nothing is waiting on the user |
 | Provider unavailable | the create fails with the typed reason and names `^s F`, the terminal fallback — never a silent no-op. The reason is the daemon's, verbatim, and names the harness and the `agentBinaries` command that failed (`` `cc` is not Claude Code: `cc (GCC) 16.2.1`. ``) rather than a default executable name Fleet never ran |
@@ -1285,6 +1331,18 @@ KEYMAP — printable keys, `Backspace`, `ctrl-w`, `ctrl-u`, `ctrl-a`/`ctrl-e`, m
 and undo. Lists **under a text field** use `ctrl-n`/`ctrl-p` or `↓`/`↑` and never `j`/`k`.
 **A dialog row with no editor open (Assign, the Settings list while browsing, Confirm) does bind
 `j`/`k`.**
+
+Only a field whose value can be a local filesystem path accepts a pasted image or pasted/dropped
+file. The repository-hooks dialog's Prepare and Post-create command rows and Settings' Claude and
+Codex *Terminal command* rows, while their inline value boxes are open for editing, insert each
+staged path as a separately shell-quoted word. Settings' Claude and Codex *Binary for threads*
+rows use the same inline editor but run without a shell and insert bare paths. Several
+successful paths keep source order and are joined by one space; insertion is at the caret as one
+undoable edit. Existing local files and folders keep their own path (`MediaAnchor::Local`, no
+copy), while a clipboard image is staged into the local Fleet downloads directory first. A
+staging failure inserts nothing for that item and uses the sticky error slot. Branches, titles,
+descriptions, comments, model/effort values, board automation and schedules, search/filter fields,
+pickers, the phase-2 composer and every read-only value deliberately remain text-only.
 
 ---
 
@@ -2033,7 +2091,8 @@ repo change or a screen change.
 
 ### 3.11 Toasts
 
-Rendering: bottom-right, above the status bar, **320 px** wide, 12 px insets, max **3** stacked,
+Rendering: bottom-right, above the status bar, **320 px** wide, 12 px insets, max **3** transient
+rows plus any pinned live media uploads,
 **3.2 s** (1.6 s for instant-action acknowledgements). A toast appears and vanishes in place —
 it does not slide or fade (DESIGN-SYSTEM §2.7). One line, one icon, no title, and a ✕ that takes
 it down at once.
@@ -2044,7 +2103,10 @@ to the same place (`J` for Jobs; none for a thread, which `1 needs you` in the t
 opens); a click on the button or on the line goes there and retires the toast. The key is never
 spelled into the text (`· J` is gone). **Hovering a toast holds its dwell**: it does not decay
 while the pointer rests on it, and resumes with the time it had left when the pointer leaves.
-Contents and the governing law: **§2.7**.
+Contents and the governing law: **§2.7**. A destructive media `Cancel` is button-only: clicking
+the progress line does nothing, while either `Cancel` or ✕ cancels the live upload and removes its
+part. In-progress work may use a longer, continually refreshed dwell and is pinned against normal
+toast-stack eviction until it finishes or is cancelled.
 
 ---
 
@@ -2393,7 +2455,8 @@ each component's full API. `Modal` is an alias of `Dialog` and `TabBar` an alias
 | `DelegationRow` | Two-line live/terminal child summary with provider, status mark, headline, elapsed time and attach hint; never fold-grouped | §3.6.0 |
 | `DelegationResultCard` | Delivered child result in Markdown, collapsed to eight lines and expandable with the shared fold affordance | §3.6.0 |
 | `DecisionDock` | The docked permission / question / plan drawer: a glyph-led title, buttons with live key chips, clickable option rows; owns the decision and key vocabulary, while plans remain transcript rows whose verbs are the dock's buttons | §3.6.0 |
-| `MultilineInput` | The docked composer: wrapping, IME, paste, `↑` history, `⏎`/`⇧⏎`, `/`, `@` and `$` triggers | §3.6.0 |
+| `MultilineInput` | The docked composer: wrapping, IME, text/image paste, file drop, `↑` history, `⏎`/`⇧⏎`, `/`, `@` and `$` triggers; media gestures are opt-in and emit typed media events for the owning screen | §3.6.0 |
+| `ComposerAttachmentRow` / `PendingAttachmentChip` | Prepared attachments between the editor and settings strip, with waiting/copying/ready/failed state and a remove action | §3.6.0 |
 | `MetadataRow` / targeted `MetadataSegment` | Width-aware metadata whose opaque optional target renders in link tone, takes a focus ring and activates through click or `Enter`; the composer's link line above it (a child's caller, a card run's card) | §3.6.0 |
 | `ComposerChip` / `ContextMeter` | The composer's settings strip: a value-and-chevron menu trigger for the model and the access mode, and the context-window meter | §3.6.0 |
 | `Markdown` | Assistant prose parsed from a stream, stable under growth | §3.6.0 |

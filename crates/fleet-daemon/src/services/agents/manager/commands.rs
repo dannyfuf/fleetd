@@ -183,6 +183,11 @@ impl AgentSessionManager {
         };
         let command = binaries.binary(provider_kind).to_owned();
         let worktree_path = request.worktree_path.clone();
+        self.inner
+            .media
+            .ensure_thread_leaf(thread)
+            .await
+            .map_err(daemon_error)?;
         let mut provider = (self.inner.provider_factory)(provider_kind, &request, &binaries)
             .map_err(|error| {
                 provider_factory_error(provider_kind, &command, &worktree_path, error)
@@ -449,6 +454,10 @@ impl AgentSessionManager {
         // Resuming takes the operation lock itself, so it happens before this one does.
         self.resume_if_stopped(&runtime).await?;
         let operation = runtime.operation.lock().await;
+        if runtime.provider.lock().await.is_none() {
+            return Err(conflict(format!("agent thread {thread} is not live")));
+        }
+        let input = self.prepare_input(thread, input).await?;
         let (turn, projected_running, kind) = {
             let state = runtime
                 .state

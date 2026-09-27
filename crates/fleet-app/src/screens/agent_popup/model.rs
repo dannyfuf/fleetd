@@ -10,6 +10,8 @@ pub(super) struct Model {
     pub(super) status_line: SharedString,
     pub(super) mode: AgentPopupMode,
     pub(super) terminal: Option<TerminalId>,
+    /// File-drop copy prepared while synchronizing, never formatted from the render path.
+    pub(super) drop_label: Option<SharedString>,
     pub(super) base_terminal: Option<TerminalId>,
     pub(super) generation: u64,
     pub(super) primed: bool,
@@ -66,6 +68,11 @@ impl Model {
         });
         let activity = app.session_agent_activity(&session);
         let reachable = app.daemon.is_connected();
+        let drop_label = terminal.is_some().then(|| {
+            crate::terminal::media_input::drop_label(
+                record.and_then(|session| session.host.as_ref()),
+            )
+        });
         Some(Self {
             agent: popup.agent,
             session_label: SharedString::from(session.to_string()),
@@ -73,6 +80,7 @@ impl Model {
 
             mode: popup.mode,
             terminal,
+            drop_label,
             base_terminal,
             generation: app.link_generation,
             primed: grid.is_some_and(|grid| grid.primed),

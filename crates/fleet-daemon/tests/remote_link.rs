@@ -1,4 +1,5 @@
 use std::{
+    num::NonZeroUsize,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -20,7 +21,8 @@ use fleet_proto::{
     PROTOCOL_VERSION,
     codec::FleetCodec,
     event::{Event, EventKind},
-    request::{ClientKind, Request, RequestBody},
+    media::CHUNK_BYTES,
+    request::{ClientKind, MediaAnchor, Request, RequestBody, StageOp, UploadId},
     response::{HelloResponse, Response, ResponseBody},
     snapshot::{LinkState, Snapshot},
 };
@@ -28,13 +30,16 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use tokio::{
     io::DuplexStream,
-    sync::{broadcast, watch},
+    sync::{broadcast, oneshot, watch},
+    time::Instant,
 };
 use tokio_util::codec::Framed;
 
 use crate::infra;
 
 const BACKOFF_FLOOR: Duration = Duration::from_millis(100);
+const TEN_MEGABITS_PER_SECOND: usize = 10_000_000 / 8;
+const FIFTY_MIB_IN_CHUNKS: usize = 50 * 1024 * 1024 / CHUNK_BYTES;
 
 #[tokio::test]
 async fn link_handshakes_pings_and_reconnects_after_remote_restart() {
@@ -264,6 +269,229 @@ async fn a_stalled_remote_write_fails_its_request_instead_of_wedging_the_link() 
         .await
         .expect("close must not hang behind a stalled write");
     drop(remote);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_media_window_keeps_paste_latency_bounded_on_a_slow_link() {
+    let host = HostId::try_from("local-daemon").expect("scripted host id");
+    let machine = Arc::new(FakeMachine::new(host.clone()));
+    machine.throttle_stream_writes(
+        NonZeroUsize::new(TEN_MEGABITS_PER_SECOND).expect("non-zero link rate"),
+    );
+    let provider: Arc<dyn MachineProvider> = machine.clone();
+    let link = RemoteLink::new(provider, LinkOptions::default());
+    let connecting = {
+        let link = Arc::clone(&link);
+        tokio::spawn(async move { link.connect().await })
+    };
+    let peer = wait_for_fake_stream(&machine).await;
+    let (remote, _snapshot) = complete_scripted_handshake(peer).await;
+    connecting
+        .await
+        .expect("connect task")
+        .expect("scripted handshake");
+
+    let data = Arc::new(fleet_proto::media::encode(&vec![0xa5; CHUNK_BYTES]));
+    let uploads = [
+        "00000000-0000-4000-8000-000000000051"
+            .parse::<UploadId>()
+            .expect("first upload id"),
+        "00000000-0000-4000-8000-000000000052"
+            .parse::<UploadId>()
+            .expect("second upload id"),
+    ];
+    let (paste_seen_tx, paste_seen_rx) = oneshot::channel();
+    let (release_responses_tx, release_responses_rx) = oneshot::channel();
+    let responder = tokio::spawn(answer_slow_media_stream(
+        remote,
+        paste_seen_tx,
+        release_responses_rx,
+    ));
+    let mut first_window = Vec::new();
+    for lane in 0..fleet_proto::media::UPLOAD_WINDOW {
+        let link = Arc::clone(&link);
+        let data = Arc::clone(&data);
+        let upload = uploads[lane / 2];
+        let lane = lane % 2;
+        let mut request = Box::pin(async move {
+            link.request(media_chunk_request(&link, upload, lane, 0, &data))
+                .await
+        });
+        assert!(
+            futures_util::poll!(request.as_mut()).is_pending(),
+            "the throttled first-window write must await its response"
+        );
+        first_window.push(tokio::spawn(request));
+    }
+    let paste_started = Instant::now();
+    let mut paste_request = {
+        let link = Arc::clone(&link);
+        Box::pin(async move {
+            link.request(RequestBody::PasteTerminal {
+                terminal: fleet_core::ids::TerminalId(9),
+                text: "x".to_owned(),
+            })
+            .await
+        })
+    };
+    assert!(
+        futures_util::poll!(paste_request.as_mut()).is_pending(),
+        "paste is queued behind the undrained media window"
+    );
+    let paste = tokio::spawn(paste_request);
+    let mut lanes = Vec::new();
+    for lane in 0..fleet_proto::media::UPLOAD_WINDOW {
+        lanes.push(tokio::spawn(send_media_lane(
+            Arc::clone(&link),
+            uploads[lane / 2],
+            lane % 2,
+            1,
+            Arc::clone(&data),
+        )));
+    }
+    paste_seen_rx.await.expect("remote observed the paste");
+    let paste_latency = Instant::now().duration_since(paste_started);
+    release_responses_tx
+        .send(())
+        .expect("scripted remote still awaits its release");
+    assert_eq!(
+        paste.await.expect("paste task").expect("paste response"),
+        ResponseBody::Ack
+    );
+    for request in first_window {
+        request
+            .await
+            .expect("first-window task")
+            .expect("first-window response");
+    }
+    for lane in lanes {
+        lane.await.expect("media lane task");
+    }
+    let (remote, chunks_before_paste, maximum_frame_time) =
+        responder.await.expect("scripted remote task");
+
+    assert_eq!(chunks_before_paste, fleet_proto::media::UPLOAD_WINDOW);
+    assert!(
+        paste_latency <= Duration::from_millis(600),
+        "paste waited {paste_latency:?} behind the media window; longest frame was {maximum_frame_time:?}"
+    );
+    assert!(
+        maximum_frame_time < WRITE_BUDGET / 10,
+        "one throttled frame occupied the link for {maximum_frame_time:?}"
+    );
+    assert_eq!(link.state(), LinkState::Ready);
+    link.close().await;
+    drop(remote);
+}
+
+async fn send_media_lane(
+    link: Arc<RemoteLink>,
+    upload: UploadId,
+    lane: usize,
+    start_index: usize,
+    data: Arc<String>,
+) {
+    let chunks_per_lane = FIFTY_MIB_IN_CHUNKS / fleet_proto::media::UPLOAD_WINDOW;
+    for index in start_index..chunks_per_lane {
+        let response = link
+            .request(media_chunk_request(&link, upload, lane, index, &data))
+            .await
+            .expect("media chunk response");
+        assert_eq!(response, ResponseBody::Ack);
+    }
+}
+
+fn media_chunk_request(
+    link: &RemoteLink,
+    upload: UploadId,
+    lane: usize,
+    index: usize,
+    data: &str,
+) -> RequestBody {
+    let offset = ((index * 2 + lane) * CHUNK_BYTES) as u64;
+    RequestBody::StageMedia {
+        anchor: MediaAnchor::Host {
+            host: link.host().clone(),
+        },
+        upload,
+        op: StageOp::Chunk {
+            file: 0,
+            offset,
+            data: data.to_owned(),
+        },
+    }
+}
+
+async fn answer_slow_media_stream(
+    mut remote: ScriptedRemote,
+    paste_seen: oneshot::Sender<()>,
+    release_responses: oneshot::Receiver<()>,
+) -> (ScriptedRemote, usize, Duration) {
+    let mut previous_frame = Instant::now();
+    let mut maximum_frame_time = Duration::ZERO;
+    let mut pending = Vec::with_capacity(fleet_proto::media::UPLOAD_WINDOW + 1);
+    for _ in 0..fleet_proto::media::UPLOAD_WINDOW {
+        let request = next_request(&mut remote).await;
+        let now = Instant::now();
+        maximum_frame_time = maximum_frame_time.max(now.duration_since(previous_frame));
+        previous_frame = now;
+        assert!(matches!(
+            &request.body,
+            RequestBody::StageMedia {
+                op: StageOp::Chunk { .. },
+                ..
+            }
+        ));
+        pending.push(request);
+    }
+    let paste = next_request(&mut remote).await;
+    let now = Instant::now();
+    maximum_frame_time = maximum_frame_time.max(now.duration_since(previous_frame));
+    previous_frame = now;
+    assert!(matches!(&paste.body, RequestBody::PasteTerminal { .. }));
+    pending.push(paste);
+    paste_seen.send(()).expect("test still awaits the paste");
+    release_responses
+        .await
+        .expect("test releases the scripted responses");
+    for request in pending {
+        send_value(
+            &mut remote,
+            Response {
+                id: request.id,
+                result: Ok(ResponseBody::Ack),
+            },
+        )
+        .await;
+    }
+
+    let mut chunks = fleet_proto::media::UPLOAD_WINDOW;
+    while chunks < FIFTY_MIB_IN_CHUNKS {
+        let request = next_request(&mut remote).await;
+        let now = Instant::now();
+        maximum_frame_time = maximum_frame_time.max(now.duration_since(previous_frame));
+        previous_frame = now;
+        match request.body {
+            RequestBody::StageMedia {
+                op: StageOp::Chunk { .. },
+                ..
+            } => chunks += 1,
+            other => panic!("unexpected request during throttled upload: {other:?}"),
+        }
+        send_value(
+            &mut remote,
+            Response {
+                id: request.id,
+                result: Ok(ResponseBody::Ack),
+            },
+        )
+        .await;
+    }
+    (
+        remote,
+        fleet_proto::media::UPLOAD_WINDOW,
+        maximum_frame_time,
+    )
 }
 
 #[tokio::test]

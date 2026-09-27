@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use fleet_core::ids::HostId;
-use fleet_proto::request::RequestBody;
+use fleet_proto::request::{MediaAnchor, RequestBody};
 
 use super::{Resolver, agents::classify_agent};
 
@@ -99,6 +99,15 @@ pub fn classify(body: &RequestBody, resolver: &dyn Resolver) -> Target {
         | ScrollOrKeyTerminal { terminal, .. }
         | RequestFullFrame { terminal }
         | PasteTerminal { terminal, .. } => host_or_local(resolver.host_of_terminal(*terminal)),
+
+        StageMedia { anchor, .. } => match anchor {
+            MediaAnchor::Local => Target::Local,
+            MediaAnchor::Terminal { terminal } => {
+                host_or_local(resolver.host_of_terminal(*terminal))
+            }
+            MediaAnchor::Host { host } => Target::Host(host.clone()),
+            MediaAnchor::Thread { thread } => host_or_local(resolver.host_of_thread(thread)),
+        },
 
         CancelJob { job } | RetryJob { job } | TailJob { job, .. } => {
             host_or_local(resolver.host_of_job(job))
@@ -430,6 +439,7 @@ pub(crate) fn local_fanout_part(
         | RequestBody::ScrollOrKeyTerminal { .. }
         | RequestBody::RequestFullFrame { .. }
         | RequestBody::PasteTerminal { .. }
+        | RequestBody::StageMedia { .. }
         | RequestBody::ListJobs
         | RequestBody::CancelJob { .. }
         | RequestBody::RetryJob { .. }

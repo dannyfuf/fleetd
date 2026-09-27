@@ -85,6 +85,7 @@ pub(crate) struct DialogHost {
     /// The input materialized for the settings row that entered editing.
     pub(super) settings_input: Option<Entity<TextInput>>,
     pub(super) settings_input_subscription: Option<Subscription>,
+    pub(super) settings_input_media_subscription: Option<Subscription>,
     /// The settings header's search field, alive for the dialog's whole lifetime.
     pub(super) settings_search: Option<Entity<TextInput>>,
     pub(super) settings_search_subscription: Option<Subscription>,
@@ -680,6 +681,24 @@ pub(crate) fn focused_input_text(state: &Entity<AppState>, cx: &mut App) -> Opti
     focused_input_entity(state, cx).map(|input| input.read(cx).text().to_owned())
 }
 
+#[cfg(test)]
+/// Seeds the focused editor, parks its caret at the end, then emits a media gesture.
+pub(crate) fn emit_focused_input_media(
+    state: &Entity<AppState>,
+    seed: &str,
+    event: fleet_ui_kit::TextInputMedia,
+    cx: &mut App,
+) -> bool {
+    let Some(input) = focused_input_entity(state, cx) else {
+        return false;
+    };
+    input.update(cx, |input, cx| {
+        input.set_text(seed, cx);
+        cx.emit(event);
+    });
+    true
+}
+
 /// Mirrors only the derived word into `AppState`; the dialog draft remains the source of truth.
 fn sync_dialog_key_context(state: &Entity<AppState>, host: &Entity<DialogHost>, cx: &mut App) {
     let dialog = match state.read(cx).overlay.as_ref() {
@@ -793,6 +812,7 @@ fn close_with(state: &Entity<AppState>, preserve_card_detail: bool, cx: &mut App
         host.hook_input_subscriptions.clear();
         host.settings_input = None;
         host.settings_input_subscription = None;
+        host.settings_input_media_subscription = None;
         host.settings_search = None;
         host.settings_search_subscription = None;
         host.rename_input = None;

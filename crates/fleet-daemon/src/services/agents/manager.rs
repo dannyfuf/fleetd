@@ -45,7 +45,10 @@ use sha2::{Digest as _, Sha256};
 
 use super::{
     AgentThreadRecord,
-    providers::{AgentProvider, ProviderError, ProviderEvent, ProviderEvents, spawn_provider},
+    providers::{
+        AgentProvider, ProviderError, ProviderEvent, ProviderEvents,
+        spawn_provider_with_attachments,
+    },
     store::{self, SqliteAgentStore},
     thread,
 };
@@ -67,6 +70,8 @@ pub(crate) enum SubmissionState {
 }
 pub use commands::CreateOptions;
 use thread::{AppliedEvent, ThreadRuntime, next_coalesced_batch};
+
+mod attachments;
 
 /// Emission-to-read skew worth a log line.
 ///
@@ -119,6 +124,7 @@ struct ManagerInner {
     /// both services and neither can take the other as a constructor argument. `None` means
     /// nothing is captured, so `[u]` is simply not drawn — never that a turn is refused.
     checkpoints: RwLock<Option<crate::services::checkpoints::Checkpoints>>,
+    media: crate::services::media::Media,
 }
 
 impl ManagerInner {
@@ -151,12 +157,33 @@ impl AgentSessionManager {
         worktrees: Worktrees,
         config: Arc<ConfigStore>,
     ) -> Self {
+        let media = default_media(&database);
+        Self::new_with_media(database, events, worktrees, config, media)
+    }
+
+    pub(crate) fn new_with_media(
+        database: PathBuf,
+        events: BroadcastBus,
+        worktrees: Worktrees,
+        config: Arc<ConfigStore>,
+        media: crate::services::media::Media,
+    ) -> Self {
+        let provider_media = media.clone();
         let manager = Self::new_with_factory(
             database,
             events,
             worktrees,
             Some(config),
-            Arc::new(spawn_provider),
+            Arc::new(move |kind, request, binaries| {
+                spawn_provider_with_attachments(
+                    kind,
+                    request,
+                    binaries,
+                    provider_media.thread_leaf(request.thread),
+                    provider_media.files(),
+                )
+            }),
+            media,
         );
         manager.set_remote_host_resolver(Arc::new(|_| None));
         manager
@@ -168,11 +195,16 @@ impl AgentSessionManager {
         worktrees: Worktrees,
         config: Option<Arc<ConfigStore>>,
         provider_factory: Arc<ProviderFactory>,
+        media: crate::services::media::Media,
     ) -> Self {
         // Opening the database migrates it and runs the one-shot NDJSON import. It reads no
         // transcript: the boot census it takes is two index lookups, and the replay it may imply
         // happens in `repair`, in the background, one thread at a time.
-        let store = match SqliteAgentStore::open(database) {
+        let store = match SqliteAgentStore::open_with_files(
+            database,
+            media.files(),
+            media.attachments_root().to_path_buf(),
+        ) {
             Ok(store) => StoreSlot::Ready(store),
             Err(error) => {
                 let reason = format!("{error:#}");
@@ -195,6 +227,7 @@ impl AgentSessionManager {
                 provider_factory,
                 remote_host_resolver: RwLock::new(None),
                 checkpoints: RwLock::new(None),
+                media,
             }),
         };
         manager.spawn_repair();
@@ -477,6 +510,11 @@ impl AgentSessionManager {
         let thread = record.thread;
         let binaries = self.agent_binaries().await;
         let kind = request.provider;
+        self.inner
+            .media
+            .ensure_thread_leaf(thread)
+            .await
+            .map_err(daemon_error)?;
         let command = binaries.binary(kind).to_owned();
         let worktree = request.worktree_path.clone();
         let mut provider = (self.inner.provider_factory)(kind, &request, &binaries)
@@ -802,6 +840,19 @@ impl AgentSessionManager {
             .await
             .map_err(apply_error)
     }
+}
+
+fn default_media(database: &std::path::Path) -> crate::services::media::Media {
+    let fleet_root = database
+        .parent()
+        .and_then(std::path::Path::parent)
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let home = fleet_core::paths::FleetHome::new(fleet_root);
+    let attachments = home.agents_attachments_path();
+    let files: Arc<dyn crate::adapters::files::Files> = Arc::new(
+        crate::adapters::files::RealFiles::new(home.root().join("trash"), [attachments]),
+    );
+    crate::services::media::Media::new(&home, files, Arc::new(crate::adapters::clock::SystemClock))
 }
 
 /// The directory a resumed delegated child gets prepended to its `PATH`.

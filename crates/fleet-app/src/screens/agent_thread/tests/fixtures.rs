@@ -398,6 +398,8 @@ pub(super) fn pending(text: &str, steered: bool) -> PendingSend {
     PendingSend {
         id: ItemId::new(),
         text: text.to_owned(),
+        draft: text.to_owned(),
+        attachments: Vec::new(),
         steered,
         failed: false,
         echoes: 0,

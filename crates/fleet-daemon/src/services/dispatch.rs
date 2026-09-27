@@ -835,6 +835,24 @@ impl Services {
                     .await;
                 self.agent_response(answer)
             }
+            RequestBody::StageMedia { anchor, upload, op } => {
+                match &anchor {
+                    fleet_proto::request::MediaAnchor::Terminal { terminal } => {
+                        if !self.sessions.runtime.owns_terminal(*terminal) {
+                            return Err(DaemonError::NotFound(format!("terminal {terminal}")));
+                        }
+                    }
+                    fleet_proto::request::MediaAnchor::Thread { thread } => {
+                        self.agents
+                            .record(*thread)
+                            .await
+                            .map_err(crate::error::from_proto_error)?;
+                    }
+                    fleet_proto::request::MediaAnchor::Local
+                    | fleet_proto::request::MediaAnchor::Host { .. } => {}
+                }
+                self.media.stage_owned(owner, anchor, upload, op).await
+            }
             RequestBody::DaemonShutdown { .. } => Ok(ResponseBody::ShuttingDown),
         }
     }
@@ -1131,5 +1149,93 @@ mod tests {
                 .expect_err("still an error");
             assert!(matches!(error, DaemonError::Protocol(_)), "{error:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn thread_media_begin_requires_a_thread_owned_by_this_daemon() {
+        use fleet_proto::request::{MediaAnchor, StageEntry, StageOp, UploadId};
+
+        let temp = tempfile::tempdir().expect("temp home");
+        let home = temp.path().join(".fleet");
+        let files = Arc::new(RealFiles::new(
+            home.join("trash"),
+            [home.join("repos"), home.join("worktrees")],
+        ));
+        let services = Services::new(
+            &home,
+            Arc::new(ConfigStore::new(&home, files.clone())),
+            Arc::new(StateStore::new(&home, files.clone(), Arc::new(SystemClock))),
+            Arc::new(JobManager::new(&home)),
+            Adapters::system(files),
+        );
+        let thread = fleet_core::agents::ThreadId::new();
+
+        let error = services
+            .dispatch(RequestBody::StageMedia {
+                anchor: MediaAnchor::Thread { thread },
+                upload: UploadId::new(),
+                op: StageOp::Begin {
+                    entry: StageEntry::File {
+                        name: "attachment.png".to_owned(),
+                        size: 0,
+                    },
+                },
+            })
+            .await
+            .expect_err("unknown thread must not get an attachment directory");
+
+        assert!(
+            matches!(error, DaemonError::NotFound(message) if message.contains(&thread.to_string()))
+        );
+        assert!(!home.join("agents/attachments").exists());
+    }
+
+    #[tokio::test]
+    async fn terminal_media_ops_require_a_terminal_owned_by_this_daemon() {
+        use fleet_proto::request::{MediaAnchor, StageEntry, StageOp, UploadId};
+
+        let temp = tempfile::tempdir().expect("temp home");
+        let home = temp.path().join(".fleet");
+        let files = Arc::new(RealFiles::new(
+            home.join("trash"),
+            [home.join("repos"), home.join("worktrees")],
+        ));
+        let services = Services::new(
+            &home,
+            Arc::new(ConfigStore::new(&home, files.clone())),
+            Arc::new(StateStore::new(&home, files.clone(), Arc::new(SystemClock))),
+            Arc::new(JobManager::new(&home)),
+            Adapters::system(files),
+        );
+        let terminal = fleet_core::ids::TerminalId(404);
+
+        let operations = [
+            StageOp::Begin {
+                entry: StageEntry::File {
+                    name: "unknown.png".to_owned(),
+                    size: 0,
+                },
+            },
+            StageOp::Chunk {
+                file: 0,
+                offset: 0,
+                data: String::new(),
+            },
+            StageOp::Finish { sha256: Vec::new() },
+            StageOp::Cancel,
+        ];
+        for op in operations {
+            let error = services
+                .dispatch(RequestBody::StageMedia {
+                    anchor: MediaAnchor::Terminal { terminal },
+                    upload: UploadId::new(),
+                    op,
+                })
+                .await
+                .expect_err("an unknown terminal must never fall back to local staging");
+
+            assert!(matches!(error, DaemonError::NotFound(message) if message == "terminal 404"));
+        }
+        assert!(!home.join("media").exists());
     }
 }

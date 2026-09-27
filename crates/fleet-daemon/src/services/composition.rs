@@ -69,11 +69,17 @@ impl Services {
             sessions.clone(),
         );
         let fleet_home = fleet_core::paths::FleetHome::new(home.clone());
-        let agents = agents::AgentSessionManager::new(
+        let media = media::Media::new(
+            &fleet_home,
+            Arc::clone(&adapters.files),
+            Arc::clone(&adapters.clock),
+        );
+        let agents = agents::AgentSessionManager::new_with_media(
             fleet_home.agents_db_path(),
             events.clone(),
             worktrees.clone(),
             Arc::clone(&config),
+            media.clone(),
         );
         // Checkpoints are Git-only: the ref namespace is their whole store, so the service needs
         // the process boundary and nothing else — no database handle, no event bus, no state.
@@ -273,6 +279,7 @@ impl Services {
             inspect,
             prune,
             doctor,
+            media,
             import,
             update,
             config,

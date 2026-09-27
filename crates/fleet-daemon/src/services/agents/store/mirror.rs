@@ -433,6 +433,8 @@ pub(super) fn discard(transaction: &Transaction<'_>, thread: ThreadId) -> anyhow
             .execute(statement, params![id])
             .with_context(|| format!("discard the mirrored rows of thread {thread}"))?;
     }
+    // A mirror owns no attachment bytes: paths and rows are authoritative only on the daemon
+    // that owns the thread, so discarding a mirror deliberately drops references without files.
     project::execute(
         transaction,
         "UPDATE threads SET head_seq = 0, projected_seq = 0, running_turn_id = NULL, \

@@ -95,6 +95,7 @@ fn config_for(binaries: &AgentBinaries, kind: AgentKind) -> harness::HarnessConf
         home: None,
         env: BTreeMap::new(),
         attachments_dir: None,
+        files: None,
         client_version: env!("CARGO_PKG_VERSION").to_owned(),
         raw_log_dir: None,
     }

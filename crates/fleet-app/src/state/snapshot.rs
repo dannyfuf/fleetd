@@ -102,6 +102,7 @@ impl AppState {
         self.agents
             .sync_snapshot(snapshot.agent_threads.clone(), &worktrees);
         self.notify_agent_attention(now);
+        self.media_uploads.wake_ready_links(&snapshot);
         self.snapshot = Some(snapshot);
         self.snapshot_at = Some(now);
         self.bump_snapshot_revision();
@@ -185,7 +186,45 @@ impl AppState {
             status.version = version;
         }
         status.error = error;
+        self.media_uploads.wake_link(host, link);
         self.bump_snapshot_revision();
+    }
+
+    /// Resolves a known terminal to its optional remote host.
+    ///
+    /// `None` means the terminal is absent from the snapshot; `Some(None)` means it is positively
+    /// known to be local. Keeping those cases distinct prevents reconnect gaps from being treated
+    /// as proof that a remote path is usable on this machine.
+    #[must_use]
+    pub fn terminal_host(&self, terminal: TerminalId) -> Option<Option<&HostId>> {
+        self.snapshot
+            .as_ref()?
+            .sessions
+            .iter()
+            .find(|session| {
+                session
+                    .terminals
+                    .iter()
+                    .any(|candidate| candidate.id == terminal)
+            })
+            .map(|session| session.host.as_ref())
+    }
+
+    /// Resolves the remote host that owns a terminal, or `None` for a local or unknown terminal.
+    #[must_use]
+    pub fn host_of_terminal(&self, terminal: TerminalId) -> Option<&HostId> {
+        self.terminal_host(terminal).flatten()
+    }
+
+    /// Reads the latest mirrored daemon-link state for a configured remote host.
+    #[must_use]
+    pub fn host_link_state(&self, host: &HostId) -> Option<LinkState> {
+        self.snapshot
+            .as_ref()?
+            .hosts
+            .iter()
+            .find(|candidate| &candidate.id == host)
+            .map(|status| status.link)
     }
 
     /// The active context, when the snapshot names one.

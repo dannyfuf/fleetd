@@ -292,6 +292,14 @@ pub(super) fn paste_clipboard(
     let Some((terminal, primed)) = terminal_input_target(state, cx) else {
         return;
     };
+    if let Some(attachment) = cx
+        .read_from_clipboard()
+        .as_ref()
+        .and_then(crate::media::from_clipboard)
+    {
+        stage_attachment(local, bridge, state, terminal, attachment, cx);
+        return;
+    }
     let mut accepted = true;
     surface::route_paste(local, state, cx, |input| {
         accepted = local
@@ -299,6 +307,60 @@ pub(super) fn paste_clipboard(
             .send_or_queue(bridge, Some(terminal), primed, input);
     });
     surface::report_input_delivery(accepted, state, cx);
+}
+
+pub(super) fn drop_paths(
+    local: &Rc<RefCell<Local>>,
+    bridge: &Bridge,
+    state: &Entity<AppState>,
+    terminal: TerminalId,
+    paths: &gpui::ExternalPaths,
+    cx: &mut App,
+) {
+    if terminal_input_target(state, cx).map(|target| target.0) != Some(terminal) {
+        return;
+    }
+    stage_attachment(
+        local,
+        bridge,
+        state,
+        terminal,
+        crate::media::from_external_paths(paths),
+        cx,
+    );
+}
+
+fn stage_attachment(
+    local: &Rc<RefCell<Local>>,
+    bridge: &Bridge,
+    state: &Entity<AppState>,
+    terminal: TerminalId,
+    attachment: crate::media::Attachment,
+    cx: &mut App,
+) {
+    let delivery_local = Rc::clone(local);
+    let delivery_bridge = bridge.clone();
+    crate::terminal::media_input::stage_for_terminal(
+        local,
+        state,
+        bridge,
+        terminal,
+        attachment,
+        move |state, input, cx| {
+            let primed = state
+                .read(cx)
+                .grids
+                .get(&terminal)
+                .is_some_and(|grid| grid.primed);
+            delivery_local.borrow_mut().send_or_queue(
+                &delivery_bridge,
+                Some(terminal),
+                primed,
+                input,
+            )
+        },
+        cx,
+    );
 }
 
 pub(super) fn terminal_input_target(

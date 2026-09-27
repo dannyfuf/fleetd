@@ -83,7 +83,8 @@ daemon can resolve per-harness defaults and adds Claude's `auto` and `dont_ask`.
 check rejects either mixed-version direction before an incompatible request is routed.
 
 Capabilities advertised by this build are `prune.reviewed_ids`, `snapshot.revision`,
-`board.worktree`, `board.automation`, `remote-machines`, `terminal.clipboard`, and the ten of
+`board.worktree`, `board.automation`, `board.reviews`, `schedules`, `remote-machines`,
+`terminal.clipboard`, `media.stage`, and all ten entries in
 `fleet_proto::AGENT_CAPABILITIES` — `agent.window`, `agent.sync_marker`, `agent.resync`,
 `agent.item_body`, `agent.checkpoints`, `agent.codex`, `agent.seen`, `agent.closed`, `agent.account`,
 `agent.delegation`. A peer infers behaviour from those strings and never from a version number, so
@@ -98,6 +99,66 @@ adds defaultable `host`; `DoctorHost { host }` provides scoped diagnostics. `Res
 `DeleteWorktrees -> WorktreesDeleted`, `InspectWorktrees -> Inspections`, and `PruneWorktrees ->
 Pruned` preserve per-item outcomes. Mixed-host dismiss/sleep/kill extensions must likewise return
 one outcome per requested item rather than failing the whole request.
+
+`StageMedia { anchor, upload, op }` is the additive, capability-gated upload lifecycle. The app
+generates the global UUID `upload`, and every operation repeats its anchor so the router keeps no
+upload-to-host state:
+
+- `Begin { entry } -> Ack` declares either one file or a directory manifest. Directory manifests
+  list regular files and explicit directories; the app skips symlinks and special entries.
+- `Chunk { file, offset, data } -> Ack` carries at most 128 KiB decoded as base64. Chunks are
+  aligned and idempotent, so an unacknowledged chunk may be resent after a link blip.
+- `Finish { sha256 } -> Path { path, host }` requires every chunk, SHA-256-verifies every file,
+  atomically publishes the part, and returns its absolute path on the owning host. The receiver
+  retains the completed result through idle expiry, so repeating `Finish` with the same digests
+  returns the same path after a lost response.
+- `Cancel -> Ack` removes the part and is also successful for an unknown upload.
+
+The four anchors are `Local`, `Terminal { terminal }`, `Host { host }`, and
+`Thread { thread }`. `Local` stays on the receiving daemon; a terminal follows its owner; an
+explicit host routes there; and a thread follows its owner. The app resolves a remote terminal
+or thread to a `Host` anchor once before starting, so clearing transient terminal mappings during
+a reconnect cannot redirect later operations to the local daemon. A daemon rejects any
+`Terminal` anchor it does not own. Forwarding rewrites a terminal id to
+the remote daemon's id, rewrites `Host` to `Local`, and leaves thread and upload UUIDs unchanged;
+a `Local` anchor is never forwarded. A remote `Path` response is stamped with that host. Before
+forwarding any operation, the router requires `media.stage`; the local client also rechecks the
+negotiated capability after reconnect. An older daemon receives no unknown variant and the caller
+gets `host <id>: media staging is unavailable; update fleetd on this host` remotely, or
+`media staging is unavailable; update fleetd on this machine` locally.
+
+The transport constants are one 128 KiB decoded chunk and one four-permit window shared by all
+uploads to a host. Base64 makes one full chunk 174,764 bytes (about 171 KiB), so at most 699,056
+encoded bytes (about 683 KiB) can sit ahead of interactive traffic: about 0.56 seconds on a
+10 Mbit/s uplink, far below the link's 10-second single-write budget. Staging remains outside both
+the ordered PTY-input lane and the per-thread agent-mutation lane; only the final path paste or
+later `AgentSend` enters those lanes. `Begin` and `Chunk` have 30-second request deadlines,
+`Finish` has 120 seconds for hashing as much as 1 GiB, and `Cancel` uses the ordinary 10 seconds.
+The app rejects a gesture that requires staging above 1 GiB or 10,000 manifest entries before
+sending bytes. Local paths inserted without copying do not need a manifest and are not subject to
+staging limits. A daemon accepts at most 16 simultaneously active uploads from one connection;
+the app starts at most 12 upload workers per host and queues the rest, leaving capacity for other
+gestures sharing a forwarded connection. Completed result records do not consume that budget.
+
+When a host is down at the start, the app shows `Waiting for <host> to reconnect…` for up to
+30 seconds. A mid-upload disconnect waits up to 165 seconds, safely below the receiver's
+three-minute idle expiry, and resends only chunks without acknowledgements. `Begin` and `Finish`
+are repeated after an observed link recovery; if a `Chunk` or `Finish` reports that the receiver
+lost the upload, the app repeats `Begin` once with the same stable id. A `Begin` `NotFound` names
+an unavailable anchor and is surfaced without restart. The receiver keeps no upload bytes in memory:
+part files live on disk, idle parts are removed after three minutes, and completed replay records
+expire after the same idle interval without deleting their published file.
+
+`Local`, `Terminal`, and `Host` publish under `~/Downloads/fleet/` on the owning machine when
+`~/Downloads` exists and is writable, otherwise under `$FLEET_HOME/media/`. A `Thread` publishes
+under `$FLEET_HOME/agents/attachments/<thread-uuid>/`, after the daemon verifies that the thread
+exists there. Completed download entries with Fleet's timestamp prefix are retained for seven
+days; orphaned stamped `.part` entries for one day. The safe sweep deletes only regular files or
+all-regular directory trees directly below the downloads root, never follows a symlink, and never
+walks thread attachments.
+
+This remains protocol version 8 because the wire addition is optional and gated by `media.stage`.
+Bumping the exact-match version would lock out every otherwise-compatible remote daemon.
 
 Events add `HostLinkChanged { host, link, version, error }`, `TerminalReattach { terminal }`, and
 the additive `TerminalClipboard { terminal, text }`. A clipboard event is transient: it is absent

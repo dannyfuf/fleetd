@@ -20,6 +20,7 @@ const UNSAVED: &str = "Unsaved";
 #[derive(Clone)]
 struct Handlers {
     state: Entity<AppState>,
+    bridge: Bridge,
     focus: FocusHandle,
 }
 
@@ -34,6 +35,7 @@ pub(crate) fn render(
 ) -> AnyElement {
     let handlers = Handlers {
         state: state.clone(),
+        bridge: bridge.clone(),
         focus: focus.clone(),
     };
     let cx: &App = cx;
@@ -185,7 +187,7 @@ pub(crate) fn render(
                 // its editor owns the keyboard the dialog publishes `SettingsEditing`, whose own
                 // `Enter` row reaches this handler again and keeps the value and closes the box.
                 // Every other row saves.
-                if confirm_opens_editing(&save_state, &focus, window, cx) {
+                if confirm_opens_editing(&save_state, &save_bridge, &focus, window, cx) {
                     return;
                 }
                 save(&save_state, &save_bridge, cx);
@@ -376,7 +378,14 @@ fn row_element(
     let open = {
         let handlers = handlers.clone();
         move |window: &mut Window, cx: &mut App| {
-            open_row(&handlers.state, index, &handlers.focus, window, cx);
+            open_row(
+                &handlers.state,
+                &handlers.bridge,
+                index,
+                &handlers.focus,
+                window,
+                cx,
+            );
         }
     };
     let mut settings_row = SettingsRow::new(("settings-row", index))

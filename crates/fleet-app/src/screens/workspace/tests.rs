@@ -96,6 +96,57 @@ fn app_with_session(session: Session) -> AppState {
     app
 }
 
+#[gpui::test]
+fn copied_paths_are_quoted_and_pasted_without_staging_locally(cx: &mut gpui::TestAppContext) {
+    let mut app = app_with_session(session("agent/claude", terminal(1, TerminalKind::Pty)));
+    let mut grid = MirrorGrid::new(80, 24);
+    grid.primed = true;
+    app.grids.insert(TerminalId(1), grid);
+    let state = cx.new(|_| app);
+    let local = Rc::new(RefCell::new(Local::default()));
+    let (bridge, requests) = Bridge::recording();
+    cx.update(|cx| {
+        cx.write_to_clipboard(ClipboardItem {
+            entries: vec![gpui::ClipboardEntry::ExternalPaths(gpui::ExternalPaths(
+                vec![
+                    PathBuf::from("/tmp/design file.png"),
+                    PathBuf::from("/tmp/spec.md"),
+                ]
+                .into(),
+            ))],
+        });
+        paste_clipboard(&local, &bridge, &state, cx);
+    });
+
+    assert!(matches!(
+        requests.take().as_slice(),
+        [RequestBody::PasteTerminal { terminal: TerminalId(1), text }]
+            if text == "'/tmp/design file.png' /tmp/spec.md"
+    ));
+}
+
+#[gpui::test]
+fn plain_text_paste_keeps_the_existing_bytes(cx: &mut gpui::TestAppContext) {
+    let mut app = app_with_session(session("agent/claude", terminal(1, TerminalKind::Pty)));
+    let mut grid = MirrorGrid::new(80, 24);
+    grid.primed = true;
+    app.grids.insert(TerminalId(1), grid);
+    let state = cx.new(|_| app);
+    let local = Rc::new(RefCell::new(Local::default()));
+    let (bridge, requests) = Bridge::recording();
+    let text = "first line\r\nsecond line\0tail";
+    cx.update(|cx| {
+        cx.write_to_clipboard(ClipboardItem::new_string(text.to_owned()));
+        paste_clipboard(&local, &bridge, &state, cx);
+    });
+
+    assert!(matches!(
+        requests.take().as_slice(),
+        [RequestBody::PasteTerminal { terminal: TerminalId(1), text: pasted }]
+            if pasted == text
+    ));
+}
+
 /// A worktree session with one PTY tab plus one native agent thread whose tab is selected.
 ///
 /// This is the shape S1 was reported in: an agent tab is client state laid over the same strip,
@@ -1544,6 +1595,7 @@ fn the_board_band_needs_a_worktree_to_be_the_board_of() {
         local: Rc::new(RefCell::new(local_with(|_| {}))),
         panes: HashMap::new(),
         agent_views: Rc::new(RefCell::new(AgentViews::new())),
+        media_drop: crate::terminal::media_input::MediaDropState::default(),
     };
     let mut app = app_with_worktree(None);
     let session = app

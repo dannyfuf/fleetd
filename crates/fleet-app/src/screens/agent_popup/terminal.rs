@@ -426,14 +426,88 @@ pub(super) fn paste(
     bridge: &Bridge,
     cx: &mut App,
 ) {
+    let attachment = cx
+        .read_from_clipboard()
+        .as_ref()
+        .and_then(crate::media::from_clipboard);
     let Some(target) = popup_input_target(state.read(cx)) else {
+        if attachment.is_some() {
+            surface::report_input_delivery(false, state, cx);
+        }
         return;
     };
+    if let Some(attachment) = attachment {
+        let Some(terminal) = target.terminal else {
+            surface::report_input_delivery(false, state, cx);
+            return;
+        };
+        stage_attachment(local, state, bridge, terminal, target, attachment, cx);
+        return;
+    }
     let accepted = Cell::new(true);
     surface::route_paste(local, state, cx, |input| {
         accepted.set(send_or_queue(local, bridge, target, input));
     });
     surface::report_input_delivery(accepted.get(), state, cx);
+}
+
+pub(super) fn drop_paths(
+    local: &Rc<RefCell<Local>>,
+    state: &Entity<AppState>,
+    bridge: &Bridge,
+    terminal: TerminalId,
+    paths: &gpui::ExternalPaths,
+    cx: &mut App,
+) {
+    let Some(target) =
+        popup_input_target(state.read(cx)).filter(|target| target.terminal == Some(terminal))
+    else {
+        return;
+    };
+    stage_attachment(
+        local,
+        state,
+        bridge,
+        terminal,
+        target,
+        crate::media::from_external_paths(paths),
+        cx,
+    );
+}
+
+fn stage_attachment(
+    local: &Rc<RefCell<Local>>,
+    state: &Entity<AppState>,
+    bridge: &Bridge,
+    terminal: TerminalId,
+    initial_target: PopupInputTarget,
+    attachment: crate::media::Attachment,
+    cx: &mut App,
+) {
+    let delivery_local = Rc::clone(local);
+    let delivery_bridge = bridge.clone();
+    crate::terminal::media_input::stage_for_terminal(
+        local,
+        state,
+        bridge,
+        terminal,
+        attachment,
+        move |state, input, cx| {
+            let target = popup_input_target(state.read(cx))
+                .filter(|target| target.terminal == Some(terminal))
+                .unwrap_or(PopupInputTarget {
+                    terminal: Some(terminal),
+                    primed: state
+                        .read(cx)
+                        .grids
+                        .get(&terminal)
+                        .is_some_and(|grid| grid.primed),
+                    ..initial_target
+                });
+            send_or_queue(&delivery_local, &delivery_bridge, target, input)
+        },
+        cx,
+    );
 }
 
 pub(super) fn copy_selection(

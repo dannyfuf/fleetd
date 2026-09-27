@@ -91,6 +91,10 @@ state**, so the thread list never touches the message or activity tables.
   paged in 256 KiB chunks. t3code built `checkpoint_diff_blobs` in migration 003 and abandoned it;
   Fleet skips that step. Attachments go on disk, referenced from SQL, swept at start and GC'd
   after commit — never base64 in a row.
+  **As built:** a user-item append inserts its root-relative `item_attachments` rows in the same
+  transaction. The daemon stages bytes in `$FLEET_HOME/agents/attachments/<thread-uuid>/` and its
+  start-time/six-hour sweep removes only unreferenced regular files directly in a thread leaf
+  after a 24-hour grace period.
 - **No compaction, no `VACUUM`, no prefix delete.** Deletion happens per *thread*, never per
   sequence prefix, because a prefix delete invalidates the meaning of a projector cursor. t3code's
   log has no retention anywhere and that is fine, because nothing scans it; the same holds here

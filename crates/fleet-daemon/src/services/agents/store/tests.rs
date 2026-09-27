@@ -13,13 +13,13 @@ use anyhow::Context;
 use chrono::{DateTime, Utc};
 use fleet_core::{
     agents::{
-        AbortReason, AgentEvent, AgentKind, Delegation, DelegationCaller, DelegationId,
-        DelegationResult, DelegationStatus, DeliveryState, GateAnswer, GateId, GateKind,
-        GateResolver, ItemId, ItemKind, ItemPatch, ItemPayloadPatch, ItemStatus, MessageOrigin,
-        ModelDescriptor, ModelSelection, PermissionChoice, PermissionMode, PermissionOption,
-        ProviderOptionId, ReasoningEffortDescriptor, ResultSource, Seq, SeqEvent, SessionState,
-        StopCause, StreamKind, ThreadId, ThreadProjection, ToolCall, ToolKind, TurnId, TurnOutcome,
-        TurnState, Usage,
+        AbortReason, AgentEvent, AgentKind, Attachment, AttachmentSource, Delegation,
+        DelegationCaller, DelegationId, DelegationResult, DelegationStatus, DeliveryState,
+        GateAnswer, GateId, GateKind, GateResolver, ItemId, ItemKind, ItemPatch, ItemPayloadPatch,
+        ItemStatus, MessageOrigin, ModelDescriptor, ModelSelection, PermissionChoice,
+        PermissionMode, PermissionOption, ProviderOptionId, ReasoningEffortDescriptor,
+        ResultSource, Seq, SeqEvent, SessionState, StopCause, StreamKind, ThreadId,
+        ThreadProjection, ToolCall, ToolKind, TurnId, TurnOutcome, TurnState, Usage,
     },
     ids::WorktreeId,
 };
@@ -30,6 +30,7 @@ use super::{
     read,
 };
 use crate::services::agents::delegation::transition::DelegationFacts;
+use crate::testing::fakes::FakeFiles;
 
 /// A store on a fresh tempdir. The directory is returned because dropping it deletes the database.
 fn store() -> anyhow::Result<(tempfile::TempDir, SqliteAgentStore)> {
@@ -84,6 +85,83 @@ fn event(seq: u64, event: AgentEvent) -> SeqEvent {
 
 fn worktree() -> WorktreeId {
     WorktreeId::try_from("acme/api#feature").unwrap_or_else(|error| panic!("{error}"))
+}
+
+#[tokio::test]
+async fn a_user_item_and_its_attachment_rows_commit_together() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir().context("create attachment store directory")?;
+    let home = fleet_core::paths::FleetHome::new(directory.path());
+    let root = home.agents_attachments_path();
+    let thread = ThreadId::new();
+    let path = root.join(thread.to_string()).join("shot.png");
+    let outside = directory.path().join("outside.txt");
+    let files = Arc::new(FakeFiles::new(
+        directory.path().join("trash"),
+        vec![root.clone()],
+    ));
+    files.insert_text(&path, "image bytes");
+    files.insert_text(&outside, "outside");
+    let store = SqliteAgentStore::open_with_files(
+        home.agents_db_path(),
+        Arc::<FakeFiles>::clone(&files),
+        root,
+    )?;
+    let item = ItemId::new();
+    store
+        .append(
+            thread,
+            &event(
+                1,
+                AgentEvent::ItemStarted {
+                    turn: TurnId::new(),
+                    item,
+                    kind: ItemKind::UserMessage {
+                        text: "inspect".to_owned(),
+                        attachments: vec![
+                            Attachment {
+                                name: Some("shot.png".to_owned()),
+                                media_type: "image/png".to_owned(),
+                                source: AttachmentSource::Path(path.clone()),
+                            },
+                            Attachment {
+                                name: Some("outside.txt".to_owned()),
+                                media_type: "text/plain".to_owned(),
+                                source: AttachmentSource::Path(outside),
+                            },
+                            Attachment {
+                                name: None,
+                                media_type: "image/png".to_owned(),
+                                source: AttachmentSource::Url(
+                                    "https://example.com/image.png".to_owned(),
+                                ),
+                            },
+                        ],
+                        steered: false,
+                        origin: Default::default(),
+                    },
+                    parent: None,
+                },
+            ),
+        )
+        .await?;
+
+    assert_eq!(
+        store.referenced_attachment_paths().await?,
+        std::collections::HashSet::from([path])
+    );
+    let conn = probe(&store)?;
+    let item_rows: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM items WHERE thread_id = ?1 AND item_id = ?2",
+        params![thread.to_string(), item.to_string()],
+        |row| row.get(0),
+    )?;
+    let attachment_rows: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM item_attachments WHERE thread_id = ?1 AND item_id = ?2",
+        params![thread.to_string(), item.to_string()],
+        |row| row.get(0),
+    )?;
+    assert_eq!((item_rows, attachment_rows), (1, 1));
+    Ok(())
 }
 
 #[tokio::test]

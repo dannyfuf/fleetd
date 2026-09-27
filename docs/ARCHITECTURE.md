@@ -9,9 +9,10 @@ rendering.
 
 Guiding rules:
 
-1. **Nothing the user started is ever tied to a UI surface.** Jobs (clone, pool build, hooks,
-   prune, fetch) and terminal sessions live in the daemon `fleetd`. Closing a dialog, the
-   workspace, or the whole app never cancels or blocks them. Only an explicit cancel does.
+1. **Durable work is never tied to a UI surface.** Jobs (clone, pool build, hooks, prune, fetch)
+   and terminal sessions live in the daemon `fleetd`; closing a dialog, workspace, or the app does
+   not cancel them. Transient app-owned gestures such as media staging outlive their originating
+   surface, but quitting the app cancels them unless their contract explicitly says otherwise.
 2. **Keyboard first, nvim-inspired.** Every screen is fully operable with the keymap in
    `docs/KEYMAP.md`. The mouse is optional sugar.
 3. **Clean and minimal.** Each view shows exactly what the user needs to decide the next
@@ -55,7 +56,8 @@ Dependency direction: `core <- proto <- {term, client, cli} <- {daemon, app}`; `
 only on gpui; `lazygit` depends on `git` and `ui-kit`, never on `core` or `proto`.
 
 Inside the two GPUI crates the module layout follows responsibility, not screen count. `fleet-app`
-splits `shell/`, `state/`, `bridge/`, `presentation/`,
+splits `shell/`, `state/`, `bridge/`, `presentation/`, `media/` (payload parsing, manifests,
+upload registry and driver),
 `screens/{hub,workspace,agent_thread,agent_popup,jobs}/`,
 `dialogs/`, `views/`, `terminal/` and `watches/`; each of those roots holds the type and its
 composition, with preparation, actions, lifecycle and tests in siblings. `fleet-lazygit` splits
@@ -94,7 +96,8 @@ system, the native git UI and the diff pipeline — are recorded in `docs/decisi
   prepared-copy `Pool`, `Inspect`, `Prune`,
   `Github` (PR tabs, caches, TTLs), `Sessions` (registry, lifecycle, host bridge, observations),
   `Hosts`, `Sleep`, `Watches` and `WatchDiscovery`, `AgentActivity`, `Agents` (the native agent
-  session manager, below), `Router`, `Mirror`, `Bootstrap`, `Awaited`, `Doctor`, `Import`,
+  session manager, below), `Media` (validated chunk assembly, hashing, publication, expiry, and
+  safe download retention), `Router`, `Mirror`, `Bootstrap`, `Awaited`, `Doctor`, `Import`,
   `Update`. `services/composition.rs` wires them, `dispatch.rs` enters the router,
   `snapshots.rs` merges local state with mirrored host fragments, and `maintenance.rs` owns the
   periodic sweeps — among them the schedules loop (`services/schedules/tick.rs`), which sleeps
@@ -589,6 +592,16 @@ advertise the capability, and capabilities reset on disconnect.
 Terminal clipboard writes are likewise an additive, capability-gated event with no protocol-version
 bump. Both sides advertise `terminal.clipboard`; only negotiated, attached subscribers receive
 `TerminalClipboard`, and no request, snapshot, or replay representation exists.
+
+Media staging is an additive request under `media.stage`, also without a version bump.
+`StageMedia` repeats a `Local | Terminal | Host | Thread` anchor on every idempotent
+`Begin | Chunk | Finish | Cancel` operation, so federation routes it without durable upload
+ownership. The receiver's `Media` service writes bounded chunks directly to a part file, verifies
+SHA-256 on finish, publishes one `Path`, and retains that result until idle expiry so a lost
+`Finish` response can be replayed. Staging remains outside PTY and agent mutation ordering. The
+app owns resumability, cancellation, one four-chunk window per host, and the final continuation
+that consumes the path. `docs/REMOTE-MACHINES.md` §3 is the wire, routing, storage, expiry, and
+retention contract.
 
 The original board request names introduced by version 6 remain unchanged. Worktree-scoped boards
 add `EnsureWorktreeBoard` and `CreateWorktreeBoard` under the `board.worktree` capability without

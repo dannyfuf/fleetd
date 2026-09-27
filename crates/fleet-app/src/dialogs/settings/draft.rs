@@ -501,6 +501,7 @@ pub(super) fn toggle_row(state: &Entity<AppState>, cx: &mut App) {
 /// `Enter` its ordinary meaning, which in this dialog is Save.
 pub(super) fn confirm_opens_editing(
     state: &Entity<AppState>,
+    bridge: &Bridge,
     focus: &FocusHandle,
     window: &mut Window,
     cx: &mut App,
@@ -520,14 +521,19 @@ pub(super) fn confirm_opens_editing(
         }
         return true;
     }
-    begin_editing(state, window, cx)
+    begin_editing(state, bridge, window, cx)
 }
 
 /// Materializes the focused row's editor and hands it the keyboard.
 ///
 /// Returns whether the row takes typing at all; a toggle, a cycler and a read-only fact do
 /// not, which is what lets `Enter` keep its ordinary meaning on them.
-pub(super) fn begin_editing(state: &Entity<AppState>, window: &mut Window, cx: &mut App) -> bool {
+pub(super) fn begin_editing(
+    state: &Entity<AppState>,
+    bridge: &Bridge,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
     if read_host(state, cx, |host, _| host.settings_input.is_some()) {
         return true;
     }
@@ -553,6 +559,15 @@ pub(super) fn begin_editing(state: &Entity<AppState>, window: &mut Window, cx: &
             })
     });
     let seed = text.clone();
+    let path_insertion = match focused.id {
+        RowId::ClaudeCommand | RowId::CodexCommand => {
+            Some(crate::dialogs::media::PathInsertion::ShellQuoted)
+        }
+        RowId::ClaudeBinary | RowId::CodexBinary => {
+            Some(crate::dialogs::media::PathInsertion::Bare)
+        }
+        _ => None,
+    };
     let input = cx.new(|cx| {
         let mut input = TextInput::new(InputMode::SingleLine, cx);
         input.set_mono(true, cx);
@@ -568,6 +583,7 @@ pub(super) fn begin_editing(state: &Entity<AppState>, window: &mut Window, cx: &
             // make `commit_value` fail to parse it and clamp the setting to its minimum.
             input.set_filter(Some(|character: char| character.is_ascii_digit()), cx);
         }
+        input.set_accepts_media(path_insertion.is_some(), cx);
         input.set_text(seed, cx);
         input
     });
@@ -601,6 +617,13 @@ pub(super) fn begin_editing(state: &Entity<AppState>, window: &mut Window, cx: &
     host.update(cx, |host, _| {
         host.settings_input_subscription = Some(subscription)
     });
+    if let Some(path_insertion) = path_insertion {
+        let subscription =
+            crate::dialogs::media::subscribe(&input, state, bridge, path_insertion, cx);
+        host.update(cx, |host, _| {
+            host.settings_input_media_subscription = Some(subscription)
+        });
+    }
     input.update(cx, |input, cx| input.focus(window, cx));
     notify(state, cx);
     true
@@ -616,6 +639,7 @@ pub(super) fn end_editing(
     let had_input = with_host(state, cx, |host| {
         host.settings.close_editor();
         host.settings_input_subscription = None;
+        host.settings_input_media_subscription = None;
         host.settings_input.take().is_some()
     });
     if had_input {

@@ -15,7 +15,7 @@ use std::{
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use fleet_proto::{
-    TERMINAL_CLIPBOARD_CAPABILITY,
+    MEDIA_STAGE_CAPABILITY, TERMINAL_CLIPBOARD_CAPABILITY,
     codec::FleetCodec,
     event::{Event, EventKind},
     request::{HelloClient, Request, RequestBody, agent_request_is_serialized},
@@ -758,6 +758,9 @@ type DispatchFuture = Pin<Box<dyn Future<Output = CompletedRequest> + Send>>;
 
 /// Requests whose effects append to the PTY input byte stream.
 fn pty_input_request_is_ordered(body: &RequestBody) -> bool {
+    // `StageMedia` deliberately stays in the concurrent pool: it writes staging files, never the
+    // PTY byte stream or thread state. Keeping chunks off this lane lets keystrokes overtake an
+    // upload; the finished path is pasted only after staging returns it to the caller.
     matches!(
         body,
         RequestBody::StartWatch { .. }
@@ -982,6 +985,7 @@ async fn write_response(
                     fleet_proto::REMOTE_MACHINES_CAPABILITY.to_owned(),
                 ))
                 .chain(std::iter::once(TERMINAL_CLIPBOARD_CAPABILITY.to_owned()))
+                .chain(std::iter::once(MEDIA_STAGE_CAPABILITY.to_owned()))
                 .chain(
                     fleet_proto::AGENT_CAPABILITIES
                         .iter()
@@ -1091,6 +1095,7 @@ mod tests {
                     fleet_proto::REMOTE_MACHINES_CAPABILITY.to_owned(),
                 ))
                 .chain(std::iter::once(TERMINAL_CLIPBOARD_CAPABILITY.to_owned()))
+                .chain(std::iter::once(MEDIA_STAGE_CAPABILITY.to_owned()))
                 .chain(
                     fleet_proto::AGENT_CAPABILITIES
                         .iter()
@@ -1114,6 +1119,7 @@ mod tests {
                 "schedules",
                 "remote-machines",
                 "terminal.clipboard",
+                "media.stage",
                 "agent.window",
                 "agent.sync_marker",
                 "agent.resync",

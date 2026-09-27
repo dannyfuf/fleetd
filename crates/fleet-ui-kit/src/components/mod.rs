@@ -137,7 +137,7 @@ pub use info_card::InfoCard;
 pub use input::actions as text_input;
 pub use input::{
     HISTORY_CAP, InputBuffer, InputMode, TEXT_INPUT_KEY_CONTEXT, TYPING_GROUP_WINDOW, TextInput,
-    TextInputEvent,
+    TextInputEvent, TextInputMedia,
 };
 pub use job_row::{JobRow, JobStatus};
 pub use job_ticker::JobTicker;

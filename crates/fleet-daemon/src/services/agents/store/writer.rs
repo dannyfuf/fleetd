@@ -51,9 +51,10 @@ use rusqlite::{Connection, TransactionBehavior};
 use tokio::sync::{mpsc, oneshot};
 
 use super::{
-    AgentIndex, AgentThreadRecord, DelegationHooks, index, migrations, mirror,
+    AgentIndex, AgentThreadRecord, DelegationHooks, attachments, index, migrations, mirror,
     project::{self, StagedEvent},
 };
+use crate::adapters::files::Files;
 use crate::services::agents::delegation::transition::DelegationFacts;
 
 /// Commands per transaction. Bounds how long one commit can hold the writer.
@@ -199,14 +200,27 @@ impl Writer {
     ///
     /// From here on this connection is reachable only from that thread, which is what makes "one
     /// writer, FIFO, no interleaving" a property of the type and not of a convention.
-    pub(super) fn spawn(conn: Connection) -> anyhow::Result<Self> {
+    pub(super) fn spawn(
+        conn: Connection,
+        files: Arc<dyn Files>,
+        attachments_root: std::path::PathBuf,
+    ) -> anyhow::Result<Self> {
         let (commands, inbox) = mpsc::unbounded_channel();
         let (finished_sender, finished) = std::sync::mpsc::channel();
         let delegation_hooks = Arc::new(Mutex::new(None));
         let writer_hooks = Arc::clone(&delegation_hooks);
         let join = std::thread::Builder::new()
             .name(WRITER_THREAD_NAME.to_owned())
-            .spawn(move || run(conn, inbox, finished_sender, writer_hooks))
+            .spawn(move || {
+                run(
+                    conn,
+                    inbox,
+                    finished_sender,
+                    writer_hooks,
+                    files,
+                    attachments_root,
+                )
+            })
             .context("spawn the fleet-agent-db writer thread")?;
         Ok(Self {
             commands: Some(commands),
@@ -465,6 +479,8 @@ fn run(
     mut inbox: mpsc::UnboundedReceiver<Command>,
     finished: Sender<()>,
     delegation_hooks: Arc<Mutex<Option<DelegationHooks>>>,
+    files: Arc<dyn Files>,
+    attachments_root: std::path::PathBuf,
 ) {
     // `blocking_recv` is correct precisely because this thread has no async context: it is a
     // dedicated OS thread, not a tokio worker, so parking it costs the runtime nothing.
@@ -499,7 +515,13 @@ fn run(
                 Err(_empty_or_closed) => break,
             }
         }
-        commit(&mut conn, batch, &delegation_hooks);
+        commit(
+            &mut conn,
+            batch,
+            &delegation_hooks,
+            files.as_ref(),
+            &attachments_root,
+        );
     }
 
     // `optimize` runs ANALYZE only on the tables whose statistics went stale, so it is cheap and
@@ -563,12 +585,23 @@ fn commit_delegation(
 /// transaction of its own, so one poisonous command fails only its own caller instead of taking
 /// every write queued behind it. The retry is safe because the batch rolled back whole: nothing
 /// it contained was applied.
-fn commit(conn: &mut Connection, batch: Vec<Queued>, hooks: &Mutex<Option<DelegationHooks>>) {
+fn commit(
+    conn: &mut Connection,
+    batch: Vec<Queued>,
+    hooks: &Mutex<Option<DelegationHooks>>,
+    files: &dyn Files,
+    attachments_root: &Path,
+) {
     let durable = batch.iter().any(|queued| needs_durability(&queued.work));
     if durable {
         set_synchronous(conn, "FULL");
     }
-    let outcome = transact(conn, batch.iter().map(|queued| &queued.work));
+    let outcome = transact(
+        conn,
+        batch.iter().map(|queued| &queued.work),
+        files,
+        attachments_root,
+    );
     let bisect = outcome.is_err() && batch.len() > 1;
     if let Err(error) = &outcome
         && bisect
@@ -586,9 +619,11 @@ fn commit(conn: &mut Connection, batch: Vec<Queued>, hooks: &Mutex<Option<Delega
     }
     for queued in batch {
         let answer = if bisect {
-            transact(conn, std::iter::once(&queued.work)).map(|committed| {
-                notify_delegation_hooks(hooks, &committed);
-            })
+            transact(conn, std::iter::once(&queued.work), files, attachments_root).map(
+                |committed| {
+                    notify_delegation_hooks(hooks, &committed);
+                },
+            )
         } else {
             match &outcome {
                 Ok(_) => Ok(()),
@@ -611,6 +646,8 @@ fn commit(conn: &mut Connection, batch: Vec<Queued>, hooks: &Mutex<Option<Delega
 fn transact<'work>(
     conn: &mut Connection,
     work: impl Iterator<Item = &'work Work>,
+    files: &dyn Files,
+    attachments_root: &Path,
 ) -> anyhow::Result<DelegationCommit> {
     // IMMEDIATE, so a competing writer is refused at BEGIN rather than after the first statement
     // has already been applied.
@@ -628,6 +665,13 @@ fn transact<'work>(
                 project::append_event(&transaction, *thread, staged)?;
                 let transition =
                     project::project_event_with_facts(&transaction, *thread, &staged.event, facts)?;
+                attachments::record(
+                    &transaction,
+                    *thread,
+                    &staged.event,
+                    files,
+                    attachments_root,
+                )?;
                 delegation_commit.absorb(transition);
                 project::advance_head(&transaction, *thread, &staged.event)?;
                 advance_caught_up_seen_through_invisible_stop(

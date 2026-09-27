@@ -348,7 +348,12 @@ pub(crate) fn pending_row(pending: &PendingSend) -> TranscriptRow {
         TranscriptRowId::Item(SharedString::from(pending.id.to_string())),
         TranscriptRowKind::User(UserRow {
             text: SharedString::new(pending.text.as_str()),
-            attachments: Rc::from([]),
+            attachments: pending
+                .attachments
+                .iter()
+                .map(|name| SharedString::from(name.clone()))
+                .collect::<Vec<_>>()
+                .into(),
             state: if pending.failed {
                 UserRowState::Failed
             } else {

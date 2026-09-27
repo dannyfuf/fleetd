@@ -46,7 +46,7 @@ impl Default for EditHooksState {
     }
 }
 
-pub(crate) fn seed(state: &Entity<AppState>, cx: &mut App) {
+pub(crate) fn seed(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
     let repo = with_host(state, cx, |host| host.pending_hooks_repo.take());
     let source = repo.as_ref().and_then(|id| {
         state
@@ -92,7 +92,7 @@ pub(crate) fn seed(state: &Entity<AppState>, cx: &mut App) {
     });
     let subscriptions = inputs
         .iter()
-        .map(|input| watch_row(state, input, cx))
+        .flat_map(|input| watch_row(state, bridge, input, cx))
         .collect();
     host.update(cx, |host, _| host.hook_input_subscriptions = subscriptions);
     relabel(state, cx);
@@ -108,6 +108,7 @@ const NEXT_COMMAND_PLACEHOLDER: &str = "Type the next command…";
 fn new_row(command: String, cx: &mut App) -> Entity<TextInput> {
     cx.new(|cx| {
         let mut input = TextInput::new(InputMode::SingleLine, cx);
+        input.set_accepts_media(true, cx);
         input.set_embedded(true, cx);
         input.set_hide_status_line(true, cx);
         input.set_mono(true, cx);
@@ -119,11 +120,13 @@ fn new_row(command: String, cx: &mut App) -> Entity<TextInput> {
 /// Grows the list when the row that was typed into is the trailing blank of its section.
 fn watch_row(
     state: &Entity<AppState>,
+    bridge: &Bridge,
     input: &Entity<TextInput>,
     cx: &mut App,
-) -> gpui::Subscription {
+) -> Vec<gpui::Subscription> {
     let weak_state = state.downgrade();
-    cx.subscribe(input, move |input, event, cx| {
+    let bridge_for_growth = bridge.clone();
+    let editing = cx.subscribe(input, move |input, event, cx| {
         let Some(state) = weak_state.upgrade() else {
             return;
         };
@@ -134,8 +137,16 @@ fn watch_row(
         if !matches!(event, TextInputEvent::Changed) {
             return;
         }
-        append_blank_rows(&state, cx);
-    })
+        append_blank_rows(&state, &bridge_for_growth, cx);
+    });
+    let media = crate::dialogs::media::subscribe(
+        input,
+        state,
+        bridge,
+        crate::dialogs::media::PathInsertion::ShellQuoted,
+        cx,
+    );
+    vec![editing, media]
 }
 
 /// Mirrors the row that just took focus into the marker the shell reconciles against.
@@ -161,7 +172,7 @@ fn claim_row(state: &Entity<AppState>, input: &Entity<TextInput>, cx: &mut App) 
 }
 
 /// Restores the "one trailing blank row per section" rule after an edit.
-fn append_blank_rows(state: &Entity<AppState>, cx: &mut App) {
+fn append_blank_rows(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
     let (prepare_len, texts) = read_host(state, cx, |host, cx| {
         (
             host.edit_hooks.prepare_len,
@@ -178,10 +189,10 @@ fn append_blank_rows(state: &Entity<AppState>, cx: &mut App) {
     }
     if prepare_full {
         let row = new_row(String::new(), cx);
-        let subscription = watch_row(state, &row, cx);
+        let subscriptions = watch_row(state, bridge, &row, cx);
         with_host(state, cx, |host| {
             host.hook_inputs.insert(prepare_len, row);
-            host.hook_input_subscriptions.push(subscription);
+            host.hook_input_subscriptions.extend(subscriptions);
             host.edit_hooks.prepare_len += 1;
             if host.edit_hooks.field >= prepare_len {
                 host.edit_hooks.field += 1;
@@ -190,10 +201,10 @@ fn append_blank_rows(state: &Entity<AppState>, cx: &mut App) {
     }
     if post_full {
         let row = new_row(String::new(), cx);
-        let subscription = watch_row(state, &row, cx);
+        let subscriptions = watch_row(state, bridge, &row, cx);
         with_host(state, cx, |host| {
             host.hook_inputs.push(row);
-            host.hook_input_subscriptions.push(subscription);
+            host.hook_input_subscriptions.extend(subscriptions);
         });
     }
     relabel(state, cx);
@@ -504,7 +515,8 @@ mod tests {
     #[gpui::test]
     fn typing_into_the_trailing_blank_row_appends_the_next_one(cx: &mut gpui::TestAppContext) {
         let state = cx.new(|_| AppState::new("/tmp/hooks", std::time::Instant::now()));
-        cx.update(|cx| seed(&state, cx));
+        let bridge = Bridge::closed();
+        cx.update(|cx| seed(&state, &bridge, cx));
         let rows = cx.update(|cx| read_host(&state, cx, |host, _| host.hook_inputs.clone()));
         assert_eq!(
             rows.len(),
@@ -531,7 +543,8 @@ mod tests {
     #[gpui::test]
     fn a_removed_command_leaves_its_list_and_the_blank_rows_stay(cx: &mut gpui::TestAppContext) {
         let state = cx.new(|_| AppState::new("/tmp/hooks-remove", std::time::Instant::now()));
-        cx.update(|cx| seed(&state, cx));
+        let bridge = Bridge::closed();
+        cx.update(|cx| seed(&state, &bridge, cx));
         let rows = cx.update(|cx| read_host(&state, cx, |host, _| host.hook_inputs.clone()));
         cx.update(|cx| {
             rows[0].update(cx, |input, cx| input.set_text("bundle install", cx));
@@ -569,7 +582,8 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         let state = cx.new(|_| AppState::new("/tmp/hooks-cursor", std::time::Instant::now()));
-        cx.update(|cx| seed(&state, cx));
+        let bridge = Bridge::closed();
+        cx.update(|cx| seed(&state, &bridge, cx));
         let rows = cx.update(|cx| read_host(&state, cx, |host, _| host.hook_inputs.clone()));
         cx.update(|cx| rows[0].update(cx, |input, cx| input.set_text("bundle install", cx)));
         let window = cx.add_empty_window();

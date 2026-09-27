@@ -1149,6 +1149,34 @@ slash-command invocation when the last block is text; leading with the text made
 image-carrying turn fall back to a plain prompt and a hand-typed `/skill args` reach the model
 unexpanded (`ClaudeAdapter.ts:1538-1549`).
 
+Pasted and dropped bytes are staged with `StageMedia` under
+`$FLEET_HOME/agents/attachments/<thread-uuid>/`; the daemon creates that thread leaf with mode
+`0700`, records only its path, and grants Claude that exact leaf with `--add-dir`. A Claude `Path`
+attachment with media type `image/gif`, `image/jpeg`, `image/png`, or `image/webp` becomes an
+inline base64 image block only after its canonical path is proven to remain inside that thread's
+leaf. Other paths, including escapes, keep the literal-text behavior. The daemon refuses input
+over 120 000 characters, more than 8 attachments, images over 10 MiB, and other files over
+50 MiB before provider dispatch. Wire `Base64` sources are decoded into the leaf and rewritten to
+`Path` before the user item is recorded; `Url` sources remain unchanged.
+
+The native composer opts its multiline input into media only when its current mode accepts
+attachments and the thread link is up. A paste becomes the shared media module's clipboard
+attachment and a drop becomes its path attachment; folders are refused with `Folders cannot be
+attached; drop the files instead.`. Before staging, the app enforces the daemon's 8-item and size
+limits using the same three refusal sentences. Clipboard images retain their `ImageFormat` MIME
+type; dropped files use the fixed `png` / `jpg` / `jpeg` / `gif` / `webp` table and otherwise
+`application/octet-stream`. Every accepted object is force-copied with
+`MediaAnchor::Thread { thread }`; a remote copy says `Copying <name> to <host>…`.
+
+The composer owns only prepared chip state. Upload tasks and byte progress stay in the shared
+media registry, and the Workspace snapshots that progress into waiting, copying, ready or failed
+chips during its update path, never during render. Removing a live chip cancels its upload, and a
+late completion is ignored by looking the chip up by its local id. Send waits while any copy is
+live, admits a ready attachment without text, omits and names failed chips, and carries each ready
+chip as `AttachmentSource::Path`. The optimistic user bubble shows its attachment names. Dispatch
+clears the chips; a raced refusal restores them together with the draft. A link-down paste or drop
+stages nothing and repeats the composer's unreachable-placeholder wording.
+
 The user bubble shows **what the user typed**. Attachment manifests, `@file` expansions and
 Fleet's own prompt prefixes are stripped for display and for `↑` recall, and kept verbatim for
 copy.
@@ -1159,7 +1187,8 @@ the daemon stored. When the `AgentSend` request comes back an error — the thre
 harness would not take the prompt, the transport deadline passed — the bubble turns failed, the
 daemon's sentence is said once as a notice, and the composer is free: a failed bubble counts as
 neither work nor an unacknowledged send, so it blocks nothing and spins nothing. There is no retry
-key; the text is one `↑` away.
+key; the draft and any dispatched attachment chips are restored unless the user has already typed
+a newer draft.
 
 The composer wraps every logical line to its resolved value-column width, breaking an unbroken
 token at a character boundary rather than widening the panel. Its caret, pointer hit-testing,
@@ -1258,6 +1287,14 @@ pass reached that thread sees the tab change without opening it.
 
 `index.json` is gone, and with it the whole-file rewrite on every metadata change: a record is one
 upsert on one row, which touches no projected column.
+
+For a user item, the projector writes one `item_attachments` row per regular attachment beneath
+the shared attachments root in the same transaction as the item. The row carries a root-relative
+path, MIME type, and stat-derived byte count; URLs and paths outside the root have no row. On
+daemon start and every six hours, the orphan sweep considers only regular files directly inside a
+thread leaf and removes an unreferenced file only after its modification time is more than 24
+hours old. Referenced files, fresh files, directories, symlinks, nested entries, and files at the
+root are retained.
 
 `agent_events_quarantine` is where `truncate_after` puts the events it drops. A transaction has no
 torn tail, so the NDJSON `events.ndjson.broken-*` machinery is gone — but the other reason it
@@ -1681,11 +1718,11 @@ this build does not do**, named here rather than softened in the section that sp
 | # | Phase | Status |
 | --- | --- | --- |
 | 1 | **Domain.** New item/event model in `fleet-core::agents`, indexed projection replacing the O(n²) scans, `projection.rs` split under ~900 lines, `should_apply_lifecycle` | **done**; `providers/opencode/**` was deleted with it. `ItemKind::UserMessage` later gained `steered` and `UserInput` gained `item`, both additive and both with a producer |
-| 2 | **Storage.** `rusqlite`, the schema, the owned writer thread, the read pool, the migration ladder, `FleetHome::agents_*`, the one-shot NDJSON import, the one-`SELECT` thread list, lazy hydration and the background boot repair | **done**. The `seen` table has a monotonic owned-writer upsert and bounded per-install census. Owed: `item_attachments` has no writer because attachments are not built |
+| 2 | **Storage.** `rusqlite`, the schema, the owned writer thread, the read pool, the migration ladder, `FleetHome::agents_*`, the one-shot NDJSON import, the one-`SELECT` thread list, lazy hydration and the background boot repair | **done**. The `seen` table has a monotonic owned-writer upsert and bounded per-install census. Attachment rows commit with their user item and drive the guarded orphan sweep |
 | 3 | **Harnesses.** The `Harness` trait and probe; Claude stream-json; Codex app-server; scripted fixtures | **done** against Claude 2.1.275 and Codex 0.154.0. Claude discovers `initialize.models` (with `list_models` and a static fallback), publishes per-model effort ladders, and restarts with resume for every model/effort/mode change. Codex discovers every `model/list` page, sends launch effort through `config.model_reasoning_effort`, and updates effort plus permissions in place. Both adapters publish their supported mode lists. The manager reads the adapter's `Submitted::JoinedActive { turn }` versus `Submitted::QueuedNew { turn }` answer, so a steer is distinguishable from a queued turn. **Owed**: the per-thread raw NDJSON log, Codex cold rehydration from its own store, and per-instance homes (multi-account is out of scope per §14). |
 | 4 | **Protocol.** Windowed open, `AgentItemBody`, the sync/resync events, real `AgentMarkSeen`, durable closed tabs, byte-exact goldens, per-request timeouts, the capability strings | **done**. Ten `agent.*` capabilities are advertised and served. `agent.delegation` gates the six delegation requests and `DelegationChanged`; `agent.account` gates `AgentAccountLogin`/`AgentAccountLogout`. `agent.seen` added `HelloClient.client_id`, `AgentSeenCursors`, `AgentThreadWindow.seen_seq`, and a monotonic store write additively in protocol 7; anonymous peers retain validate-only compatibility. `agent.closed` additively gates `AgentClosedThreads` and `AgentThreadReopen` without changing protocol 8. The app seeds its cursor and closed sets after every Hello, so reconnecting neither restores a cleared amber dot nor a closed tab. Protocol 8 remains the exact-version boundary for defaulted agent creates and the expanded permission enum |
 | 5 | **Transcript.** The flat row model, the eighteen row kinds, `TranscriptList`, `ToolRow`, the fold and group logic, the scroll machine, `gallery_agent` | **done**. Kit (5a): the flat `TranscriptRow`, all eighteen kinds, `TranscriptList` over `list` with the three-state scroll machine and its generation counter, the six-state `ToolRow`, the group summarizer, the streaming-safe `Markdown` with its highlight cache, `gallery_agent`. Screen (5b): `screens/agent_thread/rows/` projects a thread into those rows — the §B1.4 emission order, the fold exemption table, the live-activity tail walk and its present-tense rule, the group summarizer's inputs, and the settled-gate record — memoised behind a `RowsKey` so a stream chunk rewrites one row and re-runs no grouping. Scroll-back paging is closed end to end: `TranscriptEvent::ReachedOldest` reports the gesture, the workspace asks the mirror for a page cursor, and `merge_older_page` prepends the answer. Deferred scroll refresh no longer borrows list state from inside its own callback; the two-turn `scroll-wheel.scenario` exercises wheel input up and back at a 600-pixel viewport |
-| 6 | **Decisions and controls.** `DecisionDock`, the three gate kinds, the composer, the control cluster and pickers, `MetadataRow` overflow | **done**. Kit (5a): `DecisionDock` with its attachment seam, the `Decision` priority ladder and key vocabulary, `MetadataRow` with its per-width fit memo, `MultilineInput`'s three trigger reports. Screen (6): `/login` and `/logout` join the `/` built-ins on a Codex thread and nowhere else, and the metadata row's last trailing segment is the account — `signed out`, or the email, or the plan, or nothing at all; the docked drawer wired to daemon state so a gate owns the keyboard in the same frame, `⏎` unbound on a permission, the question wizard with per-question drafts, the plan verbs on the composer, `ComposerMode`'s capability table, the three control tiers with the restart rule, six completion surfaces, provider-described Codex effort rows and refreshed `$` skills, and the §12 key contexts including row focus inside scroll mode. The harness projects a prepared decision on each thread as `{kind,title,paths,has_diff}`, and the regular corpus proves a Codex file approval joins its exact item. **Not built**: attachments (nothing uploads one, so `--add-dir` is not granted either — granting a directory nothing can put a file in is an affordance with no behaviour behind it) and the `$`-to-`/` skill rewrite (the daemon's adapter boundary owns it) |
+| 6 | **Decisions and controls.** `DecisionDock`, the three gate kinds, the composer, the control cluster and pickers, `MetadataRow` overflow | **done**. Kit (5a): `DecisionDock` with its attachment seam, the `Decision` priority ladder and key vocabulary, `MetadataRow` with its per-width fit memo, `MultilineInput`'s three trigger reports. Screen (6): `/login` and `/logout` join the `/` built-ins on a Codex thread and nowhere else, and the metadata row's last trailing segment is the account — `signed out`, or the email, or the plan, or nothing at all; the docked drawer wired to daemon state so a gate owns the keyboard in the same frame, `⏎` unbound on a permission, the question wizard with per-question drafts, the plan verbs on the composer, `ComposerMode`'s capability table, the three control tiers with the restart rule, six completion surfaces, provider-described Codex effort rows and refreshed `$` skills, and the §12 key contexts including row focus inside scroll mode. The harness projects a prepared decision on each thread as `{kind,title,paths,has_diff}`, and the regular corpus proves a Codex file approval joins its exact item. Attachment chips now stage through the daemon and each Claude launch grants only its own thread leaf. **Owed**: the `$`-to-`/` skill rewrite (the daemon's adapter boundary owns it) |
 | 7 | **Remote.** The mirror column and its authority rules, snapshot-then-delta, the admission ladder | **done**: `store/mirror.rs` owns the `owner_host` columns and the only statements that write them, `manager/mirror.rs` the read-through cache, `router/agents.rs` the `AgentMirror` seam the link hangs on, and `manager/window.rs` the windowed open and the admission ladder. All four authority rules have a test. The app sends window fields on every open, so the warm-mirror path is reachable from the UI. **Owed**: the SQL-native window read of spec-C C.2.5 — the window's *content* still comes from the reducer's projection, so a windowed open of a cold thread replays its log once — and `mirror_oldest_seq` stays `NULL` because the mirror only ever stores prefixes from sequence 1 |
 | 8 | **Checkpoints and revert.** Fleet-owned git refs, `AgentRevert`, `[u]` | **done**: `services/checkpoints/` captures a turn or a file scope into `refs/fleet/checkpoints/`, reverts a worktree from one without touching `HEAD`, the index or the conversation, and garbage collects per thread plus an hourly orphan sweep. `AgentSessionManager` holds the service and takes both captures — `capture_turn` in `send`, for a turn that is actually starting rather than a steer, and `capture_files` on the `ItemStarted` of an edit-shaped tool. A capture failure logs and the turn proceeds, always (§5). The app draws `[u] revert turn` from `AgentCheckpoints` and sends `AgentRevert`. **Owed**: `[u] revert this edit` on a tool row. A file-scope checkpoint names the *turn* it was taken in and not the item, so a tool row has nothing to key on; and the capture is best-effort by construction, because neither harness waits for Fleet before running an auto-approved tool — the turn-scope checkpoint is the guarantee, the file-scope one is the finer-grained revert when the race goes Fleet's way, which it always does for a gated edit |
 | 9 | **Delegations.** Durable caller/child model, transcript origin, storage migration, capability-gated wire family, transcript rows, attach/detach navigation, `AGENTS` picker and restart recovery | **done**. A child starts hidden, attaches from its durable row or `^s d`, detaches without stopping, bubbles attention to its caller, and delivers one result card. Startup resumes one provider exit, preserves exact-once delivery, repairs deleted callers, and cancellation walks descendants first |
@@ -1738,9 +1775,6 @@ inside the adapter rather than becoming transcript identity.
   images and indented code remain literal source text.
 - **Per-edit revert is deferred.** Turn checkpoints are built, but a file-scope checkpoint does
   not yet carry the `ItemId` a tool row needs to offer `u` truthfully (`TODO.md` §4).
-- **Attachments are deferred.** The wire can describe them, but no composer, store writer or
-  per-thread attachment directory produces one, so Fleet does not grant Claude `--add-dir`
-  (`TODO.md` §5).
 - **A cold window still replays once.** Windowed responses are bounded, but their content comes
   from the reducer projection rather than the planned SQL-native window read (`TODO.md` §6).
 - **Multi-account shadow homes** (t3code's symlink overlay) are out of scope. If Fleet ever wants

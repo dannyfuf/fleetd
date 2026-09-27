@@ -14,7 +14,7 @@ mod transport;
 #[cfg(test)]
 mod tests;
 
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use fleet_core::agents::{
@@ -26,6 +26,7 @@ use tokio::{sync::Mutex, task::JoinHandle};
 use uuid::Uuid;
 
 use self::{session::ClaudeSession, transport::Transport};
+use crate::adapters::files::Files;
 use crate::agents::harness::{
     Harness, HarnessConfig, HarnessError, HarnessEvents, HarnessResult, HarnessSink,
     InterruptReason, OpenSession, RestartPlan, RuntimeApplied, RuntimeChange, RuntimeField,
@@ -58,9 +59,6 @@ const CATALOGUE_DEADLINE: Duration = Duration::from_secs(3);
 /// How long the interrupted turn's own `result` is waited for before escalating.
 const RESULT_DEADLINE: Duration = Duration::from_secs(10);
 
-/// The composer limits, copied verbatim from the numbers a real deployment settled on.
-const MAX_INPUT_CHARS: usize = 120_000;
-const MAX_ATTACHMENTS: usize = 8;
 const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 
 /// The image media types the CLI accepts. Anything else is a request error and the turn never
@@ -435,7 +433,12 @@ impl Harness for ClaudeHarness {
     }
 
     async fn submit(&mut self, req: Submit) -> HarnessResult<Submitted> {
-        let frame = user_frame(&req.input)?;
+        let frame = user_frame(
+            &req.input,
+            self.config.attachments_dir.as_deref(),
+            self.config.files.clone(),
+        )
+        .await?;
         let user_item = req.input.item.unwrap_or_default();
         // Resolved before the turn is announced: a harness that is not running must fail the
         // submit without having started anything.
@@ -629,10 +632,17 @@ impl Harness for ClaudeHarness {
         }
         self.transport()?
             .writer
-            .write(user_frame(&UserInput {
-                text: "/compact".to_owned(),
-                ..UserInput::default()
-            })?)
+            .write(
+                user_frame(
+                    &UserInput {
+                        text: "/compact".to_owned(),
+                        ..UserInput::default()
+                    },
+                    self.config.attachments_dir.as_deref(),
+                    self.config.files.clone(),
+                )
+                .await?,
+            )
             .await
     }
 
@@ -739,22 +749,16 @@ impl ClaudeHarness {
 /// invocation when the last content block is text; leading with the text made every
 /// image-carrying turn fall back to a plain prompt and a hand-typed `/skill args` reach the model
 /// unexpanded.
-pub(crate) fn user_frame(input: &UserInput) -> HarnessResult<Value> {
+pub(crate) async fn user_frame(
+    input: &UserInput,
+    attachments_dir: Option<&Path>,
+    files: Option<Arc<dyn Files>>,
+) -> HarnessResult<Value> {
     let request_error = |detail: String| HarnessError::Request {
         method: "user".to_owned(),
         code: None,
         detail,
     };
-    if input.text.chars().count() > MAX_INPUT_CHARS {
-        return Err(request_error(format!(
-            "The message is longer than {MAX_INPUT_CHARS} characters."
-        )));
-    }
-    if input.attachments.len() > MAX_ATTACHMENTS {
-        return Err(request_error(format!(
-            "A message may carry at most {MAX_ATTACHMENTS} attachments."
-        )));
-    }
     let mut text = input.text.clone();
     let mut images = Vec::new();
     for attachment in &input.attachments {
@@ -777,9 +781,26 @@ pub(crate) fn user_frame(input: &UserInput) -> HarnessResult<Value> {
                     }
                 }));
             }
-            // Non-image attachments reach the agent as absolute paths in the prompt text, which
-            // is why the attachments directory has to be in `--add-dir`.
-            (AttachmentSource::Path(path), _) => {
+            (AttachmentSource::Path(path), true) => {
+                if let (Some(directory), Some(files)) = (attachments_dir, files.as_ref())
+                    && let Some(data) = staged_image(path, directory, Arc::clone(files))
+                        .await
+                        .map_err(request_error)?
+                {
+                    images.push(json!({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": attachment.media_type,
+                            "data": data,
+                        }
+                    }));
+                } else {
+                    text.push_str(&format!("\n{}", path.display()));
+                }
+            }
+            // Non-image paths, and image paths outside this thread's leaf, remain prompt text.
+            (AttachmentSource::Path(path), false) => {
                 text.push_str(&format!("\n{}", path.display()));
             }
             (AttachmentSource::Url(url), _) => {
@@ -811,4 +832,46 @@ pub(crate) fn user_frame(input: &UserInput) -> HarnessResult<Value> {
         frame["uuid"] = Value::String(item.to_string());
     }
     Ok(frame)
+}
+
+async fn staged_image(
+    path: &Path,
+    leaf: &Path,
+    files: Arc<dyn Files>,
+) -> Result<Option<String>, String> {
+    let path = path.to_path_buf();
+    let leaf = leaf.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        use crate::adapters::files::FileKind;
+
+        let canonical_leaf = match files.canonicalize(&leaf) {
+            Ok(path) => path,
+            Err(_) => return Ok(None),
+        };
+        let canonical_path = match files.canonicalize(&path) {
+            Ok(path) => path,
+            Err(_) => return Ok(None),
+        };
+        if canonical_path == canonical_leaf || !canonical_path.starts_with(&canonical_leaf) {
+            return Ok(None);
+        }
+        let metadata = files
+            .metadata(&canonical_path)
+            .map_err(|error| format!("Could not inspect staged image: {error}"))?;
+        if metadata.kind != FileKind::File {
+            return Ok(None);
+        }
+        if metadata.len > MAX_IMAGE_BYTES as u64 {
+            return Err(format!(
+                "An image attachment is larger than {} MiB.",
+                MAX_IMAGE_BYTES / (1024 * 1024)
+            ));
+        }
+        let bytes = files
+            .read_bytes_bounded(&canonical_path, MAX_IMAGE_BYTES as u64)
+            .map_err(|error| format!("Could not read staged image: {error}"))?;
+        Ok(Some(fleet_proto::media::encode(&bytes)))
+    })
+    .await
+    .map_err(|error| format!("Could not read staged image: {error}"))?
 }

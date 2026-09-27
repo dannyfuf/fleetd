@@ -20,7 +20,7 @@
 //!   turned into the one thing it can be used for here: a skew measurement logged against the
 //!   moment the daemon read the frame (§9.4).
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use fleet_core::{
@@ -33,6 +33,7 @@ use fleet_core::{
 use thiserror::Error;
 use tokio::task::JoinHandle;
 
+use crate::adapters::files::Files;
 use crate::agents::harness::{
     self, AccountOp, AccountOutcome, Harness, HarnessConfig, HarnessError, HarnessEvent,
     HarnessEvents, InterruptReason, OpenSession, RestartPlan, RuntimeApplied, RuntimeChange,
@@ -404,14 +405,33 @@ pub fn spawn_provider(
     req: &StartRequest,
     binaries: &AgentBinaries,
 ) -> anyhow::Result<Box<dyn AgentProvider>> {
+    spawn_provider_config(kind, req, binaries, None, None)
+}
+
+pub(crate) fn spawn_provider_with_attachments(
+    kind: AgentKind,
+    req: &StartRequest,
+    binaries: &AgentBinaries,
+    attachments_dir: std::path::PathBuf,
+    files: Arc<dyn Files>,
+) -> anyhow::Result<Box<dyn AgentProvider>> {
+    spawn_provider_config(kind, req, binaries, Some(attachments_dir), Some(files))
+}
+
+fn spawn_provider_config(
+    kind: AgentKind,
+    req: &StartRequest,
+    binaries: &AgentBinaries,
+    attachments_dir: Option<std::path::PathBuf>,
+    files: Option<Arc<dyn Files>>,
+) -> anyhow::Result<Box<dyn AgentProvider>> {
     let command = binaries.binary(kind).to_owned();
     let config = HarnessConfig {
         command,
         home: None,
         env: req.env.clone(),
-        // The attachments directory is granted with `--add-dir` and is owned by the thread's
-        // store; until that lands, no directory is granted and a pasted image needs an approval.
-        attachments_dir: None,
+        attachments_dir,
+        files,
         client_version: env!("CARGO_PKG_VERSION").to_owned(),
         raw_log_dir: None,
     };

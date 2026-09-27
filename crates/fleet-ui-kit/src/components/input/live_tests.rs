@@ -1,16 +1,18 @@
 use std::{
     cell::{Cell, RefCell},
+    path::PathBuf,
     rc::Rc,
     time::Duration,
 };
 
 use gpui::{
-    ClipboardItem, Context, Entity, EntityInputHandler, FocusHandle, Focusable, KeyBinding,
-    Modifiers, MouseButton, MouseDownEvent, Subscription, VisualTestContext, Window, actions, div,
-    point, prelude::*, px,
+    ClipboardEntry, ClipboardItem, Context, Entity, EntityInputHandler, ExternalPaths,
+    FileDropEvent, FocusHandle, Focusable, Image, ImageFormat, InputEvent, KeyBinding, Modifiers,
+    MouseButton, MouseDownEvent, Subscription, VisualTestContext, Window, actions, div, point,
+    prelude::*, px,
 };
 
-use super::{InputMode, TYPING_GROUP_WINDOW, TextInput, TextInputEvent};
+use super::{InputMode, TYPING_GROUP_WINDOW, TextInput, TextInputEvent, TextInputMedia};
 use crate::{Theme, text_input};
 
 actions!(text_input_test, [ParentEnter]);
@@ -28,7 +30,7 @@ struct InputHost {
     propagated: Rc<Cell<Propagated>>,
     /// A second editor a test adds to a window that is already live and drawn.
     extra: Option<Entity<TextInput>>,
-    _event_subscription: Subscription,
+    _event_subscriptions: Vec<Subscription>,
 }
 
 impl InputHost {
@@ -87,6 +89,7 @@ type HostedInput = (
     VisualTestContext,
     Entity<TextInput>,
     Rc<RefCell<Vec<TextInputEvent>>>,
+    Rc<RefCell<Vec<TextInputMedia>>>,
     Rc<Cell<Propagated>>,
     FocusHandle,
 );
@@ -102,10 +105,12 @@ fn hosted(
         cx.bind_keys(test_bindings());
     });
     let text = text.to_owned();
-    let events = Rc::new(RefCell::new(Vec::new()));
+    let events = Rc::new(RefCell::new(Vec::<TextInputEvent>::new()));
+    let media = Rc::new(RefCell::new(Vec::new()));
     let propagated = Rc::new(Cell::new(Propagated::default()));
     let window = cx.update(|cx| {
         let events_for_host = events.clone();
+        let media_for_host = media.clone();
         let propagated_for_host = propagated.clone();
         cx.open_window(Default::default(), move |_, cx| {
             cx.new(|cx| {
@@ -117,15 +122,20 @@ fn hosted(
                     configure(&mut input, cx);
                     input
                 });
-                let subscription = cx.subscribe(&input, move |_host, _input, event, _cx| {
-                    events_for_host.borrow_mut().push(*event);
-                });
+                let editing_subscription =
+                    cx.subscribe(&input, move |_host, _input, event, _cx| {
+                        events_for_host.borrow_mut().push(*event);
+                    });
+                let media_subscription =
+                    cx.subscribe(&input, move |_host, _input, event: &TextInputMedia, _cx| {
+                        media_for_host.borrow_mut().push(event.clone());
+                    });
                 InputHost {
                     input,
                     focus: cx.focus_handle(),
                     propagated: propagated_for_host,
                     extra: None,
-                    _event_subscription: subscription,
+                    _event_subscriptions: vec![editing_subscription, media_subscription],
                 }
             })
         })
@@ -144,12 +154,12 @@ fn hosted(
     });
     visual.update(|window, cx| window.draw(cx).clear(cx));
     visual.run_until_parked();
-    (visual, input, events, propagated, parent_focus)
+    (visual, input, events, media, propagated, parent_focus)
 }
 
 #[gpui::test]
 fn typing_emits_changed_and_selection_typing_replaces(cx: &mut gpui::TestAppContext) {
-    let (mut visual, input, events, _, _) = hosted(cx, InputMode::SingleLine, "", |_, _| {});
+    let (mut visual, input, events, _, _, _) = hosted(cx, InputMode::SingleLine, "", |_, _| {});
     visual.simulate_input("hello");
     input.read_with(&visual, |input, _| assert_eq!(input.text(), "hello"));
     assert!(events.borrow().contains(&TextInputEvent::Changed));
@@ -163,7 +173,7 @@ fn typing_emits_changed_and_selection_typing_replaces(cx: &mut gpui::TestAppCont
 /// UI face; the first typed character brings the data face.
 #[gpui::test]
 fn an_empty_mono_input_draws_its_placeholder_in_the_ui_face(cx: &mut gpui::TestAppContext) {
-    let (mut visual, input, _, _, _) = hosted(cx, InputMode::SingleLine, "", |input, cx| {
+    let (mut visual, input, _, _, _, _) = hosted(cx, InputMode::SingleLine, "", |input, cx| {
         input.set_mono(true, cx);
         input.set_placeholder("Type the next command\u{2026}", cx);
     });
@@ -178,7 +188,8 @@ fn an_empty_mono_input_draws_its_placeholder_in_the_ui_face(cx: &mut gpui::TestA
 
 #[gpui::test]
 fn word_and_line_deletion_use_the_shared_actions(cx: &mut gpui::TestAppContext) {
-    let (mut visual, input, _, _, _) = hosted(cx, InputMode::SingleLine, "alpha beta", |_, _| {});
+    let (mut visual, input, _, _, _, _) =
+        hosted(cx, InputMode::SingleLine, "alpha beta", |_, _| {});
     visual.simulate_keystrokes("alt-backspace");
     input.read_with(&visual, |input, _| assert_eq!(input.text(), "alpha "));
     visual.simulate_keystrokes("ctrl-u");
@@ -187,7 +198,7 @@ fn word_and_line_deletion_use_the_shared_actions(cx: &mut gpui::TestAppContext) 
 
 #[gpui::test]
 fn single_line_vertical_motion_and_enter_propagate(cx: &mut gpui::TestAppContext) {
-    let (mut visual, _input, _, propagated, _) =
+    let (mut visual, _input, _, _, propagated, _) =
         hosted(cx, InputMode::SingleLine, "value", |_, _| {});
     visual.simulate_keystrokes("up down enter");
     let propagated = propagated.get();
@@ -202,7 +213,7 @@ fn multiline_enter_inserts_a_newline(cx: &mut gpui::TestAppContext) {
         min_rows: 2,
         max_rows: 4,
     };
-    let (mut visual, input, _, _, _) = hosted(cx, mode, "first", |_, _| {});
+    let (mut visual, input, _, _, _, _) = hosted(cx, mode, "first", |_, _| {});
     visual.simulate_keystrokes("enter");
     input.read_with(&visual, |input, _| assert_eq!(input.text(), "first\n"));
 }
@@ -213,7 +224,7 @@ fn multiline_enter_with_owner_policy_propagates(cx: &mut gpui::TestAppContext) {
         min_rows: 1,
         max_rows: 4,
     };
-    let (mut visual, input, _, propagated, _) = hosted(cx, mode, "first", |input, cx| {
+    let (mut visual, input, _, _, propagated, _) = hosted(cx, mode, "first", |input, cx| {
         input.set_enter_inserts_newline(false, cx);
     });
     visual.simulate_keystrokes("enter");
@@ -228,7 +239,7 @@ fn visual_up_moves_below_the_first_row_and_propagates_at_the_top(cx: &mut gpui::
         max_rows: 4,
     };
     let paragraph = "wrapping words across a deliberately narrow editor ".repeat(12);
-    let (mut visual, input, _, propagated, _) = hosted(cx, mode, &paragraph, |_, _| {});
+    let (mut visual, input, _, _, propagated, _) = hosted(cx, mode, &paragraph, |_, _| {});
     let end = input.read_with(&visual, |input, _| input.buffer.caret());
     visual.simulate_keystrokes("up");
     input.read_with(&visual, |input, _| assert!(input.buffer.caret() < end));
@@ -255,7 +266,7 @@ fn multiline_wraps_visual_rows_grows_to_the_cap_and_reveals_the_caret(
         max_rows: 3,
     };
     let paragraph = "wrapping words across a deliberately narrow editor ".repeat(20);
-    let (visual, input, _, _, _) = hosted(cx, mode, &paragraph, |_, _| {});
+    let (visual, input, _, _, _, _) = hosted(cx, mode, &paragraph, |_, _| {});
     input.read_with(&visual, |input, _| {
         let bounds = input.last_bounds.expect("input bounds");
         assert!(input.line_cache.visual_rows() > 3);
@@ -271,7 +282,7 @@ fn wrapped_hit_testing_bounds_and_selection_share_visual_geometry(cx: &mut gpui:
         max_rows: 4,
     };
     let paragraph = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu ".repeat(4);
-    let (mut visual, input, _, _, _) = hosted(cx, mode, &paragraph, |input, _cx| {
+    let (mut visual, input, _, _, _, _) = hosted(cx, mode, &paragraph, |input, _cx| {
         input.buffer.set_caret(0);
     });
     let second_row_point = input.read_with(&visual, |input, _| {
@@ -324,7 +335,7 @@ fn a_selection_paints_quads_for_visible_rows_only(cx: &mut gpui::TestAppContext)
         .map(|row| format!("line {row}"))
         .collect::<Vec<_>>()
         .join("\n");
-    let (mut visual, input, _, _, _) = hosted(cx, mode, &text, |_, _| {});
+    let (mut visual, input, _, _, _, _) = hosted(cx, mode, &text, |_, _| {});
     input.read_with(&visual, |input, _| {
         assert_eq!(input.line_cache.logical_lines(), 8);
         assert_eq!(input.line_cache.visual_rows(), 8);
@@ -352,7 +363,7 @@ fn a_selection_paints_quads_for_visible_rows_only(cx: &mut gpui::TestAppContext)
 #[gpui::test]
 fn single_line_remains_unwrapped_and_scrolls_horizontally(cx: &mut gpui::TestAppContext) {
     let text = "single-line-content-".repeat(40);
-    let (visual, input, _, _, _) = hosted(cx, InputMode::SingleLine, &text, |_, _| {});
+    let (visual, input, _, _, _, _) = hosted(cx, InputMode::SingleLine, &text, |_, _| {});
     input.read_with(&visual, |input, _| {
         assert_eq!(input.line_cache.visual_rows(), 1);
         assert_eq!(input.line_cache.logical_lines(), 1);
@@ -361,8 +372,9 @@ fn single_line_remains_unwrapped_and_scrolls_horizontally(cx: &mut gpui::TestApp
 }
 
 #[gpui::test]
-fn clipboard_round_trip_and_single_line_newline_sanitising(cx: &mut gpui::TestAppContext) {
-    let (mut visual, input, _, _, _) = hosted(cx, InputMode::SingleLine, "alpha beta", |_, _| {});
+fn media_off_keeps_plain_text_paste_byte_for_byte(cx: &mut gpui::TestAppContext) {
+    let (mut visual, input, _, media, _, _) =
+        hosted(cx, InputMode::SingleLine, "alpha beta", |_, _| {});
     visual.simulate_keystrokes("cmd-a cmd-c cmd-x");
     input.read_with(&visual, |input, _| assert!(input.text().is_empty()));
     visual.update(|_, cx| {
@@ -376,11 +388,168 @@ fn clipboard_round_trip_and_single_line_newline_sanitising(cx: &mut gpui::TestAp
     input.read_with(&visual, |input, _| {
         assert_eq!(input.text(), "line one line two")
     });
+    assert!(media.borrow().is_empty());
+}
+
+#[gpui::test]
+fn media_off_separates_paths_only_paste_in_a_single_line_input(cx: &mut gpui::TestAppContext) {
+    let (mut visual, input, _, media, _, _) = hosted(cx, InputMode::SingleLine, "", |_, _| {});
+    let paths = ExternalPaths(
+        [
+            PathBuf::from("/tmp/fleet one"),
+            PathBuf::from("/tmp/fleet-two"),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    visual.update(|_, cx| {
+        cx.write_to_clipboard(ClipboardItem {
+            entries: vec![ClipboardEntry::ExternalPaths(paths)],
+        });
+    });
+
+    visual.simulate_keystrokes("cmd-v");
+
+    input.read_with(&visual, |input, _| {
+        assert_eq!(input.text(), "/tmp/fleet one /tmp/fleet-two");
+    });
+    assert!(media.borrow().is_empty());
+}
+
+#[gpui::test]
+fn media_off_separates_paths_only_paste_in_a_multiline_input(cx: &mut gpui::TestAppContext) {
+    let (mut visual, input, _, media, _, _) = hosted(
+        cx,
+        InputMode::Multiline {
+            min_rows: 2,
+            max_rows: 4,
+        },
+        "",
+        |_, _| {},
+    );
+    let paths = ExternalPaths(
+        [
+            PathBuf::from("/tmp/fleet-one"),
+            PathBuf::from("/tmp/fleet-two"),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    visual.update(|_, cx| {
+        cx.write_to_clipboard(ClipboardItem {
+            entries: vec![ClipboardEntry::ExternalPaths(paths)],
+        });
+    });
+
+    visual.simulate_keystrokes("cmd-v");
+
+    input.read_with(&visual, |input, _| {
+        assert_eq!(input.text(), "/tmp/fleet-one\n/tmp/fleet-two");
+    });
+    assert!(media.borrow().is_empty());
+}
+
+#[gpui::test]
+fn media_paste_emits_one_payload_and_does_not_edit_text(cx: &mut gpui::TestAppContext) {
+    let (mut visual, input, _, media, _, _) =
+        hosted(cx, InputMode::SingleLine, "unchanged", |input, cx| {
+            input.set_accepts_media(true, cx);
+        });
+    let image_item =
+        ClipboardItem::new_image(&Image::from_bytes(ImageFormat::Png, vec![137, 80, 78, 71]));
+    visual.update(|_, cx| cx.write_to_clipboard(image_item.clone()));
+    visual.simulate_keystrokes("cmd-v");
+    input.read_with(&visual, |input, _| assert_eq!(input.text(), "unchanged"));
+    assert_eq!(
+        media.borrow().as_slice(),
+        &[TextInputMedia::Pasted(image_item)]
+    );
+
+    media.borrow_mut().clear();
+    let paths = ExternalPaths(
+        [PathBuf::from("/tmp/fleet-media.png")]
+            .into_iter()
+            .collect(),
+    );
+    let paths_item = ClipboardItem {
+        entries: vec![ClipboardEntry::ExternalPaths(paths)],
+    };
+    visual.update(|_, cx| cx.write_to_clipboard(paths_item.clone()));
+    visual.simulate_keystrokes("cmd-v");
+    input.read_with(&visual, |input, _| assert_eq!(input.text(), "unchanged"));
+    assert_eq!(
+        media.borrow().as_slice(),
+        &[TextInputMedia::Pasted(paths_item)]
+    );
+}
+
+#[gpui::test]
+fn media_drop_emits_one_paths_payload_and_does_not_edit_text(cx: &mut gpui::TestAppContext) {
+    let (mut visual, input, _, media, _, _) =
+        hosted(cx, InputMode::SingleLine, "unchanged", |input, cx| {
+            input.set_accepts_media(true, cx);
+        });
+    let paths = ExternalPaths([PathBuf::from("/tmp/fleet-drop.png")].into_iter().collect());
+    let position = input.read_with(&visual, |input, _| {
+        input.test_bounds().expect("input bounds").center()
+    });
+    visual.update(|window, cx| {
+        window.dispatch_event(
+            FileDropEvent::Entered {
+                position,
+                paths: paths.clone(),
+            }
+            .to_platform_input(),
+            cx,
+        );
+        window.dispatch_event(FileDropEvent::Submit { position }.to_platform_input(), cx);
+    });
+    visual.run_until_parked();
+
+    input.read_with(&visual, |input, _| assert_eq!(input.text(), "unchanged"));
+    assert_eq!(media.borrow().as_slice(), &[TextInputMedia::Dropped(paths)]);
+}
+
+#[gpui::test]
+fn read_only_input_ignores_media_paste_and_drop(cx: &mut gpui::TestAppContext) {
+    let (mut visual, input, _, media, _, _) =
+        hosted(cx, InputMode::SingleLine, "locked", |input, cx| {
+            input.set_accepts_media(true, cx);
+            input.set_read_only(true, cx);
+        });
+    let image_item =
+        ClipboardItem::new_image(&Image::from_bytes(ImageFormat::Png, vec![137, 80, 78, 71]));
+    visual.update(|_, cx| cx.write_to_clipboard(image_item));
+    visual.simulate_keystrokes("cmd-v");
+
+    let paths = ExternalPaths(
+        [PathBuf::from("/tmp/fleet-locked.png")]
+            .into_iter()
+            .collect(),
+    );
+    let position = input.read_with(&visual, |input, _| {
+        input.test_bounds().expect("input bounds").center()
+    });
+    visual.update(|window, cx| {
+        window.dispatch_event(
+            FileDropEvent::Entered {
+                position,
+                paths: paths.clone(),
+            }
+            .to_platform_input(),
+            cx,
+        );
+        window.dispatch_event(FileDropEvent::Submit { position }.to_platform_input(), cx);
+    });
+    visual.run_until_parked();
+
+    input.read_with(&visual, |input, _| assert_eq!(input.text(), "locked"));
+    assert!(media.borrow().is_empty());
 }
 
 #[gpui::test]
 fn typing_bursts_group_by_the_test_clock_and_redo_restores_them(cx: &mut gpui::TestAppContext) {
-    let (mut visual, input, _, _, _) = hosted(cx, InputMode::SingleLine, "", |_, _| {});
+    let (mut visual, input, _, _, _, _) = hosted(cx, InputMode::SingleLine, "", |_, _| {});
     visual.simulate_input("a");
     visual.simulate_input("b");
     visual.simulate_keystrokes("cmd-z");
@@ -402,7 +571,7 @@ fn typing_bursts_group_by_the_test_clock_and_redo_restores_them(cx: &mut gpui::T
 
 #[gpui::test]
 fn ime_composition_is_one_undo_step(cx: &mut gpui::TestAppContext) {
-    let (mut visual, input, _, _, _) = hosted(cx, InputMode::SingleLine, "", |_, _| {});
+    let (mut visual, input, _, _, _, _) = hosted(cx, InputMode::SingleLine, "", |_, _| {});
     visual.update(|window, cx| {
         input.update(cx, |input, cx| {
             input.replace_and_mark_text_in_range(None, "h", None, window, cx);
@@ -417,7 +586,7 @@ fn ime_composition_is_one_undo_step(cx: &mut gpui::TestAppContext) {
 
 #[gpui::test]
 fn clearing_during_composition_closes_its_undo_group(cx: &mut gpui::TestAppContext) {
-    let (mut visual, input, _, _, _) = hosted(cx, InputMode::SingleLine, "", |_, _| {});
+    let (mut visual, input, _, _, _, _) = hosted(cx, InputMode::SingleLine, "", |_, _| {});
     visual.update(|window, cx| {
         input.update(cx, |input, cx| {
             input.replace_and_mark_text_in_range(None, "x", None, window, cx);
@@ -433,9 +602,10 @@ fn clearing_during_composition_closes_its_undo_group(cx: &mut gpui::TestAppConte
 
 #[gpui::test]
 fn read_only_ignores_platform_and_action_edits(cx: &mut gpui::TestAppContext) {
-    let (mut visual, input, _, _, _) = hosted(cx, InputMode::SingleLine, "locked", |input, cx| {
-        input.set_read_only(true, cx);
-    });
+    let (mut visual, input, _, _, _, _) =
+        hosted(cx, InputMode::SingleLine, "locked", |input, cx| {
+            input.set_read_only(true, cx);
+        });
     visual.simulate_keystrokes("backspace cmd-x cmd-v");
     visual.update(|window, cx| {
         input.update(cx, |input, cx| {
@@ -447,7 +617,7 @@ fn read_only_ignores_platform_and_action_edits(cx: &mut gpui::TestAppContext) {
 
 #[gpui::test]
 fn character_filter_drops_rejected_input(cx: &mut gpui::TestAppContext) {
-    let (mut visual, input, _, _, _) = hosted(cx, InputMode::SingleLine, "", |input, cx| {
+    let (mut visual, input, _, _, _, _) = hosted(cx, InputMode::SingleLine, "", |input, cx| {
         input.set_filter(Some(|character| character.is_ascii_digit()), cx);
     });
     visual.simulate_input("a1b2c3");
@@ -477,7 +647,7 @@ fn character_filter_drops_rejected_input(cx: &mut gpui::TestAppContext) {
 
 #[gpui::test]
 fn owner_insertion_filters_replaces_the_selection_and_undoes_once(cx: &mut gpui::TestAppContext) {
-    let (mut visual, input, _, _, _) = hosted(cx, InputMode::SingleLine, "1234", |input, cx| {
+    let (mut visual, input, _, _, _, _) = hosted(cx, InputMode::SingleLine, "1234", |input, cx| {
         input.set_filter(Some(|character| character.is_ascii_digit()), cx);
     });
     visual.simulate_keystrokes("shift-left shift-left");
@@ -502,7 +672,8 @@ fn point_for_offset(input: &TextInput, offset: usize) -> gpui::Point<gpui::Pixel
 
 #[gpui::test]
 fn pointer_drag_and_double_click_select_text(cx: &mut gpui::TestAppContext) {
-    let (mut visual, input, _, _, _) = hosted(cx, InputMode::SingleLine, "alpha beta", |_, _| {});
+    let (mut visual, input, _, _, _, _) =
+        hosted(cx, InputMode::SingleLine, "alpha beta", |_, _| {});
     let (start, end, beta) = input.read_with(&visual, |input, _| {
         (
             point_for_offset(input, 0),
@@ -535,7 +706,7 @@ fn pointer_drag_and_double_click_select_text(cx: &mut gpui::TestAppContext) {
 
 #[gpui::test]
 fn a_click_on_a_blurred_input_emits_focused(cx: &mut gpui::TestAppContext) {
-    let (mut visual, input, events, _, parent_focus) =
+    let (mut visual, input, events, _, _, parent_focus) =
         hosted(cx, InputMode::SingleLine, "alpha beta", |_, _| {});
     let caret = input.read_with(&visual, |input, _| point_for_offset(input, "alpha".len()));
     visual.update(|window, cx| parent_focus.focus(window, cx));
@@ -553,7 +724,7 @@ fn a_click_on_a_blurred_input_emits_focused(cx: &mut gpui::TestAppContext) {
 
 #[gpui::test]
 fn focus_taken_before_the_first_paint_emits_focused(cx: &mut gpui::TestAppContext) {
-    let (mut visual, _input, _, _, _) = hosted(cx, InputMode::SingleLine, "first", |_, _| {});
+    let (mut visual, _input, _, _, _, _) = hosted(cx, InputMode::SingleLine, "first", |_, _| {});
     let host = visual
         .window_handle()
         .downcast::<InputHost>()
@@ -567,7 +738,7 @@ fn focus_taken_before_the_first_paint_emits_focused(cx: &mut gpui::TestAppContex
     let events_for_second = events.clone();
     let subscription = visual.update(|window, cx| {
         let second = cx.new(|cx| TextInput::new(InputMode::SingleLine, cx));
-        let subscription = cx.subscribe(&second, move |_second, event, _cx| {
+        let subscription = cx.subscribe(&second, move |_second, event: &TextInputEvent, _cx| {
             events_for_second.borrow_mut().push(*event);
         });
         second.update(cx, |second, cx| second.focus(window, cx));
@@ -587,7 +758,8 @@ fn focus_taken_before_the_first_paint_emits_focused(cx: &mut gpui::TestAppContex
 
 #[gpui::test]
 fn losing_focus_emits_blurred(cx: &mut gpui::TestAppContext) {
-    let (mut visual, input, events, _, _) = hosted(cx, InputMode::SingleLine, "value", |_, _| {});
+    let (mut visual, input, events, _, _, _) =
+        hosted(cx, InputMode::SingleLine, "value", |_, _| {});
     visual.update(|window, cx| {
         input.update(cx, |input, cx| {
             input.replace_and_mark_text_in_range(None, " marked", None, window, cx);

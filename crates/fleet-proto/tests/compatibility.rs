@@ -1,9 +1,9 @@
 use crate::support;
 
 use fleet_core::{
-    agents::AttentionKind,
+    agents::{AttentionKind, ThreadId},
     board::{Board, BoardSummary, BoardView, CardDraft},
-    ids::{TerminalId, WorktreeId},
+    ids::{HostId, TerminalId, WorktreeId},
     model::RepoHooks,
     sessions::AgentActivity,
     watches::{WatchChunk, WatchId, WatchStream},
@@ -12,7 +12,7 @@ use fleet_proto::{
     PROTOCOL_VERSION,
     error::{ErrorKind, ProtoError},
     event::{BoardChangeReason, Event},
-    request::{Request, RequestBody},
+    request::{MediaAnchor, Request, RequestBody, StageEntry, StageOp, StagedFile, UploadId},
     response::{
         DaemonIdentity, HelloResponse, PongResponse, Response, ResponseBody, StampedResponse,
         WorktreeDeleteResult,
@@ -211,6 +211,122 @@ fn request_wire_goldens() {
         },
         r#"{"id":11,"body":{"type":"set_agent_activity","session":"api/feature","terminal_id":7,"activity":"idle","attention":"permission"}}"#,
     );
+}
+
+#[test]
+fn media_stage_wire_goldens() {
+    let upload = UploadId::from_uuid(uuid::Uuid::from_u128(
+        0x1111_1111_2222_4333_8444_5555_5555_5555,
+    ));
+    assert_frame(
+        Request {
+            id: 111,
+            body: RequestBody::StageMedia {
+                anchor: MediaAnchor::Local,
+                upload,
+                op: StageOp::Begin {
+                    entry: StageEntry::File {
+                        name: "screenshot.png".to_owned(),
+                        size: 3,
+                    },
+                },
+            },
+        },
+        r#"{"id":111,"body":{"type":"stage_media","anchor":{"type":"local"},"upload":"11111111-2222-4333-8444-555555555555","op":{"type":"begin","entry":{"type":"file","name":"screenshot.png","size":3}}}}"#,
+    );
+    assert_frame(
+        Request {
+            id: 112,
+            body: RequestBody::StageMedia {
+                anchor: MediaAnchor::Terminal {
+                    terminal: TerminalId(42),
+                },
+                upload,
+                op: StageOp::Begin {
+                    entry: StageEntry::Directory {
+                        name: "assets".to_owned(),
+                        files: vec![StagedFile {
+                            relative: "images/logo.png".to_owned(),
+                            size: 3,
+                        }],
+                        dirs: vec!["empty".to_owned()],
+                    },
+                },
+            },
+        },
+        r#"{"id":112,"body":{"type":"stage_media","anchor":{"type":"terminal","terminal":42},"upload":"11111111-2222-4333-8444-555555555555","op":{"type":"begin","entry":{"type":"directory","name":"assets","files":[{"relative":"images/logo.png","size":3}],"dirs":["empty"]}}}}"#,
+    );
+    assert_frame(
+        Request {
+            id: 113,
+            body: RequestBody::StageMedia {
+                anchor: MediaAnchor::Host {
+                    host: HostId::try_from("devbox").expect("static host id is valid"),
+                },
+                upload,
+                op: StageOp::Chunk {
+                    file: 0,
+                    offset: 131_072,
+                    data: "AAEC".to_owned(),
+                },
+            },
+        },
+        r#"{"id":113,"body":{"type":"stage_media","anchor":{"type":"host","host":"devbox"},"upload":"11111111-2222-4333-8444-555555555555","op":{"type":"chunk","file":0,"offset":131072,"data":"AAEC"}}}"#,
+    );
+    assert_frame(
+        Request {
+            id: 114,
+            body: RequestBody::StageMedia {
+                anchor: MediaAnchor::Thread {
+                    thread: ThreadId::from_uuid(uuid::Uuid::from_u128(
+                        0xaaaa_aaaa_bbbb_4ccc_8ddd_eeee_eeee_eeee,
+                    )),
+                },
+                upload,
+                op: StageOp::Finish {
+                    sha256: vec![
+                        "ae4b3280e56e2faf83f414a6e3dabe9d5fbe18976544c05fed121accb85b53fc"
+                            .to_owned(),
+                    ],
+                },
+            },
+        },
+        r#"{"id":114,"body":{"type":"stage_media","anchor":{"type":"thread","thread":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"},"upload":"11111111-2222-4333-8444-555555555555","op":{"type":"finish","sha256":["ae4b3280e56e2faf83f414a6e3dabe9d5fbe18976544c05fed121accb85b53fc"]}}}"#,
+    );
+    assert_frame(
+        Request {
+            id: 115,
+            body: RequestBody::StageMedia {
+                anchor: MediaAnchor::Local,
+                upload,
+                op: StageOp::Cancel,
+            },
+        },
+        r#"{"id":115,"body":{"type":"stage_media","anchor":{"type":"local"},"upload":"11111111-2222-4333-8444-555555555555","op":{"type":"cancel"}}}"#,
+    );
+
+    assert_frame(
+        Response {
+            id: 116,
+            result: Ok(ResponseBody::Path {
+                path: "/home/me/Downloads/fleet/20260924-120000-screenshot.png".to_owned(),
+                host: None,
+            }),
+        },
+        r#"{"id":116,"result":{"Ok":{"type":"path","data":{"path":"/home/me/Downloads/fleet/20260924-120000-screenshot.png"}}}}"#,
+    );
+    assert_frame(
+        Response {
+            id: 117,
+            result: Ok(ResponseBody::Path {
+                path: "/home/me/Downloads/fleet/20260924-120000-assets".to_owned(),
+                host: Some(HostId::try_from("devbox").expect("static host id is valid")),
+            }),
+        },
+        r#"{"id":117,"result":{"Ok":{"type":"path","data":{"path":"/home/me/Downloads/fleet/20260924-120000-assets","host":"devbox"}}}}"#,
+    );
+
+    assert_eq!(fleet_proto::MEDIA_STAGE_CAPABILITY, "media.stage");
 }
 
 #[test]

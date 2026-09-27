@@ -42,6 +42,36 @@ fn toasts_coalesce_within_a_second_and_cap_at_three() {
 }
 
 #[test]
+fn live_media_upload_toast_is_not_evicted_by_later_feedback() {
+    let now = Instant::now();
+    let dwell = Duration::from_secs(3);
+    let mut toasts = Vec::new();
+    let upload = fleet_proto::request::UploadId::new();
+    push_toast_to(
+        &mut toasts,
+        Toast::new("Copying design.pdf…"),
+        Some(ToastTarget::MediaUpload(upload)),
+        now,
+        dwell,
+    );
+    for index in 0..4 {
+        push_toast(
+            &mut toasts,
+            Toast::new(format!("feedback {index}")),
+            now + Duration::from_millis(index),
+            dwell,
+        );
+    }
+
+    assert_eq!(toasts.len(), MAX_TOASTS);
+    assert!(
+        toasts
+            .iter()
+            .any(|live| live.target == Some(ToastTarget::MediaUpload(upload)))
+    );
+}
+
+#[test]
 fn toasts_are_never_errors() {
     let now = Instant::now();
     let mut toasts = Vec::new();

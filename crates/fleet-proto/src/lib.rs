@@ -9,6 +9,9 @@ pub const REMOTE_MACHINES_CAPABILITY: &str = "remote-machines";
 /// Capability advertised by peers that support terminal-originated clipboard writes.
 pub const TERMINAL_CLIPBOARD_CAPABILITY: &str = "terminal.clipboard";
 
+/// Capability advertised by daemons that accept chunked, resumable media uploads.
+pub const MEDIA_STAGE_CAPABILITY: &str = "media.stage";
+
 /// Maximum decoded UTF-8 byte length of a terminal-originated clipboard write.
 pub const TERMINAL_CLIPBOARD_MAX_BYTES: usize = 1024 * 1024;
 
@@ -97,6 +100,7 @@ pub mod codec;
 pub mod error;
 pub mod event;
 pub mod job;
+pub mod media;
 pub mod request;
 pub mod response;
 pub mod snapshot;

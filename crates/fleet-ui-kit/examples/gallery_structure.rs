@@ -1499,6 +1499,18 @@ fn toast_section(cx: &mut App) -> AnyElement {
                 &t,
                 toast_stage(ToastStack::new(live_toasts())),
             ),
+            specimen(
+                "destructive Cancel is button-only; the progress line is inert",
+                &t,
+                toast_stage(
+                    ToastStack::new([Toast::new("Copying design.pdf… 40%")
+                        .icon(Icon::CloudUpload)
+                        .action("Cancel")])
+                    .action_only([true])
+                    .on_activate(|_, _, _| {})
+                    .on_dismiss(|_, _, _| {}),
+                ),
+            ),
         ],
     )
 }

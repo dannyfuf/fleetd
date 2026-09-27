@@ -171,6 +171,7 @@ async fn restart_recovery_never_advances_memory_past_a_log_it_could_not_write() 
         empty_worktrees(temp.path()),
         None,
         Arc::new(|_, _, _| Err(anyhow::anyhow!("no provider in this test"))),
+        default_media(&home.agents_db_path()),
     );
 
     let thread = ThreadId::new();
@@ -547,6 +548,7 @@ async fn a_start_with_five_hundred_threads_lists_them_without_reading_a_log() {
         empty_worktrees(temp.path()),
         None,
         Arc::new(|_, _, _| Err(anyhow::anyhow!("a listing start must spawn no provider"))),
+        default_media(&home.agents_db_path()),
     );
     manager.clone().repair().await;
 

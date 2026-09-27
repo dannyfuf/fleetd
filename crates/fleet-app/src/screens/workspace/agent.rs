@@ -358,6 +358,18 @@ impl WorkspaceScreen {
                 AgentThreadEvent::Copy(text) => {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
                 }
+                AgentThreadEvent::StageMedia(media) => {
+                    crate::screens::agent_thread::media::stage_event(
+                        &view,
+                        &relay_state,
+                        &relay_bridge,
+                        media.clone(),
+                        cx,
+                    );
+                }
+                AgentThreadEvent::CancelMedia(upload) => {
+                    crate::media::cancel(&relay_state, &relay_bridge, *upload, cx);
+                }
                 AgentThreadEvent::SelectThread(thread) => {
                     let reopen_bridge = relay_bridge.clone();
                     reopen_agent_tab(
@@ -440,6 +452,7 @@ impl WorkspaceScreen {
             let modes = app.agents.modes(thread);
             if let Some(projection) = app.agents.projection(thread) {
                 view.update(cx, |view, cx| {
+                    view.refresh_attachment_progress(app, cx);
                     view.set_commands(commands);
                     view.set_skills(skills);
                     view.set_modes(modes);

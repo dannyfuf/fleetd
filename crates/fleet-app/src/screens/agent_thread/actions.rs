@@ -6,7 +6,8 @@
 //! state plus the composer's text.
 
 use fleet_core::agents::{
-    AgentKind, GateAnswer, GateKind, ItemId, ItemKind, ModelSelection, PermissionMode,
+    AgentKind, Attachment as AgentAttachment, AttachmentSource, GateAnswer, GateKind, ItemId,
+    ItemKind, ModelSelection, PermissionMode,
 };
 use fleet_ui_kit::{
     DecisionAction, MultilineInput, RowAction, TranscriptList, TranscriptRow, TranscriptRowKind,
@@ -100,12 +101,47 @@ impl AgentThreadView {
             return;
         }
 
-        if let Err(refusal) = submit_gate(&text, 0, self.pending_in_flight(), self.is_unreachable())
-        {
+        self.send_ready_turn(text, cx);
+    }
+
+    /// Applies the shared text-and-attachment gate, then dispatches one native-agent turn.
+    fn send_ready_turn(&mut self, text: String, cx: &mut Context<Self>) {
+        if let Some(name) = self.copying_attachment_name().map(str::to_owned) {
+            self.input.update(cx, |input, cx| input.set_text(text, cx));
+            self.notice(format!("still copying {name}"), cx);
+            return;
+        }
+        let ready = self.ready_attachment_count();
+        if ready > super::media::MAX_ATTACHMENTS {
+            self.input.update(cx, |input, cx| input.set_text(text, cx));
+            self.notice(super::media::ATTACHMENT_COUNT_REFUSAL, cx);
+            return;
+        }
+        let failed = self.failed_attachment_names();
+        if let Err(refusal) = submit_gate(
+            &text,
+            ready,
+            self.pending_in_flight(),
+            self.is_unreachable(),
+        ) {
+            if matches!(refusal, Refusal::Empty) && !failed.is_empty() {
+                self.notice(
+                    format!("Failed attachments were not sent: {}", failed.join(", ")),
+                    cx,
+                );
+                return;
+            }
             self.refuse_send(refusal, text, cx);
             return;
         }
-        self.dispatch_turn(text, cx);
+        if !failed.is_empty() {
+            self.notice(
+                format!("Failed attachments were not sent: {}", failed.join(", ")),
+                cx,
+            );
+        }
+        let attachments = self.take_ready_attachments();
+        self.dispatch_turn(text, attachments, cx);
     }
 
     /// `⌘⏎`: the same send, decided by the one function that decides `⏎`.
@@ -159,7 +195,12 @@ impl AgentThreadView {
     /// A message sent while a turn runs is a **steer**, dispatched immediately. There is no
     /// queue and no queued row: the shipped queue lived in a GPUI view — lost on app restart,
     /// invisible to `fleet agent` — and it re-implemented what both harnesses already do.
-    fn dispatch_turn(&mut self, text: String, cx: &mut Context<Self>) {
+    fn dispatch_turn(
+        &mut self,
+        text: String,
+        attachments: Vec<super::PendingAttachment>,
+        cx: &mut Context<Self>,
+    ) {
         let steered = self.is_working();
         let first = self.projection.turns.is_empty() && self.pending_in_flight() == 0;
         self.input.update(cx, |input, cx| {
@@ -169,19 +210,36 @@ impl AgentThreadView {
         // Client-minted, and the row's identity for its whole life: the id goes out with the
         // message, the adapter adopts it, and reconciliation is by id with no temp-id swap.
         let item = ItemId::new();
+        let attachment_names = attachments
+            .iter()
+            .map(|attachment| attachment.name.clone())
+            .collect();
+        let wire_attachments = attachments
+            .iter()
+            .filter_map(|attachment| {
+                Some(AgentAttachment {
+                    name: Some(attachment.name.clone()),
+                    media_type: attachment.media_type.clone(),
+                    source: AttachmentSource::Path(attachment.path.clone()?),
+                })
+            })
+            .collect();
         self.pending.push(PendingSend {
             id: item,
             text: strip_send_time_context(&text),
+            draft: text.clone(),
+            attachments: attachment_names,
             steered,
             failed: false,
             echoes: super::sync::count_user_items(&self.projection, &text),
         });
+        self.dispatched_attachments.insert(item, attachments);
         self.pending_rev = self.pending_rev.wrapping_add(1);
         self.send_controls(cx);
         self.dispatch(
             BridgeCommand::AgentSend {
                 thread: self.thread,
-                input: user_input(text, item),
+                input: user_input(text, item, wire_attachments),
             },
             cx,
         );
@@ -212,14 +270,19 @@ impl AgentThreadView {
     /// composer is free again. Without this the bubble read `sending` forever, the thread kept
     /// spinning, and every later send was refused as unacknowledged (§7.2).
     pub(crate) fn send_failed(&mut self, item: ItemId, reason: &str, cx: &mut Context<Self>) {
-        let Some(pending) = self
+        let Some(index) = self
             .pending
-            .iter_mut()
-            .find(|pending| pending.id == item && !pending.failed)
+            .iter()
+            .position(|pending| pending.id == item && !pending.failed)
         else {
             return;
         };
-        pending.failed = true;
+        self.pending[index].failed = true;
+        let draft = self.pending[index].draft.clone();
+        if self.input.read(cx).is_empty(cx) {
+            self.input.update(cx, |input, cx| input.set_text(draft, cx));
+        }
+        self.restore_dispatched_attachments(item);
         self.pending_rev = self.pending_rev.wrapping_add(1);
         self.sync_clock();
         self.notice(format!("message not sent: {reason}"), cx);
@@ -750,8 +813,7 @@ impl AgentThreadView {
                 } else {
                     InteractionMode::Build
                 });
-                self.input.update(cx, MultilineInput::clear);
-                self.dispatch_turn(text, cx);
+                self.send_ready_turn(text, cx);
             }
             Routed::Compose(seed) => {
                 self.gate_draft = gate;

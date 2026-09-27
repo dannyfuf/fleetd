@@ -7,6 +7,8 @@ use std::{
     sync::Mutex,
 };
 
+use sha2::{Digest as _, Sha256};
+
 use super::lock;
 use crate::{
     DaemonError, DaemonResult,
@@ -20,6 +22,14 @@ pub enum FakeFilesCall {
     Read(PathBuf),
     /// Atomic write of one text file and its complete contents.
     Write(PathBuf, String),
+    /// Exclusive creation of a sized upload part file.
+    CreatePart(PathBuf, u64),
+    /// Offset write into an upload part file.
+    WritePart(PathBuf, u64, Vec<u8>),
+    /// SHA-256 read of one file.
+    Hash(PathBuf),
+    /// Removal of one direct part child below its staging root.
+    RemovePart(PathBuf, PathBuf),
     /// Recursive directory creation.
     CreateDir(PathBuf),
     /// Recursive copy from a source tree to a destination.
@@ -39,24 +49,30 @@ impl FakeFilesCall {
         match self {
             Self::Read(path)
             | Self::Write(path, _)
+            | Self::CreatePart(path, _)
+            | Self::WritePart(path, _, _)
+            | Self::Hash(path)
             | Self::CreateDir(path)
             | Self::Remove(path)
             | Self::Metadata(path)
             | Self::List(path)
             | Self::Clone(path, _)
             | Self::Rename(path, _) => path,
+            Self::RemovePart(_, path) => path,
         }
     }
 }
 
 #[derive(Default)]
 struct Tree {
-    files: BTreeMap<PathBuf, String>,
+    files: BTreeMap<PathBuf, Vec<u8>>,
     file_identities: BTreeMap<PathBuf, u64>,
+    modified_millis: BTreeMap<PathBuf, i64>,
     directories: BTreeSet<PathBuf>,
+    others: BTreeSet<PathBuf>,
     calls: Vec<FakeFilesCall>,
     failures: VecDeque<(FakeFilesCall, io::ErrorKind)>,
-    replacements_before_conditional_remove: BTreeMap<PathBuf, String>,
+    replacements_before_conditional_remove: BTreeMap<PathBuf, Vec<u8>>,
     next_identity: u64,
 }
 
@@ -76,14 +92,23 @@ impl Tree {
     }
 
     fn exists(&self, path: &Path) -> bool {
-        self.files.contains_key(path) || self.directories.contains(path)
+        self.files.contains_key(path)
+            || self.directories.contains(path)
+            || self.others.contains(path)
     }
 
     fn metadata(&self, path: &Path) -> DaemonResult<FileMetadata> {
         if let Some(identity) = self.file_identities.get(path) {
-            Ok(FileMetadata::fake(FileKind::File, *identity))
+            Ok(FileMetadata::fake(
+                FileKind::File,
+                *identity,
+                self.files.get(path).map_or(0, |bytes| bytes.len() as u64),
+                self.modified_millis.get(path).copied().unwrap_or_default(),
+            ))
         } else if self.directories.contains(path) {
-            Ok(FileMetadata::fake(FileKind::Directory, 0))
+            Ok(FileMetadata::fake(FileKind::Directory, 0, 0, 0))
+        } else if self.others.contains(path) {
+            Ok(FileMetadata::fake(FileKind::Other, 0, 0, 0))
         } else {
             Err(failure(path, io::ErrorKind::NotFound))
         }
@@ -99,16 +124,22 @@ impl Tree {
         Ok(FileRevision::fake(*identity, len))
     }
 
-    fn insert_file(&mut self, path: PathBuf, text: String) {
+    fn insert_file(&mut self, path: PathBuf, bytes: Vec<u8>) {
+        self.insert_file_at(path, bytes, 0);
+    }
+
+    fn insert_file_at(&mut self, path: PathBuf, bytes: Vec<u8>, modified_millis: i64) {
         self.next_identity = self.next_identity.saturating_add(1);
-        self.files.insert(path.clone(), text);
-        self.file_identities.insert(path, self.next_identity);
+        self.files.insert(path.clone(), bytes);
+        self.file_identities
+            .insert(path.clone(), self.next_identity);
+        self.modified_millis.insert(path, modified_millis);
     }
 
     fn create_dirs(&mut self, path: &Path) -> DaemonResult<()> {
         if let Some(file) = path
             .ancestors()
-            .find(|ancestor| self.files.contains_key(*ancestor))
+            .find(|ancestor| self.files.contains_key(*ancestor) || self.others.contains(*ancestor))
         {
             return Err(failure(file, io::ErrorKind::NotADirectory));
         }
@@ -119,7 +150,7 @@ impl Tree {
 
     fn require_parent(&self, path: &Path) -> DaemonResult<()> {
         if let Some(parent) = path.parent() {
-            if self.files.contains_key(parent) {
+            if self.files.contains_key(parent) || self.others.contains(parent) {
                 return Err(failure(parent, io::ErrorKind::NotADirectory));
             }
             if !self.directories.contains(parent) {
@@ -133,12 +164,13 @@ impl Tree {
         let files = self
             .files
             .iter()
-            .filter_map(|(path, text)| {
+            .filter_map(|(path, bytes)| {
                 path.strip_prefix(source).ok().map(|suffix| {
                     (
                         destination.join(suffix),
-                        text.clone(),
+                        bytes.clone(),
                         self.file_identities.get(path).copied().unwrap_or_default(),
+                        self.modified_millis.get(path).copied().unwrap_or_default(),
                     )
                 })
             })
@@ -152,12 +184,13 @@ impl Tree {
                     .map(|suffix| destination.join(suffix))
             })
             .collect::<Vec<_>>();
-        for (path, text, identity) in files {
+        for (path, bytes, identity, modified_millis) in files {
             if preserve_identity {
-                self.files.insert(path.clone(), text);
-                self.file_identities.insert(path, identity);
+                self.files.insert(path.clone(), bytes);
+                self.file_identities.insert(path.clone(), identity);
+                self.modified_millis.insert(path, modified_millis);
             } else {
-                self.insert_file(path, text);
+                self.insert_file_at(path, bytes, modified_millis);
             }
         }
         self.directories.extend(directories);
@@ -168,8 +201,11 @@ impl Tree {
             .retain(|candidate, _| !candidate.starts_with(path));
         self.file_identities
             .retain(|candidate, _| !candidate.starts_with(path));
+        self.modified_millis
+            .retain(|candidate, _| !candidate.starts_with(path));
         self.directories
             .retain(|candidate| !candidate.starts_with(path));
+        self.others.retain(|candidate| !candidate.starts_with(path));
     }
 }
 
@@ -194,13 +230,34 @@ impl FakeFiles {
 
     /// Seeds a file and its ancestor directories without recording a call.
     pub fn insert_text(&self, path: impl Into<PathBuf>, text: impl Into<String>) {
+        self.insert_text_at(path, text, 0);
+    }
+
+    /// Seeds a file with an explicit Unix epoch modification time in milliseconds.
+    pub fn insert_text_at(
+        &self,
+        path: impl Into<PathBuf>,
+        text: impl Into<String>,
+        modified_millis: i64,
+    ) {
         let path = path.into();
         let mut tree = lock(&self.tree);
         if let Some(parent) = path.parent() {
             tree.directories
                 .extend(parent.ancestors().map(Path::to_path_buf));
         }
-        tree.insert_file(path, text.into());
+        tree.insert_file_at(path, text.into().into_bytes(), modified_millis);
+    }
+
+    /// Seeds a symlink or special filesystem entry without recording a call.
+    pub fn insert_other(&self, path: impl Into<PathBuf>) {
+        let path = path.into();
+        let mut tree = lock(&self.tree);
+        if let Some(parent) = path.parent() {
+            tree.directories
+                .extend(parent.ancestors().map(Path::to_path_buf));
+        }
+        tree.others.insert(path);
     }
 
     /// Replaces a file immediately before its next identity-checked removal.
@@ -211,7 +268,7 @@ impl FakeFiles {
     ) {
         lock(&self.tree)
             .replacements_before_conditional_remove
-            .insert(path.into(), text.into());
+            .insert(path.into(), text.into().into_bytes());
     }
 
     /// Fails the next matching operation once, before it mutates the tree.
@@ -228,6 +285,15 @@ impl FakeFiles {
     /// Returns the current contents of one file.
     #[must_use]
     pub fn text(&self, path: &Path) -> Option<String> {
+        lock(&self.tree)
+            .files
+            .get(path)
+            .and_then(|bytes| String::from_utf8(bytes.clone()).ok())
+    }
+
+    /// Returns the current bytes of one file.
+    #[must_use]
+    pub fn bytes(&self, path: &Path) -> Option<Vec<u8>> {
         lock(&self.tree).files.get(path).cloned()
     }
 }
@@ -242,7 +308,39 @@ impl Files for FakeFiles {
         tree.files
             .get(path)
             .cloned()
+            .map(|bytes| {
+                String::from_utf8(bytes).map_err(|error| {
+                    DaemonError::fs(path, io::Error::new(io::ErrorKind::InvalidData, error))
+                })
+            })
+            .transpose()?
             .ok_or_else(|| failure(path, io::ErrorKind::NotFound))
+    }
+
+    fn canonicalize(&self, path: &Path) -> DaemonResult<PathBuf> {
+        let path = crate::adapters::files::absolute_lexical(path);
+        if lock(&self.tree).exists(&path) {
+            Ok(path)
+        } else {
+            Err(failure(&path, io::ErrorKind::NotFound))
+        }
+    }
+
+    fn read_bytes_bounded(&self, path: &Path, maximum: u64) -> DaemonResult<Vec<u8>> {
+        let mut tree = lock(&self.tree);
+        tree.record(FakeFilesCall::Read(path.to_path_buf()))?;
+        let bytes = tree
+            .files
+            .get(path)
+            .cloned()
+            .ok_or_else(|| failure(path, io::ErrorKind::NotFound))?;
+        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > maximum {
+            return Err(DaemonError::Validation(format!(
+                "file is larger than {maximum} bytes: {}",
+                path.display()
+            )));
+        }
+        Ok(bytes)
     }
 
     fn create_dir_all(&self, path: &Path) -> DaemonResult<()> {
@@ -283,7 +381,87 @@ impl Files for FakeFiles {
         if let Some(parent) = path.parent() {
             tree.create_dirs(parent)?;
         }
-        tree.insert_file(path.to_path_buf(), text.to_owned());
+        tree.insert_file(path.to_path_buf(), text.as_bytes().to_vec());
+        Ok(())
+    }
+
+    fn create_private_dir_all(&self, path: &Path) -> DaemonResult<()> {
+        self.create_dir_all(path)
+    }
+
+    fn create_private_dir(&self, path: &Path) -> DaemonResult<()> {
+        let mut tree = lock(&self.tree);
+        tree.record(FakeFilesCall::CreateDir(path.to_path_buf()))?;
+        if tree.exists(path) {
+            return Err(failure(path, io::ErrorKind::AlreadyExists));
+        }
+        tree.require_parent(path)?;
+        tree.directories.insert(path.to_path_buf());
+        Ok(())
+    }
+
+    fn create_part_file(&self, path: &Path, size: u64) -> DaemonResult<()> {
+        let mut tree = lock(&self.tree);
+        tree.record(FakeFilesCall::CreatePart(path.to_path_buf(), size))?;
+        if tree.exists(path) {
+            return Err(failure(path, io::ErrorKind::AlreadyExists));
+        }
+        tree.require_parent(path)?;
+        let length = usize::try_from(size).map_err(|_| {
+            DaemonError::Validation(format!("fake part file is too large: {size} bytes"))
+        })?;
+        tree.insert_file(path.to_path_buf(), vec![0; length]);
+        Ok(())
+    }
+
+    fn write_part(&self, path: &Path, offset: u64, bytes: &[u8]) -> DaemonResult<()> {
+        let mut tree = lock(&self.tree);
+        tree.record(FakeFilesCall::WritePart(
+            path.to_path_buf(),
+            offset,
+            bytes.to_vec(),
+        ))?;
+        let offset = usize::try_from(offset).map_err(|_| {
+            DaemonError::Validation(format!("fake part offset is too large: {offset}"))
+        })?;
+        let file = tree
+            .files
+            .get_mut(path)
+            .ok_or_else(|| failure(path, io::ErrorKind::NotFound))?;
+        let end = offset.checked_add(bytes.len()).ok_or_else(|| {
+            DaemonError::Validation(format!("fake part write overflows for {}", path.display()))
+        })?;
+        if end > file.len() {
+            return Err(failure(path, io::ErrorKind::WriteZero));
+        }
+        file[offset..end].copy_from_slice(bytes);
+        Ok(())
+    }
+
+    fn sha256(&self, path: &Path) -> DaemonResult<String> {
+        let mut tree = lock(&self.tree);
+        tree.record(FakeFilesCall::Hash(path.to_path_buf()))?;
+        let bytes = tree
+            .files
+            .get(path)
+            .ok_or_else(|| failure(path, io::ErrorKind::NotFound))?;
+        let digest = Sha256::digest(bytes);
+        Ok(hex_lower(&digest))
+    }
+
+    fn remove_part_tree(&self, root: &Path, path: &Path) -> DaemonResult<()> {
+        let root = crate::adapters::files::absolute_lexical(root);
+        let path = crate::adapters::files::absolute_lexical(path);
+        if path.parent() != Some(root.as_path()) {
+            return Err(DaemonError::Validation(format!(
+                "refusing to remove non-child part path {} below {}",
+                path.display(),
+                root.display()
+            )));
+        }
+        let mut tree = lock(&self.tree);
+        tree.record(FakeFilesCall::RemovePart(root, path.clone()))?;
+        tree.remove_tree(&path);
         Ok(())
     }
 
@@ -323,6 +501,21 @@ impl Files for FakeFiles {
         Ok(())
     }
 
+    fn rename_part(&self, root: &Path, source: &Path, destination: &Path) -> DaemonResult<()> {
+        let root = crate::adapters::files::absolute_lexical(root);
+        let source = crate::adapters::files::absolute_lexical(source);
+        let destination = crate::adapters::files::absolute_lexical(destination);
+        if source.parent() != Some(root.as_path()) || destination.parent() != Some(root.as_path()) {
+            return Err(DaemonError::Validation(format!(
+                "refusing to publish media part {} as {} outside {}",
+                source.display(),
+                destination.display(),
+                root.display()
+            )));
+        }
+        self.rename(&source, &destination)
+    }
+
     fn trash(&self, path: &Path) -> DaemonResult<PathBuf> {
         self.guard_strict_descendant(path)?;
         self.create_dir_all(&self.trash_root)?;
@@ -351,6 +544,7 @@ impl Files for FakeFiles {
         }
         tree.files.remove(path);
         tree.file_identities.remove(path);
+        tree.modified_millis.remove(path);
         Ok(())
     }
 
@@ -375,6 +569,7 @@ impl Files for FakeFiles {
         tree.record(FakeFilesCall::Remove(path.to_path_buf()))?;
         tree.files.remove(path);
         tree.file_identities.remove(path);
+        tree.modified_millis.remove(path);
         Ok(true)
     }
 
@@ -395,6 +590,7 @@ impl Files for FakeFiles {
             .files
             .keys()
             .chain(tree.directories.iter())
+            .chain(tree.others.iter())
             .filter(|candidate| candidate.parent() == Some(path))
             .cloned()
             .collect::<BTreeSet<_>>()
@@ -427,7 +623,7 @@ impl Files for FakeFiles {
         if let Some(relative_parent) = relative.parent() {
             for component in relative_parent.components() {
                 parent.push(component);
-                if tree.files.contains_key(&parent) {
+                if tree.files.contains_key(&parent) || tree.others.contains(&parent) {
                     return Err(failure(&parent, io::ErrorKind::NotADirectory));
                 }
                 if !tree.directories.contains(&parent) {
@@ -448,6 +644,16 @@ impl Files for FakeFiles {
 
 fn failure(path: &Path, kind: io::ErrorKind) -> DaemonError {
     DaemonError::fs(path, io::Error::from(kind))
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[usize::from(byte >> 4)] as char);
+        output.push(HEX[usize::from(byte & 0x0f)] as char);
+    }
+    output
 }
 
 #[cfg(test)]
@@ -491,6 +697,30 @@ mod tests {
         assert!(files.exists(&source));
     }
 
+    fn part_file_round_trip(files: &dyn Files, root: &Path) {
+        let staging = root.join("staging");
+        let part = staging.join("upload.part");
+        let complete = staging.join("upload");
+        files
+            .create_private_dir_all(&staging)
+            .expect("create private staging directory");
+        files
+            .create_part_file(&part, 5)
+            .expect("create sized part file");
+        files.write_part(&part, 2, b"llo").expect("write tail");
+        files.write_part(&part, 0, b"he").expect("write head");
+        assert_eq!(
+            files.sha256(&part).expect("hash part"),
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
+        files.rename(&part, &complete).expect("publish part");
+        assert!(files.exists(&complete));
+        files
+            .remove_part_tree(&staging, &complete)
+            .expect("remove published child");
+        assert!(!files.exists(&complete));
+    }
+
     #[test]
     fn fake_and_real_files_preserve_directory_trees() {
         let temp = tempfile::tempdir().expect("temp dir");
@@ -502,6 +732,30 @@ mod tests {
         directory_round_trip(
             &RealFiles::new(root.join("trash"), [root.to_path_buf()]),
             root,
+        );
+    }
+
+    #[test]
+    fn fake_and_real_files_support_part_file_operations() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let fake_root = temp.path().join("fake");
+        part_file_round_trip(
+            &FakeFiles::new(temp.path().join("fake-trash"), vec![fake_root.clone()]),
+            &fake_root,
+        );
+        let real_root = temp.path().join("real");
+        part_file_round_trip(
+            &RealFiles::new(temp.path().join("real-trash"), [real_root.clone()]),
+            &real_root,
+        );
+        use std::os::unix::fs::PermissionsExt as _;
+        assert_eq!(
+            std::fs::metadata(real_root.join("staging"))
+                .expect("staging metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
         );
     }
 

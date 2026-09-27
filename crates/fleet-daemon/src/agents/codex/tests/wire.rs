@@ -184,6 +184,28 @@ fn structured_input_parts_stay_structured() {
 }
 
 #[test]
+fn a_staged_image_path_is_a_local_image_part() {
+    let path = "/fleet/agents/attachments/thread/shot.png";
+    let input = UserInput {
+        text: "inspect this".to_owned(),
+        attachments: vec![fleet_core::agents::Attachment {
+            name: Some("shot.png".to_owned()),
+            media_type: "image/png".to_owned(),
+            source: fleet_core::agents::AttachmentSource::Path(path.into()),
+        }],
+        item: None,
+        origin: Default::default(),
+    };
+    assert_eq!(
+        user_input(&input),
+        json!([
+            {"type": "text", "text": "inspect this"},
+            {"type": "localImage", "path": path},
+        ])
+    );
+}
+
+#[test]
 fn the_version_comes_from_the_user_agent_because_there_is_no_protocol_version() {
     assert_eq!(
         user_agent_version("fleet/0.147.0 (Linux Unknown; x86_64) xterm-256color"),

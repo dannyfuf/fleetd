@@ -9,11 +9,11 @@
 //! [`geometry`], and the box drawn around the value in [`chrome`].
 
 use gpui::{
-    App, Context, CursorStyle, EventEmitter, FocusHandle, Focusable, KeyContext, MouseButton,
-    SharedString, Subscription, Window, div, prelude::*,
+    App, ClipboardItem, Context, CursorStyle, EventEmitter, ExternalPaths, FocusHandle, Focusable,
+    KeyContext, MouseButton, SharedString, Subscription, Window, div, prelude::*,
 };
 
-use crate::{icons::Icon, text::styled_with, theme::ActiveTheme};
+use crate::{icons::Icon, text::styled_with, theme::ActiveTheme, tone::Tone};
 
 pub mod actions;
 mod buffer;
@@ -60,6 +60,18 @@ pub enum TextInputEvent {
     Blurred,
 }
 
+/// Media gestures emitted by an opted-in [`TextInput`].
+///
+/// This stays separate from [`TextInputEvent`] so the editing event remains a small `Copy`
+/// value while clipboard images and external paths retain their gpui payloads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TextInputMedia {
+    /// A clipboard item containing an image or external paths was pasted.
+    Pasted(ClipboardItem),
+    /// External paths were dropped on the input.
+    Dropped(ExternalPaths),
+}
+
 /// A live single-line or logical multi-line text editor.
 pub struct TextInput {
     focus_handle: FocusHandle,
@@ -72,6 +84,7 @@ pub struct TextInput {
     invalid: Option<SharedString>,
     hide_status_line: bool,
     read_only: bool,
+    accepts_media: bool,
     enter_inserts_newline: bool,
     embedded: bool,
     filter: Option<fn(char) -> bool>,
@@ -104,6 +117,7 @@ impl TextInput {
             invalid: None,
             hide_status_line: false,
             read_only: false,
+            accepts_media: false,
             enter_inserts_newline: true,
             embedded: false,
             filter: None,
@@ -253,6 +267,17 @@ impl TextInput {
     pub fn set_read_only(&mut self, read_only: bool, cx: &mut Context<Self>) {
         if self.read_only != read_only {
             self.read_only = read_only;
+            cx.notify();
+        }
+    }
+
+    /// Opt into reporting image paste and external-path drop gestures as [`TextInputMedia`].
+    ///
+    /// Off by default. Text-only paste keeps the normal editing path in either mode, while a
+    /// read-only input reports no media gestures.
+    pub fn set_accepts_media(&mut self, accepts_media: bool, cx: &mut Context<Self>) {
+        if self.accepts_media != accepts_media {
+            self.accepts_media = accepts_media;
             cx.notify();
         }
     }
@@ -567,6 +592,7 @@ impl TextInput {
 }
 
 impl EventEmitter<TextInputEvent> for TextInput {}
+impl EventEmitter<TextInputMedia> for TextInput {}
 
 impl Focusable for TextInput {
     fn focus_handle(&self, _: &App) -> FocusHandle {
@@ -597,6 +623,7 @@ impl Render for TextInput {
             self.render_chrome(focused, TextInputElement { input: cx.entity() }, cx)
                 .into_any_element()
         };
+        let accepts_media = self.accepts_media && !self.read_only;
         div()
             .when(self.embedded, |element| {
                 element.flex().flex_1().min_w_0().w_full()
@@ -609,6 +636,27 @@ impl Render for TextInput {
                 CursorStyle::Arrow
             } else {
                 CursorStyle::IBeam
+            })
+            .when(accepts_media, |element| {
+                let border = Tone::Info.color(theme);
+                let fill = Tone::Info.fill(theme);
+                let radius = theme.radii.sm;
+                let hairline = theme.metrics.hairline;
+                element
+                    .can_drop(|value, _window, _cx| value.is::<ExternalPaths>())
+                    .drag_over::<ExternalPaths>(move |style, _paths, _window, _cx| {
+                        style
+                            .rounded(radius)
+                            .border(hairline)
+                            .border_color(border)
+                            .bg(fill)
+                    })
+                    .on_drop::<ExternalPaths>(cx.listener(
+                        |_input, paths: &ExternalPaths, _window, cx| {
+                            cx.emit(TextInputMedia::Dropped(paths.clone()));
+                            cx.stop_propagation();
+                        },
+                    ))
             })
             .on_action(cx.listener(Self::move_left))
             .on_action(cx.listener(Self::move_right))

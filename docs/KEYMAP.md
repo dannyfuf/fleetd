@@ -202,7 +202,7 @@ All keys go to the PTY except these direct terminal affordances:
 | Key | Action |
 | --- | --- |
 | `cmd-c` | copy the current selection; with no selection, forward the key to the PTY |
-| `cmd-v` | paste clipboard through the daemon's bracketed-paste-aware path |
+| `cmd-v` | paste text through the bracketed-paste-aware path, or stage a clipboard image/file on the terminal's machine and paste its quoted path |
 | `ctrl-s` | enter Prefix for one key |
 
 Plain left-drag selects cells in reading order, double-click selects a word, and triple-click
@@ -213,6 +213,8 @@ coordinates. Switching between primary and alternate screen, changing the active
 resizing the grid columns clears it because those events change the coordinate space.
 Trailing padding is stripped from hard rows and wide cells are copied once. Soft-wrapped rows retain
 their cells and join directly to the following visual row; hard row boundaries copy as newlines.
+An operating-system file or folder drop over the terminal uses the same media-staging path as
+`cmd-v`; it has no keyboard binding because the payload originates in the pointer gesture.
 While a selection exists, Fleet caches only its visible rows, up to 5,000 rows, and skips repeated
 renders of the same frame and viewport. This lets selections that move partly or fully outside the
 mirror still copy. If a required row is no longer cached, Fleet clears the selection and reports
@@ -245,7 +247,7 @@ alone preserves them.
 | `y` | copy the worktree path of the current session [A11] |
 | `,` | rename current terminal |
 | `[` | Scroll mode |
-| `]` | paste clipboard (bracketed when the app requests it) |
+| `]` | paste clipboard text, image, or file; media becomes a quoted path on the terminal's machine |
 | `a` / `A` | new native Claude / Codex agent thread in this worktree |
 | `F` | the terminal fallback: the floating agent PTY popup (§10) |
 | `z` | zoom: hide the terminal tab strip; watch pane stays visible (toggle) |
@@ -300,7 +302,7 @@ their keys as chips, and a press on the scrim outside the card is `ctrl-q` (UX-S
 | --- | --- |
 | `ctrl-s` | enter the popup's one-shot Prefix |
 | `cmd-c` | copy selection; with no selection, forward the key to the PTY |
-| `cmd-v` | paste through the bracketed-paste-aware path |
+| `cmd-v` | paste text, or stage a clipboard image/file on the popup terminal's machine and paste its quoted path |
 | `ctrl-q` | hide the popup; do **not** quit Fleet or stop the session |
 | `ctrl-shift-q` | unchanged global quit-and-stop-daemon flow |
 
@@ -313,7 +315,7 @@ After `ctrl-s`:
 | `a` | hide when Claude is visible; otherwise switch to Claude |
 | `A` | hide when Codex is visible; otherwise switch to Codex |
 | `[` | enter Agent Scroll mode |
-| `]` | paste clipboard |
+| `]` | paste clipboard text, image, or file |
 | `r` | restart the exited agent command [A10] |
 | `?` | open Help above the popup |
 | `Esc` | cancel Prefix |

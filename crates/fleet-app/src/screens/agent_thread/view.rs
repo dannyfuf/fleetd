@@ -10,9 +10,10 @@
 
 use fleet_core::agents::PermissionMode;
 use fleet_ui_kit::{
-    AGENT_CONTENT_W, ActiveTheme, Button, ButtonSize, ButtonStyle, ComposerChip, ContextMeter,
-    Decision, DecisionAction, DecisionDock, DecisionKind, HarnessTargetExt, Icon, IconSize, Kbd,
-    Menu, MenuItem, MetadataRow, PopoverMenu, Segment, SegmentedControl, Text, Tone,
+    AGENT_CONTENT_W, ActiveTheme, Button, ButtonSize, ButtonStyle, ComposerAttachmentRow,
+    ComposerChip, ContextMeter, Decision, DecisionAction, DecisionDock, DecisionKind,
+    HarnessTargetExt, Icon, IconSize, Kbd, Menu, MenuItem, MetadataRow, PendingAttachmentChip,
+    PopoverMenu, Segment, SegmentedControl, Text, Tone,
 };
 use gpui::{Action, Context, Entity, SharedString, Window, div, prelude::*};
 
@@ -103,6 +104,7 @@ impl Render for AgentThreadView {
                     .child(div().flex_1().min_w_0().child(self.input.clone()))
                     .harness_target("agents.composer"),
             )
+            .children((!self.pending_attachments.is_empty()).then(|| self.attachment_row(cx)))
             .child(self.composer_strip(dimmed, window, cx));
 
         div()
@@ -156,6 +158,27 @@ impl Render for AgentThreadView {
 }
 
 impl AgentThreadView {
+    /// Prepared attachment chips between the draft and settings strip.
+    fn attachment_row(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let entity = cx.entity();
+        ComposerAttachmentRow::new()
+            .attachments(self.pending_attachments.iter().map(|attachment| {
+                let id = attachment.id;
+                let entity = entity.clone();
+                PendingAttachmentChip::new(
+                    ("composer-attachment", id),
+                    attachment.name.clone(),
+                    attachment.state.clone(),
+                )
+                .on_remove(move |_, _window, cx| {
+                    entity.update(cx, |view, cx| {
+                        view.remove_pending_attachment(id, cx);
+                    });
+                })
+            }))
+            .into_any_element()
+    }
+
     /// The docked decision drawer: one slot, one occupant, strict priority.
     ///
     /// It is attached to the composer's top edge rather than drawn in the transcript, because a

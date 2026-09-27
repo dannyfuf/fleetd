@@ -90,6 +90,7 @@ impl TerminalSurface<PopupState> {
 pub(crate) struct AgentPopup {
     model: Option<Model>,
     local: Rc<RefCell<Local>>,
+    media_drop: crate::terminal::media_input::MediaDropState,
 }
 
 /// Cloneable popup control used only by the shell's independent `ctrl-q` safety guard.
@@ -111,6 +112,7 @@ impl AgentPopup {
         Self {
             local: Rc::new(RefCell::new(Local::default())),
             model: None,
+            media_drop: crate::terminal::media_input::MediaDropState::default(),
         }
     }
 
@@ -171,16 +173,31 @@ impl AgentPopup {
             .children(exit);
         let card = hide_on_scrim_press(card, focus);
 
+        let card = self.with_keys(card, state, bridge);
+        let card = if let Some((terminal, label)) = model.terminal.zip(model.drop_label.clone()) {
+            let card = crate::terminal::media_input::drop_affordance(
+                card,
+                label,
+                self.media_drop.hovered(cx),
+            )
+            .h(height);
+            let local = Rc::clone(&self.local);
+            let state = state.clone();
+            let bridge = bridge.clone();
+            self.media_drop.install(card, move |paths, cx| {
+                drop_paths(&local, &state, &bridge, terminal, paths, cx);
+            })
+        } else {
+            card
+        };
+
         FloatingOverlay::new()
             .top(top)
             .width(width)
             .scrim(true)
             .layer(OverlayLayer::Dialog)
             .popover_elevation(true)
-            .content(
-                self.with_keys(card, state, bridge)
-                    .harness_target("agents.popup"),
-            )
+            .content(card.harness_target("agents.popup"))
             .into_any_element()
     }
 

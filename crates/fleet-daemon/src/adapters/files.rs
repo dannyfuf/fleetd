@@ -3,11 +3,11 @@
 use std::{
     ffi::{CStr, CString, OsStr},
     fs::{self, File, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     os::{
-        fd::{AsRawFd, FromRawFd},
+        fd::AsRawFd,
         unix::ffi::OsStrExt,
-        unix::fs::{MetadataExt, OpenOptionsExt},
+        unix::fs::{FileExt, MetadataExt},
     },
     path::{Component, Path, PathBuf},
     process::Command,
@@ -15,9 +15,17 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use crate::{DaemonError, DaemonResult};
+
+use self::fd::{
+    create_private_directories, metadata_at, open_directory, open_directory_at, open_file_at,
+    open_path_parent, path_component, remove_entry_at, rename_at, sync_directory, unlink_file_at,
+};
+
+mod fd;
 
 /// Filesystem entry type observed together with its stable identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,14 +49,20 @@ struct FileIdentity {
 pub struct FileMetadata {
     /// The observed entry type without following symlinks.
     pub kind: FileKind,
+    /// Length in bytes for a regular file, zero for other entry kinds.
+    pub len: u64,
+    /// Last modification time as Unix epoch milliseconds.
+    pub modified_millis: i64,
     identity: FileIdentity,
 }
 
 impl FileMetadata {
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn fake(kind: FileKind, identity: u64) -> Self {
+    pub(crate) fn fake(kind: FileKind, identity: u64, len: u64, modified_millis: i64) -> Self {
         Self {
             kind,
+            len,
+            modified_millis,
             identity: FileIdentity {
                 device: 0,
                 inode: identity,
@@ -84,14 +98,80 @@ impl FileRevision {
 pub trait Files: Send + Sync {
     /// Reads an entire UTF-8 text file.
     fn read_text(&self, path: &Path) -> DaemonResult<String>;
+    /// Resolves every symlink in a path.
+    fn canonicalize(&self, path: &Path) -> DaemonResult<PathBuf> {
+        Err(DaemonError::Validation(format!(
+            "path canonicalization is unsupported for {}",
+            path.display()
+        )))
+    }
+    /// Reads one regular file without following its final component, capped before allocation.
+    fn read_bytes_bounded(&self, path: &Path, maximum: u64) -> DaemonResult<Vec<u8>> {
+        Err(DaemonError::Validation(format!(
+            "bounded file reads are unsupported for {} (maximum {maximum} bytes)",
+            path.display()
+        )))
+    }
     /// Creates a directory and all missing ancestors.
     fn create_dir_all(&self, path: &Path) -> DaemonResult<()>;
     /// Copies a directory using the platform's copy-on-write strategy when available.
     fn clone_dir(&self, source: &Path, destination: &Path) -> DaemonResult<()>;
     /// Atomically replaces text using an exclusive same-directory temporary file and rename.
     fn atomic_write_text(&self, path: &Path, text: &str) -> DaemonResult<()>;
+    /// Creates a private directory and all missing ancestors, forcing the leaf to mode `0700`.
+    fn create_private_dir_all(&self, path: &Path) -> DaemonResult<()> {
+        Err(DaemonError::Validation(format!(
+            "private directories are unsupported for {}",
+            path.display()
+        )))
+    }
+    /// Creates one private leaf directory exclusively below an existing parent.
+    fn create_private_dir(&self, path: &Path) -> DaemonResult<()> {
+        Err(DaemonError::Validation(format!(
+            "private directory allocation is unsupported for {}",
+            path.display()
+        )))
+    }
+    /// Creates an exclusive sparse upload part file with its final length and mode `0600`.
+    fn create_part_file(&self, path: &Path, size: u64) -> DaemonResult<()> {
+        Err(DaemonError::Validation(format!(
+            "part files are unsupported for {} ({size} bytes)",
+            path.display()
+        )))
+    }
+    /// Writes one upload chunk at its exact file offset.
+    fn write_part(&self, path: &Path, offset: u64, bytes: &[u8]) -> DaemonResult<()> {
+        Err(DaemonError::Validation(format!(
+            "part writes are unsupported for {} at offset {offset} ({} bytes)",
+            path.display(),
+            bytes.len()
+        )))
+    }
+    /// Computes the lowercase SHA-256 digest of one file without loading it all into memory.
+    fn sha256(&self, path: &Path) -> DaemonResult<String> {
+        Err(DaemonError::Validation(format!(
+            "file hashing is unsupported for {}",
+            path.display()
+        )))
+    }
+    /// Removes one direct child part file or tree without following symlinks.
+    fn remove_part_tree(&self, root: &Path, path: &Path) -> DaemonResult<()> {
+        Err(DaemonError::Validation(format!(
+            "part removal is unsupported for {} below {}",
+            path.display(),
+            root.display()
+        )))
+    }
+    /// Returns currently available bytes for a directory when the adapter can query them cheaply.
+    fn available_bytes(&self, _path: &Path) -> DaemonResult<Option<u64>> {
+        Ok(None)
+    }
     /// Renames a path without crossing filesystems.
     fn rename(&self, source: &Path, destination: &Path) -> DaemonResult<()>;
+    /// Publishes one direct child part below `root` without following directory symlinks.
+    fn rename_part(&self, _root: &Path, source: &Path, destination: &Path) -> DaemonResult<()> {
+        self.rename(source, destination)
+    }
     /// Moves a path below Fleet's trash directory and returns the new path.
     fn trash(&self, path: &Path) -> DaemonResult<PathBuf>;
     /// Removes a validated descendant on a detached thread.
@@ -298,6 +378,36 @@ impl Files for RealFiles {
         fs::read_to_string(path).map_err(|error| DaemonError::fs(path, error))
     }
 
+    fn canonicalize(&self, path: &Path) -> DaemonResult<PathBuf> {
+        fs::canonicalize(path)
+            .map(|path| absolute_lexical(&path))
+            .map_err(|error| DaemonError::fs(path, error))
+    }
+
+    fn read_bytes_bounded(&self, path: &Path, maximum: u64) -> DaemonResult<Vec<u8>> {
+        let (parent, name) = open_path_parent(path)?;
+        let mut file = open_file_at(
+            &parent,
+            &name,
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0,
+            path,
+        )?;
+        let capacity = usize::try_from(maximum.min(64 * 1024)).unwrap_or(64 * 1024);
+        let mut bytes = Vec::with_capacity(capacity);
+        std::io::Read::by_ref(&mut file)
+            .take(maximum.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(|error| DaemonError::fs(path, error))?;
+        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > maximum {
+            return Err(DaemonError::Validation(format!(
+                "file is larger than {maximum} bytes: {}",
+                path.display()
+            )));
+        }
+        Ok(bytes)
+    }
+
     fn create_dir_all(&self, path: &Path) -> DaemonResult<()> {
         fs::create_dir_all(path).map_err(|error| DaemonError::fs(path, error))
     }
@@ -391,8 +501,137 @@ impl Files for RealFiles {
         result
     }
 
+    fn create_private_dir_all(&self, path: &Path) -> DaemonResult<()> {
+        create_private_directories(path, false)
+    }
+
+    fn create_private_dir(&self, path: &Path) -> DaemonResult<()> {
+        create_private_directories(path, true)
+    }
+
+    fn create_part_file(&self, path: &Path, size: u64) -> DaemonResult<()> {
+        let (parent, name) = open_path_parent(path)?;
+        let file = open_file_at(
+            &parent,
+            &name,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600,
+            path,
+        )?;
+        if let Err(error) = file.set_len(size) {
+            match unlink_file_at(&parent, &name, path) {
+                Ok(()) => {}
+                Err(DaemonError::Filesystem { source, .. })
+                    if source.kind() == std::io::ErrorKind::NotFound => {}
+                Err(cleanup) => tracing::warn!(
+                    path = %path.display(),
+                    %cleanup,
+                    "could not remove a part file after allocation failed"
+                ),
+            }
+            return Err(DaemonError::fs(path, error));
+        }
+        Ok(())
+    }
+
+    fn write_part(&self, path: &Path, offset: u64, bytes: &[u8]) -> DaemonResult<()> {
+        let (parent, name) = open_path_parent(path)?;
+        let file = open_file_at(
+            &parent,
+            &name,
+            libc::O_WRONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0,
+            path,
+        )?;
+        file.write_all_at(bytes, offset)
+            .map_err(|error| DaemonError::fs(path, error))
+    }
+
+    fn sha256(&self, path: &Path) -> DaemonResult<String> {
+        let (parent, name) = open_path_parent(path)?;
+        let mut file = open_file_at(
+            &parent,
+            &name,
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0,
+            path,
+        )?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let read = file
+                .read(&mut buffer)
+                .map_err(|error| DaemonError::fs(path, error))?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+        Ok(hex_lower(&hasher.finalize()))
+    }
+
+    fn remove_part_tree(&self, root: &Path, path: &Path) -> DaemonResult<()> {
+        let root = absolute_lexical(root);
+        let path = absolute_lexical(path);
+        if path.parent() != Some(root.as_path()) {
+            return Err(DaemonError::Validation(format!(
+                "refusing to remove non-child part path {} below {}",
+                path.display(),
+                root.display()
+            )));
+        }
+        if !path.exists() {
+            return Ok(());
+        }
+        let parent = open_directory(&root)?;
+        let name = path.file_name().ok_or_else(|| {
+            DaemonError::Validation(format!("part path has no file name: {}", path.display()))
+        })?;
+        let name = path_component(name, &path)?;
+        remove_entry_at(&parent, &name, &path)
+    }
+
+    fn available_bytes(&self, path: &Path) -> DaemonResult<Option<u64>> {
+        let directory = open_directory(path)?;
+        let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+        // SAFETY: `directory` is open for the call and `stats` points to writable storage.
+        if unsafe { libc::fstatvfs(directory.as_raw_fd(), stats.as_mut_ptr()) } != 0 {
+            return Err(DaemonError::fs(path, std::io::Error::last_os_error()));
+        }
+        // SAFETY: successful `statvfs` initialized the complete structure.
+        let stats = unsafe { stats.assume_init() };
+        Ok(Some(stats.f_bavail.saturating_mul(stats.f_frsize)))
+    }
+
     fn rename(&self, source: &Path, destination: &Path) -> DaemonResult<()> {
         fs::rename(source, destination).map_err(|error| DaemonError::fs(source, error))
+    }
+
+    fn rename_part(&self, root: &Path, source: &Path, destination: &Path) -> DaemonResult<()> {
+        let root = absolute_lexical(root);
+        let source = absolute_lexical(source);
+        let destination = absolute_lexical(destination);
+        if source.parent() != Some(root.as_path()) || destination.parent() != Some(root.as_path()) {
+            return Err(DaemonError::Validation(format!(
+                "refusing to publish media part {} as {} outside {}",
+                source.display(),
+                destination.display(),
+                root.display()
+            )));
+        }
+        let parent = open_directory(&root)?;
+        let source_name = source.file_name().ok_or_else(|| {
+            DaemonError::Validation(format!("media part has no file name: {}", source.display()))
+        })?;
+        let destination_name = destination.file_name().ok_or_else(|| {
+            DaemonError::Validation(format!(
+                "media destination has no file name: {}",
+                destination.display()
+            ))
+        })?;
+        let source_name = path_component(source_name, &source)?;
+        let destination_name = path_component(destination_name, &destination)?;
+        rename_at(&parent, &source_name, &parent, &destination_name, &source)
     }
 
     fn trash(&self, path: &Path) -> DaemonResult<PathBuf> {
@@ -532,9 +771,14 @@ fn unsafe_removal_error(path: &Path) -> DaemonError {
     ))
 }
 
-fn path_component(component: &OsStr, path: &Path) -> DaemonResult<CString> {
-    CString::new(component.as_bytes())
-        .map_err(|_| DaemonError::Validation(format!("path contains NUL: {}", path.display())))
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[usize::from(byte >> 4)] as char);
+        output.push(HEX[usize::from(byte & 0x0f)] as char);
+    }
+    output
 }
 
 fn file_metadata(metadata: &fs::Metadata) -> FileMetadata {
@@ -548,43 +792,16 @@ fn file_metadata(metadata: &fs::Metadata) -> FileMetadata {
     };
     FileMetadata {
         kind,
+        len: metadata.len(),
+        modified_millis: metadata
+            .mtime()
+            .saturating_mul(1_000)
+            .saturating_add(metadata.mtime_nsec() / 1_000_000),
         identity: FileIdentity {
             device: metadata.dev(),
             inode: metadata.ino(),
         },
     }
-}
-
-fn metadata_at(parent: &File, name: &CStr) -> std::io::Result<FileMetadata> {
-    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
-    // SAFETY: `parent` and the NUL-terminated name remain valid, and `stat` is writable.
-    let result = unsafe {
-        libc::fstatat(
-            parent.as_raw_fd(),
-            name.as_ptr(),
-            stat.as_mut_ptr(),
-            libc::AT_SYMLINK_NOFOLLOW,
-        )
-    };
-    if result != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    // SAFETY: successful `fstatat` initialized the complete structure.
-    let stat = unsafe { stat.assume_init() };
-    let kind = match stat.st_mode & libc::S_IFMT {
-        libc::S_IFREG => FileKind::File,
-        libc::S_IFDIR => FileKind::Directory,
-        _ => FileKind::Other,
-    };
-    Ok(FileMetadata {
-        kind,
-        identity: FileIdentity {
-            // `st_dev` is `u64` on Linux and `i32` on macOS; the cast is load-bearing there.
-            #[allow(clippy::unnecessary_cast)]
-            device: stat.st_dev as u64,
-            inode: stat.st_ino,
-        },
-    })
 }
 
 fn restore_quarantined_file(
@@ -620,174 +837,6 @@ fn restore_quarantined_file(
     }
 }
 
-fn unlink_file_at(parent: &File, name: &CStr, path: &Path) -> DaemonResult<()> {
-    // SAFETY: `parent` and the NUL-terminated name remain valid for this call.
-    if unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), 0) } == 0 {
-        Ok(())
-    } else {
-        Err(DaemonError::fs(path, std::io::Error::last_os_error()))
-    }
-}
-
-fn open_directory(path: &Path) -> DaemonResult<File> {
-    let path = absolute_lexical(path);
-    let mut directory = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open("/")
-        .map_err(|error| DaemonError::fs(&path, error))?;
-    for component in path.components() {
-        match component {
-            Component::RootDir => {}
-            Component::Normal(name) => {
-                directory = open_directory_at(&directory, name, &path)?;
-            }
-            _ => return Err(unsafe_removal_error(&path)),
-        }
-    }
-    Ok(directory)
-}
-
-fn open_directory_at(parent: &File, name: &OsStr, path: &Path) -> DaemonResult<File> {
-    let name = path_component(name, path)?;
-    // SAFETY: `parent` is open for the duration of the call and `name` is NUL-terminated.
-    let fd = unsafe {
-        libc::openat(
-            parent.as_raw_fd(),
-            name.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )
-    };
-    if fd < 0 {
-        return Err(DaemonError::fs(path, std::io::Error::last_os_error()));
-    }
-    // SAFETY: `openat` returned a new owned descriptor.
-    Ok(unsafe { File::from_raw_fd(fd) })
-}
-
-fn rename_at(
-    source_parent: &File,
-    source_name: &CStr,
-    destination_parent: &File,
-    destination_name: &CStr,
-    path: &Path,
-) -> DaemonResult<()> {
-    // SAFETY: both directory descriptors and both NUL-terminated names remain valid for the call.
-    let result = unsafe {
-        libc::renameat(
-            source_parent.as_raw_fd(),
-            source_name.as_ptr(),
-            destination_parent.as_raw_fd(),
-            destination_name.as_ptr(),
-        )
-    };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(DaemonError::fs(path, std::io::Error::last_os_error()))
-    }
-}
-
-fn remove_entry_at(parent: &File, name: &CStr, path: &Path) -> DaemonResult<()> {
-    // SAFETY: `parent` and the NUL-terminated entry name remain valid for the call.
-    if unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), 0) } == 0 {
-        return Ok(());
-    }
-    let error = std::io::Error::last_os_error();
-    if error.kind() == std::io::ErrorKind::NotFound {
-        return Ok(());
-    }
-    if !matches!(error.raw_os_error(), Some(libc::EISDIR) | Some(libc::EPERM)) {
-        return Err(DaemonError::fs(path, error));
-    }
-
-    let directory = open_directory_at(parent, OsStr::from_bytes(name.to_bytes()), path)?;
-    for child_name in directory_entry_names(&directory, path)? {
-        let child_name = OsStr::from_bytes(child_name.to_bytes());
-        let child_path = path.join(child_name);
-        let child_name = path_component(child_name, &child_path)?;
-        remove_entry_at(&directory, &child_name, &child_path)?;
-    }
-
-    // SAFETY: `parent` and the NUL-terminated entry name remain valid for the call.
-    if unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) } == 0 {
-        Ok(())
-    } else {
-        Err(DaemonError::fs(path, std::io::Error::last_os_error()))
-    }
-}
-
-struct DirectoryStream(*mut libc::DIR);
-
-impl Drop for DirectoryStream {
-    fn drop(&mut self) {
-        // SAFETY: `self.0` is owned by this guard and remains valid until this call.
-        unsafe { libc::closedir(self.0) };
-    }
-}
-
-fn directory_entry_names(directory: &File, path: &Path) -> DaemonResult<Vec<CString>> {
-    // SAFETY: `directory` owns a valid descriptor. `dup` creates an independently owned copy.
-    let descriptor = unsafe { libc::dup(directory.as_raw_fd()) };
-    if descriptor < 0 {
-        return Err(DaemonError::fs(path, std::io::Error::last_os_error()));
-    }
-    // SAFETY: `descriptor` is an owned directory descriptor transferred to `fdopendir`.
-    let stream = unsafe { libc::fdopendir(descriptor) };
-    if stream.is_null() {
-        let error = std::io::Error::last_os_error();
-        // SAFETY: ownership was not transferred when `fdopendir` failed.
-        unsafe { libc::close(descriptor) };
-        return Err(DaemonError::fs(path, error));
-    }
-    let stream = DirectoryStream(stream);
-    let mut names = Vec::new();
-    loop {
-        set_errno(0);
-        // SAFETY: the stream is valid and exclusively consumed by this loop.
-        let entry = unsafe { libc::readdir(stream.0) };
-        if entry.is_null() {
-            let error = errno();
-            if error == 0 {
-                break;
-            }
-            return Err(DaemonError::fs(
-                path,
-                std::io::Error::from_raw_os_error(error),
-            ));
-        }
-        // SAFETY: `readdir` returned a valid entry whose `d_name` is NUL-terminated.
-        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
-        if name.to_bytes() != b"." && name.to_bytes() != b".." {
-            names.push(name.to_owned());
-        }
-    }
-    names.sort_by(|left, right| left.to_bytes().cmp(right.to_bytes()));
-    Ok(names)
-}
-
-#[cfg(target_os = "macos")]
-fn errno_pointer() -> *mut libc::c_int {
-    // SAFETY: Darwin exposes the calling thread's errno storage through `__error`.
-    unsafe { libc::__error() }
-}
-
-#[cfg(target_os = "linux")]
-fn errno_pointer() -> *mut libc::c_int {
-    // SAFETY: glibc exposes the calling thread's errno storage through `__errno_location`.
-    unsafe { libc::__errno_location() }
-}
-
-fn errno() -> libc::c_int {
-    // SAFETY: `errno_pointer` returns valid thread-local storage.
-    unsafe { *errno_pointer() }
-}
-
-fn set_errno(value: libc::c_int) {
-    // SAFETY: `errno_pointer` returns valid thread-local storage.
-    unsafe { *errno_pointer() = value };
-}
-
 fn trash_name(path: &Path) -> CString {
     let epoch = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -808,16 +857,6 @@ fn conditional_removal_name(path: &Path) -> CString {
         .unwrap_or("cache");
     CString::new(format!(".{name}.fleet-expiry-{}.recovery", Uuid::new_v4()))
         .unwrap_or_else(|_| unreachable!("generated recovery names contain no NUL"))
-}
-
-fn sync_directory(path: &Path) -> DaemonResult<()> {
-    let directory = File::open(path).map_err(|error| DaemonError::fs(path, error))?;
-    directory
-        .sync_all()
-        .map_err(|error| DaemonError::fs(path, error))?;
-    #[cfg(test)]
-    PARENT_SYNCS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    Ok(())
 }
 
 #[cfg(test)]
@@ -874,286 +913,4 @@ fn platform_root_alias(path: PathBuf) -> PathBuf {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::sync::atomic::Ordering;
-
-    use tempfile::tempdir;
-
-    use super::*;
-
-    #[test]
-    fn atomic_write_replaces_complete_text_and_leaves_no_temp() {
-        let temp = tempdir().unwrap_or_else(|error| panic!("{error}"));
-        let files = RealFiles::new(temp.path().join("trash"), [temp.path().join("data")]);
-        let path = temp.path().join("data/config.json");
-        files
-            .atomic_write_text(&path, "first")
-            .unwrap_or_else(|error| panic!("{error}"));
-        files
-            .atomic_write_text(&path, "second")
-            .unwrap_or_else(|error| panic!("{error}"));
-        assert_eq!(fs::read_to_string(&path).ok().as_deref(), Some("second"));
-        let children = files
-            .list(path.parent().unwrap_or(temp.path()))
-            .unwrap_or_else(|error| panic!("{error}"));
-        assert_eq!(children, vec![path]);
-    }
-
-    #[test]
-    fn atomic_replace_syncs_parent_directory() {
-        let temp = tempdir().unwrap_or_else(|error| panic!("{error}"));
-        let files = RealFiles::new(temp.path().join("trash"), [temp.path().join("data")]);
-        let path = temp.path().join("data/config.json");
-        let before = PARENT_SYNCS.load(Ordering::Relaxed);
-        files
-            .atomic_write_text(&path, "durable")
-            .unwrap_or_else(|error| panic!("{error}"));
-        assert!(PARENT_SYNCS.load(Ordering::Relaxed) > before);
-    }
-
-    #[test]
-    fn conditional_remove_preserves_replacement() {
-        let temp = tempdir().unwrap_or_else(|error| panic!("{error}"));
-        let files = RealFiles::new(temp.path().join("trash"), [temp.path().join("cache")]);
-        let path = temp.path().join("cache/pr.json");
-        files
-            .atomic_write_text(&path, "stale")
-            .unwrap_or_else(|error| panic!("{error}"));
-        let inspected = files
-            .metadata(&path)
-            .unwrap_or_else(|error| panic!("{error}"));
-        files
-            .atomic_write_text(&path, "refreshed")
-            .unwrap_or_else(|error| panic!("{error}"));
-
-        assert!(
-            !files
-                .remove_file_if_unchanged(&path, inspected)
-                .unwrap_or_else(|error| panic!("{error}"))
-        );
-        assert_eq!(
-            files
-                .read_text(&path)
-                .unwrap_or_else(|error| panic!("{error}")),
-            "refreshed"
-        );
-    }
-
-    #[test]
-    fn conditional_remove_restores_replacement_after_post_check_race() {
-        let temp = tempdir().unwrap_or_else(|error| panic!("{error}"));
-        let files = RealFiles::new(temp.path().join("trash"), [temp.path().join("cache")]);
-        let path = temp.path().join("cache/pr.json");
-        files
-            .atomic_write_text(&path, "stale")
-            .unwrap_or_else(|error| panic!("{error}"));
-        let inspected = files
-            .metadata(&path)
-            .unwrap_or_else(|error| panic!("{error}"));
-        let racing_files = RealFiles::new(temp.path().join("trash"), [temp.path().join("cache")]);
-        files.set_conditional_removal_hook(move |stage, path| {
-            if stage == ConditionalRemovalStage::BeforeRename {
-                racing_files
-                    .atomic_write_text(path, "refreshed")
-                    .unwrap_or_else(|error| panic!("{error}"));
-            }
-        });
-
-        assert!(
-            !files
-                .remove_file_if_unchanged(&path, inspected)
-                .unwrap_or_else(|error| panic!("{error}"))
-        );
-        assert_eq!(
-            files
-                .read_text(&path)
-                .unwrap_or_else(|error| panic!("{error}")),
-            "refreshed"
-        );
-        assert_eq!(
-            files
-                .list(path.parent().unwrap_or(temp.path()))
-                .unwrap_or_else(|error| panic!("{error}")),
-            vec![path]
-        );
-    }
-
-    #[test]
-    fn conditional_remove_preserves_recovery_when_restore_destination_exists() {
-        let temp = tempdir().unwrap_or_else(|error| panic!("{error}"));
-        let files = RealFiles::new(temp.path().join("trash"), [temp.path().join("cache")]);
-        let path = temp.path().join("cache/pr.json");
-        files
-            .atomic_write_text(&path, "stale")
-            .unwrap_or_else(|error| panic!("{error}"));
-        let inspected = files
-            .metadata(&path)
-            .unwrap_or_else(|error| panic!("{error}"));
-        let racing_files = RealFiles::new(temp.path().join("trash"), [temp.path().join("cache")]);
-        files.set_conditional_removal_hook(move |stage, path| {
-            let text = match stage {
-                ConditionalRemovalStage::BeforeRename => "refreshed",
-                ConditionalRemovalStage::AfterRename => "newest",
-            };
-            racing_files
-                .atomic_write_text(path, text)
-                .unwrap_or_else(|error| panic!("{error}"));
-        });
-
-        assert!(
-            !files
-                .remove_file_if_unchanged(&path, inspected)
-                .unwrap_or_else(|error| panic!("{error}"))
-        );
-        assert_eq!(
-            files
-                .read_text(&path)
-                .unwrap_or_else(|error| panic!("{error}")),
-            "newest"
-        );
-        let recovery = files
-            .list(path.parent().unwrap_or(temp.path()))
-            .unwrap_or_else(|error| panic!("{error}"))
-            .into_iter()
-            .find(|candidate| {
-                candidate.file_name().is_some_and(|name| {
-                    name.as_bytes()
-                        .windows(14)
-                        .any(|part| part == b".fleet-expiry-")
-                })
-            })
-            .unwrap_or_else(|| panic!("recovery file"));
-        assert_eq!(
-            files
-                .read_text(&recovery)
-                .unwrap_or_else(|error| panic!("{error}")),
-            "refreshed"
-        );
-    }
-
-    #[test]
-    fn descendant_guard_rejects_roots_and_escapes() {
-        let temp = tempdir().unwrap_or_else(|error| panic!("{error}"));
-        let root = temp.path().join("repos");
-        fs::create_dir_all(root.join("owner")).unwrap_or_else(|error| panic!("{error}"));
-        let files = RealFiles::new(temp.path().join("trash"), [root.clone()]);
-        assert!(
-            files
-                .guard_strict_descendant(&root.join("owner/repo"))
-                .is_ok()
-        );
-        assert!(files.guard_strict_descendant(&root).is_err());
-        assert!(
-            files
-                .guard_strict_descendant(&root.join("../outside"))
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn symlink_swap_cannot_escape_removable_root() {
-        use std::os::unix::fs::symlink;
-
-        let temp = tempdir().unwrap_or_else(|error| panic!("{error}"));
-        let root = temp.path().join("repos");
-        let outside = temp.path().join("outside");
-        fs::create_dir_all(&root).unwrap_or_else(|error| panic!("{error}"));
-        fs::create_dir_all(&outside).unwrap_or_else(|error| panic!("{error}"));
-        fs::write(outside.join("keep"), "untouched").unwrap_or_else(|error| panic!("{error}"));
-        symlink(&outside, root.join("swapped")).unwrap_or_else(|error| panic!("{error}"));
-        let files = RealFiles::new(temp.path().join("trash"), [root.clone()]);
-
-        assert!(files.trash(&root.join("swapped/keep")).is_err());
-        assert_eq!(
-            fs::read_to_string(outside.join("keep")).ok().as_deref(),
-            Some("untouched")
-        );
-    }
-
-    #[test]
-    fn remove_detached_removes_nested_directory_and_reports_completion() {
-        let temp = tempdir().unwrap_or_else(|error| panic!("{error}"));
-        let root = temp.path().join("repos");
-        let trash = temp.path().join("trash");
-        let target = root.join("owner/repo");
-        fs::create_dir_all(target.join("nested/empty")).unwrap_or_else(|error| panic!("{error}"));
-        fs::write(target.join("nested/file"), "contents").unwrap_or_else(|error| panic!("{error}"));
-        let files = RealFiles::new(&trash, [root]);
-
-        files
-            .remove_detached(&target)
-            .unwrap_or_else(|error| panic!("{error}"));
-
-        assert!(!target.exists());
-        assert!(
-            fs::read_dir(&trash)
-                .unwrap_or_else(|error| panic!("{error}"))
-                .next()
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn symlinked_ancestor_above_root_allows_confined_removal() {
-        use std::os::unix::fs::symlink;
-
-        let temp = tempdir().unwrap_or_else(|error| panic!("{error}"));
-        let real = temp.path().join("real");
-        let link = temp.path().join("link");
-        let root = link.join("repos");
-        let target = root.join("owner/repo");
-        fs::create_dir_all(real.join("repos/owner/repo/nested"))
-            .unwrap_or_else(|error| panic!("{error}"));
-        fs::write(real.join("repos/owner/repo/nested/file"), "contents")
-            .unwrap_or_else(|error| panic!("{error}"));
-        symlink(&real, &link).unwrap_or_else(|error| panic!("{error}"));
-        let trash = temp.path().join("trash");
-        let files = RealFiles::new(&trash, [root]);
-
-        files
-            .remove_detached(&target)
-            .unwrap_or_else(|error| panic!("{error}"));
-
-        assert!(!real.join("repos/owner/repo").exists());
-        assert!(
-            fs::read_dir(&trash)
-                .unwrap_or_else(|error| panic!("{error}"))
-                .next()
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn removable_roots_can_be_refreshed() {
-        let temp = tempdir().unwrap_or_else(|error| panic!("{error}"));
-        let old_root = temp.path().join("old");
-        let new_root = temp.path().join("new");
-        fs::create_dir_all(old_root.join("owner")).unwrap_or_else(|error| panic!("{error}"));
-        fs::create_dir_all(new_root.join("owner")).unwrap_or_else(|error| panic!("{error}"));
-        let files = RealFiles::new(temp.path().join("trash"), [old_root.clone()]);
-
-        assert!(
-            files
-                .guard_strict_descendant(&old_root.join("owner/repo"))
-                .is_ok()
-        );
-        assert!(
-            files
-                .guard_strict_descendant(&new_root.join("owner/repo"))
-                .is_err()
-        );
-
-        files.set_removable_roots(vec![new_root.clone()]);
-
-        assert!(
-            files
-                .guard_strict_descendant(&old_root.join("owner/repo"))
-                .is_err()
-        );
-        assert!(
-            files
-                .guard_strict_descendant(&new_root.join("owner/repo"))
-                .is_ok()
-        );
-    }
-}
+mod tests;

@@ -63,6 +63,10 @@ pub(crate) struct PendingSend {
     pub(crate) id: ItemId,
     /// Exactly what the user typed, with Fleet's own send-time additions already stripped.
     pub(crate) text: String,
+    /// Exact submitted draft, retained so a raced refusal can put it back in the composer.
+    pub(crate) draft: String,
+    /// Attachment names drawn in the optimistic bubble while the daemon catches up.
+    pub(crate) attachments: Vec<String>,
     /// Whether the message joined a turn that was already running.
     pub(crate) steered: bool,
     /// Whether the daemon refused the send, which draws the row as failed and frees the composer.

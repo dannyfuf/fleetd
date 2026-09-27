@@ -4,13 +4,13 @@ use std::{
 };
 
 use gpui::{
-    ClipboardItem, Context, Entity, EntityInputHandler, FocusHandle, KeyBinding, Modifiers,
-    MouseButton, MouseDownEvent, ScrollDelta, ScrollWheelEvent, Subscription, VisualTestContext,
-    Window, actions, div, point, prelude::*, px,
+    ClipboardItem, Context, Entity, EntityInputHandler, FocusHandle, Image, ImageFormat,
+    KeyBinding, Modifiers, MouseButton, MouseDownEvent, ScrollDelta, ScrollWheelEvent,
+    Subscription, VisualTestContext, Window, actions, div, point, prelude::*, px,
 };
 
 use super::{MultilineInput, MultilineInputEvent};
-use crate::{Theme, theme::ActiveTheme};
+use crate::{TextInputMedia, Theme, theme::ActiveTheme};
 
 actions!(composer_test, [OwnerUp]);
 
@@ -223,6 +223,24 @@ fn paste_preserves_tabs_and_drops_other_controls(cx: &mut gpui::TestAppContext) 
     input.read_with(&visual, |input, cx| {
         assert_eq!(input.text(cx), "\tname\tvalue")
     });
+}
+
+#[gpui::test]
+fn media_paste_is_relayed_without_editing_the_composer(cx: &mut gpui::TestAppContext) {
+    let (mut visual, input, events, _, _) = composer(cx);
+    visual.update(|_, cx| {
+        input.update(cx, |input, cx| input.set_accepts_media(true, cx));
+    });
+    let item =
+        ClipboardItem::new_image(&Image::from_bytes(ImageFormat::Png, vec![137, 80, 78, 71]));
+    visual.update(|_, cx| cx.write_to_clipboard(item.clone()));
+    visual.simulate_keystrokes("cmd-v");
+
+    input.read_with(&visual, |input, cx| assert!(input.text(cx).is_empty()));
+    assert_eq!(
+        intents(&events),
+        [MultilineInputEvent::Media(TextInputMedia::Pasted(item))]
+    );
 }
 
 #[gpui::test]
