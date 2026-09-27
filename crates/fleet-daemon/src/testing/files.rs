@@ -318,7 +318,7 @@ impl Files for FakeFiles {
     }
 
     fn canonicalize(&self, path: &Path) -> DaemonResult<PathBuf> {
-        let path = crate::adapters::files::absolute_lexical(path);
+        let path = crate::adapters::files::normalize_lexical(path);
         if lock(&self.tree).exists(&path) {
             Ok(path)
         } else {
@@ -450,8 +450,8 @@ impl Files for FakeFiles {
     }
 
     fn remove_part_tree(&self, root: &Path, path: &Path) -> DaemonResult<()> {
-        let root = crate::adapters::files::absolute_lexical(root);
-        let path = crate::adapters::files::absolute_lexical(path);
+        let root = crate::adapters::files::normalize_lexical(root);
+        let path = crate::adapters::files::normalize_lexical(path);
         if path.parent() != Some(root.as_path()) {
             return Err(DaemonError::Validation(format!(
                 "refusing to remove non-child part path {} below {}",
@@ -502,9 +502,9 @@ impl Files for FakeFiles {
     }
 
     fn rename_part(&self, root: &Path, source: &Path, destination: &Path) -> DaemonResult<()> {
-        let root = crate::adapters::files::absolute_lexical(root);
-        let source = crate::adapters::files::absolute_lexical(source);
-        let destination = crate::adapters::files::absolute_lexical(destination);
+        let root = crate::adapters::files::normalize_lexical(root);
+        let source = crate::adapters::files::normalize_lexical(source);
+        let destination = crate::adapters::files::normalize_lexical(destination);
         if source.parent() != Some(root.as_path()) || destination.parent() != Some(root.as_path()) {
             return Err(DaemonError::Validation(format!(
                 "refusing to publish media part {} as {} outside {}",
@@ -599,14 +599,19 @@ impl Files for FakeFiles {
     }
 
     fn guard_strict_descendant(&self, path: &Path) -> DaemonResult<()> {
-        let path = crate::adapters::files::absolute_lexical(path);
+        let path = crate::adapters::files::normalize_lexical(path);
         let root = self
             .removable_roots
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .chain(std::iter::once(&self.trash_root))
-            .map(|root| (crate::adapters::files::absolute_lexical(root), root.clone()))
+            .map(|root| {
+                (
+                    crate::adapters::files::normalize_lexical(root),
+                    root.clone(),
+                )
+            })
             .filter(|(root, _)| path != *root && path.starts_with(root))
             .max_by_key(|(root, _)| root.components().count())
             .ok_or_else(|| {

@@ -52,15 +52,8 @@ pub(super) fn metadata_at(parent: &File, name: &CStr) -> std::io::Result<FileMet
     })
 }
 
-#[cfg(target_os = "macos")]
-fn modified_millis(stat: &libc::stat) -> i64 {
-    stat.st_mtimespec
-        .tv_sec
-        .saturating_mul(1_000)
-        .saturating_add(stat.st_mtimespec.tv_nsec / 1_000_000)
-}
-
-#[cfg(not(target_os = "macos"))]
+/// The `libc` crate flattens `st_mtimespec` into `st_mtime` / `st_mtime_nsec` on every
+/// platform we build for, including macOS.
 fn modified_millis(stat: &libc::stat) -> i64 {
     stat.st_mtime
         .saturating_mul(1_000)
@@ -152,6 +145,9 @@ pub(super) fn open_file_at(
     mode: libc::mode_t,
     path: &Path,
 ) -> DaemonResult<File> {
+    // `mode_t` is `u16` on macOS and cannot be passed to a variadic call as is.
+    #[allow(clippy::unnecessary_cast)]
+    let mode = mode as libc::c_uint;
     // SAFETY: `parent` remains open and `name` is NUL-terminated for this call.
     let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags, mode) };
     if fd < 0 {

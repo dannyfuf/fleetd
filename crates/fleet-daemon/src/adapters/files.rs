@@ -600,7 +600,10 @@ impl Files for RealFiles {
         }
         // SAFETY: successful `statvfs` initialized the complete structure.
         let stats = unsafe { stats.assume_init() };
-        Ok(Some(stats.f_bavail.saturating_mul(stats.f_frsize)))
+        // `f_bavail` is `u32` on macOS and `u64` on Linux; widen both before multiplying.
+        #[allow(clippy::unnecessary_cast)]
+        let available = (stats.f_bavail as u64).saturating_mul(stats.f_frsize as u64);
+        Ok(Some(available))
     }
 
     fn rename(&self, source: &Path, destination: &Path) -> DaemonResult<()> {
@@ -862,7 +865,15 @@ fn conditional_removal_name(path: &Path) -> CString {
 #[cfg(test)]
 static PARENT_SYNCS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// Lexically absolute path with the platform root alias applied, ready for the kernel: on
+/// macOS `/var` becomes `/private/var` so an `O_NOFOLLOW` walk does not trip over the symlink.
 pub(crate) fn absolute_lexical(path: &Path) -> PathBuf {
+    platform_root_alias(normalize_lexical(path))
+}
+
+/// Lexically absolute path with `.` and `..` folded and no platform aliasing. Fakes that key
+/// their trees by caller paths use this so a path round-trips through them unchanged.
+pub(crate) fn normalize_lexical(path: &Path) -> PathBuf {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -880,7 +891,7 @@ pub(crate) fn absolute_lexical(path: &Path) -> PathBuf {
             other => normalized.push(other.as_os_str()),
         }
     }
-    platform_root_alias(normalized)
+    normalized
 }
 
 fn resolve_root(path: &Path) -> PathBuf {
