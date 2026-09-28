@@ -8,7 +8,7 @@ use fleet_ui_kit::{
 };
 use gpui::{AnyElement, App, SharedString, div};
 
-use crate::actions::{filter, first_run as first_run_actions, fleet, hub, repos};
+use crate::actions::{filter, first_run as first_run_actions, fleet, hub, repos, worktrees};
 
 /// What Fleet is for, in one sentence (§3.13).
 const HEADLINE: &str =
@@ -52,6 +52,9 @@ pub(crate) enum EmptySurface {
     Worktrees,
     WorktreesRepo,
     WorktreesNoRepos,
+    /// The scope holds worktrees, but every one is a review worktree the list hides (§3.3).
+    /// The scope is the hidden-count phrase, `2 review worktrees hidden`.
+    WorktreesReviewsHidden,
     Filter,
     PrsMine,
     PrsReview,
@@ -67,6 +70,7 @@ impl EmptySurface {
                 "No repositories yet \u{2014} clone one to start a worktree",
                 "",
             ),
+            Self::WorktreesReviewsHidden => ("No worktrees of your own yet \u{b7} {}", ""),
             Self::Filter => ("Nothing matches \"{}\".", "Clear filter"),
             Self::PrsMine => ("No open PRs authored by you in {}.", "r  refresh"),
             Self::PrsReview => ("No PRs waiting for your review in {}.", "r  refresh"),
@@ -101,6 +105,18 @@ impl EmptySurface {
                     .style(ButtonStyle::Primary)
                     .action(Box::new(repos::Clone))
                     .harness_target("worktrees.empty.clone"),
+                )
+                .into_any_element(),
+            // Every worktree here is a hidden review: the way to them is the toggle `v` runs. The
+            // header toolbar keeps `New worktree`, so the page is not a dead end either way.
+            Self::WorktreesReviewsHidden => EmptyState::new(fact)
+                .button(
+                    Button::new(
+                        "worktrees-empty-reviews",
+                        crate::views::worktrees_list::SHOW_REVIEWS,
+                    )
+                    .action(Box::new(worktrees::ToggleReviewWorktrees))
+                    .harness_target("worktrees.empty.reviews"),
                 )
                 .into_any_element(),
             // The sidebar says the same thing with a control: the button runs the key the old
@@ -320,6 +336,14 @@ mod tests {
             EmptySurface::Worktrees.copy(None),
             ("No worktrees yet".into(), "n  create one"),
             "an unscoped fact is a static string, not a substitution"
+        );
+        assert_eq!(
+            EmptySurface::WorktreesReviewsHidden.copy(Some("2 review worktrees hidden")),
+            (
+                "No worktrees of your own yet \u{b7} 2 review worktrees hidden".into(),
+                ""
+            ),
+            "a scope of hidden reviews says what it holds instead of claiming it is empty"
         );
     }
 

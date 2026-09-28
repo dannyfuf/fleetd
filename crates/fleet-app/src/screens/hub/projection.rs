@@ -64,6 +64,9 @@ pub struct HubModel {
     pub review_hidden: usize,
     /// The Worktrees page's subtitle: `4 across 2 repositories · 1 needs attention`.
     pub worktree_summary: SharedString,
+    /// The subtitle's review-worktree segment: `2 review worktrees hidden`, or `2 review
+    /// worktrees` while they are shown; `None` when the scope holds none (§3.3).
+    pub worktree_reviews: Option<SharedString>,
     /// How many PR rows exist before filtering, after the documented display cap.
     pub pr_total: usize,
     /// How many pull requests the §3.5 cap hid.
@@ -223,7 +226,7 @@ fn model(state: &AppState, hub: &HubState, now: i64) -> HubModel {
     scoped.retain(in_scope);
     let worktree_total = scoped.len();
     let review_hidden = reviews.iter().filter(|worktree| in_scope(worktree)).count();
-    let (worktrees, worktree_summary) = if matches!(
+    let (worktrees, worktree_summary, worktree_reviews) = if matches!(
         state.screen,
         Screen::Hub {
             tab: HubTab::Worktrees
@@ -245,15 +248,20 @@ fn model(state: &AppState, hub: &HubState, now: i64) -> HubModel {
             RepoScope::All => None,
             RepoScope::Repo(repo) => Some(repo),
         };
-        let summary = worktrees_list::summary(&rows, scope_repo);
+        let summary = worktrees_list::summary(&rows, scope_repo, review_hidden);
+        let reviews = worktrees_list::review_fact(
+            review_hidden,
+            rows.iter().filter(|row| row.review.is_some()).count(),
+        );
         (
             rows.into_iter()
                 .filter(|row| worktrees_list::matches(row, list_query))
                 .collect(),
             summary,
+            reviews,
         )
     } else {
-        (Rc::default(), SharedString::default())
+        (Rc::default(), SharedString::default(), None)
     };
     let cache_key = cache::PrCacheKey::from_state(state);
     let slice = hub.prs.slice_for(state.pr_tab, &cache_key);
@@ -289,6 +297,7 @@ fn model(state: &AppState, hub: &HubState, now: i64) -> HubModel {
         worktree_total,
         review_hidden,
         worktree_summary,
+        worktree_reviews,
         pr_total,
         pr_hidden: if state.review_board_is_shown() {
             0

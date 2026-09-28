@@ -270,6 +270,8 @@ impl HubScreen {
                             RepoScope::Repo(repo) => Some(SharedString::from(repo.to_string())),
                         },
                         summary: model.worktree_summary.clone(),
+                        reviews: model.worktree_reviews.clone(),
+                        review_hidden: model.review_hidden,
                         filter,
                         stale,
                         loading: state.snapshot.is_none(),

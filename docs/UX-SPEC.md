@@ -471,7 +471,7 @@ to context · `i` detail · `ga` jump to `All` (KEYMAP A7) · `H` collapse/expan
 
 ```
  Worktrees                                   [⌕ Filter  /] [Clone repo] [+ New worktree n]
- 4 across 2 repositories · 1 needs attention
+ 4 across 2 repositories · 1 needs attention · 2 review worktrees hidden
  Name                          Repository  Session                   Pull request   Age
  ─────────────────────────────────────────────────────────────────────────────────────────
 ▌⑂ spike ↑2                     acme/web    ● claude working · 2 tabs  #4 In review    2d  [Open ⏎] [⋯]
@@ -486,7 +486,13 @@ scope holds only one), then `· <k> needs attention` when a row has failed hooks
 or an inspection error (zero-suppressed). Every number here counts listed rows: while the list
 hides review worktrees (a pull-request checkout, whose base is `pull/<number>/head`) they are left
 out of the rows, the counts, and the rail and title-bar counts that must agree with them (§2.2,
-§3.2). A frozen snapshot appends an amber `Stale · <age>` chip
+§3.2). After those comes `· <k> review worktrees hidden` (singular at one, zero-suppressed), drawn
+as a compact ghost button (`worktrees.reviews`) that runs `worktrees::ToggleReviewWorktrees`, as
+`v` does; its tooltip reads `Show review worktrees` with the live key. While review worktrees are
+shown the same button reads `· <k> review worktrees`, counting the scope's review rows before the
+filter, and its tooltip reads `Hide review worktrees`. A scope with no review worktree draws no
+segment. The filter (`/`) narrows only the listed rows: a hidden review worktree never comes back
+because its branch matches the query, and the segment still counts it. A frozen snapshot appends an amber `Stale · <age>` chip
 and draws the rows at 55 % (`stale_opacity`); they stay navigable.
 The toolbar on the right: the **filter field** (`/`; a click opens the same filter mode, §3.10),
 `Clone repo` (`repos::Clone`) and the primary `New worktree  n` (`worktrees::Create`). While the
@@ -503,6 +509,7 @@ context holds no repository there is nothing to branch from, so `New worktree` i
 | Ahead | mono `↑n`, only when ahead > 0 | after the branch | the one git fact that says "unpushed work" at a glance | `WorktreeInspection.ahead` |
 | Dirty | muted `uncommitted changes` | after the branch | dirty is a property of the branch, so it rides with it | `WorktreeInspection.dirty` |
 | Host chip | `cloud` + host id; `cloud-off` amber when unreachable | after the branch | absent for local (the 95 % case) | `Worktree.host` |
+| Review chip | muted `review` chip, only while review worktrees are shown | after the branch, before the host chip | tells a pull request's own checkout from the user's own branch at a glance | `Worktree.baseRef` is `pull/<n>/head` (`fleet_core::github::pull_request_checkout`) |
 | Hooks failed | amber `Setup hook failed` chip + `View log` ghost button, which opens Jobs on that hooks job with its log already expanded, as `⏎` on the job would | after the branch | a worktree that looks ready but whose post-create hooks failed is a trap | `Worktree.degraded` + the failed `PostCreateHooks` job |
 | Repository | `owner/name` | col 2 | disambiguates in `All` scope | — |
 | Session | in words behind a dot: `claude working · 2 tabs`, `claude waiting · 1 tab`, `1 terminal`, `Sleeping`, `No session`, `Host offline` | col 3 | says what `s`/`K`/`d` would stop without decoding a glyph | `WorktreeStatus` (session, windows, agent activity) |
@@ -527,7 +534,7 @@ action (`r`, filter change, repo change, screen change). A row that changes stat
 words **in place**.
 
 **Intentionally omitted:** `WorktreeId` (never typed in the GUI), `path` (`y` copies it, detail
-shows it), `baseRef`, session name string, window names, `behind`, `uniqueCommits`,
+shows it), `baseRef` (a `pull/<n>/head` base shows only as the `review` chip), session name string, window names, `behind`, `uniqueCommits`,
 `published`, `mergedIntoTarget`, absolute timestamps, PR title, PR author, additions/deletions.
 Every one of them appears in the detail panel or in the delete/prune confirm — i.e. exactly where
 it changes a decision.
@@ -537,6 +544,8 @@ it changes a decision.
 | State | Rendering |
 | --- | --- |
 | Empty | `No worktrees yet` / `No worktrees for <repo> yet` over a primary `New worktree  n` button |
+| Only hidden reviews | every worktree in scope is a hidden review worktree: the subtitle reads `No worktrees of your own yet · <k> review worktrees hidden`, and the page says `No worktrees of your own yet · <k> review worktrees hidden` over a `Show review worktrees` button (`worktrees.empty.reviews`) that runs the same toggle as `v`; the header keeps `New worktree` |
+| Review worktrees shown | each review row carries the muted `review` chip, and the subtitle's button reads `· <k> review worktrees` and hides them again |
 | No repositories | `No repositories yet — clone one to start a worktree` over a primary `Clone repo` button; the header offers no `New worktree` |
 | Filter-empty | `Nothing matches "<filter>".` over a `Clear filter  esc` button (§3.10) |
 | Loading (cold) | `Loading…` until the first snapshot; rows then render from `state.json` immediately — **never blank** |
@@ -750,7 +759,8 @@ repos rail is hidden, as on the Board tab, because a Reviews board spans reposit
 are *Pending review → Reviewing → Reviewed → Review published*, plus *Dismissed*. A request becomes
 a card (from a schedule, §12 of `docs/BOARD.md`, or from `fleet board --reviews card new --pr`); a
 card entering *Pending review* starts reviewing at once in its pull request's own worktree, two at
-a time; a finished review waits in *Reviewed* with its report on the card; commenting on the card
+a time (a `pull/<n>/head` checkout, which the Worktrees list hides by default; `v` shows it,
+§3.3); a finished review waits in *Reviewed* with its report on the card; commenting on the card
 corrects the review, and moving it to *Review published* posts it. Each tile carries its pull
 request, `owner/name#123`, and the card detail a `Pull request` row. Leaving the tab gives the
 board mirror back to whatever the Hub's Board tab showed.
@@ -2185,6 +2195,7 @@ no control to put it in (the terminal exit strip).
 | No repos | `No repos in <context>.` | `Clone repo  n` button |
 | No worktrees | `No worktrees yet` | primary `New worktree  n` button |
 | No worktrees for a repo | `No worktrees for <repo> yet` | primary `New worktree  n` button |
+| Only hidden review worktrees | `No worktrees of your own yet · <k> review worktrees hidden` | `Show review worktrees` button, which runs the toggle `v` runs (§3.3); `New worktree` stays in the header |
 | Filter miss | `Nothing matches "<filter>".` | `Clear filter  esc` button |
 | PR mine | `No open PRs authored by you in <scope>.` | `Refresh  r` button |
 | PR review (Reviews board) | `No reviews yet.` | `⏎ add the GitHub review schedule`, a button (ADR 0023) — only while the board has no schedule and the daemon advertises `schedules`; `Enter` or a click opens Board settings on Schedules with the starter draft |

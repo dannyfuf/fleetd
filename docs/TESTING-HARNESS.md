@@ -305,7 +305,7 @@ The names Fleet paints today, by surface:
 | --- | --- |
 | Sidebar | `repos.rail` (the whole sidebar), `repos.row[N]`, `repos.row[N].menu` (a repository's `⋯`, painted while the row is hovered), `repos.clone` (the `+` beside `Repositories`), `repos.collapse` (the foot button, the pointer's `H`), `repos.resize` (the draggable edge). `repos.rail`'s `w` is the collapse and drag oracle — 232 expanded by default, 44 collapsed, the dragged width (200–320) after `drag repos.resize <x> <y>`. |
 | Hub lists | `worktrees.row[N]`, `prs.row[N]`, `jobs.row[N]`, `hub.tab[N]`, `prs.tab[N]` |
-| Worktrees page | `worktrees.new` (absent while the context has no repository), `worktrees.clone` (the primary then), `worktrees.empty.clone` (the empty page's `Clone repo` when there is no repository), `worktrees.filter`, `worktrees.row[N].open`, `worktrees.row[N].menu`, `worktrees.row[N].log` |
+| Worktrees page | `worktrees.new` (absent while the context has no repository), `worktrees.clone` (the primary then), `worktrees.empty.clone` (the empty page's `Clone repo` when there is no repository), `worktrees.reviews` (the subtitle's review-worktree count, which shows or hides them; absent while the scope holds no review worktree), `worktrees.empty.reviews` (the empty page's `Show review worktrees` when every worktree in scope is a hidden review), `worktrees.filter`, `worktrees.row[N].open`, `worktrees.row[N].menu`, `worktrees.row[N].log` |
 | Pull requests | `prs.filter`, `prs.refresh`, `prs.retry`, `prs.more`, `prs.row[N].open`, `prs.row[N].menu` |
 | Detail panel | `detail.open`, `detail.sleep`, `detail.menu`, `detail.copy_path`, `detail.inspect` |
 | Title bar | `titlebar.context`, `titlebar.command`, `titlebar.needs_you`, `titlebar.jobs`, `titlebar.update`, `titlebar.daemon`, `titlebar.help`, `titlebar.settings`, `titlebar.back`, `workspace.back`, `workspace.switcher`, `workspace.pr` |
@@ -330,7 +330,9 @@ The names Fleet paints today, by surface:
 
 The Worktrees page's header paints `worktrees.filter` (the idle filter field; while the filter is
 being edited the same box is `filter.input`), `worktrees.clone` and `worktrees.new` (the primary
-*New worktree*). A row's hover actions, `worktrees.row[N].open` (*Open*) and
+*New worktree*). While the scope holds a review worktree, the subtitle also paints
+`worktrees.reviews` after its words: the `<k> review worktrees hidden` (or, while shown,
+`<k> review worktrees`) button that runs the same toggle as `v`. A row's hover actions, `worktrees.row[N].open` (*Open*) and
 `worktrees.row[N].menu` (the `⋯` trigger), are drawn only while that row is hovered or selected,
 so a scenario clicks the row first; `worktrees.row[N].log` is the *View log* button of a row whose
 hooks failed. Right-clicking `worktrees.row[N]` opens the same menu at the pointer. The detail

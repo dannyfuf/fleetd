@@ -8,6 +8,7 @@
 use std::{collections::HashMap, path::Path};
 
 use fleet_core::{
+    github::pull_request_checkout,
     ids::{JobId, RepoId, WorktreeId},
     inspection::WorktreeInspection,
     model::Worktree,
@@ -165,6 +166,9 @@ pub struct WorktreeRow {
     pub inspect_error: bool,
     /// `#n` plus the badge state, when a PR matches the branch.
     pub pr: Option<(u64, PrBadgeState)>,
+    /// The pull request this worktree checks out, when it is a review worktree (a
+    /// `pull/<n>/head` base, §3.3): the row carries the muted `review` chip.
+    pub review: Option<u64>,
     /// Whether the derived marks are older than 10 minutes (§2.6).
     pub stale_marks: bool,
     inspected_age: Option<i64>,
@@ -347,6 +351,7 @@ fn build_row(
         deleting: job.is_some_and(|job| matches!(job.kind, JobKind::DeleteWorktree)),
         inspect_error: errored,
         pr,
+        review: pull_request_checkout(worktree),
         stale_marks,
         inspected_age,
         age: worktree
@@ -632,12 +637,21 @@ pub fn matches(row: &WorktreeRow, query: &str) -> bool {
             .any(|label| contains_folded(label, &needle))
 }
 
+/// What the subtitle says when every worktree in scope is a hidden review worktree.
+const NO_OWN_WORKTREES: &str = "No worktrees of your own yet";
+
 /// The page subtitle: `4 across 2 repositories · 1 needs attention`, or `3 in acme/api` when one
-/// repository is selected. `rows` is the scope before the filter.
+/// repository is selected. `rows` is the scope before the filter; `review_hidden` is how many
+/// review worktrees the list hides in that scope, so a scope holding only those does not claim
+/// it has no worktrees.
 #[must_use]
-pub fn summary(rows: &[WorktreeRow], repo: Option<&RepoId>) -> SharedString {
+pub fn summary(rows: &[WorktreeRow], repo: Option<&RepoId>, review_hidden: usize) -> SharedString {
     if rows.is_empty() {
-        return SharedString::new_static("No worktrees yet");
+        return SharedString::new_static(if review_hidden > 0 {
+            NO_OWN_WORKTREES
+        } else {
+            "No worktrees yet"
+        });
     }
     let count = rows.len();
     let lead = match repo {
@@ -659,4 +673,26 @@ pub fn summary(rows: &[WorktreeRow], repo: Option<&RepoId>) -> SharedString {
         let verb = if attention == 1 { "needs" } else { "need" };
         SharedString::from(format!("{lead} \u{b7} {attention} {verb} attention"))
     }
+}
+
+/// The subtitle's review-worktree segment (§3.3): `2 review worktrees hidden` while the list
+/// hides them, `2 review worktrees` while it shows them, and nothing when the scope holds none.
+///
+/// `hidden` is the model's hidden count, zero whenever reviews are shown; `shown` is how many of
+/// the scope's rows, before the filter, are review worktrees.
+#[must_use]
+pub fn review_fact(hidden: usize, shown: usize) -> Option<SharedString> {
+    let (count, suffix) = if hidden > 0 {
+        (hidden, " hidden")
+    } else if shown > 0 {
+        (shown, "")
+    } else {
+        return None;
+    };
+    let noun = if count == 1 {
+        "review worktree"
+    } else {
+        "review worktrees"
+    };
+    Some(SharedString::from(format!("{count} {noun}{suffix}")))
 }

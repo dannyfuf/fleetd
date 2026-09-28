@@ -589,6 +589,11 @@ fn hidden_review_worktrees_leave_the_rows_the_rail_counts_and_the_filter_total()
         "the subtitle counts listed rows: {}",
         hidden.worktree_summary
     );
+    assert_eq!(
+        hidden.worktree_reviews.as_deref(),
+        Some("1 review worktree hidden"),
+        "the subtitle's segment names what the list leaves out"
+    );
     state.displayed_hub = hidden.displayed();
     assert_eq!(state.displayed_hub.review_hidden, 1);
     assert_eq!(crate::presentation::filter_counts(&state), (2, 2));
@@ -600,6 +605,20 @@ fn hidden_review_worktrees_leave_the_rows_the_rail_counts_and_the_filter_total()
     assert_eq!(shown.worktrees.len(), 3);
     assert_eq!(shown.worktree_total, 3);
     assert_eq!(shown.review_hidden, 0);
+    assert_eq!(
+        shown.worktree_reviews.as_deref(),
+        Some("1 review worktree"),
+        "while shown, the segment counts the review rows it marks"
+    );
+    assert_eq!(
+        shown
+            .worktrees
+            .iter()
+            .filter_map(|row| row.review)
+            .collect::<Vec<_>>(),
+        vec![7],
+        "the shown review row carries its pull request for the `review` chip"
+    );
     assert_eq!(rail_count(&shown, None), Some(3));
     assert_eq!(rail_count(&shown, Some("acme/api")), Some(3));
     state.displayed_hub = shown.displayed();
