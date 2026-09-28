@@ -208,10 +208,15 @@ fn hub_place(state: &AppState, section: HubTab, reviews: usize) -> HubPlace {
                 .any(|candidate| &candidate.id == repo && &candidate.context_id == context)
         })
     };
+    // The same set the Worktrees list shows: hidden review worktrees are not counted (§2.2).
     let worktrees = snapshot
         .worktrees
         .iter()
         .filter(|worktree| in_context(&worktree.repo_id))
+        .filter(|worktree| {
+            state.show_review_worktrees
+                || fleet_core::github::pull_request_checkout(worktree).is_none()
+        })
         .count();
     let summary = context_board_summary(&snapshot.boards, state.active_context());
     HubPlace {

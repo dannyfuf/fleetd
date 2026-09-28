@@ -9,6 +9,8 @@ pub struct DisplayedHub {
     pub repo_total: usize,
     pub worktrees: Vec<DisplayedWorktree>,
     pub worktree_total: usize,
+    /// Review worktrees in the scope that the list hides (§3.3).
+    pub review_hidden: usize,
     pub prs: Vec<DisplayedPr>,
     pub pr_total: usize,
 }

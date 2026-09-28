@@ -19,7 +19,8 @@
   - verified: `cargo test -p fleet-core github` (5 passed, 0 failed) and `make lint` clean. `fleet_core::github::pull_request_checkout(&Worktree) -> Option<u64>` is the one fleet-core definition of a review worktree; `worktree_matches_pr` calls it.
 - [x] T02 — Add the session flag, the toggle action, its key, label and help row
   - verified: `cargo test -p fleet-app` filters keymap (35), action_catalogue (12), help (16), palette (50) and the full lib suite (1300) pass; `real_shell_v_toggles_review_worktrees_in_the_worktrees_list` presses `v` twice on the real shell; `make lint` clean.
-- [ ] T03 — Exclude hidden review worktrees from the Hub projection and every count that must agree with it
+- [x] T03 — Exclude hidden review worktrees from the Hub projection and every count that must agree with it
+  - verified: `cargo test -p fleet-app` filters hub (77), repos_rail (14), title (20), worktrees_list (25), filter (34) and the full lib suite pass; three projection tests in `screens/hub/tests.rs` and one title test pin the rule; `make lint` clean.
 - [ ] T04 — Say what is hidden, mark what is shown, and keep the empty state honest
 - [ ] T05 — Keep the cursor and selection stable across the toggle
 - [ ] T06 — Harness: a `review` mark, the new target, a fixture with a review worktree, and a scenario
@@ -42,6 +43,11 @@
 - 2026-09-28 — T02: the handler is `Shell::toggle_review_worktrees` in `shell/root/routing.rs`, registered on the shell root beside `toggle_rail`, not on the Hub root. The palette overlay is not under the Hub root, so only a shell-root listener is reachable by `window.dispatch_action`; T04's subtitle and empty-state buttons should dispatch `worktrees::ToggleReviewWorktrees` the same way.
 - 2026-09-28 — T02: the palette needed its own `Command::ToggleReviewWorktrees` (icon `GitPullRequest`) and a `run_command` arm that dispatches the action; the plan's Touches list omitted both palette files. It is listed on the Worktrees screen whatever the connection, since the flag is local.
 - 2026-09-28 — T02: the Help overlay has no hand-written table; its `v` row comes from `keymap::table()` plus the catalogue, so "add the row to the help overlay" needed no edit. `docs/UX-SPEC.md` §3.3's Keyboard line gained `v` now (the key ships in T02); the rest of §3.3 stays with T04. `docs/APP-CONTRACTS.md`'s `AppState` field table gained the flag.
+- 2026-09-28 — T03: the partition runs right after the context filter and before the glyph loop, so rows, the subtitle, rail counts, rail glyphs and issue chips all see one slice. `rail_rows` now takes `worktrees: &[&Worktree]` (the context-scoped slice, reviews removed, before the RepoScope retain) instead of `snapshot.worktrees`, which avoids cloning worktrees per revision and keeps other repos' counts when one repo is selected.
+- 2026-09-28 — T03: `HubModel.review_hidden` / `DisplayedHub.review_hidden` count hidden review worktrees inside the RepoScope (not the whole context), so the subtitle and T04's empty state agree with the rows under them. It is 0 while reviews are shown; no `review_total` field was added — T04 can count shown reviews from its rows once `WorktreeRow` carries `review`.
+- 2026-09-28 — T03: the flag is a `ProjectionKey` field (`show_reviews`), so toggling rebuilds the cached `Rc<HubModel>`. `PrInputs.worktrees` still gets every worktree: the PR screen keeps linking a PR to its review worktree.
+- 2026-09-28 — T03: `hub_place` (title bar) applies the same exclusion; it still counts the whole context and ignores RepoScope, as before, so it equals the subtitle only under `All`.
+- 2026-09-28 — T03: UX-SPEC §5 invariant 6 ("No surface auto-hides a failure") contradicted the plan's accepted risk. Followed the plan and wrote the exception into invariant 6: a hidden review worktree's failed hook or unreachable host lights no rail glyph or issue chip until `v` shows reviews. The rail rows in §3.2, the section nav in §2.2, the §3.3 subtitle numbers and the §3.10 match count now say hidden reviews are not counted; APP-CONTRACTS `displayed_hub` names `review_hidden`.
 
 ## Follow-ups
 (Things discovered mid-flight that are out of scope for this plan. Each gets a one-line description.)

@@ -522,6 +522,160 @@ fn unset_context_projects_the_chrome_context() {
     assert_eq!(model.worktrees[0].id.as_str(), "acme/api#one");
 }
 
+/// A pull-request checkout, as the daemon's `create_pr_local` writes one.
+fn review_worktree(id: &str, repo: &str, number: u64) -> Worktree {
+    let mut review = worktree(id, repo, "2026-09-04T10:00:00Z");
+    review.base_ref = format!("pull/{number}/head");
+    review
+}
+
+/// One context, `acme`, with the given repositories and worktrees.
+fn review_state(repos: &[&str], worktrees: Vec<Worktree>) -> AppState {
+    let now = Instant::now();
+    let mut state = AppState::new("/tmp/fleet-hub-reviews", now);
+    let mut source = snapshot(0);
+    source.contexts = vec![context("acme")];
+    source.repos = repos.iter().map(|id| repo(id, "acme")).collect();
+    source.worktrees = worktrees;
+    state.apply_snapshot(source, now);
+    state
+}
+
+fn rail_count(model: &projection::HubModel, repo: Option<&str>) -> Option<usize> {
+    model
+        .rail
+        .iter()
+        .find(|row| row.repo.as_ref().map(RepoId::as_str) == repo)
+        .and_then(|row| row.count)
+}
+
+#[test]
+fn hidden_review_worktrees_leave_the_rows_the_rail_counts_and_the_filter_total() {
+    let mut state = review_state(
+        &["acme/api"],
+        vec![
+            worktree("acme/api#one", "acme/api", "2026-09-04T10:00:00Z"),
+            worktree("acme/api#two", "acme/api", "2026-09-04T10:00:00Z"),
+            review_worktree("acme/api#pr-7", "acme/api", 7),
+        ],
+    );
+    let hub = HubState::default();
+    assert!(
+        !state.show_review_worktrees,
+        "review worktrees start hidden"
+    );
+
+    let hidden = projection::prepare(&state, &hub, 1_788_523_200);
+    assert_eq!(hidden.worktrees.len(), 2);
+    assert!(
+        hidden
+            .worktrees
+            .iter()
+            .all(|row| row.id.as_str() != "acme/api#pr-7")
+    );
+    assert_eq!(
+        hidden.worktree_total, 2,
+        "the total leaves hidden reviews out"
+    );
+    assert_eq!(hidden.review_hidden, 1);
+    assert_eq!(
+        rail_count(&hidden, None),
+        Some(2),
+        "`All` counts listed rows"
+    );
+    assert_eq!(rail_count(&hidden, Some("acme/api")), Some(2));
+    assert!(
+        hidden.worktree_summary.starts_with("2 "),
+        "the subtitle counts listed rows: {}",
+        hidden.worktree_summary
+    );
+    state.displayed_hub = hidden.displayed();
+    assert_eq!(state.displayed_hub.review_hidden, 1);
+    assert_eq!(crate::presentation::filter_counts(&state), (2, 2));
+
+    // The flag is a projection input: flipping it rebuilds the model at once.
+    state.show_review_worktrees = true;
+    let shown = projection::prepare(&state, &hub, 1_788_523_201);
+    assert!(!Rc::ptr_eq(&hidden, &shown));
+    assert_eq!(shown.worktrees.len(), 3);
+    assert_eq!(shown.worktree_total, 3);
+    assert_eq!(shown.review_hidden, 0);
+    assert_eq!(rail_count(&shown, None), Some(3));
+    assert_eq!(rail_count(&shown, Some("acme/api")), Some(3));
+    state.displayed_hub = shown.displayed();
+    assert_eq!(crate::presentation::filter_counts(&state), (3, 3));
+}
+
+#[test]
+fn a_hidden_degraded_review_worktree_lights_no_rail_glyph_or_issue_chip() {
+    let mut review = review_worktree("acme/api#pr-7", "acme/api", 7);
+    review.degraded = Some(fleet_core::model::Degraded {
+        kind: "post_create_hooks".to_owned(),
+        step: "1".to_owned(),
+        exit_code: Some(1),
+        at: "2026-09-04T11:00:00Z".to_owned(),
+        log_path: "/tmp/hooks.log".to_owned(),
+    });
+    let mut state = review_state(
+        &["acme/api"],
+        vec![
+            worktree("acme/api#one", "acme/api", "2026-09-04T10:00:00Z"),
+            review,
+        ],
+    );
+    let hub = HubState::default();
+    let repo_row = |model: &projection::HubModel| {
+        model
+            .rail
+            .iter()
+            .find(|row| row.kind == RailKind::Repo)
+            .map(|row| (row.glyph, row.issues.clone()))
+            .unwrap_or_else(|| panic!("acme/api has a rail row"))
+    };
+
+    let (glyph, issues) = repo_row(&projection::prepare(&state, &hub, 1_788_523_200));
+    assert_ne!(glyph, fleet_ui_kit::StatusKind::Degraded);
+    assert_eq!(issues, None);
+
+    state.show_review_worktrees = true;
+    let (glyph, issues) = repo_row(&projection::prepare(&state, &hub, 1_788_523_201));
+    assert_eq!(glyph, fleet_ui_kit::StatusKind::Degraded);
+    assert_eq!(issues.as_deref(), Some("1 issue"));
+}
+
+#[test]
+fn the_hidden_review_count_follows_the_repository_scope_but_rail_counts_do_not() {
+    let mut state = review_state(
+        &["acme/api", "acme/web"],
+        vec![
+            worktree("acme/api#one", "acme/api", "2026-09-04T10:00:00Z"),
+            review_worktree("acme/api#pr-7", "acme/api", 7),
+            worktree("acme/web#own", "acme/web", "2026-09-04T10:00:00Z"),
+            review_worktree("acme/web#pr-9", "acme/web", 9),
+        ],
+    );
+    let hub = HubState::default();
+
+    let all = projection::prepare(&state, &hub, 1_788_523_200);
+    assert_eq!(all.worktree_total, 2);
+    assert_eq!(all.review_hidden, 2);
+
+    state.scope = RepoScope::Repo("acme/api".parse().expect("repo id"));
+    let scoped = projection::prepare(&state, &hub, 1_788_523_201);
+    assert_eq!(scoped.worktree_total, 1);
+    assert_eq!(
+        scoped.review_hidden, 1,
+        "a review worktree in another repository is not hidden from this scope"
+    );
+    assert_eq!(rail_count(&scoped, None), Some(2));
+    assert_eq!(rail_count(&scoped, Some("acme/api")), Some(1));
+    assert_eq!(
+        rail_count(&scoped, Some("acme/web")),
+        Some(1),
+        "the rail counts the context, not the selected repository"
+    );
+}
+
 #[gpui::test]
 fn filter_shrink_preserves_selected_worktree_identity(cx: &mut gpui::TestAppContext) {
     let now = Instant::now();

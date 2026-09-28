@@ -115,6 +115,28 @@ fn the_hub_title_names_the_active_context_and_counts_its_worktrees() {
 }
 
 #[test]
+fn the_context_bar_worktree_count_leaves_out_hidden_review_worktrees() {
+    let mut state = two_context_state();
+    let snapshot = state
+        .snapshot
+        .as_mut()
+        .unwrap_or_else(|| panic!("the fixture has a snapshot"));
+    snapshot.worktrees[1].base_ref = "pull/7/head".to_owned();
+    let count = |state: &AppState| match TitleModel::build(state).place {
+        Place::Hub(place) => place.worktrees,
+        place => panic!("the Hub draws the nav: {place:?}"),
+    };
+
+    assert_eq!(
+        count(&state),
+        2,
+        "a hidden review worktree is not counted, as the Worktrees list does not show it"
+    );
+    state.show_review_worktrees = true;
+    assert_eq!(count(&state), 3, "shown, it is counted again");
+}
+
+#[test]
 fn an_empty_first_run_draws_an_empty_title_bar() {
     let now = Instant::now();
     let mut state = AppState::new("/tmp/fleet", now);

@@ -132,7 +132,7 @@ chrome — it is the pane's content, like a list header — and it stays.
 | --- | --- | --- | --- |
 | Title bar | Top, full width; the unified macOS titlebar, so it starts at x = 84 after the traffic lights (12 px on other platforms) | 44 px, `chrome` ground, hairline below | One row does what three did: where you are, a way to search or run anything, and what needs you. |
 | Context switcher | Title bar, left: a monogram tile, the context name and a chevron | compact ghost button | Contexts are the outermost coordinate. It opens a menu of every context with its `1`–`9` key (a context past nine has none), then *New context* `N`, *Edit context* `E`, *Delete context* `D` (red). The keys keep working without it, and `gt` / `gT` still cycle. |
-| Section nav | Title bar, after the switcher | a segmented control | *Worktrees · Pull requests · Board*, each with its count (worktrees in the context, reviews waiting on you, open board cards; zero-suppressed). The review count is the Reviews board's non-archived cards that either want you — `attention(card, now)`: the newest run ended needing a person and nobody has moved the card since, or a run owed for 60 s on a card that is not queued (BOARD.md §11.5) — or stand in a `Started` column with no live or owed run, each card once. A run parked on a question is a live run, so it is counted by the status cluster's `needs you`, not here. While the Review tab shows the board the app folds this rule from the cards it holds, in the card-marks update and never in render; anywhere else it reads the same rule from the board's summary, `attention_count + idle_started`, so the count is the same on and off the tab. On a daemon without `board.reviews` it is still the number of PRs waiting for your review. The same actions as `g w` / `p` / `g b`; the segments are the harness's `hub.tab[N]`. Hub only. |
+| Section nav | Title bar, after the switcher | a segmented control | *Worktrees · Pull requests · Board*, each with its count (the worktrees the Worktrees list shows in the context, hidden review worktrees left out as in §3.3; reviews waiting on you; open board cards; zero-suppressed). The review count is the Reviews board's non-archived cards that either want you — `attention(card, now)`: the newest run ended needing a person and nobody has moved the card since, or a run owed for 60 s on a card that is not queued (BOARD.md §11.5) — or stand in a `Started` column with no live or owed run, each card once. A run parked on a question is a live run, so it is counted by the status cluster's `needs you`, not here. While the Review tab shows the board the app folds this rule from the cards it holds, in the card-marks update and never in render; anywhere else it reads the same rule from the board's summary, `attention_count + idle_started`, so the count is the same on and off the tab. On a daemon without `board.reviews` it is still the number of PRs waiting for your review. The same actions as `g w` / `p` / `g b`; the segments are the harness's `hub.tab[N]`. Hub only. |
 | Command field | Title bar, right, just before the status cluster | 240 × 30 | Looks like a search input — magnifier, *Search or run a command*, the palette key — and is a button: a click opens the palette. Nobody has to know a key to find a command. Right-aligned so where-you-are, on the left, gets every pixel the field and the cluster leave. The palette key is one of the few chips a control keeps on its face, and it holds still while the palette or a dialog has the focus. |
 | Status cluster (§2.3) | Title bar, right | compact ghost buttons | What needs you and what is running, each shown only while non-zero, each opening what it counts. Top-right is the OS status corner, far from the cursor. |
 | Help, Settings | Title bar, far right | 26 px icon buttons | `?` and `,` as controls; the tooltip names the key. |
@@ -427,11 +427,11 @@ the sidebar owns the keyboard, and the sidebar draws the pane focus ring then.
 | Element | Content | Position | Why here | Why needed |
 | --- | --- | --- | --- | --- |
 | Section title | `Repositories` (sentence case), then a `+` icon button that opens Clone repo (`n`); a retained filter shows as a search chip before it, and the live filter bar replaces the title row in place (§3.10) | top | the add action lives where the list it adds to is | §5 clone |
-| `All repositories` | grid icon + literal label + total worktree count | row 0, pinned | swarm's default and the most common scope | §5 "All pseudo-repo default" |
-| Repository dot | small dot from the worst-of session state of its worktrees: amber while a finished agent waits for you, green while one works, lighter while any session is alive, dim otherwise | left of name | where live work is, at a glance | §5 "aggregate session glyph" |
+| `All repositories` | grid icon + literal label + total worktree count: the worktrees the Worktrees list shows across the context, so hidden review worktrees (§3.3) are not counted | row 0, pinned | swarm's default and the most common scope | §5 "All pseudo-repo default" |
+| Repository dot | small dot from the worst-of session state of its listed worktrees (a hidden review worktree does not light it): amber while a finished agent waits for you, green while one works, lighter while any session is alive, dim otherwise | left of name | where live work is, at a glance | §5 "aggregate session glyph" |
 | Repo name | `Repo.name`; `owner/name` **only** on collision | flex | you think in repo names | §5 "disambiguated owner/name" |
-| Issue chip | amber `1 issue` / `n issues`: worktrees whose post-create hooks failed or whose host is unreachable; zero-suppressed | before the count | a repo that needs attention says so in words, not only in a glyph | `Worktree.degraded`, host reachability |
-| Worktree count | integer, right, muted | right | sizes the jump you are about to make | §5 "worktree count" |
+| Issue chip | amber `1 issue` / `n issues`: listed worktrees whose post-create hooks failed or whose host is unreachable (a hidden review worktree is not counted, §5 invariant 6); zero-suppressed | before the count | a repo that needs attention says so in words, not only in a glyph | `Worktree.degraded`, host reachability |
+| Worktree count | integer, right, muted: the rows the Worktrees list shows for that repository, hidden review worktrees left out | right | sizes the jump you are about to make | §5 "worktree count" |
 | Clone row | spinning `loader-circle` + name + `cloning 40%` (`cloning…` until a percent is parseable) + a thin progress bar along the item's foot | sort position | a repo being born must be visible where it will live | §1 `CloneJob`, §6 |
 | Clone failed row | `circle-x` red + name + faint `failed` | same | failure must not disappear silently; `Enter` opens the Jobs panel focused on that job, `x` dismisses (KEYMAP arbitrates `d` = delete repo, `x` = dismiss a failed clone) | `CloneJob.status`, `.error` |
 | Collapse | an icon button at the foot, the same as `H`; collapsed, the sidebar is 44 px of icons whose labels are tooltips | foot | the pointer's way to the room `H` makes | KEYMAP A22 |
@@ -483,7 +483,10 @@ to context · `i` detail · `ga` jump to `All` (KEYMAP A7) · `H` collapse/expan
 **Page header.** An H1 `Worktrees` (`page_title`) over one subtitle the view model builds:
 `<n> across <r> repositories`, or `<n> in <owner/name>` when one repository is selected (or the
 scope holds only one), then `· <k> needs attention` when a row has failed hooks, an offline host
-or an inspection error (zero-suppressed). A frozen snapshot appends an amber `Stale · <age>` chip
+or an inspection error (zero-suppressed). Every number here counts listed rows: while the list
+hides review worktrees (a pull-request checkout, whose base is `pull/<number>/head`) they are left
+out of the rows, the counts, and the rail and title-bar counts that must agree with them (§2.2,
+§3.2). A frozen snapshot appends an amber `Stale · <age>` chip
 and draws the rows at 55 % (`stale_opacity`); they stay navigable.
 The toolbar on the right: the **filter field** (`/`; a click opens the same filter mode, §3.10),
 `Clone repo` (`repos::Clone`) and the primary `New worktree  n` (`worktrees::Create`). While the
@@ -2068,7 +2071,7 @@ The filter **replaces the pane header in place** — 30 px, same row, no overlay
 | --- | --- | --- | --- |
 | `search` icon | 14 px `fg.muted` | replaces the pane label | the filter bar *is* how Filter mode shows; there is no mode word (§2.8) |
 | Query | live text, blue caret | inline | — |
-| Match count | `<shown>/<total>` | right | tells you whether to keep typing |
+| Match count | `<shown>/<total>`; on the Worktrees list `<total>` is the subtitle's `<n>`, hidden review worktrees left out | right | tells you whether to keep typing |
 | `esc` hint | faint, right of the count | right | the two-stage `Esc` is non-obvious |
 | Clear ✕ | compact icon button at the end of the query, only while it holds text | inline | empties the query as `ctrl-u` would; the input keeps the keyboard, so `Esc` still leaves it first |
 | Retained chip | `⌕rut` in accent inside the restored header, with a blue dot | same row | a hidden active filter is the classic "where did my rows go" bug |
@@ -2262,7 +2265,9 @@ Median for the four highest-frequency tasks (open, switch session, switch tab, c
 4. A nullable inspection fact renders `—` and its verbatim warning; it never renders `0`.
 5. Every job-derived fact on screen has a stamp available (row → detail panel → confirm), and
    every confirm quotes its stamp inline.
-6. No surface auto-hides a failure.
+6. No surface auto-hides a failure. The one deliberate exception is a review worktree while the
+   Worktrees list hides review worktrees (§3.3): a failed hook or an unreachable host on it lights
+   no rail glyph or issue chip until `v` shows review worktrees again.
 7. No bare-key affordance is drawn over a terminal (§3.6, D-8): every Workspace key chip carries
    its `⌃S` prefix, except inside the ⌃S command menu, where the prefix is already held.
 8. Every action valid on a surface has a visible control there, and every control shows its key

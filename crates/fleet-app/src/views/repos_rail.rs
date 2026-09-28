@@ -152,6 +152,9 @@ impl<'a> RepoGlyphs<'a> {
 
 /// Builds every rail row for one context, `All` first and the rest sorted by label.
 ///
+/// `worktrees` is the slice the Worktrees list is built from — the context's worktrees, hidden
+/// review worktrees already left out — so every count here matches the rows it sizes (§3.2).
+///
 /// A clone in flight sorts among the cloned repositories rather than at the end: "a repo being
 /// born must be visible where it will live" (§3.2).
 #[must_use]
@@ -159,7 +162,7 @@ pub fn rail_rows(
     context: Option<&ContextId>,
     repos: &[Repo],
     clones: &[CloneJob],
-    worktrees: &[Worktree],
+    worktrees: &[&Worktree],
     glyphs: &RepoGlyphs<'_>,
     jobs: &[JobRecord],
 ) -> Vec<RailRow> {
