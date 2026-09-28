@@ -202,11 +202,30 @@ pub fn derive_pr_state(
     }
 }
 
+/// Returns the pull-request number a worktree checks out, or `None` for any other worktree.
+///
+/// This is the one definition of a "review worktree" the app relies on: a worktree whose
+/// base ref is exactly `pull/<n>/head`, which the daemon writes in `create_pr_local` for every
+/// worktree created from a pull request. Any other base ref, including a malformed number
+/// such as `pull/+412/head` or `pull/0412/head`, returns `None`.
+#[must_use]
+pub fn pull_request_checkout(worktree: &Worktree) -> Option<u64> {
+    parse_pull_head(&worktree.base_ref)
+}
+
+/// Returns the number in a canonical `pull/<n>/head` ref, rejecting signs and leading zeros.
+fn parse_pull_head(base_ref: &str) -> Option<u64> {
+    let digits = base_ref.strip_prefix("pull/")?.strip_suffix("/head")?;
+    let canonical = digits.bytes().all(|byte| byte.is_ascii_digit())
+        && (digits == "0" || !digits.starts_with('0'));
+    if canonical { digits.parse().ok() } else { None }
+}
+
 /// Returns whether a worktree represents a pull request by base ref or same-repo branch.
 #[must_use]
 pub fn worktree_matches_pr(worktree: &Worktree, pull_request: &PullRequest) -> bool {
     worktree.repo_id == pull_request.repo_id
-        && (worktree.base_ref == format!("pull/{}/head", pull_request.number)
+        && (pull_request_checkout(worktree) == Some(pull_request.number)
             || (!pull_request.is_cross_repository && worktree.branch == pull_request.head_ref_name))
 }
 
@@ -223,6 +242,95 @@ pub fn local_branch_for_pr(pull_request: &PullRequest) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ids::WorktreeId;
+
+    fn worktree(id: &str, branch: &str, base_ref: &str) -> Worktree {
+        let id = WorktreeId::try_from(id).unwrap_or_else(|error| panic!("{error}"));
+        Worktree {
+            repo_id: id.repo().parse().unwrap_or_else(|error| panic!("{error}")),
+            slug: id.slug().into(),
+            id,
+            branch: branch.into(),
+            base_ref: base_ref.into(),
+            path: "/tmp/worktree".into(),
+            session: "payroll/worktree".into(),
+            host: None,
+            created_at: "2026-09-28T12:00:00Z".into(),
+            last_opened_at: None,
+            degraded: None,
+        }
+    }
+
+    fn pull_request(cross: bool) -> PullRequest {
+        PullRequest {
+            repo_id: RepoId::try_from("buk/payroll").unwrap_or_else(|error| panic!("{error}")),
+            number: 412,
+            title: "Fix RUT validation".to_owned(),
+            url: "https://github.com/buk/payroll/pull/412".to_owned(),
+            author: "dannyfuf".to_owned(),
+            head_ref_name: "feat/rut".to_owned(),
+            base_ref_name: "main".to_owned(),
+            is_draft: false,
+            is_cross_repository: cross,
+            head_repo: cross.then(|| {
+                RepoId::try_from("dannyfuf/payroll").unwrap_or_else(|error| panic!("{error}"))
+            }),
+            review_decision: PrReviewDecision::None,
+            checks: PrChecks::Pass,
+            checks_passed: Some(9),
+            checks_total: Some(9),
+            additions: 142,
+            deletions: 18,
+            labels: vec!["payroll".to_owned()],
+            updated_at: "2026-09-04T10:00:00Z".to_owned(),
+        }
+    }
+
+    #[test]
+    fn pull_head_base_ref_is_a_pull_request_checkout() {
+        let review = worktree("buk/payroll#pr-412", "feat/rut", "pull/412/head");
+        assert_eq!(pull_request_checkout(&review), Some(412));
+        assert_eq!(parse_pull_head("pull/0/head"), Some(0));
+    }
+
+    #[test]
+    fn other_base_refs_are_not_pull_request_checkouts() {
+        for base_ref in [
+            "origin/main",
+            "pull/x/head",
+            "pull/412/merge",
+            "",
+            "pull//head",
+            "pull/+412/head",
+            "pull/0412/head",
+            "pull/-412/head",
+            "pull/412/head/extra",
+            "refs/pull/412/head",
+            "pull/99999999999999999999/head",
+        ] {
+            assert_eq!(parse_pull_head(base_ref), None, "{base_ref:?}");
+        }
+        let own = worktree("buk/payroll#feat-rut", "feat/rut", "origin/main");
+        assert_eq!(pull_request_checkout(&own), None);
+    }
+
+    #[test]
+    fn worktree_matches_pr_by_pull_head_base_ref() {
+        let review = worktree("buk/payroll#pr-412", "unrelated", "pull/412/head");
+        let mut cross_repo = pull_request(true);
+        assert!(worktree_matches_pr(&review, &cross_repo));
+        cross_repo.number = 413;
+        assert!(!worktree_matches_pr(&review, &cross_repo));
+    }
+
+    #[test]
+    fn worktree_matches_pr_by_same_repo_branch_only() {
+        let own = worktree("buk/payroll#feat-rut", "feat/rut", "origin/main");
+        assert!(worktree_matches_pr(&own, &pull_request(false)));
+        assert!(!worktree_matches_pr(&own, &pull_request(true)));
+        let elsewhere = worktree("buk/billing#feat-rut", "feat/rut", "pull/412/head");
+        assert!(!worktree_matches_pr(&elsewhere, &pull_request(false)));
+    }
 
     #[test]
     fn pr_state_obeys_documented_priority() {
