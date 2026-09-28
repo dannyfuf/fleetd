@@ -165,6 +165,8 @@ pub mod worktrees {
             CopyPath,
             /// `Y` — copy the branch name.
             CopyBranch,
+            /// `v` — show or hide pull-request review worktrees.
+            ToggleReviewWorktrees,
         ]
     );
 }

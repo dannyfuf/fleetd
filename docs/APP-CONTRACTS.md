@@ -549,6 +549,7 @@ is the single source of truth on the client. The parts a screen touches:
 | `board_stale: bool` | authoritative refresh pending; lives outside the frozen `BoardState` fields |
 | `board_backends: Vec<BackendDescriptor>` | the daemon's backend registry, fetched once per connection; the header label and the settings dialog's rows are drawn from it |
 | `screen`, `hub_pane`, `pr_tab`, `scope`, `cursors` | where the cursor is, per list |
+| `show_review_worktrees` | whether the Worktrees list shows pull-request review worktrees (`v`); session-only, `false` on every launch |
 | `terminal_mode`, `agent_popup`, `overlay`, `mode()` | the base Workspace mode, floating-agent mode, top overlay, and resulting mode/key context |
 | `filter` | query + whether the input still owns the keyboard |
 | `session_mru`, `terminal_mru` | `ctrl-s w` and `ctrl-s Tab` are `Mru::alternate()` |

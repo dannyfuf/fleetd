@@ -115,6 +115,8 @@ pub enum Command {
     KillSession,
     /// Re-inspect the worktree under the cursor.
     InspectWorktree,
+    /// Show or hide the pull-request review worktrees in the Worktrees list.
+    ToggleReviewWorktrees,
     /// Open §3.8.5.
     MoveRepo,
     /// Open §3.8.4 for a new context.
@@ -203,6 +205,7 @@ impl Command {
         Self::SleepSession,
         Self::KillSession,
         Self::InspectWorktree,
+        Self::ToggleReviewWorktrees,
         Self::MoveRepo,
         Self::NewContext,
         Self::EditContext,
@@ -291,7 +294,7 @@ impl Command {
             Self::InspectWorktree => Icon::Eye,
             Self::MoveRepo => Icon::ArrowRightLeft,
             Self::NewContext | Self::EditContext => Icon::Boxes,
-            Self::PullRequests => Icon::GitPullRequest,
+            Self::PullRequests | Self::ToggleReviewWorktrees => Icon::GitPullRequest,
             Self::Worktrees => Icon::GitBranch,
             Self::JobsPanel => Icon::Clock,
             Self::Settings => Icon::Settings2,
@@ -368,6 +371,7 @@ impl Command {
             Self::SleepSession => "worktrees::Sleep",
             Self::KillSession => "worktrees::Kill",
             Self::InspectWorktree => "worktrees::Inspect",
+            Self::ToggleReviewWorktrees => "worktrees::ToggleReviewWorktrees",
             Self::MoveRepo => "repos::MoveToContext",
             Self::NewContext => "hub::NewContext",
             Self::EditContext => "hub::EditContext",
@@ -499,6 +503,15 @@ impl Command {
             }
             Self::PullRequests => !on_prs && has_repo,
             Self::Worktrees => on_prs || on_board,
+            // A session flag of the Worktrees list: it needs no daemon, only the list it filters.
+            Self::ToggleReviewWorktrees => {
+                matches!(
+                    state.screen,
+                    Screen::Hub {
+                        tab: HubTab::Worktrees
+                    }
+                )
+            }
             Self::UpdateFleet => connected && state.update_version.is_some(),
             Self::NewContext
             | Self::Settings

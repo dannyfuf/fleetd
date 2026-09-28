@@ -179,6 +179,10 @@ pub struct AppState {
     pub pr_tab: PrTab,
     /// The repository the lists are scoped to.
     pub scope: RepoScope,
+    /// Whether the Worktrees list shows pull-request review worktrees (`v`).
+    ///
+    /// Session-only: hidden on every launch, kept across screen changes while Fleet runs.
+    pub show_review_worktrees: bool,
     /// One cursor per list.
     pub cursors: Cursors,
     /// The Jobs panel's own cursor and filter.
@@ -333,6 +337,7 @@ impl AppState {
             hub_pane: HubPane::List,
             pr_tab: PrTab::Mine,
             scope: RepoScope::All,
+            show_review_worktrees: false,
             cursors: Cursors::default(),
             jobs_panel: JobsPanelMirror::default(),
             displayed_hub: crate::presentation::DisplayedHub::default(),

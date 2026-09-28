@@ -597,6 +597,22 @@ fn commands_require_executable_current_targets() {
     assert!(!Command::KillSession.valid(&app));
 }
 
+/// The review-worktree toggle is a session flag of the Worktrees list: listed on that screen
+/// whether or not the daemon answers, and nowhere else, where it would change nothing visible.
+#[test]
+fn the_review_toggle_is_listed_on_the_worktrees_screen_only() {
+    let mut app = AppState::new("/tmp/fleet", Instant::now());
+    assert!(Command::ToggleReviewWorktrees.valid(&app));
+
+    app.daemon = crate::state::DaemonLink::Connected;
+    assert!(Command::ToggleReviewWorktrees.valid(&app));
+
+    app.screen = Screen::Hub { tab: HubTab::Prs };
+    assert!(!Command::ToggleReviewWorktrees.valid(&app));
+    app.screen = Screen::Hub { tab: HubTab::Board };
+    assert!(!Command::ToggleReviewWorktrees.valid(&app));
+}
+
 /// `Open the worktree's board` dispatches a `Workspace > Prefix` action, and that handler
 /// exists only while the Workspace is showing a worktree session. Listed anywhere else the
 /// row would be one `Enter` that does nothing at all (§3.9 lists no row that cannot run).

@@ -870,6 +870,45 @@ fn real_shell_clear_filter_button_clears_from_either_stage(cx: &mut gpui::TestAp
     assert_eq!(hub_filter_query(&mut fixture), "");
 }
 
+/// Review worktrees are hidden on every launch, and `v` in the Worktrees list flips that.
+#[gpui::test]
+fn real_shell_v_toggles_review_worktrees_in_the_worktrees_list(cx: &mut gpui::TestAppContext) {
+    let mut fixture = root_hub_fixture(cx, "review-toggle");
+    let shown = |fixture: &mut RootInputFixture| {
+        fixture
+            .state
+            .read_with(&fixture.visual, |app, _| app.show_review_worktrees)
+    };
+    assert!(!shown(&mut fixture));
+
+    dispatch_root_key(&mut fixture, "v");
+    assert!(shown(&mut fixture));
+
+    dispatch_root_key(&mut fixture, "v");
+    assert!(!shown(&mut fixture));
+}
+
+/// The palette row reaches the same shell listener as `v`, although the palette overlay is
+/// not under the Hub root.
+#[gpui::test]
+fn real_shell_review_worktrees_palette_row_flips_the_same_flag(cx: &mut gpui::TestAppContext) {
+    let mut fixture = root_hub_fixture(cx, "review-toggle-palette");
+
+    dispatch_root_key(&mut fixture, ":");
+    assert_dialog_input_focused(&mut fixture);
+    fixture
+        .visual
+        .simulate_input("Show or hide review worktrees");
+    settle(&mut fixture);
+    dispatch_root_key(&mut fixture, "enter");
+
+    assert!(
+        fixture
+            .state
+            .read_with(&fixture.visual, |app, _| app.show_review_worktrees)
+    );
+}
+
 #[gpui::test]
 fn real_shell_palette_query_accepts_platform_text(cx: &mut gpui::TestAppContext) {
     let mut fixture = root_hub_fixture(cx, "palette-query");

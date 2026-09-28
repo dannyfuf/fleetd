@@ -524,6 +524,15 @@ pub(super) const ENTRIES: &[Entry] = &[
         "Put the selected worktree's branch name on the clipboard.",
     )
     .short("Copy branch"),
+    e(
+        &["worktrees::ToggleReviewWorktrees"],
+        P::Worktrees,
+        G::Worktree,
+        "Show or hide review worktrees",
+        "Show the worktrees made for reviewing pull requests, or hide them again.",
+    )
+    .short("Review worktrees")
+    .palette(),
     // ── Pull requests ─────────────────────────────────────────────────────────────────────
     e(
         &["prs::Open"],

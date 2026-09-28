@@ -550,7 +550,7 @@ it changes a decision.
 **Keyboard:** `j`/`k`/`gg`/`G`/`ctrl-d`/`ctrl-u` · `Enter`/`o` open (sleeps previous) · `O` open
 keeping previous · `n` create · `d` delete · `x` prune repo · `s` sleep · `K` kill · `I` inspect ·
 `i` detail · `y` copy path · `Y` copy branch · `b` browser · `u` undo last delete (KEYMAP A6) ·
-`/` filter · `p` PRs · `J` jobs.
+`v` show/hide review worktrees · `/` filter · `p` PRs · `J` jobs.
 
 ---
 

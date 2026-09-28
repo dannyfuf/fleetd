@@ -729,6 +729,7 @@ key_table! {
     "I",            "Hub > Worktrees" => worktrees::Inspect;
     "y",            "Hub > Worktrees" => worktrees::CopyPath;
     "Y",            "Hub > Worktrees" => worktrees::CopyBranch;
+    "v",            "Hub > Worktrees" => worktrees::ToggleReviewWorktrees;
 
     "tab",          "Hub > Prs" => prs::NextTab;
     "l",            "Hub > Prs" => prs::NextTab;
@@ -1745,6 +1746,34 @@ mod tests {
             );
             assert!(action_for_keystroke("Workspace > Terminal", &stroke).is_none());
         }
+    }
+
+    /// `v` shows or hides review worktrees only in the Hub's Worktrees pane; it stays the
+    /// watch pane after `ctrl-s` and types while the Hub filter owns the keyboard.
+    #[test]
+    fn the_review_toggle_is_v_in_the_worktrees_pane_only() {
+        let bound: Vec<(&str, &str)> = table()
+            .iter()
+            .filter(|spec| spec.action == "worktrees::ToggleReviewWorktrees")
+            .map(|spec| (spec.keys, spec.context))
+            .collect();
+        assert_eq!(bound, [("v", "Hub > Worktrees")]);
+
+        let stroke = Keystroke::parse("v").unwrap();
+        assert_eq!(
+            action_for_keystroke("Hub > Worktrees", &stroke)
+                .unwrap()
+                .name(),
+            "worktrees::ToggleReviewWorktrees"
+        );
+        assert_eq!(
+            action_for_keystroke("Workspace > Prefix", &stroke)
+                .unwrap()
+                .name(),
+            "prefix::ToggleWatchPane"
+        );
+        assert!(action_for_keystroke("Hub > Prs", &stroke).is_none());
+        assert!(action_for_keystroke("Filter", &stroke).is_none());
     }
 
     /// The binding and its row in `docs/KEYMAP.md` are one change.
