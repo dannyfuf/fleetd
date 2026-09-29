@@ -117,6 +117,48 @@ fn populated_state_projects_every_collection() {
 }
 
 #[test]
+fn a_pull_request_checkout_row_carries_the_review_mark() {
+    let now = Instant::now();
+    let mut state = state();
+    state.daemon = DaemonLink::Connected;
+    let mut snapshot = test_support::snapshot();
+    let worktree = |slug: &str, base_ref: &str| Worktree {
+        id: format!("acme/api#{slug}")
+            .parse()
+            .unwrap_or_else(|error| panic!("{error}")),
+        repo_id: "acme/api".parse().unwrap_or_else(|error| panic!("{error}")),
+        slug: slug.to_owned(),
+        branch: slug.to_owned(),
+        base_ref: base_ref.to_owned(),
+        path: format!("/tmp/{slug}"),
+        session: format!("acme/api#{slug}"),
+        host: None,
+        created_at: "2026-09-11T09:00:00Z".to_owned(),
+        last_opened_at: None,
+        degraded: None,
+    };
+    let review = worktree("banner", "pull/21/head");
+    let own = worktree("login", "main");
+    let displayed = [&review, &own]
+        .into_iter()
+        .map(|worktree| crate::presentation::DisplayedWorktree {
+            id: worktree.id.clone(),
+            repo: worktree.repo_id.clone(),
+        })
+        .collect();
+    snapshot.worktrees.extend([review, own]);
+    state.apply_snapshot(snapshot, now);
+    state.displayed_hub.worktrees = displayed;
+
+    let dump = state.harness_projection().snapshot;
+    let rows = &dump.lists.get("worktrees").expect("worktrees list").rows;
+    assert_eq!(rows[0].label, "banner");
+    assert_eq!(rows[0].marks, vec!["review".to_owned()]);
+    assert_eq!(rows[1].label, "login");
+    assert!(rows[1].marks.is_empty(), "an ordinary base is no review");
+}
+
+#[test]
 fn a_running_job_keeps_idle_false_until_it_finishes() {
     let now = Instant::now();
     let mut state = state();

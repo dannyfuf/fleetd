@@ -282,6 +282,15 @@ each in the daemon's order — and `lists.jobs.selected` is the row at the panel
 filtered set. Thus `jobs.row[N]` and `lists.jobs.rows[N]` address the same job.
 `lists.jobs.filter` is `""` for All, then `running`, `failed` or `done`.
 
+`lists.worktrees.rows` is the Worktrees list's displayed rows in the order it draws them, so
+`worktrees.row[N]` and `lists.worktrees.rows[N]` address the same worktree. A row's `id` is the
+worktree id (`owner/name#slug`), its `label` the slug and its one badge the branch. Its `marks`
+are, in this order, `degraded` (a post-create hook failed), `remote` (the worktree lives on
+another host) and the additive `review` (a review worktree: its base ref is `pull/<n>/head`, a
+pull request's checkout). While review worktrees are hidden, which is the default (UX-SPEC §3.3),
+they are absent from the rows rather than present and unmarked; `v` or `worktrees.reviews` puts
+them back.
+
 The snapshot is memoised behind a key naming every input its builder reads, and its revision moves
 only when the projected content actually differs — a repainted frame that changes nothing does not
 wake a waiting `await`. A key that misses an input is a stale snapshot, which is an `await` that
@@ -561,8 +570,10 @@ the scenario that hits them:
   session's wallpaper, bar and window-opacity rules are inside every baseline recorded from it.
 
 Fixture presets are `empty` (first run), `one-repo` (one clean repository and worktree), `busy`
-(several repositories, worktrees and pull requests, one worktree degraded), `board` (two boards
-with cards, plus fake `acli`), and `agents` (native-agent configuration plus scripted transcripts). Each gets a
+(several repositories, worktrees and pull requests, one worktree degraded, and one review
+worktree, `acme/api#banner`, checked out from `acme/api#21` through `CreateWorktreeFromPr` from
+the `refs/pull/21/head` its origin carries, so the Worktrees list hides it by default), `board`
+(two boards with cards, plus fake `acli`), and `agents` (native-agent configuration plus scripted transcripts). Each gets a
 private `FLEET_HOME`, child-only `HOME`, real local Git repositories, and fake `gh`/`acli`; it
 never reads the developer's Fleet home. Every child also starts with the variables an *outer*
 fleetd exports — `FLEET_DELEGATION`, `FLEET_DELEGATION_TOKEN`, `FLEET_SESSION`, `FLEET_TERMINAL`,
@@ -762,6 +773,9 @@ seeded pull-request card's tile shows `owner/name#1` and that its detail shows t
 row; `board/schedules-section` opens Board settings on the Reviews board, goes to Schedules, presses
 `n` and asserts the starter's name and prompt in the form (with one `shot`). They read the board's
 existing targets.
+`hub/review-worktrees` pins the hidden-by-default review worktree (UX-SPEC §3.3): `busy`'s
+four worktrees of its own are listed and none is marked `review`, the filter does not bring the
+review back, `v` adds it as the first row marked `review`, and `v` again removes it.
 The configuration dialogs' scenarios pin the shared settings shell (UX-SPEC §3.8.6). A click on
 a row only moves the cursor, so `hub/settings` opens an editor with `key enter` after the click
 (a pointer journey clicks `settings.box` instead), and closing a dirty draft takes two `key

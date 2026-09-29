@@ -197,6 +197,12 @@ pub struct PullRequest {
     pub deletions: u64,
     /// Labels.
     pub labels: Vec<String>,
+    /// Whether the preset also checks the pull request out as a review worktree, through
+    /// `CreateWorktreeFromPr` — the production path, so the daemon's own `create_pr_local`
+    /// writes the `pull/<n>/head` base the app keys on. The origin carries
+    /// `refs/pull/<n>/head` for it ([`super::git`]).
+    #[serde(default)]
+    pub review_worktree: bool,
 }
 
 /// Which pull-request tab a fixture pull request belongs to.
@@ -415,6 +421,7 @@ fn busy() -> Fixture {
                         additions: 120,
                         deletions: 8,
                         labels: vec!["enhancement".to_owned()],
+                        review_worktree: false,
                     },
                     PullRequest {
                         number: 13,
@@ -429,6 +436,7 @@ fn busy() -> Fixture {
                         additions: 4,
                         deletions: 40,
                         labels: Vec::new(),
+                        review_worktree: false,
                     },
                     PullRequest {
                         number: 21,
@@ -443,6 +451,7 @@ fn busy() -> Fixture {
                         additions: 16,
                         deletions: 2,
                         labels: vec!["review".to_owned()],
+                        review_worktree: true,
                     },
                 ],
             },
@@ -464,6 +473,7 @@ fn busy() -> Fixture {
                     additions: 9,
                     deletions: 9,
                     labels: Vec::new(),
+                    review_worktree: false,
                 }],
             },
         ],

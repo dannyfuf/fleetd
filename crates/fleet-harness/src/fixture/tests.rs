@@ -360,11 +360,26 @@ async fn the_busy_preset_boots_twice_into_the_same_world() {
     assert_eq!(
         first.worktree_slugs(),
         vec![
+            "acme/api#banner".to_owned(),
             "acme/api#broken".to_owned(),
             "acme/api#feature".to_owned(),
             "acme/api#hotfix".to_owned(),
             "acme/web#spike".to_owned(),
         ]
+    );
+    // The review worktree is the daemon's own pull-request checkout, from the origin's
+    // `refs/pull/21/head`, and it was created after the repository's hooks were cleared.
+    let review = first
+        .snapshot
+        .worktrees
+        .iter()
+        .find(|worktree| worktree.id.as_ref() == "acme/api#banner")
+        .unwrap_or_else(|| panic!("busy checks acme/api#21 out as a review worktree"));
+    assert_eq!(review.base_ref, "pull/21/head");
+    assert_eq!(review.branch, "banner");
+    assert!(
+        review.degraded.is_none(),
+        "the review worktree must not inherit the degraded worktree's failing hook"
     );
     let degraded: Vec<String> = first
         .snapshot

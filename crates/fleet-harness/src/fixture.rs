@@ -52,7 +52,8 @@ pub enum Preset {
     Empty,
     /// One clean repository and one clean worktree.
     OneRepo,
-    /// Several repositories, worktrees and pull requests, one of them degraded.
+    /// Several repositories, worktrees and pull requests, one worktree degraded, and one review
+    /// worktree checked out from `acme/api#21`.
     Busy,
     /// A board with cards, plus the fake `acli`.
     Board,

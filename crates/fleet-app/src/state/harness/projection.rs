@@ -909,6 +909,9 @@ impl AppState {
                     if record.host.is_some() {
                         marks.push("remote".to_owned());
                     }
+                    if fleet_core::github::pull_request_checkout(record).is_some() {
+                        marks.push("review".to_owned());
+                    }
                 }
                 RowSnapshot {
                     id: row.id.as_str().to_owned(),
