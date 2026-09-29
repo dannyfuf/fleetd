@@ -773,8 +773,8 @@ repos rail is hidden, as on the Board tab, because a Reviews board spans reposit
 are *Pending review → Reviewing → Reviewed → Review published*, plus *Dismissed*. A request becomes
 a card (from a schedule, §12 of `docs/BOARD.md`, or from `fleet board --reviews card new --pr`); a
 card entering *Pending review* starts reviewing at once in its pull request's own worktree, two at
-a time (a `pull/<n>/head` checkout, which the Worktrees list hides by default; `v` shows it,
-§3.3); a finished review waits in *Reviewed* with its report on the card; commenting on the card
+a time (normally a `pull/<n>/head` checkout, which the Worktrees list hides by default; `v`
+shows it, §3.3 — a worktree of the user's own that the card adopted stays listed); a finished review waits in *Reviewed* with its report on the card; commenting on the card
 corrects the review, and moving it to *Review published* posts it. Each tile carries its pull
 request, `owner/name#123`, and the card detail a `Pull request` row. Leaving the tab gives the
 board mirror back to whatever the Hub's Board tab showed.
