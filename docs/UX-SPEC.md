@@ -392,8 +392,9 @@ and the facts after it (§3.6). `‹` is an icon button for `⌃S s` (back to th
 running), its tooltip *Back to Worktrees* and that key. Back always lands where the breadcrumb says — the
 Worktrees list — with the cursor on the worktree just left, whichever surface opened the workspace
 (the list, the Board, the palette), unless the list hides it as a review worktree (§3.3), when the
-cursor stays on the row it was on; `⌃S S` lands the same way after the sleep; the repository is text; the worktree is the **worktree
-switcher**. The command field, the status cluster (without *sleeping* and *Update*, whose keys are
+cursor stays on the row it was on; when no row is listed, the focus waits and `v` lands on that
+worktree. `⌃S S` lands the same way after the sleep; the repository is text; the worktree is the
+**worktree switcher**. The command field, the status cluster (without *sleeping* and *Update*, whose keys are
 Hub keys) and Help / Settings stay; the tooltips of Help and Jobs name their `⌃S` chords.
 
 **Harness:** `titlebar.context`, `titlebar.command`, `titlebar.needs_you`, `titlebar.jobs`,
@@ -488,13 +489,20 @@ or an inspection error (zero-suppressed). Every number here counts listed rows: 
 hides review worktrees (a pull-request checkout, whose base is `pull/<number>/head`) they are left
 out of the rows, the counts, and the rail and title-bar counts that must agree with them (§2.2,
 §3.2). After those comes `· <k> review worktrees hidden` (singular at one, zero-suppressed), drawn
-as a compact ghost button (`worktrees.reviews`) that runs `worktrees::ToggleReviewWorktrees`, as
-`v` does; its tooltip reads `Show review worktrees` with the live key. While review worktrees are
-shown the same button reads `· <k> review worktrees`, counting the scope's review rows before the
-filter, and its tooltip reads `Hide review worktrees`. A scope with no review worktree draws no
-segment. The filter (`/`) narrows only the listed rows: a hidden review worktree never comes back
-because its branch matches the query, and the segment still counts it. A frozen snapshot appends an amber `Stale · <age>` chip
-and draws the rows at 55 % (`stale_opacity`); they stay navigable.
+as an inline ghost button (`worktrees.reviews`, the caption's own height and role) that runs
+`worktrees::ToggleReviewWorktrees`, as `v` does; its tooltip reads `Show review worktrees` with the
+live key. While review worktrees are shown the same button reads `· <k> review worktrees`,
+counting the scope's review rows before the filter, and its tooltip reads `Hide review
+worktrees`. A scope with no review worktree draws no segment, and drawing it never changes the
+header's height. When the line runs out of room (a narrow window, the detail panel open) the
+review segment gives way first, ellipsizing and then clipping to nothing, and only then does the
+summary ellipsize: `needs attention` is never cut to make room for a count of rows hidden on
+purpose (§5 invariant 6). The filter (`/`) narrows only the listed rows: a hidden review worktree
+never comes back because its branch matches the query, and the segment still counts it. Hiding is
+the list's alone: the palette's `@` scope, the Workspace switcher, the Reviews board, the Pull
+requests screen and `fleet list` keep every worktree, and the §2.6 inspection sweep still inspects
+hidden ones. A frozen snapshot closes the line with an amber `Stale · <age>` chip and draws the
+rows at 55 % (`stale_opacity`); they stay navigable.
 The toolbar on the right: the **filter field** (`/`; a click opens the same filter mode, §3.10),
 `Clone repo` (`repos::Clone`) and the primary `New worktree  n` (`worktrees::Create`). While the
 context holds no repository there is nothing to branch from, so `New worktree` is not offered and
@@ -510,7 +518,7 @@ context holds no repository there is nothing to branch from, so `New worktree` i
 | Ahead | mono `↑n`, only when ahead > 0 | after the branch | the one git fact that says "unpushed work" at a glance | `WorktreeInspection.ahead` |
 | Dirty | muted `uncommitted changes` | after the branch | dirty is a property of the branch, so it rides with it | `WorktreeInspection.dirty` |
 | Host chip | `cloud` + host id; `cloud-off` amber when unreachable | after the branch | absent for local (the 95 % case) | `Worktree.host` |
-| Review chip | muted `review` chip, only while review worktrees are shown | after the branch, before the host chip | tells a pull request's own checkout from the user's own branch at a glance | `Worktree.baseRef` is `pull/<n>/head` (`fleet_core::github::pull_request_checkout`) |
+| Review badge | muted outlined `review` badge, only while review worktrees are shown | after the ahead and dirty words, before the host chip | tells a pull request's own checkout from the user's own branch at a glance | `Worktree.baseRef` is `pull/<n>/head` (`fleet_core::github::pull_request_checkout`) |
 | Hooks failed | amber `Setup hook failed` chip + `View log` ghost button, which opens Jobs on that hooks job with its log already expanded, as `⏎` on the job would | after the branch | a worktree that looks ready but whose post-create hooks failed is a trap | `Worktree.degraded` + the failed `PostCreateHooks` job |
 | Repository | `owner/name` | col 2 | disambiguates in `All` scope | — |
 | Session | in words behind a dot: `claude working · 2 tabs`, `claude waiting · 1 tab`, `1 terminal`, `Sleeping`, `No session`, `Host offline` | col 3 | says what `s`/`K`/`d` would stop without decoding a glyph | `WorktreeStatus` (session, windows, agent activity) |
@@ -518,6 +526,7 @@ context holds no repository there is nothing to branch from, so `New worktree` i
 | PR chip | tinted `#n` + state words: `In review`, `Draft`, `Approved`, `CI failing`, `Needs changes`, `CI running`, `Merged`; `—` without a PR | col 4 | the single fact that decides "is this branch done?" | inspection PR, refined by the PR cache |
 | Age | relative `lastOpenedAt ?? createdAt`, 1 unit | col 5 | recency is the sort you verify visually | — |
 | Hover actions | `Open ⏎` and a `⋯` menu; drawn while the row is hovered or selected, width always reserved | col 6 | the pointer's way to the row's verbs | ADR 0023 |
+| Review button | inline ghost button in the subtitle: `<k> review worktrees hidden` / `<k> review worktrees`; tooltip `Show review worktrees` / `Hide review worktrees` + the live key | after the summary, behind a faint `·`; gives way first when the line is short | the hidden count sits where the list's numbers are, and is the pointer's way to `v` | `HubModel.worktree_reviews`, `worktrees::ToggleReviewWorktrees` |
 | Sort | `lastOpenedAt` desc, then `createdAt` desc | — | MRU puts the right answer on row 0, so `Enter` alone is often the whole task | — |
 
 **Row menu.** The `⋯` menu and the right-click menu are the same list, each item with its key
@@ -538,8 +547,8 @@ its slot (the new last row at the end), and that row stays selected when `v` sho
 A scope left with no rows keeps the review row selected for when they come back.
 
 **Intentionally omitted:** `WorktreeId` (never typed in the GUI), `path` (`y` copies it, detail
-shows it), `baseRef` (a `pull/<n>/head` base shows only as the `review` chip), session name string, window names, `behind`, `uniqueCommits`,
-`published`, `mergedIntoTarget`, absolute timestamps, PR title, PR author, additions/deletions.
+shows it), `baseRef` (a `pull/<n>/head` base shows only as the `review` badge), session name
+string, window names, `behind`, `uniqueCommits`, `published`, `mergedIntoTarget`, absolute timestamps, PR title, PR author, additions/deletions.
 Every one of them appears in the detail panel or in the delete/prune confirm — i.e. exactly where
 it changes a decision.
 
@@ -549,7 +558,7 @@ it changes a decision.
 | --- | --- |
 | Empty | `No worktrees yet` / `No worktrees for <repo> yet` over a primary `New worktree  n` button |
 | Only hidden reviews | every worktree in scope is a hidden review worktree: the subtitle reads `No worktrees of your own yet · <k> review worktrees hidden`, and the page says `No worktrees of your own yet · <k> review worktrees hidden` over a `Show review worktrees` button (`worktrees.empty.reviews`) that runs the same toggle as `v`; the header keeps `New worktree` |
-| Review worktrees shown | each review row carries the muted `review` chip, and the subtitle's button reads `· <k> review worktrees` and hides them again |
+| Review worktrees shown | each review row carries the muted `review` badge, and the subtitle's button reads `· <k> review worktrees` and hides them again |
 | No repositories | `No repositories yet — clone one to start a worktree` over a primary `Clone repo` button; the header offers no `New worktree` |
 | Filter-empty | `Nothing matches "<filter>".` over a `Clear filter  esc` button (§3.10) |
 | Loading (cold) | `Loading…` until the first snapshot; rows then render from `state.json` immediately — **never blank** |

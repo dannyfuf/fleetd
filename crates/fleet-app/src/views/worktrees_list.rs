@@ -9,10 +9,10 @@ use std::rc::Rc;
 
 use fleet_ui_kit::theme::ch;
 use fleet_ui_kit::{
-    ActiveTheme, AgeLabel, Button, ButtonSize, ButtonStyle, Chip, ColumnLadder, ContextMenu,
-    EmptyState, FilterField, HarnessTargetExt, Icon, IconButton, IconSize, ListHeader, ListPointer,
-    ListView, Menu, MenuAnchor, MenuItem, PageHeader, Pane, PaneBorder, PopoverMenu, PrBadge,
-    ResolvedColumn, Row, RowColumn, StatusDot, Text, TextInput, Tone, Truncate, truncate,
+    ActiveTheme, AgeLabel, Badge, BadgeStyle, Button, ButtonSize, ButtonStyle, Chip, ColumnLadder,
+    ContextMenu, EmptyState, FilterField, HarnessTargetExt, Icon, IconButton, IconSize, ListHeader,
+    ListPointer, ListView, Menu, MenuAnchor, MenuItem, PageHeader, Pane, PaneBorder, PopoverMenu,
+    PrBadge, ResolvedColumn, Row, RowColumn, StatusDot, Text, TextInput, Tone, Truncate, truncate,
 };
 use gpui::{
     Action, AnyElement, App, Entity, IntoElement, SharedString, UniformListScrollHandle, Window,
@@ -45,7 +45,9 @@ const FILTER_PLACEHOLDER: &str = "Filter";
 const NO_PR: &str = "\u{2014}";
 /// The dirty fact, in words, beside the name.
 const DIRTY: &str = "uncommitted changes";
-/// The muted chip a review worktree (a pull request's own checkout) carries beside the name.
+/// The muted outlined badge a review worktree (a pull request's own checkout) carries beside
+/// the name: a fixed vocabulary word in a row column, boxed so it reads apart from the muted
+/// `uncommitted changes` words before it.
 const REVIEW: &str = "review";
 /// What the subtitle's review-worktree button does while they are hidden; the empty page's
 /// button reads it too.
@@ -334,19 +336,23 @@ fn page_header(
     let mut header = PageHeader::new(TITLE).subtitle(summary).action(field);
     if let Some(reviews) = reviews {
         // The segment is the toggle itself: one click shows the hidden reviews, or hides them
-        // again, exactly as `v` does; the tooltip says which and names the live key.
-        header = header.fact(Text::caption("\u{b7}").faint()).fact(
-            Button::new("worktrees-reviews", reviews)
-                .style(ButtonStyle::Ghost)
-                .size(ButtonSize::Compact)
-                .action(Box::new(worktrees::ToggleReviewWorktrees))
-                .tooltip(if reviews_hidden {
-                    SHOW_REVIEWS
-                } else {
-                    HIDE_REVIEWS
-                })
-                .harness_target("worktrees.reviews"),
-        );
+        // again, exactly as `v` does; the tooltip says which and names the live key. It is a
+        // yielding fact drawn inline: it keeps the caption line's height, and when the line runs
+        // out of room it gives way before the summary's `needs attention` does (§3.3).
+        header = header
+            .yielding_fact(Text::caption("\u{b7}").faint())
+            .yielding_fact(
+                Button::new("worktrees-reviews", reviews)
+                    .style(ButtonStyle::Ghost)
+                    .size(ButtonSize::Inline)
+                    .action(Box::new(worktrees::ToggleReviewWorktrees))
+                    .tooltip(if reviews_hidden {
+                        SHOW_REVIEWS
+                    } else {
+                        HIDE_REVIEWS
+                    })
+                    .harness_target("worktrees.reviews"),
+            );
     }
     header = if has_repos {
         header
@@ -552,7 +558,11 @@ fn name_cell(row: &WorktreeRow, ctx: &RowContext<'_>, cx: &App) -> AnyElement {
                     )
                 })
                 .when(row.review.is_some(), |el| {
-                    el.child(Chip::new().text(REVIEW).tone(Tone::Muted))
+                    el.child(
+                        Badge::new(REVIEW)
+                            .tone(Tone::Muted)
+                            .style(BadgeStyle::Outlined),
+                    )
                 })
                 .children(row.host.clone().map(|host| {
                     let (icon, tone) = host_badge(

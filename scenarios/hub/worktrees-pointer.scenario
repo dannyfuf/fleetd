@@ -3,12 +3,17 @@
 # runs the action its key runs.
 #
 # The page itself — H1, subtitle, toolbar, column heads, comfortable rows and the detail panel,
-# which is open by default at the harness's 1440 px — is the `worktrees-page` shot's job.
+# which is open by default at the harness's 1440 px — is the `worktrees-page` shot's job. At that
+# width the subtitle is short of room: the shot shows `4 across 2 repositories · 1 needs
+# attention` whole and the review segment after it cut short, because the segment gives way first
+# (§3.3). The segment is an inline button, one caption line tall, so it never makes the header
+# taller than a caption line (a compact button is 26 px).
 fixture: busy
 await idle 30000
 assert screen == Hub && hub_pane == List && focused == worktrees.row[0]
 assert targets["worktrees.new"] exists && targets["worktrees.filter"] exists
 assert targets["detail.open"] exists
+assert targets["worktrees.reviews"].h < 20
 shot worktrees-page
 
 # A click selects: the cursor moves, and the row's hover actions are drawn for it.

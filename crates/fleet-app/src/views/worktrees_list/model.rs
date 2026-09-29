@@ -167,7 +167,7 @@ pub struct WorktreeRow {
     /// `#n` plus the badge state, when a PR matches the branch.
     pub pr: Option<(u64, PrBadgeState)>,
     /// The pull request this worktree checks out, when it is a review worktree (a
-    /// `pull/<n>/head` base, §3.3): the row carries the muted `review` chip.
+    /// `pull/<n>/head` base, §3.3): the row carries the muted `review` badge.
     pub review: Option<u64>,
     /// Whether the derived marks are older than 10 minutes (§2.6).
     pub stale_marks: bool,
