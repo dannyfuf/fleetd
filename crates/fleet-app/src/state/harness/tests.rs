@@ -117,12 +117,8 @@ fn populated_state_projects_every_collection() {
     assert!(dump.lists.contains_key("jobs"));
 }
 
-#[test]
-fn a_pull_request_checkout_row_carries_the_review_mark() {
-    let now = Instant::now();
-    let mut state = state();
-    state.daemon = DaemonLink::Connected;
-    let mut snapshot = test_support::snapshot();
+/// A `busy`-like pair: `banner`, a pull-request checkout, and `login`, an ordinary branch.
+fn review_and_own_worktrees() -> (Worktree, Worktree) {
     let worktree = |slug: &str, base_ref: &str| Worktree {
         id: format!("acme/api#{slug}")
             .parse()
@@ -138,38 +134,71 @@ fn a_pull_request_checkout_row_carries_the_review_mark() {
         last_opened_at: None,
         degraded: None,
     };
-    let review = worktree("banner", "pull/21/head");
-    let own = worktree("login", "main");
-    let displayed = [&review, &own]
-        .into_iter()
+    (
+        worktree("banner", "pull/21/head"),
+        worktree("login", "main"),
+    )
+}
+
+/// A connected state whose Hub displays `shown` (in order) and hides `review_hidden` reviews, as
+/// the Hub's projection publishes them; `review` comes from the one definition of a review
+/// worktree, as `WorktreeRow.review` does.
+fn displaying(shown: &[&Worktree], every: Vec<Worktree>, review_hidden: usize) -> AppState {
+    let now = Instant::now();
+    let mut state = state();
+    state.daemon = DaemonLink::Connected;
+    let mut snapshot = test_support::snapshot();
+    let displayed = shown
+        .iter()
         .map(|worktree| crate::presentation::DisplayedWorktree {
             id: worktree.id.clone(),
             repo: worktree.repo_id.clone(),
-            // The Hub sets this from the row the `review` badge is drawn from.
-            review: worktree.base_ref.starts_with("pull/"),
+            review: fleet_core::github::pull_request_checkout(worktree).is_some(),
         })
         .collect();
-    snapshot.worktrees.extend([review, own]);
+    snapshot.worktrees.extend(every);
     state.apply_snapshot(snapshot, now);
     state.displayed_hub.worktrees = displayed;
-    state.displayed_hub.review_hidden = 2;
+    state.displayed_hub.review_hidden = review_hidden;
+    state
+}
 
-    let dump = state.harness_projection().snapshot;
+#[test]
+fn a_displayed_review_row_carries_the_review_mark_and_the_list_its_hidden_count() {
+    // Shown: the review row is listed with its mark, and the list hides nothing.
+    let (review, own) = review_and_own_worktrees();
+    let shown = displaying(&[&review, &own], vec![review.clone(), own.clone()], 0);
+    let dump = shown.harness_projection().snapshot;
     let list = dump.lists.get("worktrees").expect("worktrees list");
-    let rows = &list.rows;
-    assert_eq!(rows[0].label, "banner");
-    assert_eq!(rows[0].marks, vec!["review".to_owned()]);
-    assert_eq!(rows[1].label, "login");
-    assert!(rows[1].marks.is_empty(), "an ordinary base is no review");
+    assert_eq!(list.rows[0].label, "banner");
+    assert_eq!(list.rows[0].marks, vec!["review".to_owned()]);
+    assert_eq!(list.rows[1].label, "login");
+    assert!(
+        list.rows[1].marks.is_empty(),
+        "an ordinary base is no review"
+    );
     assert_eq!(
         list.hidden,
-        Some(2),
-        "the list says how many review worktrees it hides"
+        Some(0),
+        "nothing is hidden while reviews are shown"
     );
     assert_eq!(
         dump.lists.get("repos").map(|list| list.hidden),
         Some(None),
         "only the worktrees list reports a hidden count"
+    );
+
+    // Hidden: only the user's own row is listed, and the list says one review is left out.
+    let hidden = displaying(&[&own], vec![review, own.clone()], 1);
+    let dump = hidden.harness_projection().snapshot;
+    let list = dump.lists.get("worktrees").expect("worktrees list");
+    assert_eq!(list.rows.len(), 1);
+    assert_eq!(list.rows[0].label, "login");
+    assert!(list.rows[0].marks.is_empty());
+    assert_eq!(
+        list.hidden,
+        Some(1),
+        "the list says how many review worktrees it hides"
     );
 }
 

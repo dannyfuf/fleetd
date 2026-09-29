@@ -513,3 +513,45 @@ fn back_to_a_hidden_review_worktree_leaves_the_cursor_where_it_was(cx: &mut gpui
     cx.read(|cx| assert_eq!(ctx.state.read(cx).pending_worktree_focus, None));
     close_requests(&harness, cx);
 }
+
+/// Back names a hidden review worktree while every row of the scope is a hidden review: there is
+/// no row to leave the cursor on, so the focus waits, and `v` lands on that worktree (UX-SPEC
+/// §3.1).
+#[gpui::test]
+fn back_to_a_hidden_review_worktree_waits_in_an_empty_list_and_v_lands_on_it(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (ctx, harness) = review_list(
+        vec![
+            review_worktree_at("acme/api#pr-7", "acme/api", 7, "2026-09-04T12:00:00Z"),
+            review_worktree_at("acme/api#pr-8", "acme/api", 8, "2026-09-04T11:00:00Z"),
+        ],
+        true,
+        "acme/api#pr-7",
+        cx,
+    );
+    set_reviews_shown(&ctx, false, cx);
+    let pr_8: WorktreeId = "acme/api#pr-8".parse().expect("worktree id");
+
+    cx.update(|cx| {
+        ctx.state.update(cx, |state, cx| {
+            state.pending_worktree_focus = Some(pr_8.clone());
+            cx.notify();
+        });
+        ctx.synchronize(cx);
+    });
+    cx.read(|cx| {
+        let state = ctx.state.read(cx);
+        assert!(state.displayed_hub.worktrees.is_empty(), "no row is listed");
+        assert_eq!(
+            state.pending_worktree_focus.as_ref(),
+            Some(&pr_8),
+            "with no row to land on, the focus waits"
+        );
+    });
+
+    set_reviews_shown(&ctx, true, cx);
+    assert_eq!(landed(&ctx, cx), (1, "acme/api#pr-8".to_owned()));
+    cx.read(|cx| assert_eq!(ctx.state.read(cx).pending_worktree_focus, None));
+    close_requests(&harness, cx);
+}
