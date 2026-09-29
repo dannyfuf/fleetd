@@ -205,7 +205,7 @@ The snapshot is built from update-path state and memoised per revision. Render n
 | `overlay` | `Filter`, `Palette`, `Jobs`, `Dialog`, or null |
 | `key_contexts` | live outer-to-inner stack using the exact words in `KEYMAP.md`; `Fleet` may be implicit at the root |
 | `focused` | stable focus-owner target name or null |
-| `lists` | map name → `{rows:[row],selected:row|null,filter:string}` |
+| `lists` | map name → `{rows:[row],selected:row|null,filter:string,hidden?:int}`; `hidden` is additive and present only on `worktrees` (below) |
 | row | `{id:string,label:string,badges:[string],marks:[string]}` |
 | `dialog` | `{name,fields:[{name,value,focused}],buttons:[string],message:string|null}` or null; `message` carries the Confirm dialog's consequence sentence — the one line §3.8.3 has the user accept, including the two cancel cards' own — and is `null` over every other dialog, whose body is elements rather than a sentence |
 | `toasts` | `[{level,text,count}]`; levels use the UX vocabulary `info`, `success`, `warning`, `error` |
@@ -282,6 +282,18 @@ each in the daemon's order — and `lists.jobs.selected` is the row at the panel
 filtered set. Thus `jobs.row[N]` and `lists.jobs.rows[N]` address the same job.
 `lists.jobs.filter` is `""` for All, then `running`, `failed` or `done`.
 
+`lists.worktrees.rows` is the Worktrees list's displayed rows in the order it draws them, so
+`worktrees.row[N]` and `lists.worktrees.rows[N]` address the same worktree. A row's `id` is the
+worktree id (`owner/name#slug`), its `label` the slug and its one badge the branch. Its `marks`
+are, in this order, `degraded` (a post-create hook failed), `remote` (the worktree lives on
+another host) and the additive `review` (a review worktree: its base ref is `pull/<n>/head`, a
+pull request's checkout; the mark is read from the displayed row the list draws its `review`
+badge from). While review worktrees are hidden, which is the default (UX-SPEC §3.3), they are
+absent from the rows rather than present and unmarked; `v` or `worktrees.reviews` puts them back.
+The additive `lists.worktrees.hidden` is how many review worktrees in the repository scope the
+list leaves out — the subtitle's `<k> review worktrees hidden` — and `0` while they are shown; no
+other list carries the `hidden` field (the palette's `hidden` is a row mark, not this count).
+
 The snapshot is memoised behind a key naming every input its builder reads, and its revision moves
 only when the projected content actually differs — a repainted frame that changes nothing does not
 wake a waiting `await`. A key that misses an input is a stale snapshot, which is an `await` that
@@ -305,7 +317,7 @@ The names Fleet paints today, by surface:
 | --- | --- |
 | Sidebar | `repos.rail` (the whole sidebar), `repos.row[N]`, `repos.row[N].menu` (a repository's `⋯`, painted while the row is hovered), `repos.clone` (the `+` beside `Repositories`), `repos.collapse` (the foot button, the pointer's `H`), `repos.resize` (the draggable edge). `repos.rail`'s `w` is the collapse and drag oracle — 232 expanded by default, 44 collapsed, the dragged width (200–320) after `drag repos.resize <x> <y>`. |
 | Hub lists | `worktrees.row[N]`, `prs.row[N]`, `jobs.row[N]`, `hub.tab[N]`, `prs.tab[N]` |
-| Worktrees page | `worktrees.new` (absent while the context has no repository), `worktrees.clone` (the primary then), `worktrees.empty.clone` (the empty page's `Clone repo` when there is no repository), `worktrees.filter`, `worktrees.row[N].open`, `worktrees.row[N].menu`, `worktrees.row[N].log` |
+| Worktrees page | `worktrees.new` (absent while the context has no repository), `worktrees.clone` (the primary then), `worktrees.empty.clone` (the empty page's `Clone repo` when there is no repository), `worktrees.reviews` (the subtitle's review-worktree count, which shows or hides them; absent while the scope holds no review worktree), `worktrees.empty.reviews` (the empty page's `Show review worktrees` when every worktree in scope is a hidden review), `worktrees.filter`, `worktrees.row[N].open`, `worktrees.row[N].menu`, `worktrees.row[N].log` |
 | Pull requests | `prs.filter`, `prs.refresh`, `prs.retry`, `prs.more`, `prs.row[N].open`, `prs.row[N].menu` |
 | Detail panel | `detail.open`, `detail.sleep`, `detail.menu`, `detail.copy_path`, `detail.inspect` |
 | Title bar | `titlebar.context`, `titlebar.command`, `titlebar.needs_you`, `titlebar.jobs`, `titlebar.update`, `titlebar.daemon`, `titlebar.help`, `titlebar.settings`, `titlebar.back`, `workspace.back`, `workspace.switcher`, `workspace.pr` |
@@ -330,7 +342,10 @@ The names Fleet paints today, by surface:
 
 The Worktrees page's header paints `worktrees.filter` (the idle filter field; while the filter is
 being edited the same box is `filter.input`), `worktrees.clone` and `worktrees.new` (the primary
-*New worktree*). A row's hover actions, `worktrees.row[N].open` (*Open*) and
+*New worktree*). While the scope holds a review worktree, the subtitle also paints
+`worktrees.reviews` after its words: the `<k> review worktrees hidden` (or, while shown,
+`<k> review worktrees`) button that runs the same toggle as `v`, one caption line tall. A row's
+hover actions, `worktrees.row[N].open` (*Open*) and
 `worktrees.row[N].menu` (the `⋯` trigger), are drawn only while that row is hovered or selected,
 so a scenario clicks the row first; `worktrees.row[N].log` is the *View log* button of a row whose
 hooks failed. Right-clicking `worktrees.row[N]` opens the same menu at the pointer. The detail
@@ -559,9 +574,11 @@ the scenario that hits them:
   session's wallpaper, bar and window-opacity rules are inside every baseline recorded from it.
 
 Fixture presets are `empty` (first run), `one-repo` (one clean repository and worktree), `busy`
-(several repositories, worktrees and pull requests, one worktree degraded), `board` (two boards
-with cards, plus fake `acli`), and `agents` (native-agent configuration plus scripted transcripts). Each gets a
-private `FLEET_HOME`, child-only `HOME`, real local Git repositories, and fake `gh`/`acli`; it
+(several repositories, worktrees and pull requests, one worktree degraded, and one review
+worktree, `acme/api#banner`, checked out from `acme/api#21` through `CreateWorktreeFromPr` from
+the `refs/pull/21/head` its origin carries, so the Worktrees list hides it by default), `board`
+(two boards with cards, plus fake `acli`), and `agents` (native-agent configuration plus
+scripted transcripts). Each gets a private `FLEET_HOME`, child-only `HOME`, real local Git repositories, and fake `gh`/`acli`; it
 never reads the developer's Fleet home. Every child also starts with the variables an *outer*
 fleetd exports — `FLEET_DELEGATION`, `FLEET_DELEGATION_TOKEN`, `FLEET_SESSION`, `FLEET_TERMINAL`,
 `FLEET_TERMINAL_ID` and `FLEET_STATUS_PATH` — cleared, so a run launched from a Fleet terminal or
@@ -760,6 +777,11 @@ seeded pull-request card's tile shows `owner/name#1` and that its detail shows t
 row; `board/schedules-section` opens Board settings on the Reviews board, goes to Schedules, presses
 `n` and asserts the starter's name and prompt in the form (with one `shot`). They read the board's
 existing targets.
+`hub/review-worktrees` pins the hidden-by-default review worktree (UX-SPEC §3.3): `busy`'s
+four worktrees of its own are listed, none is marked `review` and `lists.worktrees.hidden` is 1,
+the filter does not bring the review back, `v` adds it as the first row marked `review` with the
+cursor still on `spike`, and a click on `worktrees.reviews` removes it again.
+`hub/worktrees-pointer` also pins that the subtitle's review button is one caption line tall.
 The configuration dialogs' scenarios pin the shared settings shell (UX-SPEC §3.8.6). A click on
 a row only moves the cursor, so `hub/settings` opens an editor with `key enter` after the click
 (a pointer journey clicks `settings.box` instead), and closing a dirty draft takes two `key

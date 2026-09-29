@@ -10,11 +10,12 @@
 //!
 //! The one thing this module writes directly is nothing at all; `config.json` goes through
 //! `RequestBody::SetConfig`, which deep-merges and persists under
-//! `fleet_core::config::CONFIG_VERSION`.
+//! `fleet_core::config::CONFIG_VERSION`, and a review worktree through
+//! `RequestBody::CreateWorktreeFromPr`, the request the Pull requests screen sends.
 
 use super::{
     git,
-    plan::{Board, Card, Fixture, Repository, ReviewCard, Workflow, Worktree},
+    plan::{Board, Card, Fixture, PullRequest, Repository, ReviewCard, Workflow, Worktree},
 };
 use crate::env::{Daemon, HarnessEnv};
 use anyhow::Context as _;
@@ -24,7 +25,7 @@ use fleet_core::{
     ids::{CardId, ContextId, JobId, RepoId, WorktreeId},
     model::RepoHooks,
 };
-use fleet_proto::{job::JobStatus, request::RequestBody};
+use fleet_proto::{job::JobStatus, request::RequestBody, response::ResponseBody};
 use std::{collections::BTreeMap, path::Path, process::Stdio, time::Duration};
 
 /// How long a seeded clone or worktree job is given before the preset gives up.
@@ -84,6 +85,18 @@ async fn write_everything(
             publish(&client, repository, worktree).await?;
         }
         clear_hooks(&client, repository).await?;
+    }
+    // After every repository's hooks are back to none, so a review worktree comes out with
+    // the repository's plain configuration rather than the failing hook `busy`'s degraded
+    // worktree left on it — and after every other worktree, so it is the newest one.
+    for repository in &fixture.repositories {
+        for pull in repository
+            .pull_requests
+            .iter()
+            .filter(|pull| pull.review_worktree)
+        {
+            check_out_pull_request(&client, repository, pull).await?;
+        }
     }
     if let Some(board) = &fixture.board {
         seed_board(&client, &context.id, board).await?;
@@ -208,6 +221,47 @@ async fn publish(
         seed_worktree_board(client, &result.worktree.id, worktree).await?;
     }
     Ok(())
+}
+
+/// Checks one pull request out as a review worktree, the way the Pull requests screen and the
+/// Reviews board do.
+///
+/// `CreateWorktreeFromPr` is the production path: the daemon asks the fake `gh` for the pull
+/// request, fetches `refs/pull/<n>/head` from the origin and writes the `pull/<n>/head` base
+/// ref itself, so the fixture never states the base a review worktree carries. The client has
+/// no typed operation for it, so this sends the raw request as [`configure`] does.
+async fn check_out_pull_request(
+    client: &Client,
+    repository: &Repository,
+    pull: &PullRequest,
+) -> anyhow::Result<()> {
+    let repo = RepoId::try_from(repository.slug())
+        .map_err(|error| anyhow::anyhow!("name {}: {error}", repository.slug()))?;
+    let response = client
+        .request(RequestBody::CreateWorktreeFromPr {
+            repo,
+            number: pull.number,
+            host: None,
+        })
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("check out {}#{}: {error}", repository.slug(), pull.number)
+        })?;
+    match response {
+        ResponseBody::Worktree {
+            post_create_job, ..
+        } => {
+            if let Some(job) = post_create_job {
+                await_job(client, &job.id).await?;
+            }
+            Ok(())
+        }
+        other => anyhow::bail!(
+            "check out {}#{}: unexpected response {other:?}",
+            repository.slug(),
+            pull.number
+        ),
+    }
 }
 
 /// Seeds the board scoped to one published worktree.

@@ -1,6 +1,6 @@
 use super::Shell;
 use crate::{
-    actions::{hub, prefix, scroll, workspace},
+    actions::{hub, prefix, scroll, workspace, worktrees},
     state::{AppState, FilterState, HubPane, HubTab, Screen, TerminalMode},
 };
 use fleet_ui_kit::Icon;
@@ -92,6 +92,19 @@ impl Shell {
     ) {
         self.state.update(cx, |state, cx| {
             state.rail_collapsed = !state.rail_collapsed;
+            cx.notify();
+        });
+    }
+
+    /// Lives on the Shell, not the Hub root, so the palette can reach it by dispatch.
+    pub(super) fn toggle_review_worktrees(
+        &mut self,
+        _: &worktrees::ToggleReviewWorktrees,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |state, cx| {
+            state.show_review_worktrees = !state.show_review_worktrees;
             cx.notify();
         });
     }

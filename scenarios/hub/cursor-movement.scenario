@@ -1,6 +1,7 @@
 # KEYMAP.md §Global (Normal mode, all Hub screens) — `j`/`k`, `gg`/`G`, `ctrl-d`/`ctrl-u`
 #
-# The `busy` preset publishes four worktrees across two repositories, which is the smallest
+# The `busy` preset lists four worktrees across two repositories (its fifth, a review worktree,
+# is hidden by default — `hub/review-worktrees`), which is the smallest
 # list where "move one row", "jump to an end" and "jump half a page" have three different
 # answers. The oracle is `focused`, which names the cursor's own row index, plus the row count
 # the list is being moved through — a movement scenario that did not pin the list length would

@@ -1432,3 +1432,17 @@ fn opening_an_offline_remote_worktree_toasts_rather_than_sticking(cx: &mut gpui:
 
 /// The Review tab as the context's Reviews board (UX-SPEC §3.5, FEA-23).
 mod review_board;
+/// Review worktrees hidden from the Worktrees list by default (UX-SPEC §3.3).
+mod review_worktrees;
+
+/// The Worktrees list's own counts for `state` — the subtitle's `<n>` and the rail's `All` row —
+/// for a test elsewhere in the crate that must agree with them (the title bar's count).
+pub(crate) fn listed_worktree_counts(state: &AppState) -> (usize, Option<usize>) {
+    let model = projection::prepare(state, &HubState::default(), 1_788_523_200);
+    let all = model
+        .rail
+        .iter()
+        .find(|row| row.kind == RailKind::All)
+        .and_then(|row| row.count);
+    (model.worktree_total, all)
+}

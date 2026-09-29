@@ -22,7 +22,7 @@ use gpui::{AnyElement, App, Entity, FocusHandle, Keystroke, ScrollHandle, Window
 
 use crate::{
     action_catalogue::{self, ActionInfo, Place},
-    actions::{board, card_detail, fleet, palette as palette_actions},
+    actions::{board, card_detail, fleet, palette as palette_actions, worktrees},
     bridge::Bridge,
     dialogs::{
         ConfirmRequest, DialogHost, Dialogs, SessionTransport, notify, open_agent_session,
@@ -912,6 +912,11 @@ fn run_command<T: SessionTransport>(
                     background: false,
                 });
             }
+        }
+        // The handler sits on the shell's window root, an ancestor of this overlay, so the
+        // palette and the `v` key flip the flag through the same listener.
+        Command::ToggleReviewWorktrees => {
+            window.dispatch_action(Box::new(worktrees::ToggleReviewWorktrees), cx);
         }
         Command::PullRequests => {
             state.update(cx, |app, cx| {

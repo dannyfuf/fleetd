@@ -661,11 +661,14 @@ impl AppState {
         );
         lists.insert(
             "worktrees".to_owned(),
-            list(
-                self.worktree_rows(snapshot),
-                self.cursors.worktrees,
-                list_filter.clone(),
-            ),
+            ListSnapshot {
+                hidden: Some(self.displayed_hub.review_hidden),
+                ..list(
+                    self.worktree_rows(snapshot),
+                    self.cursors.worktrees,
+                    list_filter.clone(),
+                )
+            },
         );
         lists.insert(
             "prs".to_owned(),
@@ -779,6 +782,7 @@ impl AppState {
                         .map(|row| row.row.clone()),
                     rows: tabs.rows.iter().map(|row| row.row.clone()).collect(),
                     filter: String::new(),
+                    hidden: None,
                 },
             );
         }
@@ -794,6 +798,7 @@ impl AppState {
                     selected: None,
                     rows,
                     filter: "agents".to_owned(),
+                    hidden: None,
                 },
             );
         }
@@ -842,11 +847,13 @@ impl AppState {
                 rows: files,
                 selected: None,
                 filter: base.clone(),
+                hidden: None,
             },
             ListSnapshot {
                 rows: commits,
                 selected: None,
                 filter: base,
+                hidden: None,
             },
         ))
     }
@@ -909,6 +916,11 @@ impl AppState {
                     if record.host.is_some() {
                         marks.push("remote".to_owned());
                     }
+                }
+                // The mark follows the displayed row the `review` badge is drawn from, not a
+                // second reading of the record.
+                if row.review {
+                    marks.push("review".to_owned());
                 }
                 RowSnapshot {
                     id: row.id.as_str().to_owned(),
@@ -1143,6 +1155,7 @@ fn list(rows: Vec<RowSnapshot>, cursor: usize, filter: String) -> ListSnapshot {
         selected: rows.get(cursor).cloned(),
         rows,
         filter,
+        hidden: None,
     }
 }
 
@@ -1152,6 +1165,7 @@ fn unselected(rows: Vec<RowSnapshot>) -> ListSnapshot {
         selected: None,
         rows,
         filter: String::new(),
+        hidden: None,
     }
 }
 

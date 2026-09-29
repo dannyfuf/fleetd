@@ -1412,6 +1412,35 @@ fn structure_section(cx: &mut App, filter_query: Entity<TextInput>) -> AnyElemen
                 .stale("2m"),
         ),
         LAYOUT.labeled(
+            "page header · stale + yielding fact",
+            &t,
+            PageHeader::new("Worktrees")
+                .subtitle("4 across 2 repositories \u{b7} 1 needs attention")
+                .yielding_fact(Text::caption("\u{b7}").faint())
+                .yielding_fact(
+                    Button::new("kit-page-reviews", "1 review worktree hidden")
+                        .style(ButtonStyle::Ghost)
+                        .size(ButtonSize::Inline)
+                        .tooltip("Show review worktrees"),
+                )
+                .stale("2m"),
+        ),
+        LAYOUT.labeled(
+            // Squeezed: the yielding fact gives way before the summary loses a letter.
+            "page header · yielding fact, squeezed",
+            &t,
+            div().w(px(300.0)).child(
+                PageHeader::new("Worktrees")
+                    .subtitle("4 across 2 repositories \u{b7} 1 needs attention")
+                    .yielding_fact(Text::caption("\u{b7}").faint())
+                    .yielding_fact(
+                        Button::new("kit-page-reviews-squeezed", "1 review worktree hidden")
+                            .style(ButtonStyle::Ghost)
+                            .size(ButtonSize::Inline),
+                    ),
+            ),
+        ),
+        LAYOUT.labeled(
             "page header · badge + facts (the board)",
             &t,
             PageHeader::new("Fleet board")

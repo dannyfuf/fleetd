@@ -229,6 +229,7 @@ fn displayed_worktrees(count: usize) -> Vec<crate::presentation::DisplayedWorktr
             repo: "acme/widgets"
                 .parse()
                 .unwrap_or_else(|error| panic!("{error}")),
+            review: false,
         })
         .collect()
 }
@@ -595,6 +596,22 @@ fn commands_require_executable_current_targets() {
     app.cursors.worktrees = 9;
     assert!(!Command::SleepSession.valid(&app));
     assert!(!Command::KillSession.valid(&app));
+}
+
+/// The review-worktree toggle is a session flag of the Worktrees list: listed on that screen
+/// whether or not the daemon answers, and nowhere else, where it would change nothing visible.
+#[test]
+fn the_review_toggle_is_listed_on_the_worktrees_screen_only() {
+    let mut app = AppState::new("/tmp/fleet", Instant::now());
+    assert!(Command::ToggleReviewWorktrees.valid(&app));
+
+    app.daemon = crate::state::DaemonLink::Connected;
+    assert!(Command::ToggleReviewWorktrees.valid(&app));
+
+    app.screen = Screen::Hub { tab: HubTab::Prs };
+    assert!(!Command::ToggleReviewWorktrees.valid(&app));
+    app.screen = Screen::Hub { tab: HubTab::Board };
+    assert!(!Command::ToggleReviewWorktrees.valid(&app));
 }
 
 /// `Open the worktree's board` dispatches a `Workspace > Prefix` action, and that handler

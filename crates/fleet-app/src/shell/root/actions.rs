@@ -356,6 +356,7 @@ impl Shell {
         .on_action(cx.listener(Self::open_filter))
         .on_action(cx.listener(Self::toggle_detail))
         .on_action(cx.listener(Self::toggle_rail))
+        .on_action(cx.listener(Self::toggle_review_worktrees))
         // Workspace modes
         .on_action(cx.listener(Self::enter_prefix))
         .on_action(cx.listener(Self::cancel_prefix))

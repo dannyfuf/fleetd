@@ -42,7 +42,9 @@ backend is `local` (no remote). Jira is the second (separate contract, later).
 
 A context may also hold one **Reviews board** (ADR 0024): a second context board whose cards each
 carry a pull request someone asked the user to review, whose columns run an agent review in each
-pull request's own worktree, and which the Pull requests screen's Review tab shows. Board-owned
+pull request's own worktree (normally a `pull/<n>/head` checkout, which the Hub's Worktrees list
+hides by default; `v` shows it — a worktree of the user's own that the card adopted stays
+listed), and which the Pull requests screen's Review tab shows. Board-owned
 **schedules** (§12, ADR 0025) run a prompt headless on a cadence and fill it with cards.
 
 Non-goals for v1: multiple boards per scope in the UI (the model allows it; the Hub shows the

@@ -638,7 +638,7 @@ fn the_summary_counts_repositories_and_what_needs_attention() {
     let snapshot = snapshot(vec![a, b, c], Vec::new(), Vec::new());
     let rows = rows(&snapshot, &HashMap::new());
     assert_eq!(
-        summary(&rows, None).as_ref(),
+        summary(&rows, None, 0).as_ref(),
         "3 across 2 repositories \u{b7} 1 needs attention"
     );
     let payroll = RepoId::try_from("buk/payroll").unwrap_or_else(|error| panic!("{error}"));
@@ -648,8 +648,101 @@ fn the_summary_counts_repositories_and_what_needs_attention() {
         .cloned()
         .collect();
     assert_eq!(
-        summary(&scoped, Some(&payroll)).as_ref(),
+        summary(&scoped, Some(&payroll), 0).as_ref(),
         "2 in buk/payroll \u{b7} 1 needs attention"
     );
-    assert_eq!(summary(&[], None).as_ref(), "No worktrees yet");
+    assert_eq!(summary(&[], None, 0).as_ref(), "No worktrees yet");
+}
+
+#[test]
+fn the_hidden_review_count_stays_out_of_the_summary_string() {
+    let a = worktree("a", None, "2026-09-01T10:00:00Z");
+    let mut b = worktree("b", None, "2026-09-01T10:00:00Z");
+    b.repo_id = RepoId::try_from("acme/web").unwrap_or_else(|error| panic!("{error}"));
+    let snapshot = snapshot(vec![a, b], Vec::new(), Vec::new());
+    let rows = rows(&snapshot, &HashMap::new());
+    assert_eq!(
+        summary(&rows, None, 3).as_ref(),
+        summary(&rows, None, 0).as_ref(),
+        "the hidden count is its own segment, never part of the summary string"
+    );
+}
+
+#[test]
+fn a_scope_of_only_hidden_reviews_is_summarised_as_no_worktrees_of_your_own() {
+    assert_eq!(
+        summary(&[], None, 2).as_ref(),
+        "No worktrees of your own yet",
+        "a scope of hidden reviews is not a scope without worktrees"
+    );
+    assert_eq!(summary(&[], None, 0).as_ref(), "No worktrees yet");
+}
+
+#[test]
+fn the_review_segment_counts_hidden_or_shown_review_worktrees() {
+    assert_eq!(review_fact(0, 0), None, "no review worktree, no segment");
+    assert_eq!(
+        review_fact(1, 0).as_deref(),
+        Some("1 review worktree hidden"),
+        "singular at one"
+    );
+    assert_eq!(
+        review_fact(3, 0).as_deref(),
+        Some("3 review worktrees hidden")
+    );
+    assert_eq!(
+        review_fact(0, 1).as_deref(),
+        Some("1 review worktree"),
+        "while shown, the segment counts the review rows and drops `hidden`"
+    );
+    assert_eq!(review_fact(0, 2).as_deref(), Some("2 review worktrees"));
+}
+
+#[test]
+fn a_review_worktree_row_carries_its_pull_request_number() {
+    let mut review = worktree("pr-7", None, "2026-09-01T10:00:00Z");
+    review.base_ref = "pull/7/head".to_owned();
+    let own = worktree("own", None, "2026-09-01T10:00:00Z");
+    let cache = HashMap::new();
+    let snapshot = snapshot(vec![review, own], Vec::new(), Vec::new());
+    let rows = rows(&snapshot, &cache);
+    assert_eq!(
+        rows[0].review,
+        Some(7),
+        "a `pull/<n>/head` base is a review"
+    );
+    assert_eq!(
+        rows[1].review, None,
+        "an `origin/main` base is the user's own"
+    );
+}
+
+#[test]
+fn the_empty_page_explains_a_scope_of_hidden_reviews() {
+    let repo = SharedString::new_static("buk/payroll");
+    let query = SharedString::new_static("rut");
+    assert_eq!(
+        empty_surface(None, true, None, 2),
+        EmptySurface::WorktreesReviewsHidden
+    );
+    assert_eq!(
+        empty_surface(None, true, Some(&repo), 1),
+        EmptySurface::WorktreesReviewsHidden,
+        "a selected repository whose only worktrees are hidden reviews says so too"
+    );
+    assert_eq!(empty_surface(None, true, None, 0), EmptySurface::Worktrees);
+    assert_eq!(
+        empty_surface(None, true, Some(&repo), 0),
+        EmptySurface::WorktreesRepo
+    );
+    assert_eq!(
+        empty_surface(Some(&query), true, None, 2),
+        EmptySurface::Filter,
+        "a filter miss wins: the query is what emptied the list"
+    );
+    assert_eq!(
+        empty_surface(None, false, None, 2),
+        EmptySurface::WorktreesNoRepos,
+        "with no repository there is nothing to branch from, whatever else is hidden"
+    );
 }

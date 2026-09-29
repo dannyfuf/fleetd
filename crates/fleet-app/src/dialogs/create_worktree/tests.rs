@@ -670,6 +670,7 @@ fn displayed_rows(ids: &[&str]) -> Vec<crate::presentation::DisplayedWorktree> {
         .map(|id| crate::presentation::DisplayedWorktree {
             id: WorktreeId::try_from(*id).unwrap_or_else(|error| panic!("{error}")),
             repo: RepoId::try_from("buk/payroll").unwrap_or_else(|error| panic!("{error}")),
+            review: false,
         })
         .collect()
 }

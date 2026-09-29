@@ -62,6 +62,9 @@ pub struct RailRow {
     pub glyph: StatusKind,
     /// Worktree count for the count slot; absent while a clone is running or failing.
     pub count: Option<usize>,
+    /// How many of the counted worktrees have an attached session (§3.4); absent exactly
+    /// when `count` is.
+    pub live: Option<usize>,
     /// Clone progress percent, when the daemon's progress line carries one.
     pub percent: Option<u8>,
     /// The concrete failed clone attempt that `Enter` must reveal in Jobs.
@@ -117,11 +120,13 @@ fn clone_target(target: &str) -> &str {
 }
 
 /// The worst-of glyph per repository, folded as the projection walks the worktrees so no
-/// per-repo vector is ever built.
+/// per-repo vector is ever built. It also folds how many of them have an attached session, so
+/// the repository detail's `live` count sizes the same worktrees as the rail's count (§3.4).
 #[derive(Default)]
 pub struct RepoGlyphs<'a> {
     worst: HashMap<&'a RepoId, StatusKind>,
     issues: HashMap<&'a RepoId, usize>,
+    live: HashMap<&'a RepoId, usize>,
 }
 
 impl<'a> RepoGlyphs<'a> {
@@ -134,6 +139,16 @@ impl<'a> RepoGlyphs<'a> {
         if matches!(glyph, StatusKind::Degraded | StatusKind::HostUnreachable) {
             *self.issues.entry(repo).or_default() += 1;
         }
+    }
+
+    /// Counts one of the repository's worktrees as having an attached session.
+    pub fn add_live(&mut self, repo: &'a RepoId) {
+        *self.live.entry(repo).or_default() += 1;
+    }
+
+    /// How many of a repository's worktrees have an attached session.
+    fn live(&self, repo: &RepoId) -> usize {
+        self.live.get(repo).copied().unwrap_or_default()
     }
 
     /// How many of a repository's worktrees are degraded or on an unreachable host.
@@ -152,6 +167,9 @@ impl<'a> RepoGlyphs<'a> {
 
 /// Builds every rail row for one context, `All` first and the rest sorted by label.
 ///
+/// `worktrees` is the slice the Worktrees list is built from — the context's worktrees, hidden
+/// review worktrees already left out — so every count here matches the rows it sizes (§3.2).
+///
 /// A clone in flight sorts among the cloned repositories rather than at the end: "a repo being
 /// born must be visible where it will live" (§3.2).
 #[must_use]
@@ -159,7 +177,7 @@ pub fn rail_rows(
     context: Option<&ContextId>,
     repos: &[Repo],
     clones: &[CloneJob],
-    worktrees: &[Worktree],
+    worktrees: &[&Worktree],
     glyphs: &RepoGlyphs<'_>,
     jobs: &[JobRecord],
 ) -> Vec<RailRow> {
@@ -211,6 +229,7 @@ pub fn rail_rows(
                 },
                 glyph: glyphs.get(&repo.id),
                 count: Some(count),
+                live: Some(glyphs.live(&repo.id)),
                 percent: None,
                 job: None,
                 issues: issue_label(glyphs.issues(&repo.id)),
@@ -251,6 +270,7 @@ pub fn rail_rows(
                         StatusKind::Cloning
                     },
                     count: None,
+                    live: None,
                     percent,
                     job: failed.then(|| attempt.map(|job| job.id.clone())).flatten(),
                     issues: None,
@@ -264,12 +284,14 @@ pub fn rail_rows(
         .iter()
         .map(|repo| counts.get(&repo.id).copied().unwrap_or_default())
         .sum();
+    let live = scoped.iter().map(|repo| glyphs.live(&repo.id)).sum();
     let mut all = vec![RailRow {
         kind: RailKind::All,
         repo: None,
         name: SharedString::new_static("All"),
         glyph: aggregate_glyph(rows.iter().map(|row| row.glyph)),
         count: Some(total),
+        live: Some(live),
         percent: None,
         job: None,
         issues: None,

@@ -133,7 +133,7 @@ fn names_disambiguate_only_on_collision() {
 #[test]
 fn all_is_pinned_first_and_counts_every_worktree_in_the_context() {
     let repos = vec![repo("buk", "www", "buk"), repo("buk", "payroll", "buk")];
-    let worktrees = vec![
+    let worktrees = [
         worktree("buk/payroll", "a"),
         worktree("buk/payroll", "b"),
         worktree("buk/www", "c"),
@@ -142,7 +142,7 @@ fn all_is_pinned_first_and_counts_every_worktree_in_the_context() {
         Some(&repos[0].context_id),
         &repos,
         &[],
-        &worktrees,
+        &worktrees.iter().collect::<Vec<_>>(),
         &RepoGlyphs::default(),
         &[],
     );

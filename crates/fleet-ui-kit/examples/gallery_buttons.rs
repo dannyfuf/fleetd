@@ -91,7 +91,13 @@ const STYLES: [(&str, ButtonStyle); 5] = [
 fn styles_section(cx: &App) -> AnyElement {
     let t = cx.theme();
     let mut children = Vec::new();
-    for (size_name, size) in [("", ButtonSize::Default), (" compact", ButtonSize::Compact)] {
+    // Inline draws every style too; its `face` sample keeps the key in the tooltip, since a chip
+    // is taller than the caption line.
+    for (size_name, size) in [
+        ("", ButtonSize::Default),
+        (" compact", ButtonSize::Compact),
+        (" inline", ButtonSize::Inline),
+    ] {
         for (name, style) in STYLES {
             let id = |slot: &'static str| SharedString::from(format!("{name}{size_name}-{slot}"));
             let action: Box<dyn Action> = match style {
@@ -174,6 +180,11 @@ fn states_section(pinned: bool, cx: &mut Context<ButtonsGallery>) -> AnyElement 
                         .style(ButtonStyle::Ghost)
                         .selected(false)
                         .into_any_element(),
+                    Button::new("ghost-inline-on", "2 review worktrees")
+                        .style(ButtonStyle::Ghost)
+                        .size(ButtonSize::Inline)
+                        .selected(true)
+                        .into_any_element(),
                 ],
             ),
         ),
@@ -215,6 +226,39 @@ fn states_section(pinned: bool, cx: &mut Context<ButtonsGallery>) -> AnyElement 
                 .dot(t.colors.warning)
                 .size(ButtonSize::Compact)
                 .tooltip("A value with a colour of its own: a card's status"),
+        ),
+        LAYOUT.labeled(
+            "inline · in a caption line, and squeezed",
+            &t,
+            strip(
+                &t,
+                vec![
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(t.space.xs)
+                        .child(Text::caption("4 across 2 repositories").muted())
+                        .child(Text::caption("\u{b7}").faint())
+                        .child(
+                            Button::new("inline", "2 review worktrees hidden")
+                                .style(ButtonStyle::Ghost)
+                                .size(ButtonSize::Inline)
+                                .action(Box::new(Filter))
+                                .tooltip("Show review worktrees"),
+                        )
+                        .into_any_element(),
+                    // Narrower than its label: the label ellipsizes, the line keeps its height.
+                    div()
+                        .flex()
+                        .w(px(96.0))
+                        .child(
+                            Button::new("inline-squeezed", "2 review worktrees hidden")
+                                .style(ButtonStyle::Ghost)
+                                .size(ButtonSize::Inline),
+                        )
+                        .into_any_element(),
+                ],
+            ),
         ),
         LAYOUT.labeled(
             "full width",
@@ -267,6 +311,11 @@ fn icon_buttons_section(cx: &App) -> AnyElement {
     let children = vec![
         LAYOUT.labeled("default · hover me", t, row(ButtonSize::Default, "icon")),
         LAYOUT.labeled("compact", t, row(ButtonSize::Compact, "icon-compact")),
+        LAYOUT.labeled(
+            "inline · one caption line",
+            t,
+            row(ButtonSize::Inline, "icon-inline"),
+        ),
     ];
     LAYOUT.section("icon button · tooltip carries label and key", t, children)
 }

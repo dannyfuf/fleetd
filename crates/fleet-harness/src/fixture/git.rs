@@ -101,6 +101,31 @@ async fn build_origin(
         .await?;
         git(&seed, child_home, &["push", "origin", branch]).await?;
     }
+    // A pull request checked out as a review worktree needs what GitHub publishes for it:
+    // `refs/pull/<n>/head`, which the daemon fetches by that name. Only the pull ref is pushed,
+    // never `refs/heads/<head>`, so the clone has no `origin/<head>` and the checkout can only
+    // come from the pull ref.
+    for pull in repository
+        .pull_requests
+        .iter()
+        .filter(|pull| pull.review_worktree)
+    {
+        let head = &pull.head;
+        git(&seed, child_home, &["checkout", "-b", head, DEFAULT_BRANCH]).await?;
+        write(&seed, &format!("{head}.md"), &format!("# {head}\n")).await?;
+        git(&seed, child_home, &["add", "--all"]).await?;
+        git(&seed, child_home, &["commit", "-m", &format!("add {head}")]).await?;
+        git(
+            &seed,
+            child_home,
+            &[
+                "push",
+                "origin",
+                &format!("{head}:refs/pull/{}/head", pull.number),
+            ],
+        )
+        .await?;
+    }
     git(&seed, child_home, &["checkout", DEFAULT_BRANCH]).await?;
 
     // A clone reads `HEAD` to learn the default branch, and a bare repository initialised on a

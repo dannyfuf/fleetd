@@ -9,10 +9,10 @@ use std::rc::Rc;
 
 use fleet_ui_kit::theme::ch;
 use fleet_ui_kit::{
-    ActiveTheme, AgeLabel, Button, ButtonSize, ButtonStyle, Chip, ColumnLadder, ContextMenu,
-    EmptyState, FilterField, HarnessTargetExt, Icon, IconButton, IconSize, ListHeader, ListPointer,
-    ListView, Menu, MenuAnchor, MenuItem, PageHeader, Pane, PaneBorder, PopoverMenu, PrBadge,
-    ResolvedColumn, Row, RowColumn, StatusDot, Text, TextInput, Tone, Truncate, truncate,
+    ActiveTheme, AgeLabel, Badge, BadgeStyle, Button, ButtonSize, ButtonStyle, Chip, ColumnLadder,
+    ContextMenu, EmptyState, FilterField, HarnessTargetExt, Icon, IconButton, IconSize, ListHeader,
+    ListPointer, ListView, Menu, MenuAnchor, MenuItem, PageHeader, Pane, PaneBorder, PopoverMenu,
+    PrBadge, ResolvedColumn, Row, RowColumn, StatusDot, Text, TextInput, Tone, Truncate, truncate,
 };
 use gpui::{
     Action, AnyElement, App, Entity, IntoElement, SharedString, UniformListScrollHandle, Window,
@@ -31,7 +31,7 @@ mod tests;
 
 pub use model::{
     DetailPr, GitFacts, KnownGit, KnownPr, NameIcon, RowInputs, SessionWords, WorktreeDetail,
-    WorktreeRow, build_rows, matches, sort_rows, summary,
+    WorktreeRow, build_rows, matches, review_fact, sort_rows, summary,
 };
 pub(crate) use model::{job_targets_worktree, owns_row};
 
@@ -45,6 +45,15 @@ const FILTER_PLACEHOLDER: &str = "Filter";
 const NO_PR: &str = "\u{2014}";
 /// The dirty fact, in words, beside the name.
 const DIRTY: &str = "uncommitted changes";
+/// The muted outlined badge a review worktree (a pull request's own checkout) carries beside
+/// the name: a fixed vocabulary word in a row column, boxed so it reads apart from the muted
+/// `uncommitted changes` words before it.
+const REVIEW: &str = "review";
+/// What the subtitle's review-worktree button does while they are hidden; the empty page's
+/// button reads it too.
+pub(crate) const SHOW_REVIEWS: &str = "Show review worktrees";
+/// What that button does while they are shown.
+const HIDE_REVIEWS: &str = "Hide review worktrees";
 /// The chip a worktree whose post-create hooks failed carries.
 const HOOKS_FAILED: &str = "Setup hook failed";
 /// The button beside it.
@@ -106,6 +115,11 @@ pub struct ListProps<Rows> {
     pub scope_repo: Option<SharedString>,
     /// The subtitle the model built.
     pub summary: SharedString,
+    /// The subtitle's review-worktree segment (`2 review worktrees hidden`), drawn as the button
+    /// that shows or hides them; `None` when the scope holds no review worktree.
+    pub reviews: Option<SharedString>,
+    /// How many review worktrees the scope holds that the list hides; zero while they are shown.
+    pub review_hidden: usize,
     /// The filter field.
     pub filter: FilterSlot,
     /// `<age>` when the snapshot is frozen (§1.3).
@@ -139,6 +153,8 @@ pub fn render(
         pane_ch,
         scope_repo,
         summary,
+        reviews,
+        review_hidden,
         filter,
         stale,
         loading,
@@ -155,24 +171,39 @@ pub fn render(
     // While fleetd is gone the rows are true but frozen: they stay navigable, drawn at the stale
     // opacity under the header's one `Stale · <age>` chip (§3.12 C).
     let frozen = stale.is_some();
-    let header = page_header(summary, filter, stale, has_repos);
+    let row_count = rows.as_ref().len();
+    // The empty state is only built when it is drawn: a list with rows never pays for its copy
+    // or its button, whatever the scope holds.
+    let empty = (row_count == 0).then(|| {
+        if loading {
+            return EmptyState::new("Loading\u{2026}").into_any_element();
+        }
+        let surface = empty_surface(
+            query.as_ref(),
+            has_repos,
+            scope_repo.as_ref(),
+            review_hidden,
+        );
+        let scope = match surface {
+            EmptySurface::Filter => query.clone(),
+            EmptySurface::WorktreesRepo => scope_repo.clone(),
+            EmptySurface::WorktreesReviewsHidden => reviews.clone(),
+            _ => None,
+        };
+        surface.render(scope.as_deref())
+    });
+    let header = page_header(
+        summary,
+        reviews,
+        review_hidden > 0,
+        filter,
+        stale,
+        has_repos,
+    );
     let columns = columns(pane_ch, scope_repo.is_none());
     let heads = columns.iter().fold(ListHeader::new(), |header, column| {
         header.column(column, column_head(column.key.as_ref()))
     });
-
-    let empty = if loading {
-        EmptyState::new("Loading\u{2026}").into_any_element()
-    } else if let Some(query) = &query {
-        EmptySurface::Filter.render(Some(query))
-    } else if !has_repos {
-        EmptySurface::WorktreesNoRepos.render(None)
-    } else {
-        match &scope_repo {
-            None => EmptySurface::Worktrees.render(None),
-            Some(repo) => EmptySurface::WorktreesRepo.render(Some(repo)),
-        }
-    };
 
     let pointer = ListPointer::new()
         .on_select({
@@ -185,7 +216,6 @@ pub fn render(
         })
         // The right-click selects; the row's `ContextMenu` opens the menu itself.
         .on_menu(|_, _, _, _| {});
-    let row_count = rows.as_ref().len();
     let list = ListView::new(
         "hub-worktrees",
         row_count,
@@ -211,8 +241,11 @@ pub fn render(
     )
     .row_height(theme.metrics.row_h_comfortable)
     .cursor(cursor)
-    .track_scroll(scroll)
-    .empty(empty);
+    .track_scroll(scroll);
+    let list = match empty {
+        Some(empty) => list.empty(empty),
+        None => list,
+    };
 
     let body = div()
         .flex()
@@ -251,10 +284,35 @@ pub fn render(
         .into_any_element()
 }
 
-/// The page header: `Worktrees`, the summary, the filter field, `Clone repo` and the primary
-/// `New worktree` — or, while the context holds no repository, a primary `Clone repo` alone.
+/// Which §3.13 empty surface the list shows when it has no row to draw: a filter miss first, then
+/// a context with nothing to branch from, then a scope whose only worktrees are hidden review
+/// worktrees, then a scope with none at all.
+pub(crate) fn empty_surface(
+    query: Option<&SharedString>,
+    has_repos: bool,
+    scope_repo: Option<&SharedString>,
+    review_hidden: usize,
+) -> EmptySurface {
+    if query.is_some() {
+        EmptySurface::Filter
+    } else if !has_repos {
+        EmptySurface::WorktreesNoRepos
+    } else if review_hidden > 0 {
+        EmptySurface::WorktreesReviewsHidden
+    } else if scope_repo.is_some() {
+        EmptySurface::WorktreesRepo
+    } else {
+        EmptySurface::Worktrees
+    }
+}
+
+/// The page header: `Worktrees`, the summary and its review-worktree button, the filter field,
+/// `Clone repo` and the primary `New worktree` — or, while the context holds no repository, a
+/// primary `Clone repo` alone.
 fn page_header(
     summary: SharedString,
+    reviews: Option<SharedString>,
+    reviews_hidden: bool,
     filter: FilterSlot,
     stale: Option<SharedString>,
     has_repos: bool,
@@ -282,6 +340,26 @@ fn page_header(
     };
     let clone = Button::new("worktrees-clone", label(&repos::Clone)).action(Box::new(repos::Clone));
     let mut header = PageHeader::new(TITLE).subtitle(summary).action(field);
+    if let Some(reviews) = reviews {
+        // The segment is the toggle itself: one click shows the hidden reviews, or hides them
+        // again, exactly as `v` does; the tooltip says which and names the live key. It is a
+        // yielding fact drawn inline: it keeps the caption line's height, and when the line runs
+        // out of room it gives way before the summary's `needs attention` does (§3.3).
+        header = header
+            .yielding_fact(Text::caption("\u{b7}").faint())
+            .yielding_fact(
+                Button::new("worktrees-reviews", reviews)
+                    .style(ButtonStyle::Ghost)
+                    .size(ButtonSize::Inline)
+                    .action(Box::new(worktrees::ToggleReviewWorktrees))
+                    .tooltip(if reviews_hidden {
+                        SHOW_REVIEWS
+                    } else {
+                        HIDE_REVIEWS
+                    })
+                    .harness_target("worktrees.reviews"),
+            );
+    }
     header = if has_repos {
         header
             .action(clone.harness_target("worktrees.clone"))
@@ -423,7 +501,8 @@ fn worktree_row(row: &WorktreeRow, ctx: RowContext<'_>, cx: &App) -> AnyElement 
     .into_any_element()
 }
 
-/// `⑂ spike  ↑2`, `⑂ hotfix  uncommitted changes`, `⚠ broken  [Setup hook failed] View log`.
+/// `⑂ spike  ↑2`, `⑂ hotfix  uncommitted changes`, `⑂ pr-412  [review]`,
+/// `⚠ broken  [Setup hook failed] View log`.
 fn name_cell(row: &WorktreeRow, ctx: &RowContext<'_>, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let ix = ctx.ix;
@@ -482,6 +561,13 @@ fn name_cell(row: &WorktreeRow, ctx: &RowContext<'_>, cx: &App) -> AnyElement {
                             .muted()
                             .opacity(dirty_opacity)
                             .flex_none(),
+                    )
+                })
+                .when(row.review.is_some(), |el| {
+                    el.child(
+                        Badge::new(REVIEW)
+                            .tone(Tone::Muted)
+                            .style(BadgeStyle::Filled),
                     )
                 })
                 .children(row.host.clone().map(|host| {

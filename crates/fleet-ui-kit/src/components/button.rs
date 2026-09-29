@@ -18,7 +18,9 @@
 //!
 //! Use an [`IconButton`] when a glyph alone names the action in a dense toolbar or header; its
 //! label becomes the tooltip and the accessible name. Use a clickable `Row` or `Chip`, not a
-//! button, when the thing clicked is a piece of data rather than a verb.
+//! button, when the thing clicked is a piece of data rather than a verb. A button that sits
+//! inside a line of caption text, such as a page header's summary, is [`ButtonSize::Inline`]: it
+//! keeps the line's height and yields its width before the words around it do.
 //!
 //! Two chrome shapes share the same frame: a [`StatusButton`] is a live count that opens what it
 //! counts (`1 needs you`, `2 jobs`, `fleetd down`), and a [`SwitcherButton`] names the current
@@ -69,6 +71,27 @@ pub enum ButtonSize {
     Default,
     /// `button_h_compact`: inside a row, a pane header or a toolbar.
     Compact,
+    /// One `caption` line tall, with no hairline and `xxs` side padding: a control inside a line
+    /// of caption text, such as a page header's summary (`2 review worktrees hidden`). The label
+    /// is drawn in the caption role and ellipsizes, so the button shrinks when its line runs out
+    /// of room instead of growing the line or pushing the words beside it out.
+    ///
+    /// A labelled [`Button`] and an [`IconButton`] (a caption-line square with a small glyph) draw
+    /// it. An inline `Button` keeps its key in the tooltip even with [`Button::show_kbd`], because
+    /// a chip is taller than the line. A [`StatusButton`] or [`SwitcherButton`] given it draws
+    /// [`ButtonSize::Compact`]: their labels are body text, which no caption line can hold.
+    Inline,
+}
+
+impl ButtonSize {
+    /// This size for a button whose label cannot sit in a caption line: `Inline` becomes
+    /// `Compact`, every other size stays.
+    const fn outside_a_line(self) -> Self {
+        match self {
+            Self::Inline => Self::Compact,
+            other => other,
+        }
+    }
 }
 
 type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
@@ -166,6 +189,7 @@ impl ButtonBase {
         match self.size {
             ButtonSize::Default => theme.metrics.button_h,
             ButtonSize::Compact => theme.metrics.button_h_compact,
+            ButtonSize::Inline => theme.text.caption.line_height,
         }
     }
 
@@ -191,6 +215,8 @@ impl ButtonBase {
     ) -> Stateful<Div> {
         let (hover, active) = (paint.hover, paint.active);
         let height = self.height(theme);
+        // An inline button sits in a line of text: a hairline would make it taller than the line.
+        let hairline = self.size != ButtonSize::Inline;
         let frame = div()
             .id(self.id)
             .flex()
@@ -200,8 +226,9 @@ impl ButtonBase {
             .h(height)
             .rounded(theme.radii.control)
             .bg(paint.bg)
-            .border(theme.metrics.hairline)
-            .border_color(paint.border)
+            .when(hairline, |el| {
+                el.border(theme.metrics.hairline).border_color(paint.border)
+            })
             .when_some(kbd.and_then(Kbd::aria_shortcut), |el, shortcut| {
                 el.aria_keyshortcuts(shortcut)
             })
@@ -376,11 +403,14 @@ impl RenderOnce for Button {
         let kbd = self.base.resolve_kbd(window, cx);
         let theme = cx.theme();
         let paint = self.base.paint(theme);
+        let inline = self.base.size == ButtonSize::Inline;
         let (kbd_size, icon_size, pad) = match self.base.size {
             ButtonSize::Default => (KbdSize::Default, IconSize::Medium, theme.space.md),
             ButtonSize::Compact => (KbdSize::Small, IconSize::Small, theme.space.sm),
+            ButtonSize::Inline => (KbdSize::Small, IconSize::Small, theme.space.xxs),
         };
-        let show_kbd = self.show_kbd;
+        // A chip is taller than a caption line, so an inline button keeps its key in the tooltip.
+        let show_kbd = self.show_kbd && !inline;
         let chip = kbd
             .clone()
             .filter(|_| show_kbd)
@@ -395,7 +425,13 @@ impl RenderOnce for Button {
                 .rounded(theme.radii.full)
                 .bg(color)
         });
-        let label = Text::ui_strong(self.label.clone()).color(paint.fg);
+        let label = if inline {
+            Text::caption(self.label.clone())
+                .color(paint.fg)
+                .ellipsize()
+        } else {
+            Text::ui_strong(self.label.clone()).color(paint.fg)
+        };
         let tooltip = button_tooltip(&self.label, self.tooltip, kbd.clone(), show_kbd);
         let full_width = self.full_width;
         self.base
@@ -404,6 +440,9 @@ impl RenderOnce for Button {
             .map(|el| {
                 if full_width {
                     el.w_full()
+                } else if inline {
+                    // Shrinks with its line of text; the label ellipsizes.
+                    el.min_w_0()
                 } else {
                     el.flex_none()
                 }
@@ -462,7 +501,7 @@ impl RenderOnce for IconButton {
         let side = self.base.height(theme);
         let icon_size = match self.base.size {
             ButtonSize::Default => IconSize::Medium,
-            ButtonSize::Compact => IconSize::Small,
+            ButtonSize::Compact | ButtonSize::Inline => IconSize::Small,
         };
         let tooltip = Tooltip::new(self.label.clone()).kbd(kbd.clone());
         self.base
@@ -539,6 +578,7 @@ impl StatusButton {
 
 impl RenderOnce for StatusButton {
     fn render(mut self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        self.base.size = self.base.size.outside_a_line();
         let kbd = self.base.resolve_kbd(window, cx);
         let theme = cx.theme();
         let paint = self.base.paint(theme);
@@ -639,6 +679,7 @@ fn monogram_of(label: &str) -> Option<SharedString> {
 
 impl RenderOnce for SwitcherButton {
     fn render(mut self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        self.base.size = self.base.size.outside_a_line();
         let kbd = self.base.resolve_kbd(window, cx);
         let theme = cx.theme();
         let paint = self.base.paint(theme);
@@ -692,6 +733,13 @@ mod tests {
     use super::*;
 
     gpui::actions!(button_test, [Fire, Unbound]);
+
+    #[test]
+    fn a_status_or_switcher_button_draws_inline_as_compact() {
+        assert_eq!(ButtonSize::Inline.outside_a_line(), ButtonSize::Compact);
+        assert_eq!(ButtonSize::Compact.outside_a_line(), ButtonSize::Compact);
+        assert_eq!(ButtonSize::Default.outside_a_line(), ButtonSize::Default);
+    }
 
     struct Host {
         focus: FocusHandle,

@@ -154,6 +154,7 @@ depending on row state — same key, same pane, same mode, different blast radiu
 | `I` | inspect (refresh safety facts as a job) |
 | `i` | toggle detail panel |
 | `y` / `Y` | copy the worktree path / copy the **branch name** [A17] |
+| `v` | show / hide pull-request review worktrees (hidden on every launch; session only) |
 
 ## Hub › Pull requests screen
 
@@ -717,7 +718,8 @@ log`, `Run doctor` and `Quit`; case C's `Reconnect now`, `Open log` and ✕; the
 again`, `Open log` and `Close`. Each dispatches the same action its key does.
 
 Case A (cold start) binds nothing: fleetd is auto-spawned. While disconnected, read-only keys
-(`j` / `k`, `y`, `b`, `/`, `i`, `:`) keep working; mutating keys flash the banner. Keys typed
+(`j` / `k`, `y`, `b`, `/`, `i`, `:`, and `v` in the Worktrees pane, a local view flag) keep
+working; mutating keys flash the banner. Keys typed
 into a veiled terminal grid are dropped, not buffered.
 
 ## First run (`FirstRun` context)
@@ -753,7 +755,8 @@ a documented key).
 the Hub and "leave Scroll mode" in the Workspace. `r` is "refresh" in Normal and "restart" after
 `ctrl-s`. `c` is "create without opening" on the PR screen, "new terminal tab" after `ctrl-s`,
 and "cancel job" in the Jobs panel. `b` is "open in browser" in the Hub and on the PR screen and
-"this worktree's board tab" after `ctrl-s`.
+"this worktree's board tab" after `ctrl-s`. `v` shows or hides review worktrees in the Hub's
+Worktrees pane, is the subagent watch pane after `ctrl-s`, and starts a selection in Scroll mode.
 `f` cycles the Jobs filter in the list and toggles follow
 inside an expanded log. `y` copies a path, a URL or a log path depending on the pane. All are
 mode- or pane-disjoint; Help's All shortcuts table files every key under the place it works, so

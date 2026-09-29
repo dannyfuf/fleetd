@@ -19,6 +19,8 @@ struct ProjectionKey {
     query: String,
     /// Whether the Review tab is the Reviews board, which builds no flat list (§3.5).
     review_board: bool,
+    /// Whether review worktrees (`pull/<n>/head` checkouts) are listed and counted (§3.3).
+    show_reviews: bool,
 }
 
 /// The Hub model for this frame, rebuilt only when one of its inputs changed.
@@ -34,6 +36,7 @@ pub(super) fn prepare(state: &AppState, hub: &HubState, now: i64) -> Rc<HubModel
         screen: state.screen.clone(),
         query: state.filter.query.clone(),
         review_board: state.review_board_is_shown(),
+        show_reviews: state.show_review_worktrees,
     };
     if cache.key.as_ref() != Some(&key) {
         cache.model = Rc::new(model(state, hub, now));
@@ -53,10 +56,15 @@ pub struct HubModel {
     pub worktrees: Rc<[WorktreeRow]>,
     /// The pull-request rows of the active tab, filtered.
     pub prs: Rc<[PrRow]>,
-    /// How many worktrees the scope holds before the filter.
+    /// How many worktrees the scope holds before the filter, hidden review worktrees excluded.
     pub worktree_total: usize,
+    /// How many review worktrees the scope holds that the list hides (§3.3); zero while shown.
+    pub review_hidden: usize,
     /// The Worktrees page's subtitle: `4 across 2 repositories · 1 needs attention`.
     pub worktree_summary: SharedString,
+    /// The subtitle's review-worktree segment: `2 review worktrees hidden`, or `2 review
+    /// worktrees` while they are shown; `None` when the scope holds none (§3.3).
+    pub worktree_reviews: Option<SharedString>,
     /// How many PR rows exist before filtering, after the documented display cap.
     pub pr_total: usize,
     /// How many pull requests the §3.5 cap hid.
@@ -90,9 +98,11 @@ impl HubModel {
                 .map(|row| crate::presentation::DisplayedWorktree {
                     id: row.id.clone(),
                     repo: row.repo.clone(),
+                    review: row.review.is_some(),
                 })
                 .collect(),
             worktree_total: self.worktree_total,
+            review_hidden: self.review_hidden,
             prs: self
                 .prs
                 .iter()
@@ -151,6 +161,21 @@ fn model(state: &AppState, hub: &HubState, now: i64) -> HubModel {
             })
         })
         .collect();
+    let in_scope = |worktree: &&Worktree| match &state.scope {
+        RepoScope::All => true,
+        RepoScope::Repo(repo) => &worktree.repo_id == repo,
+    };
+    // Hidden review worktrees leave the slice before anything is derived from it, so the rows,
+    // the subtitle, the rail's counts, glyphs and issue chips all agree (§3.2, §3.3). Only how
+    // many sit in the repository scope is kept, for the subtitle and the empty page.
+    let mut review_hidden = 0;
+    scoped.retain(|worktree| {
+        let listed = state.lists_worktree(worktree);
+        if !listed && in_scope(worktree) {
+            review_hidden += 1;
+        }
+        listed
+    });
     let mut glyphs = repos_rail::RepoGlyphs::default();
     for worktree in &scoped {
         let status = index.status(&worktree.id);
@@ -177,12 +202,15 @@ fn model(state: &AppState, hub: &HubState, now: i64) -> HubModel {
                 job,
             ),
         );
+        if status.is_some_and(|status| status.session == SessionState::Attached) {
+            glyphs.add_live(&worktree.repo_id);
+        }
     }
     let mut rail = repos_rail::rail_rows(
         context,
         &snapshot.repos,
         &snapshot.clones,
-        &snapshot.worktrees,
+        &scoped,
         &glyphs,
         &snapshot.jobs,
     );
@@ -196,12 +224,9 @@ fn model(state: &AppState, hub: &HubState, now: i64) -> HubModel {
     } else {
         ""
     };
-    scoped.retain(|worktree| match &state.scope {
-        RepoScope::All => true,
-        RepoScope::Repo(repo) => &worktree.repo_id == repo,
-    });
+    scoped.retain(in_scope);
     let worktree_total = scoped.len();
-    let (worktrees, worktree_summary) = if matches!(
+    let (worktrees, worktree_summary, worktree_reviews) = if matches!(
         state.screen,
         Screen::Hub {
             tab: HubTab::Worktrees
@@ -223,15 +248,20 @@ fn model(state: &AppState, hub: &HubState, now: i64) -> HubModel {
             RepoScope::All => None,
             RepoScope::Repo(repo) => Some(repo),
         };
-        let summary = worktrees_list::summary(&rows, scope_repo);
+        let summary = worktrees_list::summary(&rows, scope_repo, review_hidden);
+        let reviews = worktrees_list::review_fact(
+            review_hidden,
+            rows.iter().filter(|row| row.review.is_some()).count(),
+        );
         (
             rows.into_iter()
                 .filter(|row| worktrees_list::matches(row, list_query))
                 .collect(),
             summary,
+            reviews,
         )
     } else {
-        (Rc::default(), SharedString::default())
+        (Rc::default(), SharedString::default(), None)
     };
     let cache_key = cache::PrCacheKey::from_state(state);
     let slice = hub.prs.slice_for(state.pr_tab, &cache_key);
@@ -265,7 +295,9 @@ fn model(state: &AppState, hub: &HubState, now: i64) -> HubModel {
         worktrees,
         prs,
         worktree_total,
+        review_hidden,
         worktree_summary,
+        worktree_reviews,
         pr_total,
         pr_hidden: if state.review_board_is_shown() {
             0
