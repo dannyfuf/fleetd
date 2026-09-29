@@ -409,13 +409,7 @@ impl HubScreen {
                 .repos
                 .iter()
                 .find(|repo: &&Repo| &repo.id == repo_id)?;
-            let worktrees = repo_detail_worktrees(row);
-            let live = snapshot
-                .statuses
-                .iter()
-                .filter(|status| status.session == SessionState::Attached)
-                .filter(|status| status.worktree_id.repo() == repo_id.as_str())
-                .count();
+            let (worktrees, live) = repo_detail_counts(row);
             return Some(detail::repo(
                 RepoProps {
                     repo,
@@ -550,9 +544,11 @@ impl AppState {
     }
 }
 
-/// The repository detail's worktree count (§3.4): the rail row's own count, which is the rows the
-/// Worktrees list shows for that repository. A hidden review worktree is left out here exactly as
-/// the rail and the subtitle leave it out (§3.3), and nothing is counted in the render path.
-pub(super) fn repo_detail_worktrees(row: &RailRow) -> usize {
-    row.count.unwrap_or_default()
+/// The repository detail's `worktrees` and `live` counts (§3.4): the rail row's own counts, which
+/// size the rows the Worktrees list shows for that repository. A hidden review worktree, and its
+/// attached session, are left out here exactly as the rail and the subtitle leave it out (§3.3),
+/// so `live` never exceeds `worktrees`. Both are folded in the projection; the detail only reads
+/// them.
+pub(super) fn repo_detail_counts(row: &RailRow) -> (usize, usize) {
+    (row.count.unwrap_or_default(), row.live.unwrap_or_default())
 }

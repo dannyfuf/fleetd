@@ -201,16 +201,32 @@ fn the_hidden_review_count_follows_the_repository_scope_but_rail_counts_do_not()
     );
 }
 
+/// An attached session on `id`, as the daemon's status summary reports one.
+fn attached(id: &str) -> fleet_core::sessions::WorktreeStatus {
+    fleet_core::sessions::WorktreeStatus {
+        worktree_id: id.parse().expect("worktree id"),
+        session: fleet_core::sessions::SessionState::Attached,
+        windows: Vec::new(),
+        running: Vec::new(),
+        agent_activity: fleet_core::sessions::AgentActivity::Unknown,
+        agent_activity_changed_at: None,
+    }
+}
+
 #[test]
-fn the_repository_detail_counts_the_worktrees_the_list_shows() {
-    let mut state = review_state(
-        &["acme/api"],
-        vec![
-            worktree("acme/api#one", "acme/api", "2026-09-04T10:00:00Z"),
-            worktree("acme/api#two", "acme/api", "2026-09-04T10:00:00Z"),
-            review_worktree("acme/api#pr-7", "acme/api", 7),
-        ],
-    );
+fn the_repository_detail_counts_the_worktrees_and_live_sessions_the_list_shows() {
+    let now = Instant::now();
+    let mut state = AppState::new("/tmp/fleet-hub-reviews", now);
+    let mut source = snapshot(0);
+    source.contexts = vec![context("acme")];
+    source.repos = vec![repo("acme/api", "acme")];
+    source.worktrees = vec![
+        worktree("acme/api#one", "acme/api", "2026-09-04T10:00:00Z"),
+        worktree("acme/api#two", "acme/api", "2026-09-04T10:00:00Z"),
+        review_worktree("acme/api#pr-7", "acme/api", 7),
+    ];
+    source.statuses = vec![attached("acme/api#one"), attached("acme/api#pr-7")];
+    state.apply_snapshot(source, now);
     state.hub_pane = HubPane::Repos;
     let hub = HubState::default();
     let detail = |model: &projection::HubModel| {
@@ -218,20 +234,20 @@ fn the_repository_detail_counts_the_worktrees_the_list_shows() {
             .rail
             .iter()
             .find(|row| row.kind == RailKind::Repo)
-            .map(composition::repo_detail_worktrees)
+            .map(composition::repo_detail_counts)
             .unwrap_or_else(|| panic!("acme/api has a rail row"))
     };
 
     assert_eq!(
         detail(&projection::prepare(&state, &hub, 1_788_523_200)),
-        2,
-        "a hidden review worktree is not in the repository detail's count"
+        (2, 1),
+        "a hidden review worktree, and its attached session, are not in the repository detail"
     );
     state.show_review_worktrees = true;
     assert_eq!(
         detail(&projection::prepare(&state, &hub, 1_788_523_201)),
-        3,
-        "shown, it is counted again"
+        (3, 2),
+        "shown, both are counted again"
     );
 }
 

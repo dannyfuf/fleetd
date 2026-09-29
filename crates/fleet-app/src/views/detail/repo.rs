@@ -4,7 +4,7 @@ use super::*;
 pub struct RepoProps<'a> {
     /// The repository under the cursor.
     pub repo: &'a Repo,
-    /// How many worktrees it owns.
+    /// How many worktrees the Worktrees list shows for it (hidden review worktrees left out).
     pub worktrees: usize,
     /// How many of them have an attached session.
     pub live: usize,

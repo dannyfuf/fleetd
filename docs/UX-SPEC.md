@@ -628,7 +628,7 @@ Every string is built with the row in the Hub's projection; the panel only lays 
 
 | Cursor on | Panel content |
 | --- | --- |
-| Repo | name, owner, `defaultBranch`, `path`, worktree count (the rail row's: the worktrees the list shows, hidden review worktrees left out, §3.3), live count, `hooks.prepare` (count + commands), `hooks.postCreate`, `url`, prepared copies `1/1 ready · refreshed 2m ago` |
+| Repo | name, owner, `defaultBranch`, `path`, worktree count (the rail row's: the worktrees the list shows, hidden review worktrees left out, §3.3), live count (of those worktrees, the ones with an attached session; folded in the projection beside the rail count), `hooks.prepare` (count + commands), `hooks.postCreate`, `url`, prepared copies `1/1 ready · refreshed 2m ago` |
 | Clone job | status, staging path, log path, `error` in red; `Enter` opens it in the Jobs panel |
 | Context (rail header focused) | name, `owners` joined, repo + worktree counts |
 | PR row | §3.5 PR detail |

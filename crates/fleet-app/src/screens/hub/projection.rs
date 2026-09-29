@@ -206,6 +206,9 @@ fn model(state: &AppState, hub: &HubState, now: i64) -> HubModel {
                 job,
             ),
         );
+        if status.is_some_and(|status| status.session == SessionState::Attached) {
+            glyphs.add_live(&worktree.repo_id);
+        }
     }
     let mut rail = repos_rail::rail_rows(
         context,
