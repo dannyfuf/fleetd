@@ -1,5 +1,3 @@
-use fleet_core::github::pull_request_checkout;
-
 use super::*;
 
 #[derive(Default)]
@@ -171,15 +169,13 @@ fn model(state: &AppState, hub: &HubState, now: i64) -> HubModel {
     // the subtitle, the rail's counts, glyphs and issue chips all agree (§3.2, §3.3). Only how
     // many sit in the repository scope is kept, for the subtitle and the empty page.
     let mut review_hidden = 0;
-    if !state.show_review_worktrees {
-        scoped.retain(|worktree| {
-            let review = pull_request_checkout(worktree).is_some();
-            if review && in_scope(worktree) {
-                review_hidden += 1;
-            }
-            !review
-        });
-    }
+    scoped.retain(|worktree| {
+        let listed = state.lists_worktree(worktree);
+        if !listed && in_scope(worktree) {
+            review_hidden += 1;
+        }
+        listed
+    });
     let mut glyphs = repos_rail::RepoGlyphs::default();
     for worktree in &scoped {
         let status = index.status(&worktree.id);

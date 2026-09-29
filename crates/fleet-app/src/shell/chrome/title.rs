@@ -213,10 +213,7 @@ fn hub_place(state: &AppState, section: HubTab, reviews: usize) -> HubPlace {
         .worktrees
         .iter()
         .filter(|worktree| in_context(&worktree.repo_id))
-        .filter(|worktree| {
-            state.show_review_worktrees
-                || fleet_core::github::pull_request_checkout(worktree).is_none()
-        })
+        .filter(|worktree| state.lists_worktree(worktree))
         .count();
     let summary = context_board_summary(&snapshot.boards, state.active_context());
     HubPlace {

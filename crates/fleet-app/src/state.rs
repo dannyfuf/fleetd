@@ -11,8 +11,9 @@ use fleet_core::{
     agents::AttentionKind,
     board::BackendDescriptor,
     config::{Agent, NotificationsConfig},
-    github::PrTab,
+    github::{PrTab, pull_request_checkout},
     ids::{ContextId, HostId, JobId, RepoId, SessionId, TerminalId, WorktreeId},
+    model::Worktree,
     sessions::{AgentActivity, Session, SessionKind, aggregate_agent_activity},
 };
 use fleet_proto::{
@@ -392,6 +393,14 @@ impl AppState {
     #[must_use]
     pub fn detail_visible(&self, wide: bool) -> bool {
         self.detail_open.unwrap_or(wide)
+    }
+
+    /// Whether the Hub's Worktrees list shows `worktree` (UX-SPEC §3.3): every worktree while
+    /// review worktrees are shown, otherwise every worktree but a pull-request checkout. The
+    /// projection and the title bar's count both ask this, so they leave out the same set.
+    #[must_use]
+    pub(crate) fn lists_worktree(&self, worktree: &Worktree) -> bool {
+        self.show_review_worktrees || pull_request_checkout(worktree).is_none()
     }
 
     /// Whether the connected daemon serves Reviews boards (`board.reviews`, from Hello).
