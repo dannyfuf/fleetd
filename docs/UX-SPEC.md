@@ -548,7 +548,8 @@ A scope left with no rows keeps the review row selected for when they come back.
 
 **Intentionally omitted:** `WorktreeId` (never typed in the GUI), `path` (`y` copies it, detail
 shows it), `baseRef` (a `pull/<n>/head` base shows only as the `review` badge), session name
-string, window names, `behind`, `uniqueCommits`, `published`, `mergedIntoTarget`, absolute timestamps, PR title, PR author, additions/deletions.
+string, window names, `behind`, `uniqueCommits`, `published`, `mergedIntoTarget`, absolute
+timestamps, PR title, PR author, additions/deletions.
 Every one of them appears in the detail panel or in the delete/prune confirm — i.e. exactly where
 it changes a decision.
 
