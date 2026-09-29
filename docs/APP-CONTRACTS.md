@@ -544,7 +544,7 @@ is the single source of truth on the client. The parts a screen touches:
 | `snapshot: Option<Snapshot>` | the daemon's authoritative state; `None` until the first one lands |
 | `snapshot_at` / `snapshot_age(now)` | what the `Stale · <age>` chip ages (§1.3) |
 | `grids: HashMap<TerminalId, MirrorGrid>` | one mirror grid per terminal, diffs already applied |
-| `displayed_hub: DisplayedHub` | stable IDs and rows from the Hub's current scoped/sorted/filtered projection, review worktrees left out while `show_review_worktrees` is off; `review_hidden` counts those left out of the repository scope |
+| `displayed_hub: DisplayedHub` | stable IDs and rows from the Hub's current scoped/sorted/filtered projection, review worktrees left out while `show_review_worktrees` is off; each row's `review` says it is a review worktree (the harness's `review` mark); `review_hidden` counts the review worktrees inside the repository scope that the list leaves out (0 while they are shown), the harness's `lists.worktrees.hidden` |
 | `board: BoardState` | active context’s `BoardView`, loading/error, `BoardFocus { column, row }`, filter and optional `GroupBy` |
 | `board_stale: bool` | authoritative refresh pending; lives outside the frozen `BoardState` fields |
 | `board_backends: Vec<BackendDescriptor>` | the daemon's backend registry, fetched once per connection; the header label and the settings dialog's rows are drawn from it |

@@ -73,6 +73,10 @@ pub struct ListSnapshot {
     pub rows: Vec<RowSnapshot>,
     pub selected: Option<RowSnapshot>,
     pub filter: String,
+    /// Rows the list leaves out on purpose rather than through the filter: on `worktrees`, the
+    /// review worktrees it hides (UX-SPEC §3.3). Absent on every other list.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hidden: Option<usize>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RowSnapshot {

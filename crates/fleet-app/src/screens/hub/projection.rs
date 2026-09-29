@@ -100,6 +100,7 @@ impl HubModel {
                 .map(|row| crate::presentation::DisplayedWorktree {
                     id: row.id.clone(),
                     repo: row.repo.clone(),
+                    review: row.review.is_some(),
                 })
                 .collect(),
             worktree_total: self.worktree_total,
@@ -162,14 +163,19 @@ fn model(state: &AppState, hub: &HubState, now: i64) -> HubModel {
             })
         })
         .collect();
+    let in_scope = |worktree: &&Worktree| match &state.scope {
+        RepoScope::All => true,
+        RepoScope::Repo(repo) => &worktree.repo_id == repo,
+    };
     // Hidden review worktrees leave the slice before anything is derived from it, so the rows,
-    // the subtitle, the rail's counts, glyphs and issue chips all agree (§3.2, §3.3).
-    let mut reviews: Vec<&Worktree> = Vec::new();
+    // the subtitle, the rail's counts, glyphs and issue chips all agree (§3.2, §3.3). Only how
+    // many sit in the repository scope is kept, for the subtitle and the empty page.
+    let mut review_hidden = 0;
     if !state.show_review_worktrees {
         scoped.retain(|worktree| {
             let review = pull_request_checkout(worktree).is_some();
-            if review {
-                reviews.push(worktree);
+            if review && in_scope(worktree) {
+                review_hidden += 1;
             }
             !review
         });
@@ -219,13 +225,8 @@ fn model(state: &AppState, hub: &HubState, now: i64) -> HubModel {
     } else {
         ""
     };
-    let in_scope = |worktree: &&Worktree| match &state.scope {
-        RepoScope::All => true,
-        RepoScope::Repo(repo) => &worktree.repo_id == repo,
-    };
     scoped.retain(in_scope);
     let worktree_total = scoped.len();
-    let review_hidden = reviews.iter().filter(|worktree| in_scope(worktree)).count();
     let (worktrees, worktree_summary, worktree_reviews) = if matches!(
         state.screen,
         Screen::Hub {

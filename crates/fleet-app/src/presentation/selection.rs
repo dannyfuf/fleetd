@@ -34,6 +34,9 @@ pub enum DisplayedRepoKind {
 pub struct DisplayedWorktree {
     pub id: WorktreeId,
     pub repo: RepoId,
+    /// Whether the row is a review worktree (a pull request's own checkout), which the list
+    /// marks with its `review` badge (UX-SPEC §3.3).
+    pub review: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

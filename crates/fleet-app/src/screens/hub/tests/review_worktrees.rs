@@ -109,6 +109,17 @@ fn hidden_review_worktrees_leave_the_rows_the_rail_counts_and_the_filter_total()
     assert_eq!(rail_count(&shown, Some("acme/api")), Some(3));
     state.displayed_hub = shown.displayed();
     assert_eq!(crate::presentation::filter_counts(&state), (3, 3));
+    assert_eq!(
+        state
+            .displayed_hub
+            .worktrees
+            .iter()
+            .filter(|row| row.review)
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        ["acme/api#pr-7"],
+        "the harness's `review` mark reads the same row the badge is drawn from"
+    );
 
     state.show_review_worktrees = false;
     let hidden_again = projection::prepare(&state, &hub, 1_788_523_203);

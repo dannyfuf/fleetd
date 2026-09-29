@@ -287,9 +287,12 @@ filtered set. Thus `jobs.row[N]` and `lists.jobs.rows[N]` address the same job.
 worktree id (`owner/name#slug`), its `label` the slug and its one badge the branch. Its `marks`
 are, in this order, `degraded` (a post-create hook failed), `remote` (the worktree lives on
 another host) and the additive `review` (a review worktree: its base ref is `pull/<n>/head`, a
-pull request's checkout). While review worktrees are hidden, which is the default (UX-SPEC §3.3),
-they are absent from the rows rather than present and unmarked; `v` or `worktrees.reviews` puts
-them back.
+pull request's checkout; the mark is read from the displayed row the list draws its `review`
+badge from). While review worktrees are hidden, which is the default (UX-SPEC §3.3), they are
+absent from the rows rather than present and unmarked; `v` or `worktrees.reviews` puts them back.
+The additive `lists.worktrees.hidden` is how many review worktrees in the repository scope the
+list leaves out — the subtitle's `<k> review worktrees hidden` — and `0` while they are shown; no
+other list carries `hidden`.
 
 The snapshot is memoised behind a key naming every input its builder reads, and its revision moves
 only when the projected content actually differs — a repainted frame that changes nothing does not
@@ -341,7 +344,8 @@ The Worktrees page's header paints `worktrees.filter` (the idle filter field; wh
 being edited the same box is `filter.input`), `worktrees.clone` and `worktrees.new` (the primary
 *New worktree*). While the scope holds a review worktree, the subtitle also paints
 `worktrees.reviews` after its words: the `<k> review worktrees hidden` (or, while shown,
-`<k> review worktrees`) button that runs the same toggle as `v`. A row's hover actions, `worktrees.row[N].open` (*Open*) and
+`<k> review worktrees`) button that runs the same toggle as `v`, one caption line tall. A row's
+hover actions, `worktrees.row[N].open` (*Open*) and
 `worktrees.row[N].menu` (the `⋯` trigger), are drawn only while that row is hovered or selected,
 so a scenario clicks the row first; `worktrees.row[N].log` is the *View log* button of a row whose
 hooks failed. Right-clicking `worktrees.row[N]` opens the same menu at the pointer. The detail
@@ -573,8 +577,8 @@ Fixture presets are `empty` (first run), `one-repo` (one clean repository and wo
 (several repositories, worktrees and pull requests, one worktree degraded, and one review
 worktree, `acme/api#banner`, checked out from `acme/api#21` through `CreateWorktreeFromPr` from
 the `refs/pull/21/head` its origin carries, so the Worktrees list hides it by default), `board`
-(two boards with cards, plus fake `acli`), and `agents` (native-agent configuration plus scripted transcripts). Each gets a
-private `FLEET_HOME`, child-only `HOME`, real local Git repositories, and fake `gh`/`acli`; it
+(two boards with cards, plus fake `acli`), and `agents` (native-agent configuration plus
+scripted transcripts). Each gets a private `FLEET_HOME`, child-only `HOME`, real local Git repositories, and fake `gh`/`acli`; it
 never reads the developer's Fleet home. Every child also starts with the variables an *outer*
 fleetd exports — `FLEET_DELEGATION`, `FLEET_DELEGATION_TOKEN`, `FLEET_SESSION`, `FLEET_TERMINAL`,
 `FLEET_TERMINAL_ID` and `FLEET_STATUS_PATH` — cleared, so a run launched from a Fleet terminal or
@@ -774,8 +778,10 @@ row; `board/schedules-section` opens Board settings on the Reviews board, goes t
 `n` and asserts the starter's name and prompt in the form (with one `shot`). They read the board's
 existing targets.
 `hub/review-worktrees` pins the hidden-by-default review worktree (UX-SPEC §3.3): `busy`'s
-four worktrees of its own are listed and none is marked `review`, the filter does not bring the
-review back, `v` adds it as the first row marked `review`, and `v` again removes it.
+four worktrees of its own are listed, none is marked `review` and `lists.worktrees.hidden` is 1,
+the filter does not bring the review back, `v` adds it as the first row marked `review` with the
+cursor still on `spike`, and a click on `worktrees.reviews` removes it again.
+`hub/worktrees-pointer` also pins that the subtitle's review button is one caption line tall.
 The configuration dialogs' scenarios pin the shared settings shell (UX-SPEC §3.8.6). A click on
 a row only moves the cursor, so `hub/settings` opens an editor with `key enter` after the click
 (a pointer journey clicks `settings.box` instead), and closing a dirty draft takes two `key

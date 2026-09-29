@@ -229,6 +229,7 @@ fn displayed_worktrees(count: usize) -> Vec<crate::presentation::DisplayedWorktr
             repo: "acme/widgets"
                 .parse()
                 .unwrap_or_else(|error| panic!("{error}")),
+            review: false,
         })
         .collect()
 }

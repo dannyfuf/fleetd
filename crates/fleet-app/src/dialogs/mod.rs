@@ -427,6 +427,7 @@ mod tests {
         state.displayed_hub.worktrees = vec![crate::presentation::DisplayedWorktree {
             id: "acme/api#newest".parse().expect("worktree id"),
             repo: "acme/api".parse().expect("repo id"),
+            review: false,
         }];
         state.cursors.worktrees = 0;
 

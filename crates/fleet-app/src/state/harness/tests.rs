@@ -95,6 +95,7 @@ fn populated_state_projects_every_collection() {
     state.displayed_hub.worktrees = vec![crate::presentation::DisplayedWorktree {
         id: worktree,
         repo: "acme/api".parse().unwrap_or_else(|error| panic!("{error}")),
+        review: false,
     }];
     state.toast(
         Toast::new("cloned").icon(Icon::Info),
@@ -144,18 +145,32 @@ fn a_pull_request_checkout_row_carries_the_review_mark() {
         .map(|worktree| crate::presentation::DisplayedWorktree {
             id: worktree.id.clone(),
             repo: worktree.repo_id.clone(),
+            // The Hub sets this from the row the `review` badge is drawn from.
+            review: worktree.base_ref.starts_with("pull/"),
         })
         .collect();
     snapshot.worktrees.extend([review, own]);
     state.apply_snapshot(snapshot, now);
     state.displayed_hub.worktrees = displayed;
+    state.displayed_hub.review_hidden = 2;
 
     let dump = state.harness_projection().snapshot;
-    let rows = &dump.lists.get("worktrees").expect("worktrees list").rows;
+    let list = dump.lists.get("worktrees").expect("worktrees list");
+    let rows = &list.rows;
     assert_eq!(rows[0].label, "banner");
     assert_eq!(rows[0].marks, vec!["review".to_owned()]);
     assert_eq!(rows[1].label, "login");
     assert!(rows[1].marks.is_empty(), "an ordinary base is no review");
+    assert_eq!(
+        list.hidden,
+        Some(2),
+        "the list says how many review worktrees it hides"
+    );
+    assert_eq!(
+        dump.lists.get("repos").map(|list| list.hidden),
+        Some(None),
+        "only the worktrees list reports a hidden count"
+    );
 }
 
 #[test]

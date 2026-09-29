@@ -5,19 +5,22 @@
 # The `busy` preset checks `acme/api#21` out as `acme/api#banner` through `CreateWorktreeFromPr`,
 # so the daemon itself writes its `pull/21/head` base; it is created last and so is the newest
 # worktree, which puts it first in the sort once it is shown. The oracle is the row count, the
-# `review` mark and the branch badge: hidden, the list is busy's four worktrees of its own and
-# none is marked; shown, a fifth row carries both. `focused` pins that showing a row above the
-# cursor keeps the cursor on the same worktree rather than the same index (§3.3 Cursor stability).
-# The filter narrows only the visible list, so typing the review's branch finds nothing while it
-# is hidden. A headless `await` does not repaint (§11), so the target is read with `assert`.
+# `review` mark, the branch badge and the list's `hidden` count: hidden, the list is busy's four
+# worktrees of its own, none is marked and one is counted hidden; shown, a fifth row carries both
+# and nothing is hidden. `focused` pins that showing a row above the cursor keeps the cursor on
+# the same worktree rather than the same index (§3.3 Cursor stability). The filter narrows only
+# the visible list, so typing the review's branch finds nothing while it is hidden. The key shows
+# the review and the subtitle's button hides it again, so both ways to the toggle are pinned. A
+# headless `await` does not repaint (§11), so the target is read with `assert`.
 #
 # No `shot`: this is a keyboard scenario, so it belongs in the headless subset too (§7).
 fixture: busy
 await idle 30000
 assert screen == Hub && hub_pane == List && hub_tab == Worktrees && focused == worktrees.row[0]
-assert lists.worktrees.rows[3] exists && lists.worktrees.rows[4] absent
+assert lists.worktrees.rows[3] exists && lists.worktrees.rows[4] absent && lists.worktrees.hidden == 1
 assert lists.worktrees.rows[0].label == spike && lists.worktrees.rows[0].marks[0] absent
-assert lists.worktrees.rows[1].marks[0] == degraded && lists.worktrees.rows[2].marks[0] absent && lists.worktrees.rows[3].marks[0] absent
+assert lists.worktrees.rows[1].marks[0] == degraded && lists.worktrees.rows[1].marks[1] absent
+assert lists.worktrees.rows[2].marks[0] absent && lists.worktrees.rows[3].marks[0] absent
 assert targets["worktrees.reviews"] exists
 
 # The filter does not bring a hidden review worktree back.
@@ -35,13 +38,15 @@ key v
 await lists.worktrees.rows[4] exists
 assert lists.worktrees.rows[0].label == banner && lists.worktrees.rows[0].badges[0] == banner
 assert lists.worktrees.rows[0].marks[0] == review && lists.worktrees.rows[0].id == "acme/api#banner"
+assert lists.worktrees.hidden == 0
 assert focused == worktrees.row[1] && lists.worktrees.selected.label == spike
 assert targets["worktrees.reviews"] exists
 dump shown
 
-# `v` again hides it, and the cursor stays on the worktree it was on.
-key v
+# The subtitle's button hides it again, as `v` would, and the cursor stays on its worktree.
+click worktrees.reviews
 await lists.worktrees.rows[4] absent
 assert lists.worktrees.rows[0].label == spike && focused == worktrees.row[0]
+assert lists.worktrees.hidden == 1
 dump hidden
 quit
