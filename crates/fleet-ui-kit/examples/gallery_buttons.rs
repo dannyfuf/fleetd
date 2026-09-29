@@ -91,7 +91,13 @@ const STYLES: [(&str, ButtonStyle); 5] = [
 fn styles_section(cx: &App) -> AnyElement {
     let t = cx.theme();
     let mut children = Vec::new();
-    for (size_name, size) in [("", ButtonSize::Default), (" compact", ButtonSize::Compact)] {
+    // Inline draws every style too; its `face` sample keeps the key in the tooltip, since a chip
+    // is taller than the caption line.
+    for (size_name, size) in [
+        ("", ButtonSize::Default),
+        (" compact", ButtonSize::Compact),
+        (" inline", ButtonSize::Inline),
+    ] {
         for (name, style) in STYLES {
             let id = |slot: &'static str| SharedString::from(format!("{name}{size_name}-{slot}"));
             let action: Box<dyn Action> = match style {
@@ -173,6 +179,11 @@ fn states_section(pinned: bool, cx: &mut Context<ButtonsGallery>) -> AnyElement 
                     Button::new("ghost-off", "Everyone")
                         .style(ButtonStyle::Ghost)
                         .selected(false)
+                        .into_any_element(),
+                    Button::new("ghost-inline-on", "2 review worktrees")
+                        .style(ButtonStyle::Ghost)
+                        .size(ButtonSize::Inline)
+                        .selected(true)
                         .into_any_element(),
                 ],
             ),
@@ -300,6 +311,11 @@ fn icon_buttons_section(cx: &App) -> AnyElement {
     let children = vec![
         LAYOUT.labeled("default · hover me", t, row(ButtonSize::Default, "icon")),
         LAYOUT.labeled("compact", t, row(ButtonSize::Compact, "icon-compact")),
+        LAYOUT.labeled(
+            "inline · one caption line",
+            t,
+            row(ButtonSize::Inline, "icon-inline"),
+        ),
     ];
     LAYOUT.section("icon button · tooltip carries label and key", t, children)
 }

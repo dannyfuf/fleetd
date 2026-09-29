@@ -2267,7 +2267,10 @@ compact). With `.show_kbd()`, `[icon] label [Kbd]`: the chip `kbd_h` (`kbd_h_sma
 toned for the fill. `ButtonSize::Inline` is a button inside a line of caption text (a
 `PageHeader`'s summary): one `caption` line tall, `xxs` side padding, no hairline, the label in
 `Caption` and ellipsized, and it shrinks (`min_w_0`) instead of holding its width, so it never
-makes its line taller or pushes the words beside it out.
+makes its line taller or pushes the words beside it out. An inline button keeps its key in the
+tooltip even with `.show_kbd()` (a chip is taller than the line). Only `Button` and `IconButton`
+draw `Inline`; `StatusButton` and `SwitcherButton` draw it as `Compact`, since their labels are
+body text.
 **API.** `Button::new(id, label)` then `.style(ButtonStyle::{Primary, Secondary, Ghost, Danger, GhostDanger})
 .size(ButtonSize::{Default, Compact, Inline}) .icon(Icon) .dot(Hsla) .kbd(Kbd) .action(Box<dyn Action>) .prefer_key(keys) .key_of(Box<dyn Action>)
 .on_click(Fn(&ClickEvent, &mut Window, &mut App)) .disabled(bool) .selected(bool) .full_width()
@@ -2326,7 +2329,8 @@ opens; each choice's key is on its menu row, not on the switcher.
 
 #### `IconButton`
 **Purpose.** A square, glyph-only button for dense headers and toolbars.
-**Anatomy.** `button_h` (or `button_h_compact`) square, the glyph centred, `Ghost` by default.
+**Anatomy.** `button_h` (or `button_h_compact`, or one `caption` line for `Inline`) square, the
+glyph centred (12 px compact and inline), `Ghost` by default.
 **API.** `IconButton::new(id, Icon, label)` then the same `.style .size .kbd .action .on_click
 .disabled .selected` as `Button`.
 **States.** as `Button`.

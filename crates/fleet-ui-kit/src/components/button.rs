@@ -75,7 +75,23 @@ pub enum ButtonSize {
     /// of caption text, such as a page header's summary (`2 review worktrees hidden`). The label
     /// is drawn in the caption role and ellipsizes, so the button shrinks when its line runs out
     /// of room instead of growing the line or pushing the words beside it out.
+    ///
+    /// A labelled [`Button`] and an [`IconButton`] (a caption-line square with a small glyph) draw
+    /// it. An inline `Button` keeps its key in the tooltip even with [`Button::show_kbd`], because
+    /// a chip is taller than the line. A [`StatusButton`] or [`SwitcherButton`] given it draws
+    /// [`ButtonSize::Compact`]: their labels are body text, which no caption line can hold.
     Inline,
+}
+
+impl ButtonSize {
+    /// This size for a button whose label cannot sit in a caption line: `Inline` becomes
+    /// `Compact`, every other size stays.
+    const fn outside_a_line(self) -> Self {
+        match self {
+            Self::Inline => Self::Compact,
+            other => other,
+        }
+    }
 }
 
 type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
@@ -393,7 +409,8 @@ impl RenderOnce for Button {
             ButtonSize::Compact => (KbdSize::Small, IconSize::Small, theme.space.sm),
             ButtonSize::Inline => (KbdSize::Small, IconSize::Small, theme.space.xxs),
         };
-        let show_kbd = self.show_kbd;
+        // A chip is taller than a caption line, so an inline button keeps its key in the tooltip.
+        let show_kbd = self.show_kbd && !inline;
         let chip = kbd
             .clone()
             .filter(|_| show_kbd)
@@ -561,6 +578,7 @@ impl StatusButton {
 
 impl RenderOnce for StatusButton {
     fn render(mut self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        self.base.size = self.base.size.outside_a_line();
         let kbd = self.base.resolve_kbd(window, cx);
         let theme = cx.theme();
         let paint = self.base.paint(theme);
@@ -661,6 +679,7 @@ fn monogram_of(label: &str) -> Option<SharedString> {
 
 impl RenderOnce for SwitcherButton {
     fn render(mut self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        self.base.size = self.base.size.outside_a_line();
         let kbd = self.base.resolve_kbd(window, cx);
         let theme = cx.theme();
         let paint = self.base.paint(theme);
@@ -714,6 +733,13 @@ mod tests {
     use super::*;
 
     gpui::actions!(button_test, [Fire, Unbound]);
+
+    #[test]
+    fn a_status_or_switcher_button_draws_inline_as_compact() {
+        assert_eq!(ButtonSize::Inline.outside_a_line(), ButtonSize::Compact);
+        assert_eq!(ButtonSize::Compact.outside_a_line(), ButtonSize::Compact);
+        assert_eq!(ButtonSize::Default.outside_a_line(), ButtonSize::Default);
+    }
 
     struct Host {
         focus: FocusHandle,
