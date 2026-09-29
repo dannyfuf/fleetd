@@ -718,7 +718,8 @@ log`, `Run doctor` and `Quit`; case C's `Reconnect now`, `Open log` and ✕; the
 again`, `Open log` and `Close`. Each dispatches the same action its key does.
 
 Case A (cold start) binds nothing: fleetd is auto-spawned. While disconnected, read-only keys
-(`j` / `k`, `y`, `b`, `/`, `i`, `:`) keep working; mutating keys flash the banner. Keys typed
+(`j` / `k`, `y`, `b`, `/`, `i`, `:`, and `v` in the Worktrees pane, a local view flag) keep
+working; mutating keys flash the banner. Keys typed
 into a veiled terminal grid are dropped, not buffered.
 
 ## First run (`FirstRun` context)

@@ -105,6 +105,7 @@ rejected: there is no intermediate state worth shipping on its own.
 - `crates/fleet-app/src/presentation/` (`DisplayedHub`) and `crates/fleet-app/src/state/harness/projection.rs` — harness dump.
 - `crates/fleet-harness/src/fixture/plan.rs`, `fixture/seed.rs`, `scenarios/hub/` — fixture and scenario.
 - `docs/UX-SPEC.md` §3.3 (and §2.2 / §3.2 where the counts are described), `docs/KEYMAP.md`, `docs/TESTING-HARNESS.md`, `docs/BOARD.md` (one sentence where review worktrees are introduced).
+- Added during T07 (tracker T08, T09): `crates/fleet-ui-kit/src/components/button.rs` (`ButtonSize::Inline`), `crates/fleet-ui-kit/src/components/page_header.rs` (`PageHeader::yielding_fact`), `crates/fleet-ui-kit/examples/{gallery_buttons,kit_gallery}.rs`, `docs/DESIGN-SYSTEM.md` §6; `crates/fleet-app/src/screens/hub/composition.rs` and `views/detail/repo.rs` (the repository detail's counts, UX-SPEC §3.4); `crates/fleet-app/src/dialogs/palette/` (`Command::ToggleReviewWorktrees`).
 
 ## Tasks
 

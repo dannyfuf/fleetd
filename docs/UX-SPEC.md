@@ -558,7 +558,7 @@ it changes a decision.
 | State | Rendering |
 | --- | --- |
 | Empty | `No worktrees yet` / `No worktrees for <repo> yet` over a primary `New worktree  n` button |
-| Only hidden reviews | every worktree in scope is a hidden review worktree: the subtitle reads `No worktrees of your own yet · <k> review worktrees hidden`, and the page says `No worktrees of your own yet · <k> review worktrees hidden` over a `Show review worktrees` button (`worktrees.empty.reviews`) that runs the same toggle as `v`; the header keeps `New worktree` |
+| Only hidden reviews | every worktree in scope is a hidden review worktree: the subtitle reads `No worktrees of your own yet · <k> review worktrees hidden`, and the page says `No worktrees of your own yet · <k> review worktrees hidden` over a `Show review worktrees  v` button (`worktrees.empty.reviews`) that runs the same toggle as `v`; the header keeps `New worktree` |
 | Review worktrees shown | each review row carries the muted `review` badge, and the subtitle's button reads `· <k> review worktrees` and hides them again |
 | No repositories | `No repositories yet — clone one to start a worktree` over a primary `Clone repo` button; the header offers no `New worktree` |
 | Filter-empty | `Nothing matches "<filter>".` over a `Clear filter  esc` button (§3.10) |
@@ -2209,7 +2209,7 @@ no control to put it in (the terminal exit strip).
 | No repos | `No repos in <context>.` | `Clone repo  n` button |
 | No worktrees | `No worktrees yet` | primary `New worktree  n` button |
 | No worktrees for a repo | `No worktrees for <repo> yet` | primary `New worktree  n` button |
-| Only hidden review worktrees | `No worktrees of your own yet · <k> review worktrees hidden` | `Show review worktrees` button, which runs the toggle `v` runs (§3.3); `New worktree` stays in the header |
+| Only hidden review worktrees | `No worktrees of your own yet · <k> review worktrees hidden` | `Show review worktrees  v` button, which runs the toggle `v` runs (§3.3); `New worktree` stays in the header |
 | Filter miss | `Nothing matches "<filter>".` | `Clear filter  esc` button |
 | PR mine | `No open PRs authored by you in <scope>.` | `Refresh  r` button |
 | PR review (Reviews board) | `No reviews yet.` | `⏎ add the GitHub review schedule`, a button (ADR 0023) — only while the board has no schedule and the daemon advertises `schedules`; `Enter` or a click opens Board settings on Schedules with the starter draft |
@@ -2292,7 +2292,8 @@ Median for the four highest-frequency tasks (open, switch session, switch tab, c
    every confirm quotes its stamp inline.
 6. No surface auto-hides a failure. The one deliberate exception is a review worktree while the
    Worktrees list hides review worktrees (§3.3): a failed hook or an unreachable host on it lights
-   no rail glyph or issue chip until `v` shows review worktrees again.
+   no rail glyph or issue chip and is not in the subtitle's `needs attention` count until `v`
+   shows review worktrees again; the subtitle's `<k> review worktrees hidden` still counts it.
 7. No bare-key affordance is drawn over a terminal (§3.6, D-8): every Workspace key chip carries
    its `⌃S` prefix, except inside the ⌃S command menu, where the prefix is already held.
 8. Every action valid on a surface has a visible control there, and every control shows its key

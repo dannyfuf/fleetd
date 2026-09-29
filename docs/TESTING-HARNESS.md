@@ -205,7 +205,7 @@ The snapshot is built from update-path state and memoised per revision. Render n
 | `overlay` | `Filter`, `Palette`, `Jobs`, `Dialog`, or null |
 | `key_contexts` | live outer-to-inner stack using the exact words in `KEYMAP.md`; `Fleet` may be implicit at the root |
 | `focused` | stable focus-owner target name or null |
-| `lists` | map name → `{rows:[row],selected:row|null,filter:string}` |
+| `lists` | map name → `{rows:[row],selected:row|null,filter:string,hidden?:int}`; `hidden` is additive and present only on `worktrees` (below) |
 | row | `{id:string,label:string,badges:[string],marks:[string]}` |
 | `dialog` | `{name,fields:[{name,value,focused}],buttons:[string],message:string|null}` or null; `message` carries the Confirm dialog's consequence sentence — the one line §3.8.3 has the user accept, including the two cancel cards' own — and is `null` over every other dialog, whose body is elements rather than a sentence |
 | `toasts` | `[{level,text,count}]`; levels use the UX vocabulary `info`, `success`, `warning`, `error` |
@@ -292,7 +292,7 @@ badge from). While review worktrees are hidden, which is the default (UX-SPEC §
 absent from the rows rather than present and unmarked; `v` or `worktrees.reviews` puts them back.
 The additive `lists.worktrees.hidden` is how many review worktrees in the repository scope the
 list leaves out — the subtitle's `<k> review worktrees hidden` — and `0` while they are shown; no
-other list carries `hidden`.
+other list carries the `hidden` field (the palette's `hidden` is a row mark, not this count).
 
 The snapshot is memoised behind a key naming every input its builder reads, and its revision moves
 only when the projected content actually differs — a repainted frame that changes nothing does not
