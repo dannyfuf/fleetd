@@ -3,15 +3,19 @@
 //!
 //! ```text
 //! Worktrees                                  [⩸ Filter  /] [Clone repo] [+ New worktree n]
-//! 4 across 2 repositories · 1 needs attention
+//! 4 across 2 repositories · 1 needs attention · 1 review worktree hidden
 //! ```
 //!
 //! The title is the page's name in `page_title`; the subtitle is a sentence the view model
 //! already built (counts, scope), never assembled here. The toolbar holds the page's own
 //! controls — a [`super::FilterField`], secondary [`super::Button`]s and at most one primary
-//! one — right-aligned to the title's baseline. A frozen snapshot adds an amber
-//! an amber `Stale · <age>` chip after the subtitle (§1.3), the same chip a [`super::PaneHeader`]
-//! carries.
+//! one — right-aligned to the title's baseline.
+//!
+//! The summary line reads, left to right: the subtitle, the yielding facts
+//! ([`PageHeader::yielding_fact`]), the facts ([`PageHeader::fact`]), and last, on a frozen
+//! snapshot, an amber `Stale · <age>` chip (§1.3), the same chip a [`super::PaneHeader`]
+//! carries. When the line runs out of room the yielding facts give way first; only then does the
+//! subtitle ellipsize. Facts and the stale chip never shrink.
 //!
 //! Not a [`super::PaneHeader`]: that is the 30 px label row of a dense pane. Not a
 //! [`super::SectionHeader`], which names a block inside a panel.
@@ -28,6 +32,7 @@ pub struct PageHeader {
     subtitle: Option<SharedString>,
     stale: Option<SharedString>,
     badge: Option<AnyElement>,
+    yielding: Vec<AnyElement>,
     facts: Vec<AnyElement>,
     actions: Vec<AnyElement>,
 }
@@ -40,6 +45,7 @@ impl PageHeader {
             subtitle: None,
             stale: None,
             badge: None,
+            yielding: Vec::new(),
             facts: Vec::new(),
             actions: Vec::new(),
         }
@@ -64,9 +70,20 @@ impl PageHeader {
     }
 
     /// Append an element to the summary line, after the subtitle: a clickable `1 needs you`,
-    /// a counter chip, a spinner. The words are still the caller's; this is where they sit.
+    /// a counter chip, a spinner. The words are still the caller's; this is where they sit. A
+    /// fact keeps its width; use [`Self::yielding_fact`] for one that may give way.
     pub fn fact(mut self, fact: impl IntoElement) -> Self {
         self.facts.push(fact.into_any_element());
+        self
+    }
+
+    /// Append a secondary note right after the subtitle that gives way first when the line runs
+    /// out of room: `·` then `2 review worktrees hidden`. The yielding facts share one run that
+    /// shrinks to nothing, clipping at its end, before the subtitle loses a letter, so the page's
+    /// own summary always reads whole; a shrinkable element in it (an inline [`super::Button`],
+    /// an ellipsized `Text`) gives way first. A note the user must not miss is a [`Self::fact`].
+    pub fn yielding_fact(mut self, fact: impl IntoElement) -> Self {
+        self.yielding.push(fact.into_any_element());
         self
     }
 
@@ -80,25 +97,52 @@ impl PageHeader {
 impl RenderOnce for PageHeader {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
-        let summary = (self.subtitle.is_some() || self.stale.is_some() || !self.facts.is_empty())
-            .then(|| {
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(theme.space.xs)
-                    .min_w_0()
-                    .children(
-                        self.subtitle
-                            .map(|subtitle| Text::caption(subtitle).muted().ellipsize()),
+        let has_summary = self.subtitle.is_some()
+            || self.stale.is_some()
+            || !self.facts.is_empty()
+            || !self.yielding.is_empty();
+        let summary = has_summary.then(|| {
+            // The subtitle and its yielding facts share one shrinkable run: inside it the
+            // subtitle never shrinks but is capped at the run's width (so it still ellipsizes
+            // once the yielding facts are gone), and the yielding facts take every lost pixel.
+            let lead = div()
+                .flex()
+                .items_center()
+                .gap(theme.space.xs)
+                .min_w_0()
+                .overflow_hidden()
+                .children(self.subtitle.map(|subtitle| {
+                    div()
+                        .flex()
+                        .flex_shrink_0()
+                        .max_w_full()
+                        .child(Text::caption(subtitle).muted().ellipsize())
+                }))
+                .when(!self.yielding.is_empty(), |lead| {
+                    lead.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(theme.space.xs)
+                            .min_w_0()
+                            .overflow_hidden()
+                            .children(self.yielding),
                     )
-                    .children(self.stale.map(|age| {
-                        Chip::new()
-                            .text(format!("Stale \u{b7} {age}"))
-                            .tone(Tone::Warning)
-                            .filled(true)
-                    }))
-                    .children(self.facts)
-            });
+                });
+            div()
+                .flex()
+                .items_center()
+                .gap(theme.space.xs)
+                .min_w_0()
+                .child(lead)
+                .children(self.facts)
+                .children(self.stale.map(|age| {
+                    Chip::new()
+                        .text(format!("Stale \u{b7} {age}"))
+                        .tone(Tone::Warning)
+                        .filled(true)
+                }))
+        });
         div()
             .flex()
             .items_end()

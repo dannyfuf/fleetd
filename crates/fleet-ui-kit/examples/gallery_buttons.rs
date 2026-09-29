@@ -217,6 +217,39 @@ fn states_section(pinned: bool, cx: &mut Context<ButtonsGallery>) -> AnyElement 
                 .tooltip("A value with a colour of its own: a card's status"),
         ),
         LAYOUT.labeled(
+            "inline · in a caption line, and squeezed",
+            &t,
+            strip(
+                &t,
+                vec![
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(t.space.xs)
+                        .child(Text::caption("4 across 2 repositories").muted())
+                        .child(Text::caption("\u{b7}").faint())
+                        .child(
+                            Button::new("inline", "2 review worktrees hidden")
+                                .style(ButtonStyle::Ghost)
+                                .size(ButtonSize::Inline)
+                                .action(Box::new(Filter))
+                                .tooltip("Show review worktrees"),
+                        )
+                        .into_any_element(),
+                    // Narrower than its label: the label ellipsizes, the line keeps its height.
+                    div()
+                        .flex()
+                        .w(px(96.0))
+                        .child(
+                            Button::new("inline-squeezed", "2 review worktrees hidden")
+                                .style(ButtonStyle::Ghost)
+                                .size(ButtonSize::Inline),
+                        )
+                        .into_any_element(),
+                ],
+            ),
+        ),
+        LAYOUT.labeled(
             "full width",
             &t,
             div().w(px(360.0)).child(

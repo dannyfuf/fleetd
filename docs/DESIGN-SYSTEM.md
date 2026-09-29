@@ -705,13 +705,18 @@ the whole mirror is frozen, and a second one on the rail says nothing new.
 **Purpose.** The top of a Hub page: an H1 in `page_title`, one summary line under it, and the
 page's toolbar right-aligned to the title's baseline.
 **API.** `PageHeader::new(title).badge(impl IntoElement).subtitle(text).stale(age)
-.fact(impl IntoElement).action(impl IntoElement)`; `fact` and `action` append. The badge sits after
-the title on its line (a board's prefix); facts follow the subtitle on the summary line (the
-board's clickable `1 needs you`, its dirty and conflict counters, a spinner).
-**Variants.** normal · stale (an amber `Stale · 2m` chip after the subtitle) · with badge and facts
-(the board header).
+.yielding_fact(impl IntoElement).fact(impl IntoElement).action(impl IntoElement)`;
+`yielding_fact`, `fact` and `action` append. The badge sits after the title on its line (a
+board's prefix). The summary line reads: the subtitle, the yielding facts (the Worktrees page's
+`· 2 review worktrees hidden`, an `Inline` button), the facts (the board's clickable
+`1 needs you`, its dirty and conflict counters, a spinner), and a stale chip closes the line.
+**Variants.** normal · stale (an amber `Stale · 2m` chip at the end of the summary line) · with
+badge and facts (the board header) · with a yielding fact, whole and squeezed (the Worktrees page).
 **Usage rule.** The subtitle is a sentence the view model built in its update path
-(`4 across 2 repositories · 1 needs attention`); the header never counts anything. The toolbar
+(`4 across 2 repositories · 1 needs attention`); the header never counts anything. When the
+summary line runs out of room the yielding facts give way first, clipping to nothing, and only
+then does the subtitle ellipsize; facts and the stale chip never shrink. So a secondary note is a
+yielding fact and a note the user must not miss is a fact. The toolbar
 holds the page's own controls — a `FilterField`, secondary `Button`s, at most one primary
 `Button` — each showing its key. Not a `PaneHeader` (the dense 30 px pane label row) and not a
 `SectionHeader` (a block inside a panel).
@@ -2259,9 +2264,12 @@ longer uses it); `fleet_app::presentation::pretty_keys` re-exports it.
 **Anatomy.** `[icon] label`, `sm` apart, `md` side padding (`sm` compact), `button_h` (or
 `button_h_compact`) tall, `radii.control`, a hairline. Label in `UiStrong`; icon 14 px (12
 compact). With `.show_kbd()`, `[icon] label [Kbd]`: the chip `kbd_h` (`kbd_h_small` compact) and
-toned for the fill.
+toned for the fill. `ButtonSize::Inline` is a button inside a line of caption text (a
+`PageHeader`'s summary): one `caption` line tall, `xxs` side padding, no hairline, the label in
+`Caption` and ellipsized, and it shrinks (`min_w_0`) instead of holding its width, so it never
+makes its line taller or pushes the words beside it out.
 **API.** `Button::new(id, label)` then `.style(ButtonStyle::{Primary, Secondary, Ghost, Danger, GhostDanger})
-.size(ButtonSize::{Default, Compact}) .icon(Icon) .dot(Hsla) .kbd(Kbd) .action(Box<dyn Action>) .prefer_key(keys) .key_of(Box<dyn Action>)
+.size(ButtonSize::{Default, Compact, Inline}) .icon(Icon) .dot(Hsla) .kbd(Kbd) .action(Box<dyn Action>) .prefer_key(keys) .key_of(Box<dyn Action>)
 .on_click(Fn(&ClickEvent, &mut Window, &mut App)) .disabled(bool) .selected(bool) .full_width()
 .tooltip(text) .show_kbd()`. `.dot(color)` leads the label with a `dot_size_small` dot of a token colour —
 a value that has a colour of its own, such as the card detail's status button.
