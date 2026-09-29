@@ -136,6 +136,38 @@ fn the_context_bar_worktree_count_leaves_out_hidden_review_worktrees() {
     assert_eq!(count(&state), 3, "shown, it is counted again");
 }
 
+/// The context bar, the Worktrees subtitle and the rail's `All` row are three surfaces counted by
+/// two code paths (`hub_place` and the Hub projection); they must name one number either way.
+#[test]
+fn the_context_bar_subtitle_and_rail_count_the_same_worktrees_whether_reviews_are_hidden_or_shown()
+{
+    let mut state = two_context_state();
+    let snapshot = state
+        .snapshot
+        .as_mut()
+        .unwrap_or_else(|| panic!("the fixture has a snapshot"));
+    snapshot.worktrees[1].base_ref = "pull/7/head".to_owned();
+    let bar = |state: &AppState| match TitleModel::build(state).place {
+        Place::Hub(place) => place.worktrees,
+        place => panic!("the Hub draws the nav: {place:?}"),
+    };
+
+    for shown in [false, true] {
+        state.show_review_worktrees = shown;
+        let (subtitle, all) = crate::screens::hub::tests::listed_worktree_counts(&state);
+        assert_eq!(
+            bar(&state),
+            subtitle,
+            "context bar vs subtitle, shown: {shown}"
+        );
+        assert_eq!(
+            Some(subtitle),
+            all,
+            "subtitle vs the rail's All row, shown: {shown}"
+        );
+    }
+}
+
 #[test]
 fn an_empty_first_run_draws_an_empty_title_bar() {
     let now = Instant::now();

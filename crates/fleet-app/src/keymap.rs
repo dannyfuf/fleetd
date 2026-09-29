@@ -1749,7 +1749,9 @@ mod tests {
     }
 
     /// `v` shows or hides review worktrees only in the Hub's Worktrees pane; it stays the
-    /// watch pane after `ctrl-s` and types while the Hub filter owns the keyboard.
+    /// watch pane after `ctrl-s`. That it types while the Hub filter owns the keyboard is a
+    /// behaviour of the focused input, pinned on the real shell by
+    /// `real_shell_v_types_into_the_hub_filter_instead_of_toggling_reviews`.
     #[test]
     fn the_review_toggle_is_v_in_the_worktrees_pane_only() {
         let bound: Vec<(&str, &str)> = table()
@@ -1759,21 +1761,20 @@ mod tests {
             .collect();
         assert_eq!(bound, [("v", "Hub > Worktrees")]);
 
-        let stroke = Keystroke::parse("v").unwrap();
+        let stroke = Keystroke::parse("v").unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(
             action_for_keystroke("Hub > Worktrees", &stroke)
-                .unwrap()
+                .expect("v is bound in Hub > Worktrees")
                 .name(),
             "worktrees::ToggleReviewWorktrees"
         );
         assert_eq!(
             action_for_keystroke("Workspace > Prefix", &stroke)
-                .unwrap()
+                .expect("v is bound after ctrl-s")
                 .name(),
             "prefix::ToggleWatchPane"
         );
         assert!(action_for_keystroke("Hub > Prs", &stroke).is_none());
-        assert!(action_for_keystroke("Filter", &stroke).is_none());
     }
 
     /// The binding and its row in `docs/KEYMAP.md` are one change.

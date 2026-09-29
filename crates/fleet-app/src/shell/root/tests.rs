@@ -932,12 +932,12 @@ fn real_shell_v_moves_the_cursor_off_a_hidden_review_row_and_keeps_it_there(
     let state = fixture.state.clone();
     fixture.visual.update(|_, cx| {
         state.update(cx, |app, cx| {
-            let mut snapshot = app.snapshot.clone().unwrap();
+            let mut snapshot = app.snapshot.clone().expect("the fixture has a snapshot");
             let review = snapshot
                 .worktrees
                 .iter_mut()
                 .find(|worktree| worktree.slug == "feat-one")
-                .unwrap();
+                .expect("feat-one is seeded");
             review.base_ref = "pull/7/head".to_owned();
             app.apply_snapshot(snapshot, Instant::now());
             cx.notify();
@@ -968,6 +968,79 @@ fn real_shell_v_moves_the_cursor_off_a_hidden_review_row_and_keeps_it_there(
         worktree_under_cursor(&mut fixture),
         (2, Some("acme/api#feat-three".to_owned()))
     );
+}
+
+/// `v` is bound in `Hub > Worktrees`, and the Hub filter's input sits inside that context: while
+/// the filter owns the keyboard a typed `v` is a letter of the query, never the toggle.
+#[gpui::test]
+fn real_shell_v_types_into_the_hub_filter_instead_of_toggling_reviews(
+    cx: &mut gpui::TestAppContext,
+) {
+    let mut fixture = root_hub_fixture(cx, "review-toggle-filter");
+
+    dispatch_root_key(&mut fixture, "/");
+    fixture.visual.simulate_input("v");
+    settle(&mut fixture);
+    assert_eq!(hub_filter_query(&mut fixture), "v");
+    assert!(
+        !fixture
+            .state
+            .read_with(&fixture.visual, |app, _| app.show_review_worktrees),
+        "the filter took the key; review worktrees stay hidden"
+    );
+}
+
+/// A scope whose only worktrees are hidden reviews says so on its empty page, and the page's
+/// `Show review worktrees` button runs the same toggle as `v` (UX-SPEC §3.3, §3.13).
+#[gpui::test]
+fn real_shell_empty_page_button_shows_the_hidden_review_worktrees(cx: &mut gpui::TestAppContext) {
+    fleet_ui_kit::harness::set_recording(true);
+    let mut fixture = root_hub_fixture(cx, "review-toggle-empty");
+    let state = fixture.state.clone();
+    let reviews = fixture.visual.update(|_, cx| {
+        state.update(cx, |app, cx| {
+            let mut snapshot = app.snapshot.clone().expect("the fixture has a snapshot");
+            for (index, worktree) in snapshot.worktrees.iter_mut().enumerate() {
+                worktree.base_ref = format!("pull/{}/head", index + 1);
+            }
+            let reviews = snapshot.worktrees.len();
+            app.apply_snapshot(snapshot, Instant::now());
+            cx.notify();
+            reviews
+        })
+    });
+    settle(&mut fixture);
+    assert_eq!(
+        worktree_under_cursor(&mut fixture),
+        (0, None),
+        "no row is listed"
+    );
+    let button = fixture.visual.update(|window, _| {
+        fleet_ui_kit::harness::painted(window)
+            .into_iter()
+            .find(|target| target.name == "worktrees.empty.reviews")
+            .map(|target| {
+                gpui::point(
+                    gpui::px(target.rect.x + target.rect.w / 2.0),
+                    gpui::px(target.rect.y + target.rect.h / 2.0),
+                )
+            })
+    });
+    fleet_ui_kit::harness::set_recording(false);
+    let button = button.expect("the empty page paints its Show review worktrees button");
+
+    fixture
+        .visual
+        .simulate_click(button, gpui::Modifiers::none());
+    settle(&mut fixture);
+    fixture.state.read_with(&fixture.visual, |app, _| {
+        assert!(app.show_review_worktrees, "the click ran the toggle");
+        assert_eq!(
+            app.displayed_hub.worktrees.len(),
+            reviews,
+            "every review is listed"
+        );
+    });
 }
 
 #[gpui::test]
