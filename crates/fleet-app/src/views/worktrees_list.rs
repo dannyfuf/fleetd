@@ -567,7 +567,7 @@ fn name_cell(row: &WorktreeRow, ctx: &RowContext<'_>, cx: &App) -> AnyElement {
                     el.child(
                         Badge::new(REVIEW)
                             .tone(Tone::Muted)
-                            .style(BadgeStyle::Outlined),
+                            .style(BadgeStyle::Filled),
                     )
                 })
                 .children(row.host.clone().map(|host| {
