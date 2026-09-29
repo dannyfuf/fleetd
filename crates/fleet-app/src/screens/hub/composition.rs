@@ -409,11 +409,7 @@ impl HubScreen {
                 .repos
                 .iter()
                 .find(|repo: &&Repo| &repo.id == repo_id)?;
-            let worktrees = snapshot
-                .worktrees
-                .iter()
-                .filter(|worktree| &worktree.repo_id == repo_id)
-                .count();
+            let worktrees = repo_detail_worktrees(row);
             let live = snapshot
                 .statuses
                 .iter()
@@ -552,4 +548,11 @@ impl AppState {
             && self.pr_tab == PrTab::Review
             && self.supports_review_boards()
     }
+}
+
+/// The repository detail's worktree count (§3.4): the rail row's own count, which is the rows the
+/// Worktrees list shows for that repository. A hidden review worktree is left out here exactly as
+/// the rail and the subtitle leave it out (§3.3), and nothing is counted in the render path.
+pub(super) fn repo_detail_worktrees(row: &RailRow) -> usize {
+    row.count.unwrap_or_default()
 }

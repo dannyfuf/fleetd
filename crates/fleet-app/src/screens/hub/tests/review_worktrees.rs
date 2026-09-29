@@ -190,6 +190,40 @@ fn the_hidden_review_count_follows_the_repository_scope_but_rail_counts_do_not()
     );
 }
 
+#[test]
+fn the_repository_detail_counts_the_worktrees_the_list_shows() {
+    let mut state = review_state(
+        &["acme/api"],
+        vec![
+            worktree("acme/api#one", "acme/api", "2026-09-04T10:00:00Z"),
+            worktree("acme/api#two", "acme/api", "2026-09-04T10:00:00Z"),
+            review_worktree("acme/api#pr-7", "acme/api", 7),
+        ],
+    );
+    state.hub_pane = HubPane::Repos;
+    let hub = HubState::default();
+    let detail = |model: &projection::HubModel| {
+        model
+            .rail
+            .iter()
+            .find(|row| row.kind == RailKind::Repo)
+            .map(composition::repo_detail_worktrees)
+            .unwrap_or_else(|| panic!("acme/api has a rail row"))
+    };
+
+    assert_eq!(
+        detail(&projection::prepare(&state, &hub, 1_788_523_200)),
+        2,
+        "a hidden review worktree is not in the repository detail's count"
+    );
+    state.show_review_worktrees = true;
+    assert_eq!(
+        detail(&projection::prepare(&state, &hub, 1_788_523_201)),
+        3,
+        "shown, it is counted again"
+    );
+}
+
 /// A review worktree created at `created_at`, so a test can place it between its neighbours.
 fn review_worktree_at(id: &str, repo: &str, number: u64, created_at: &str) -> Worktree {
     let mut review = review_worktree(id, repo, number);
