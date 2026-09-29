@@ -171,9 +171,13 @@ pub fn render(
     // While fleetd is gone the rows are true but frozen: they stay navigable, drawn at the stale
     // opacity under the header's one `Stale · <age>` chip (§3.12 C).
     let frozen = stale.is_some();
-    let empty = if loading {
-        EmptyState::new("Loading\u{2026}").into_any_element()
-    } else {
+    let row_count = rows.as_ref().len();
+    // The empty state is only built when it is drawn: a list with rows never pays for its copy
+    // or its button, whatever the scope holds.
+    let empty = (row_count == 0).then(|| {
+        if loading {
+            return EmptyState::new("Loading\u{2026}").into_any_element();
+        }
         let surface = empty_surface(
             query.as_ref(),
             has_repos,
@@ -187,7 +191,7 @@ pub fn render(
             _ => None,
         };
         surface.render(scope.as_deref())
-    };
+    });
     let header = page_header(
         summary,
         reviews,
@@ -212,7 +216,6 @@ pub fn render(
         })
         // The right-click selects; the row's `ContextMenu` opens the menu itself.
         .on_menu(|_, _, _, _| {});
-    let row_count = rows.as_ref().len();
     let list = ListView::new(
         "hub-worktrees",
         row_count,
@@ -238,8 +241,11 @@ pub fn render(
     )
     .row_height(theme.metrics.row_h_comfortable)
     .cursor(cursor)
-    .track_scroll(scroll)
-    .empty(empty);
+    .track_scroll(scroll);
+    let list = match empty {
+        Some(empty) => list.empty(empty),
+        None => list,
+    };
 
     let body = div()
         .flex()
