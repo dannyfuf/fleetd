@@ -391,7 +391,8 @@ its key.
 and the facts after it (§3.6). `‹` is an icon button for `⌃S s` (back to the Hub; the session keeps
 running), its tooltip *Back to Worktrees* and that key. Back always lands where the breadcrumb says — the
 Worktrees list — with the cursor on the worktree just left, whichever surface opened the workspace
-(the list, the Board, the palette); `⌃S S` lands the same way after the sleep; the repository is text; the worktree is the **worktree
+(the list, the Board, the palette), unless the list hides it as a review worktree (§3.3), when the
+cursor stays on the row it was on; `⌃S S` lands the same way after the sleep; the repository is text; the worktree is the **worktree
 switcher**. The command field, the status cluster (without *sleeping* and *Update*, whose keys are
 Hub keys) and Help / Settings stay; the tooltips of Help and Jobs name their `⌃S` chords.
 
@@ -530,8 +531,11 @@ a row first selects that row, so the action it dispatches acts on the row under 
 
 **Cursor stability.** Background events (status polls, PR fetches, job completions, pool refills)
 never re-sort, re-scroll or re-focus the list. Sort order is recomputed only on explicit user
-action (`r`, filter change, repo change, screen change). A row that changes state changes its
-words **in place**.
+action (`r`, filter change, repo change, screen change, `v`). A row that changes state changes its
+words **in place**. `v` keeps the cursor on its worktree: showing review worktrees above it moves
+its index, not the row. Hiding the review row under the cursor lands on the row that moves into
+its slot (the new last row at the end), and that row stays selected when `v` shows reviews again.
+A scope left with no rows keeps the review row selected for when they come back.
 
 **Intentionally omitted:** `WorktreeId` (never typed in the GUI), `path` (`y` copies it, detail
 shows it), `baseRef` (a `pull/<n>/head` base shows only as the `review` chip), session name string, window names, `behind`, `uniqueCommits`,

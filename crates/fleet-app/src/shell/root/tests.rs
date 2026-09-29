@@ -909,6 +909,67 @@ fn real_shell_review_worktrees_palette_row_flips_the_same_flag(cx: &mut gpui::Te
     );
 }
 
+/// The cursor's index and the id of the row the harness sees under it.
+fn worktree_under_cursor(fixture: &mut RootInputFixture) -> (usize, Option<String>) {
+    fixture.state.read_with(&fixture.visual, |app, _| {
+        let cursor = app.cursors.worktrees;
+        let id = app
+            .displayed_hub
+            .worktrees
+            .get(cursor)
+            .map(|row| row.id.as_str().to_owned());
+        (cursor, id)
+    })
+}
+
+/// `v` with the cursor on a review row: hiding it lands on the row that moves into its slot,
+/// and showing reviews again keeps that row rather than jumping back (UX-SPEC §3.3).
+#[gpui::test]
+fn real_shell_v_moves_the_cursor_off_a_hidden_review_row_and_keeps_it_there(
+    cx: &mut gpui::TestAppContext,
+) {
+    let mut fixture = root_hub_fixture(cx, "review-toggle-cursor");
+    let state = fixture.state.clone();
+    fixture.visual.update(|_, cx| {
+        state.update(cx, |app, cx| {
+            let mut snapshot = app.snapshot.clone().unwrap();
+            let review = snapshot
+                .worktrees
+                .iter_mut()
+                .find(|worktree| worktree.slug == "feat-one")
+                .unwrap();
+            review.base_ref = "pull/7/head".to_owned();
+            app.apply_snapshot(snapshot, Instant::now());
+            cx.notify();
+        });
+    });
+    settle(&mut fixture);
+    // Hidden by default: chore-lint, feat-three, feat-two.
+    assert_eq!(
+        worktree_under_cursor(&mut fixture),
+        (0, Some("acme/api#chore-lint".to_owned()))
+    );
+
+    dispatch_root_key(&mut fixture, "v");
+    dispatch_root_key(&mut fixture, "j");
+    assert_eq!(
+        worktree_under_cursor(&mut fixture),
+        (1, Some("acme/api#feat-one".to_owned()))
+    );
+
+    dispatch_root_key(&mut fixture, "v");
+    assert_eq!(
+        worktree_under_cursor(&mut fixture),
+        (1, Some("acme/api#feat-three".to_owned()))
+    );
+
+    dispatch_root_key(&mut fixture, "v");
+    assert_eq!(
+        worktree_under_cursor(&mut fixture),
+        (2, Some("acme/api#feat-three".to_owned()))
+    );
+}
+
 #[gpui::test]
 fn real_shell_palette_query_accepts_platform_text(cx: &mut gpui::TestAppContext) {
     let mut fixture = root_hub_fixture(cx, "palette-query");
